@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.68.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.70.0 LANGUAGES CXX)
 
 option(XRFG_BUILD_LAYER "Build the Windows OpenXR API layer" ON)
 option(XRFG_BUILD_TESTS "Build the core test executable" ON)

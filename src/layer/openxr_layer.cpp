@@ -363,8 +363,24 @@ struct PrivateSwapchainState {
     std::uint32_t acquired_index{};
 };
 
+// The current output alternates between two private swapchains, so the
+// application can release frame N+1's output while the presenter still has
+// frame N's current submission queued. A composition layer names a swapchain
+// rather than an image index, and the runtime binds whichever image was
+// released last when xrEndFrame runs, so one shared swapchain would repoint
+// that queued frame at the newer image.
+//
+// The synthetic output needs no second slot. It is always the first of the
+// pair to be submitted, so it has already left the queue by the time the
+// application is admitted to build the next pair.
+constexpr std::size_t kCurrentSlotCount = 2;
+
 struct FrameGenerationSwapchainState {
-    PrivateSwapchainState current;
+    std::array<PrivateSwapchainState, kCurrentSlotCount> current{};
+    // Destination images are addressed by a flat index across every slot, so
+    // slot s image i is s * current_images_per_slot + i.
+    std::uint32_t current_images_per_slot{};
+    std::size_t current_slot{};
     PrivateSwapchainState synthetic;
     std::shared_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
     std::shared_ptr<xrfg::D3D11D3D12SwapchainInterop> d3d11_interop;
@@ -677,12 +693,18 @@ void destroy_frame_generation_swapchains(
 
         const auto& dispatch = state->session->dispatch;
         static_cast<void>(release_private_image(dispatch, generation->synthetic));
-        static_cast<void>(release_private_image(dispatch, generation->current));
+        for (PrivateSwapchainState& image : generation->current) {
+            static_cast<void>(release_private_image(dispatch, image));
+        }
         if (dispatch->destroy_swapchain == nullptr) {
             return;
         }
-        for (PrivateSwapchainState* image :
-             {&generation->synthetic, &generation->current}) {
+        std::array<PrivateSwapchainState*, kCurrentSlotCount + 1> owned{};
+        owned[0] = &generation->synthetic;
+        for (std::size_t slot = 0; slot < kCurrentSlotCount; ++slot) {
+            owned[slot + 1] = &generation->current[slot];
+        }
+        for (PrivateSwapchainState* image : owned) {
             if (image->handle == XR_NULL_HANDLE) {
                 continue;
             }
@@ -791,12 +813,82 @@ struct CreatedPrivateSwapchain {
     return true;
 }
 
+struct CreatedCurrentRing {
+    std::array<CreatedPrivateSwapchain, kCurrentSlotCount> slots{};
+    // Every slot's destination images end to end, in slot order, which is the
+    // flat addressing both the synthesizer and the D3D11 interop expect.
+    std::vector<ID3D12Resource*> d3d12_resources;
+    std::vector<ID3D11Texture2D*> d3d11_resources;
+    std::uint32_t images_per_slot{};
+};
+
+void destroy_current_ring(
+    const std::shared_ptr<Dispatch>& dispatch,
+    CreatedCurrentRing* ring) noexcept {
+    if (ring == nullptr || !dispatch || dispatch->destroy_swapchain == nullptr) {
+        return;
+    }
+    for (CreatedPrivateSwapchain& created : ring->slots) {
+        if (created.state.handle == XR_NULL_HANDLE) {
+            continue;
+        }
+        static_cast<void>(dispatch->destroy_swapchain(created.state.handle));
+        created.state.handle = XR_NULL_HANDLE;
+    }
+}
+
+[[nodiscard]] bool create_current_ring(
+    const std::shared_ptr<SwapchainState>& state,
+    const XrSwapchainCreateInfo& create_info,
+    CreatedCurrentRing* output) {
+    if (output == nullptr) {
+        return false;
+    }
+    for (std::size_t slot = 0; slot < kCurrentSlotCount; ++slot) {
+        if (!create_private_swapchain(state, create_info, &output->slots[slot])) {
+            return false;
+        }
+        const CreatedPrivateSwapchain& created = output->slots[slot];
+        const std::size_t count = created.d3d12_resources.empty()
+            ? created.d3d11_resources.size()
+            : created.d3d12_resources.size();
+        // A flat destination index assumes one stride for every slot, so a
+        // runtime that hands out different image counts is not usable here.
+        if (count == 0 ||
+            (slot != 0 && count != output->images_per_slot)) {
+            return false;
+        }
+        output->images_per_slot = static_cast<std::uint32_t>(count);
+        output->d3d12_resources.insert(
+            output->d3d12_resources.end(),
+            created.d3d12_resources.begin(),
+            created.d3d12_resources.end());
+        output->d3d11_resources.insert(
+            output->d3d11_resources.end(),
+            created.d3d11_resources.begin(),
+            created.d3d11_resources.end());
+    }
+    return true;
+}
+
+// Publishes a created ring into the shared generation state.
+void adopt_current_ring(
+    const std::shared_ptr<FrameGenerationSwapchainState>& generation,
+    CreatedCurrentRing& ring) noexcept {
+    for (std::size_t slot = 0; slot < kCurrentSlotCount; ++slot) {
+        generation->current[slot] = ring.slots[slot].state;
+        ring.slots[slot].state.handle = XR_NULL_HANDLE;
+    }
+    generation->current_images_per_slot = ring.images_per_slot;
+    generation->current_slot = 0;
+}
+
 [[nodiscard]] std::shared_ptr<FrameGenerationSwapchainState>
 create_d3d12_frame_generation_swapchains(
     const std::shared_ptr<SwapchainState>& state,
     SwapchainEligibilityReason* failure_reason,
     std::uint64_t* failure_detail) {
-    CreatedPrivateSwapchain current;
+    CreatedCurrentRing current;
     CreatedPrivateSwapchain synthetic;
     if (failure_reason != nullptr) {
         *failure_reason = SwapchainEligibilityReason::exception;
@@ -839,11 +931,12 @@ create_d3d12_frame_generation_swapchains(
         private_info.next = nullptr;
         private_info.usageFlags |=
             XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-        if (!create_private_swapchain(state, private_info, &current)) {
+        if (!create_current_ring(state, private_info, &current)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
                     SwapchainEligibilityReason::current_private_swapchain_failed;
             }
+            destroy_current_ring(dispatch, &current);
             return nullptr;
         }
         if (!create_private_swapchain(state, private_info, &synthetic)) {
@@ -851,9 +944,7 @@ create_d3d12_frame_generation_swapchains(
                 *failure_reason =
                     SwapchainEligibilityReason::synthetic_private_swapchain_failed;
             }
-            if (current.state.handle != XR_NULL_HANDLE) {
-                dispatch->destroy_swapchain(current.state.handle);
-            }
+            destroy_current_ring(dispatch, &current);
             return nullptr;
         }
 
@@ -898,14 +989,13 @@ create_d3d12_frame_generation_swapchains(
                 *failure_detail = static_cast<std::uint64_t>(gpu_result);
             }
             dispatch->destroy_swapchain(synthetic.state.handle);
-            dispatch->destroy_swapchain(current.state.handle);
             synthetic.state.handle = XR_NULL_HANDLE;
-            current.state.handle = XR_NULL_HANDLE;
+            destroy_current_ring(dispatch, &current);
             return nullptr;
         }
 
         auto generation = std::make_shared<FrameGenerationSwapchainState>();
-        generation->current = current.state;
+        adopt_current_ring(generation, current);
         generation->synthetic = synthetic.state;
         generation->synthesizer = std::move(synthesizer);
         if (failure_reason != nullptr) {
@@ -918,9 +1008,7 @@ create_d3d12_frame_generation_swapchains(
             if (synthetic.state.handle != XR_NULL_HANDLE) {
                 state->session->dispatch->destroy_swapchain(synthetic.state.handle);
             }
-            if (current.state.handle != XR_NULL_HANDLE) {
-                state->session->dispatch->destroy_swapchain(current.state.handle);
-            }
+            destroy_current_ring(state->session->dispatch, &current);
         }
         return nullptr;
     }
@@ -932,7 +1020,7 @@ create_d3d11_frame_generation_swapchains(
     std::span<ID3D11Texture2D* const> application_images,
     SwapchainEligibilityReason* failure_reason,
     std::uint64_t* failure_detail) {
-    CreatedPrivateSwapchain current;
+    CreatedCurrentRing current;
     CreatedPrivateSwapchain synthetic;
     if (failure_reason != nullptr) {
         *failure_reason = SwapchainEligibilityReason::exception;
@@ -983,22 +1071,19 @@ create_d3d11_frame_generation_swapchains(
                     dispatch->destroy_swapchain(synthetic.state.handle));
                 synthetic.state.handle = XR_NULL_HANDLE;
             }
-            if (current.state.handle != XR_NULL_HANDLE) {
-                static_cast<void>(
-                    dispatch->destroy_swapchain(current.state.handle));
-                current.state.handle = XR_NULL_HANDLE;
-            }
+            destroy_current_ring(dispatch, &current);
         };
 
         XrSwapchainCreateInfo private_info = state->create_info;
         private_info.next = nullptr;
         private_info.usageFlags |= XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
                                    XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-        if (!create_private_swapchain(state, private_info, &current)) {
+        if (!create_current_ring(state, private_info, &current)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
                     SwapchainEligibilityReason::current_private_swapchain_failed;
             }
+            destroy_private();
             return nullptr;
         }
         if (!create_private_swapchain(state, private_info, &synthetic)) {
@@ -1105,7 +1190,7 @@ create_d3d11_frame_generation_swapchains(
         }
 
         auto generation = std::make_shared<FrameGenerationSwapchainState>();
-        generation->current = current.state;
+        adopt_current_ring(generation, current);
         generation->synthetic = synthetic.state;
         generation->synthesizer = std::move(synthesizer);
         generation->d3d11_interop = std::move(interop);
@@ -1124,10 +1209,7 @@ create_d3d11_frame_generation_swapchains(
                 static_cast<void>(state->session->dispatch->destroy_swapchain(
                     synthetic.state.handle));
             }
-            if (current.state.handle != XR_NULL_HANDLE) {
-                static_cast<void>(state->session->dispatch->destroy_swapchain(
-                    current.state.handle));
-            }
+            destroy_current_ring(state->session->dispatch, &current);
         }
         return nullptr;
     }
@@ -3652,8 +3734,12 @@ struct PreparedProjectionFrame {
             output.reason = GenerationPrepareReason::missing_capture;
             return output;
         }
-        if (generation->current.handle == XR_NULL_HANDLE ||
-            generation->synthetic.handle == XR_NULL_HANDLE) {
+        const std::size_t current_slot = generation->current_slot;
+        PrivateSwapchainState& current_image =
+            generation->current[current_slot];
+        if (current_image.handle == XR_NULL_HANDLE ||
+            generation->synthetic.handle == XR_NULL_HANDLE ||
+            generation->current_images_per_slot == 0) {
             output.reason = GenerationPrepareReason::invalid_private_swapchain;
             return output;
         }
@@ -3669,7 +3755,7 @@ struct PreparedProjectionFrame {
 
         if (!acquire_and_wait_private_image(
                 state->session->dispatch,
-                generation->current)) {
+                current_image)) {
             output.reason = GenerationPrepareReason::current_private_acquire_failed;
             if (request_pair) {
                 std::scoped_lock gpu_lock(state->session->gpu_mutex);
@@ -3686,11 +3772,16 @@ struct PreparedProjectionFrame {
                 GenerationPrepareReason::synthetic_private_acquire_failed;
             static_cast<void>(release_private_image(
                 state->session->dispatch,
-                generation->current));
+                current_image));
             std::scoped_lock gpu_lock(state->session->gpu_mutex);
             static_cast<void>(generation->synthesizer->retire_previous());
             return output;
         }
+
+        const std::uint32_t current_destination_index =
+            static_cast<std::uint32_t>(current_slot) *
+                generation->current_images_per_slot +
+            current_image.acquired_index;
 
         xrfg::D3D12FrameSynthesisTicket ticket{};
         HRESULT submit_result = E_UNEXPECTED;
@@ -3703,7 +3794,7 @@ struct PreparedProjectionFrame {
             capture->serial,
             (static_cast<std::uint64_t>(
                  generation->synthetic.acquired_index) << 32) |
-                generation->current.acquired_index);
+                current_destination_index);
         {
             std::scoped_lock gpu_lock(state->session->gpu_mutex);
             log_completed_nvidia_gpu_timings(generation->synthesizer);
@@ -3718,24 +3809,24 @@ struct PreparedProjectionFrame {
                                           current_source_views,
                                           current_source_views,
                                           generation->synthetic.acquired_index,
-                                          generation->current.acquired_index,
+                                          current_destination_index,
                                           &ticket)
                                     : generation->synthesizer->submit_prime(
                                           *capture,
                                           current_source_views,
-                                          generation->current.acquired_index,
+                                          current_destination_index,
                                           &ticket);
             }
             if (SUCCEEDED(submit_result) && generation->d3d11_interop) {
                 const auto publish_token = xrfg::bridge_flight_logger().begin(
                     xrfg::BridgeFlightOperation::d3d11_publish,
                     handle_value(application_swapchain),
-                    generation->current.acquired_index,
+                    current_destination_index,
                     request_pair ? generation->synthetic.acquired_index
                                  : std::numeric_limits<std::uint32_t>::max());
                 const HRESULT publish_result =
                     generation->d3d11_interop->publish(
-                        generation->current.acquired_index,
+                        current_destination_index,
                         request_pair
                             ? std::optional<std::uint32_t>(
                                   generation->synthetic.acquired_index)
@@ -3745,7 +3836,7 @@ struct PreparedProjectionFrame {
                     xrfg::BridgeFlightOperation::d3d11_publish,
                     publish_result,
                     handle_value(application_swapchain),
-                    generation->current.acquired_index,
+                    current_destination_index,
                     request_pair ? generation->synthetic.acquired_index
                                  : std::numeric_limits<std::uint32_t>::max());
                 if (FAILED(publish_result)) {
@@ -3770,7 +3861,7 @@ struct PreparedProjectionFrame {
         }
         const bool current_released = release_private_image(
             state->session->dispatch,
-            generation->current);
+            current_image);
 
         if (FAILED(submit_result)) {
             output.reason = GenerationPrepareReason::synthesis_failed;
@@ -3782,9 +3873,13 @@ struct PreparedProjectionFrame {
         }
 
         output.anchor_is_current = true;
-        output.current_handle = generation->current.handle;
+        output.current_handle = current_image.handle;
         output.synthetic_handle = generation->synthetic.handle;
         if (current_released && synthetic_released) {
+            // Hand the next frame the other slot, so it can release its output
+            // while this one is still queued behind the presenter.
+            generation->current_slot =
+                (current_slot + 1) % kCurrentSlotCount;
             output.kind = request_pair ? PreparedGenerationKind::pair
                                        : PreparedGenerationKind::prime;
             output.reason = GenerationPrepareReason::ready;
@@ -4107,10 +4202,18 @@ XrResult layer_end_frame_impl(
         state->pipelined_wait_streak = 0;
     }
     const bool use_continuous_presenter = continuous_presenter_active(state);
+    if (use_continuous_presenter &&
+        (end_info == nullptr || end_info->type != XR_TYPE_FRAME_END_INFO)) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
     std::unique_lock<std::mutex> presenter_content_lock;
-    if (use_continuous_presenter) {
-        if (end_info == nullptr || end_info->type != XR_TYPE_FRAME_END_INFO) {
-            return XR_ERROR_VALIDATION_FAILURE;
+    // Drains the presenter and takes the content lock. Used by the paths that
+    // hand the runtime the application's own composition unchanged: they have
+    // no private output of their own, so the retained repeat has to be settled
+    // before they submit.
+    const auto enter_presenter_exclusive = [&]() -> XrResult {
+        if (!use_continuous_presenter || presenter_content_lock.owns_lock()) {
+            return XR_SUCCESS;
         }
         const XrResult idle_result = wait_for_presenter_idle(state);
         if (XR_FAILED(idle_result)) {
@@ -4118,7 +4221,8 @@ XrResult layer_end_frame_impl(
         }
         presenter_content_lock =
             std::unique_lock<std::mutex>(state->presenter_content_mutex);
-    }
+        return XR_SUCCESS;
+    };
 
     if (state->fps_overlay) {
         std::scoped_lock gpu_lock(state->gpu_mutex);
@@ -4167,6 +4271,10 @@ XrResult layer_end_frame_impl(
             0,
             0,
             0);
+        const XrResult exclusive_result = enter_presenter_exclusive();
+        if (XR_FAILED(exclusive_result)) {
+            return exclusive_result;
+        }
         const auto end_token = xrfg::bridge_flight_logger().begin(
             xrfg::BridgeFlightOperation::downstream_first_end_frame,
             handle_value(session),
@@ -4222,6 +4330,10 @@ XrResult layer_end_frame_impl(
         resource_mappings.detail);
     if (!resource_mappings.ready()) {
         clear_generation_continuity(state);
+        const XrResult exclusive_result = enter_presenter_exclusive();
+        if (XR_FAILED(exclusive_result)) {
+            return exclusive_result;
+        }
         const auto end_token = xrfg::bridge_flight_logger().begin(
             xrfg::BridgeFlightOperation::downstream_first_end_frame,
             handle_value(session),
@@ -4272,12 +4384,35 @@ XrResult layer_end_frame_impl(
     const bool metadata_pairable =
         latest_application_frame && previous_snapshot &&
         projection_snapshots_compatible(*previous_snapshot, current_snapshot);
+    // Admit this frame once the presenter has taken the previous pair's
+    // synthetic, leaving only its current submission outstanding.
+    //
+    // Waiting for the queue to empty instead spent half the available budget:
+    // the application was released only after the second of two paced
+    // submissions and still had to enqueue before the very next slot, so it
+    // had one display period to render a frame that two periods were available
+    // for. Admitting it a slot earlier is what the alternating current
+    // swapchain exists to make safe -- the previous pair's queued current
+    // frame names the other slot, and its synthetic has already left the
+    // queue, so neither can be repointed by the release below.
+    if (use_continuous_presenter) {
+        const XrResult capacity_result = wait_for_presenter_capacity(state, 1);
+        if (XR_FAILED(capacity_result)) {
+            return capacity_result;
+        }
+    }
     PreparedProjectionFrame prepared = prepare_projection_frame(
         current_snapshot,
         std::span<const ProjectionResourceMapping>(
             resource_mappings.mappings.data(),
             resource_mappings.mappings.size()),
         metadata_pairable);
+    // Acquire, synthesis and release all ran without the content lock, so the
+    // presenter kept submitting throughout. Hold it only across the handoff.
+    if (use_continuous_presenter) {
+        presenter_content_lock =
+            std::unique_lock<std::mutex>(state->presenter_content_mutex);
+    }
     GenerationPrepareReason prepare_reason = prepared.reason;
     XrSwapchain failed_prepare_swapchain = prepared.failed_swapchain;
 
