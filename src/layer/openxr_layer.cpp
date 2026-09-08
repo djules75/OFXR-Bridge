@@ -2849,8 +2849,6 @@ void continuous_presenter_main(
                         state->presenter_display_period > 0;
                 } else {
                     state->presenter_next_submit += period;
-                    // Deadlines already missed are stepped over a whole period
-                    // at a time, which keeps the phase and never charges a
                     // fresh full period for being late. Resetting to now+period
                     // instead made every cycle cost a period plus whatever the
                     // loop took, which is how a 11.11 ms pace produced 15.5 ms
@@ -2859,6 +2857,29 @@ void continuous_presenter_main(
                         const auto behind = now - state->presenter_next_submit;
                         state->presenter_next_submit +=
                             (behind / period + 1) * period;
+                    }
+                    // Then step off any deadline that falls too soon after the
+                    // frame just handed over. The schedule is an absolute grid
+                    // and knows nothing about how long this submission took;
+                    // when the runtime's own xrEndFrame ran long - 3.7 ms
+                    // typical against 17 ms worst on SteamVR - the next grid
+                    // point can be a couple of milliseconds away, so the pair
+                    // lands inside one scanout window and the compositor keeps
+                    // only the later one. That is the bunching the pace exists
+                    // to prevent, reappearing after an overrun instead of at
+                    // free-run: measured as a repeating on-grid, long, short
+                    // cadence with 28.8% of gaps under 9 ms against an 11.11 ms
+                    // period.
+                    //
+                    // Half a period is the threshold rather than a full one so
+                    // this cannot fire in steady state, where the deadline
+                    // already falls about 7 ms after the previous handover.
+                    // Chaining every deadline off the handover would instead
+                    // add the loop's own cost to each cycle, which is what held
+                    // an earlier build to 64/s.
+                    const auto earliest = now + period / 2;
+                    while (state->presenter_next_submit < earliest) {
+                        state->presenter_next_submit += period;
                     }
                 }
             }
