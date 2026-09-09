@@ -138,16 +138,21 @@ float4 bilinear_current_source(float2 coordinate, uint slice) {
     return lerp(top, bottom, fraction.y);
 }
 
-float2 nvidia_flow_input_scale() {
-    return min(
-        float2(1.0, 1.0),
-        float2(float(PackedWidth), float(PackedHeight)) /
-            max(float2(float(Width), float(Height)), float2(1.0, 1.0)));
+// The ratio the flow input was packed at, relative to the source image.
+// One when the input is full resolution. Derived from the width alone and
+// applied to both axes: the scale is uniform, and the packed height carries
+// the stacked eyes on the FidelityFX path, so a height ratio would not
+// describe it.
+float2 flow_input_scale() {
+    float ratio = min(
+        1.0,
+        float(PackedWidth) / max(float(Width), 1.0));
+    return float2(ratio, ratio);
 }
 
-float2 nvidia_flow_input_coordinate(float2 full_resolution_coordinate) {
+float2 flow_input_coordinate(float2 full_resolution_coordinate) {
     return (full_resolution_coordinate + 0.5) *
-        nvidia_flow_input_scale() - 0.5;
+        flow_input_scale() - 0.5;
 }
 
 struct CameraSample {
@@ -205,7 +210,22 @@ void PackFlowInput(uint3 thread_id : SV_DispatchThreadID) {
     float4 current_color = float4(0.0, 0.0, 0.0, 1.0);
     uint slice = thread_id.y / PackedEyeStride;
     uint local_y = thread_id.y - slice * PackedEyeStride;
-    if (thread_id.x < Width && slice < ArraySize && local_y < Height) {
+    // A reduced input is resampled rather than point-sampled, so the flow
+    // sees a filtered image instead of every fourth pixel.
+    float2 input_scale = flow_input_scale();
+    if (slice >= ArraySize) {
+        PackedColor[thread_id.xy] = saturate(current_color);
+        return;
+    }
+    if (PackedWidth < Width) {
+        float2 source_coordinate =
+            (float2(float(thread_id.x), float(local_y)) + 0.5) /
+                max(input_scale, float2(1.0e-6, 1.0e-6)) - 0.5;
+        if (source_coordinate.y < float(Height)) {
+            current_color =
+                bilinear_current_source(source_coordinate, slice);
+        }
+    } else if (thread_id.x < Width && local_y < Height) {
         current_color = CurrentFrame.Load(
             int4(int2(thread_id.x, local_y), int(slice), 0));
     }
@@ -224,7 +244,7 @@ void PackNvidiaFlowInput(uint3 thread_id : SV_DispatchThreadID) {
     bool downscaled = PackedWidth < Width || PackedHeight < Height;
     if (slice < ArraySize && downscaled) {
         float2 source_coordinate =
-            (float2(thread_id.xy) + 0.5) / nvidia_flow_input_scale() - 0.5;
+            (float2(thread_id.xy) + 0.5) / flow_input_scale() - 0.5;
         previous_color = bilinear_previous_source(source_coordinate, slice);
         current_color = bilinear_current_source(source_coordinate, slice);
     } else if (thread_id.x < Width && slice < ArraySize &&
@@ -259,12 +279,13 @@ struct FlowGridBounds {
 
 FlowGridBounds flow_grid_bounds(
     float4 image_rect,
-    uint slice,
-    bool use_nvidia_input_scale) {
+    uint slice) {
     uint2 image_minimum = uint2(image_rect.xy);
     uint2 image_maximum = image_minimum + uint2(image_rect.zw) - 1U;
-    if (use_nvidia_input_scale) {
-        float2 input_scale = nvidia_flow_input_scale();
+    // Always applied: the scale is one when the input is full resolution,
+    // so this is the identity on an unscaled path.
+    {
+        float2 input_scale = flow_input_scale();
         uint2 scaled_minimum = uint2(floor(
             float2(image_minimum) * input_scale));
         uint2 scaled_end = uint2(ceil(
@@ -291,18 +312,18 @@ float2 flow_for_pixel(
     uint view_index,
     float value_scale,
     bool use_nvidia_input_scale) {
+    // The stride is zero where the backend packs eyes separately, so this
+    // is the scaled coordinate on that path and the scaled coordinate plus
+    // the eye offset on the stacked one.
+    float2 scaled = flow_input_coordinate(pixel);
     float2 packed_coordinate = float2(
-        pixel.x,
-        pixel.y + float(slice * PackedEyeStride));
-    if (use_nvidia_input_scale) {
-        packed_coordinate = nvidia_flow_input_coordinate(pixel);
-    }
+        scaled.x,
+        scaled.y + float(slice * PackedEyeStride));
     float2 flow_coordinate =
         (packed_coordinate + 0.5) / float(FlowBlockSize) - 0.5;
     FlowGridBounds bounds = flow_grid_bounds(
         PreviousMappings[view_index].TargetRect,
-        slice,
-        use_nvidia_input_scale);
+        slice);
     float2 bounded = clamp(
         flow_coordinate,
         float2(bounds.minimum),
@@ -331,9 +352,8 @@ float2 flow_for_pixel(
             bounds.maximum),
         fraction.x);
     float2 result = lerp(top, bottom, fraction.y) * value_scale;
-    if (use_nvidia_input_scale) {
-        result /= max(nvidia_flow_input_scale(), float2(1.0e-6, 1.0e-6));
-    }
+    // Flow measured on a reduced input has proportionally smaller vectors.
+    result /= max(flow_input_scale(), float2(1.0e-6, 1.0e-6));
     float magnitude = length(result);
     return magnitude > 512.0 ? result * (512.0 / magnitude) : result;
 }
@@ -343,14 +363,13 @@ float2 forward_flow_for_pixel(
     uint slice,
     uint view_index,
     float value_scale) {
-    float2 input_scale = nvidia_flow_input_scale();
-    float2 packed_coordinate = nvidia_flow_input_coordinate(pixel);
+    float2 input_scale = flow_input_scale();
+    float2 packed_coordinate = flow_input_coordinate(pixel);
     float2 flow_coordinate =
         (packed_coordinate + 0.5) / float(FlowBlockSize) - 0.5;
     FlowGridBounds bounds = flow_grid_bounds(
         PreviousMappings[view_index].SourceRect,
-        slice,
-        true);
+        slice);
     float2 bounded = clamp(
         flow_coordinate,
         float2(bounds.minimum),
@@ -385,13 +404,12 @@ float2 forward_flow_for_pixel(
 }
 
 float nvidia_cost_for_pixel(float2 pixel, uint slice, uint view_index) {
-    float2 packed_coordinate = nvidia_flow_input_coordinate(pixel);
+    float2 packed_coordinate = flow_input_coordinate(pixel);
     int2 coordinate = int2(round(
         (packed_coordinate + 0.5) / float(FlowBlockSize) - 0.5));
     FlowGridBounds bounds = flow_grid_bounds(
         PreviousMappings[view_index].TargetRect,
-        slice,
-        true);
+        slice);
     return float(FlowAuxiliary.Load(int3(clamp(
         coordinate,
         bounds.minimum,
@@ -402,13 +420,12 @@ float nvidia_forward_cost_for_pixel(
     float2 pixel,
     uint slice,
     uint view_index) {
-    float2 packed_coordinate = nvidia_flow_input_coordinate(pixel);
+    float2 packed_coordinate = flow_input_coordinate(pixel);
     int2 coordinate = int2(round(
         (packed_coordinate + 0.5) / float(FlowBlockSize) - 0.5));
     FlowGridBounds bounds = flow_grid_bounds(
         PreviousMappings[view_index].SourceRect,
-        slice,
-        true);
+        slice);
     return float(ForwardAuxiliary.Load(int3(clamp(
         coordinate,
         bounds.minimum,

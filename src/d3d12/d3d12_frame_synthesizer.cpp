@@ -667,6 +667,7 @@ struct D3D12FrameSynthesizer::Impl {
     std::uint32_t next_timing_slot{};
     D3D12OpticalFlowBackend backend{D3D12OpticalFlowBackend::fidelity_fx};
     D3D12NvidiaOpticalFlowOptions nvidia_options{};
+    D3D12FidelityFxOpticalFlowOptions fidelity_fx_options{};
     bool synthesis_enabled{};
     bool completion_unknown{};
     bool ffx_context_created{};
@@ -1655,6 +1656,7 @@ struct D3D12FrameSynthesizer::Impl {
         D3D12_RESOURCE_STATES input_release_state,
         D3D12OpticalFlowBackend input_backend,
         D3D12NvidiaOpticalFlowOptions input_nvidia_options,
+        D3D12FidelityFxOpticalFlowOptions input_fidelity_fx_options,
         bool enable_nvidia_gpu_timing) {
         if (input_device == nullptr || input_queue == nullptr ||
             input_history == nullptr || !input_history->initialized() ||
@@ -1765,28 +1767,28 @@ struct D3D12FrameSynthesizer::Impl {
                 : kFidelityFxFlowBlockSize;
         const bool separate_nvidia_eyes =
             input_backend == D3D12OpticalFlowBackend::nvidia;
-        const NvidiaInputScaleRatio nvidia_scale = nvidia_input_scale_ratio(
-            input_nvidia_options.input_scale);
-        const UINT64 flow_input_width = separate_nvidia_eyes
-            ? (static_cast<UINT64>(width) * nvidia_scale.numerator +
-               nvidia_scale.denominator - 1U) /
-                  nvidia_scale.denominator
-            : width;
-        const UINT64 flow_input_height = separate_nvidia_eyes
-            ? (static_cast<UINT64>(description.Height) *
-                   nvidia_scale.numerator +
-               nvidia_scale.denominator - 1U) /
-                  nvidia_scale.denominator
-            : description.Height;
+        // One scale for whichever backend is running. The FidelityFX path
+        // packs both eyes into one texture, so its stride and packed height
+        // are derived from the scaled per-eye height rather than the source.
+        const NvidiaInputScaleRatio scale = nvidia_input_scale_ratio(
+            separate_nvidia_eyes ? input_nvidia_options.input_scale
+                                 : input_fidelity_fx_options.input_scale);
+        const auto scaled = [&](UINT64 value) -> UINT64 {
+            return (value * scale.numerator + scale.denominator - 1U) /
+                scale.denominator;
+        };
+        const UINT64 flow_input_width = scaled(width);
+        const UINT64 flow_input_height =
+            scaled(description.Height);
         const UINT64 stride = separate_nvidia_eyes
             ? 0U
-            : (static_cast<UINT64>(description.Height) + kEyeGapPixels +
+            : (flow_input_height + kEyeGapPixels +
                flow_block_size - 1U) /
                   flow_block_size * flow_block_size;
         const UINT64 unaligned_packed_height = separate_nvidia_eyes
             ? flow_input_height
             : stride * (description.DepthOrArraySize - 1U) +
-                  description.Height;
+                  flow_input_height;
         const UINT64 packed_height_value = std::max<UINT64>(
             (unaligned_packed_height + flow_block_size - 1U) /
                 flow_block_size * flow_block_size,
@@ -1816,6 +1818,7 @@ struct D3D12FrameSynthesizer::Impl {
         release_state = input_release_state;
         backend = input_backend;
         nvidia_options = input_nvidia_options;
+        fidelity_fx_options = input_fidelity_fx_options;
         nvidia_gpu_timing_enabled =
             input_backend == D3D12OpticalFlowBackend::nvidia &&
             enable_nvidia_gpu_timing;
@@ -3731,7 +3734,8 @@ HRESULT D3D12FrameSynthesizer::initialize(
     D3D12_RESOURCE_STATES release_state,
     D3D12OpticalFlowBackend backend,
     D3D12NvidiaOpticalFlowOptions nvidia_options,
-    bool enable_nvidia_gpu_timing) noexcept {
+    bool enable_nvidia_gpu_timing,
+    D3D12FidelityFxOpticalFlowOptions fidelity_fx_options) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ != nullptr) {
@@ -3748,6 +3752,7 @@ HRESULT D3D12FrameSynthesizer::initialize(
             release_state,
             backend,
             nvidia_options,
+            fidelity_fx_options,
             enable_nvidia_gpu_timing);
         if (FAILED(result)) {
             return result;

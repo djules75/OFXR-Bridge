@@ -37,10 +37,21 @@ struct ConfiguredNvidiaOptions {
     bool bidirectional{};
 };
 
+struct ConfiguredFidelityFxOptions {
+    // Full by default: the FidelityFX path has always run the flow at full
+    // resolution, and lowering it trades motion-vector detail for a
+    // materially cheaper pack and flow at high headset resolutions.
+    ConfiguredNvidiaInputScale input_scale{
+        ConfiguredNvidiaInputScale::full};
+};
+
 [[nodiscard]] ConfiguredFlowBackend read_flow_backend(
     const std::filesystem::path& module_directory) noexcept;
 
 [[nodiscard]] ConfiguredNvidiaOptions read_nvidia_options(
+    const std::filesystem::path& module_directory) noexcept;
+
+[[nodiscard]] ConfiguredFidelityFxOptions read_fidelity_fx_options(
     const std::filesystem::path& module_directory) noexcept;
 
 [[nodiscard]] bool register_manifest(

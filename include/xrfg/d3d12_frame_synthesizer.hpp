@@ -76,10 +76,22 @@ enum class D3D12NvidiaPerformancePreset {
     fast,
 };
 
-enum class D3D12NvidiaInputScale {
+// Ratio the optical-flow input is packed at. Shared by both backends: the
+// FidelityFX path ran at full resolution and had no equivalent option,
+// while NVIDIA has defaulted to half per axis all along.
+enum class D3D12OpticalFlowInputScale {
     full,
     three_quarter,
     half,
+};
+
+// The name the NVIDIA options and the tray settings already use.
+using D3D12NvidiaInputScale = D3D12OpticalFlowInputScale;
+
+struct D3D12FidelityFxOpticalFlowOptions {
+    // Full by default so an existing installation behaves exactly as before.
+    D3D12OpticalFlowInputScale input_scale{
+        D3D12OpticalFlowInputScale::full};
 };
 
 struct D3D12NvidiaOpticalFlowOptions {
@@ -123,7 +135,8 @@ public:
         D3D12OpticalFlowBackend backend =
             D3D12OpticalFlowBackend::fidelity_fx,
         D3D12NvidiaOpticalFlowOptions nvidia_options = {},
-        bool enable_nvidia_gpu_timing = false) noexcept;
+        bool enable_nvidia_gpu_timing = false,
+        D3D12FidelityFxOpticalFlowOptions fidelity_fx_options = {}) noexcept;
 
     [[nodiscard]] HRESULT submit_prime(
         const D3D12HistoryCaptureTicket& current,

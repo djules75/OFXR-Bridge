@@ -84,6 +84,27 @@ template <typename Handle>
         : xrfg::D3D12OpticalFlowBackend::fidelity_fx;
 }
 
+[[nodiscard]] xrfg::D3D12FidelityFxOpticalFlowOptions
+selected_fidelity_fx_options() noexcept {
+    const auto configured = xrfg::implicit_layer::read_fidelity_fx_options(
+        current_layer_directory());
+    xrfg::D3D12FidelityFxOpticalFlowOptions options;
+    switch (configured.input_scale) {
+    case xrfg::implicit_layer::ConfiguredNvidiaInputScale::three_quarter:
+        options.input_scale =
+            xrfg::D3D12OpticalFlowInputScale::three_quarter;
+        break;
+    case xrfg::implicit_layer::ConfiguredNvidiaInputScale::half:
+        options.input_scale = xrfg::D3D12OpticalFlowInputScale::half;
+        break;
+    case xrfg::implicit_layer::ConfiguredNvidiaInputScale::full:
+    default:
+        options.input_scale = xrfg::D3D12OpticalFlowInputScale::full;
+        break;
+    }
+    return options;
+}
+
 [[nodiscard]] xrfg::D3D12NvidiaOpticalFlowOptions selected_nvidia_options()
     noexcept {
     const auto configured =
@@ -297,6 +318,7 @@ struct SessionState {
     xrfg::D3D12OpticalFlowBackend optical_flow_backend{
         xrfg::D3D12OpticalFlowBackend::fidelity_fx};
     xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options{};
+    xrfg::D3D12FidelityFxOpticalFlowOptions fidelity_fx_options{};
     SessionGraphicsBinding graphics_binding{SessionGraphicsBinding::none};
     std::uint64_t graphics_binding_capabilities{};
     Microsoft::WRL::ComPtr<ID3D11Device> d3d11_device;
@@ -972,7 +994,8 @@ create_d3d12_frame_generation_swapchains(
             D3D12_RESOURCE_STATE_RENDER_TARGET,
             backend,
             state->session->nvidia_options,
-            xrfg::bridge_flight_logger().enabled());
+            xrfg::bridge_flight_logger().enabled(),
+            state->session->fidelity_fx_options);
         xrfg::bridge_flight_logger().end(
             initialize_token,
             xrfg::BridgeFlightOperation::synthesis_initialize,
@@ -1169,7 +1192,8 @@ create_d3d11_frame_generation_swapchains(
             D3D12_RESOURCE_STATE_COMMON,
             backend,
             session->nvidia_options,
-            xrfg::bridge_flight_logger().enabled());
+            xrfg::bridge_flight_logger().enabled(),
+            session->fidelity_fx_options);
         xrfg::bridge_flight_logger().end(
             initialize_token,
             xrfg::BridgeFlightOperation::synthesis_initialize,
@@ -1552,6 +1576,7 @@ XrResult layer_create_session_impl(
     auto state = std::make_shared<SessionState>(dispatch);
     state->optical_flow_backend = selected_optical_flow_backend();
     state->nvidia_options = selected_nvidia_options();
+    state->fidelity_fx_options = selected_fidelity_fx_options();
     XrStructureType binding_structure_type = XR_TYPE_UNKNOWN;
     if (create_info != nullptr) {
         auto* next = static_cast<const XrBaseInStructure*>(create_info->next);
