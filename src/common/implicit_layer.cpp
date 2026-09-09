@@ -114,26 +114,6 @@ ConfiguredNvidiaOptions read_nvidia_options(
     return options;
 }
 
-ConfiguredFidelityFxOptions read_fidelity_fx_options(
-    const std::filesystem::path& module_directory) noexcept {
-    ConfiguredFidelityFxOptions options{};
-    try {
-        const auto ini_path = module_directory / L"ofxr_bridge.ini";
-        const UINT input_scale = GetPrivateProfileIntW(
-            L"ofxr",
-            L"fidelityfx_input_scale",
-            100,
-            ini_path.c_str());
-        options.input_scale = input_scale == 75
-            ? ConfiguredNvidiaInputScale::three_quarter
-            : input_scale == 50
-                ? ConfiguredNvidiaInputScale::half
-                : ConfiguredNvidiaInputScale::full;
-    } catch (...) {
-    }
-    return options;
-}
-
 bool register_manifest(
     const std::filesystem::path& manifest,
     std::wstring* error,
