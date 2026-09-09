@@ -324,6 +324,23 @@ struct SessionState {
     // of per-cycle overhead to a 10 ms pace and held the runtime to 64/s.
     std::chrono::steady_clock::time_point presenter_next_submit{};
     bool presenter_schedule_valid{};
+    // The display time the runtime reported for the previous internal
+    // xrWaitFrame, and how many slots the pace has been asked to give back.
+    //
+    // The schedule above is a steady_clock grid. The compositor scans out on
+    // the display's clock, and nothing related the two: the phase between
+    // them was whatever it happened to be when the presenter thread started,
+    // and no path corrected it. A grid sitting just after the compositor's
+    // deadline makes every submission miss the scanout it was built for and
+    // land in the next, so each scanout sees either nothing new or two
+    // frames - continuously, not occasionally, and latched for the life of
+    // the session, which is why leaving and re-entering changed everything.
+    //
+    // predictedDisplayTime is the runtime naming the scanout each frame is
+    // for, so consecutive waits advancing by exactly one period is the lock
+    // condition, and the delta is the error. Guarded by presenter_mutex.
+    XrTime presenter_last_predicted_display{};
+    bool presenter_last_predicted_valid{};
     // A condition variable waits on the system tick, which is 15.6 ms by
     // default on Windows. Every pace wait rounded up to that, so an 11.11 ms
     // schedule produced 15.5 ms submissions and exactly 64/s no matter what
@@ -2737,6 +2754,47 @@ void continuous_presenter_main(
             state->presenter_frame_state = frame_state;
             state->presenter_frame_state.next = nullptr;
             state->presenter_frame_state_valid = true;
+            // Lock the grid to the display the runtime is actually scanning
+            // out on. One frame per period means consecutive waits advance
+            // predictedDisplayTime by exactly one period; a repeat says two
+            // submissions were aimed at one scanout and the grid is ahead, a
+            // skip says a scanout went unfilled and it is behind. Correct by
+            // a bounded fraction so a single odd prediction cannot jerk the
+            // cadence, and only once the grid exists to be corrected.
+            const XrDuration locked_period =
+                state->presenter_display_period;
+            if (state->presenter_last_predicted_valid &&
+                state->presenter_schedule_valid && locked_period > 0) {
+                const XrTime previous =
+                    state->presenter_last_predicted_display;
+                const XrTime current = frame_state.predictedDisplayTime;
+                const XrDuration advance = current > previous
+                    ? static_cast<XrDuration>(current - previous)
+                    : 0;
+                // Slots the display moved on by, rounded to nearest, so
+                // ordinary jitter around one period reads as one.
+                const std::int64_t slots =
+                    (advance + locked_period / 2) / locked_period;
+                if (slots != 1) {
+                    const auto period_ns =
+                        std::chrono::nanoseconds(locked_period);
+                    // A repeated slot means the grid is early and must be
+                    // pushed later; a skipped one means it is late. Step by
+                    // an eighth of a period, which walks out a whole slot in
+                    // under a tenth of a second and cannot bunch a pair
+                    // inside one scanout window on its own.
+                    const auto step = period_ns / 8;
+                    if (slots < 1) {
+                        state->presenter_next_submit += step;
+                    } else {
+                        state->presenter_next_submit -= step;
+                    }
+                }
+            }
+            state->presenter_last_predicted_display =
+                frame_state.predictedDisplayTime;
+            state->presenter_last_predicted_valid =
+                frame_state.predictedDisplayTime > 0;
             // Keep the smallest plausible period seen, so a runtime that
             // inflates the value under load cannot inflate the pace with it.
             constexpr XrDuration kShortestCredibleDisplayPeriod = 2'000'000;
@@ -2987,6 +3045,9 @@ void continuous_presenter_main(
         state->presenter_frame_state_valid = false;
         // A schedule left over from a previous presenter would stall the first
         // submission of this one.
+        // A display time from a previous presenter says nothing about this
+        // grid, and its schedule is about to be rebuilt.
+        state->presenter_last_predicted_valid = false;
         state->presenter_schedule_valid = false;
         state->presenter_display_period = 0;
         state->presenter_stop_requested = false;
