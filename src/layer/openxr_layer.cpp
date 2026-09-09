@@ -2771,21 +2771,39 @@ void continuous_presenter_main(
                 const XrDuration advance = current > previous
                     ? static_cast<XrDuration>(current - previous)
                     : 0;
-                // Slots the display moved on by, rounded to nearest, so
-                // ordinary jitter around one period reads as one.
-                const std::int64_t slots =
-                    (advance + locked_period / 2) / locked_period;
+                // A predicted time that did not move, or moved absurdly,
+                // is the runtime not describing a new scanout - a session
+                // transition, a frame it does not want rendered, a stall.
+                // It is not evidence about this grid's phase, and treating
+                // a repeat as proof the grid was early is what let the
+                // deadline run away into the future.
+                const bool usable_signal =
+                    advance > 0 && advance < locked_period * 8;
+                const std::int64_t slots = usable_signal
+                    ? (advance + locked_period / 2) / locked_period
+                    : 1;
                 if (slots != 1) {
                     const auto period_ns =
                         std::chrono::nanoseconds(locked_period);
                     // A repeated slot means the grid is early and must be
-                    // pushed later; a skipped one means it is late. Step by
-                    // an eighth of a period, which walks out a whole slot in
-                    // under a tenth of a second and cannot bunch a pair
+                    // pushed later; a skipped one means it is late. Step by a
+                    // sixteenth of a period, which still walks out a whole slot
+                    // in about a fifth of a second and cannot bunch a pair
                     // inside one scanout window on its own.
-                    const auto step = period_ns / 8;
+                    const auto step = period_ns / 16;
                     if (slots < 1) {
                         state->presenter_next_submit += step;
+                        // Never let a correction put the deadline further
+                        // out than one period. Every other path moves it
+                        // later too, so without a ceiling the schedule can
+                        // only walk forwards, and a presenter that keeps
+                        // sleeping longer stops draining the queue the
+                        // application is admitted against.
+                        const auto ceiling =
+                            std::chrono::steady_clock::now() + period_ns;
+                        if (state->presenter_next_submit > ceiling) {
+                            state->presenter_next_submit = ceiling;
+                        }
                     } else {
                         state->presenter_next_submit -= step;
                     }
