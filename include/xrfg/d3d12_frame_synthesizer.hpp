@@ -137,7 +137,26 @@ public:
         std::span<const D3D12ReprojectionView> synthetic_target_views,
         std::uint32_t synthetic_destination_index,
         std::uint32_t current_destination_index,
-        D3D12FrameSynthesisTicket* ticket) noexcept;
+        D3D12FrameSynthesisTicket* ticket,
+        // Records the current output's copy but leaves it unsubmitted for
+        // flush_current_copy to hand over once the synthetic frame has gone
+        // to the runtime. Defaults off: a caller that never flushes would
+        // publish a stale current frame.
+        bool defer_current_copy = false) noexcept;
+
+    // Executes the current output's copy, which submit_pair records but
+    // deliberately leaves unsubmitted. The synthetic frame is handed to the
+    // runtime a display period before the current one, and a runtime waits
+    // for the whole queue when it takes a frame, so a copy left queued ahead
+    // of the synthetic makes the frame with the tighter deadline wait for a
+    // full-resolution copy it never reads. The caller submits the synthetic
+    // first and calls this immediately afterwards, leaving the copy a whole
+    // period to finish before the current frame needs it.
+    //
+    // Safe to call when nothing is pending. Submission entry points flush
+    // any copy still outstanding themselves, so a caller that never gets
+    // here costs a frame of latency rather than correctness.
+    [[nodiscard]] HRESULT flush_current_copy() noexcept;
 
     // Relinquishes the retained rolling source against its last GPU-use fence.
     // This is nonblocking and is required before history invalidation.

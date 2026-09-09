@@ -2457,6 +2457,12 @@ struct GeneratedFrameEndInfo {
     std::vector<ProjectionLayerCopy> projections;
     std::vector<OwnedCompositionLayer> composition_layers;
     std::vector<const XrCompositionLayerBaseHeader*> layer_pointers;
+    // Synthesizers whose current copy is recorded but not yet submitted.
+    // Only the synthetic half of a pair carries these: the copy must reach
+    // the queue after this frame has been handed over and before the
+    // current frame follows a display period later.
+    std::vector<std::shared_ptr<xrfg::D3D12FrameSynthesizer>>
+        pending_current_copies;
 };
 
 [[nodiscard]] std::optional<OwnedCompositionLayer>
@@ -2832,6 +2838,18 @@ void continuous_presenter_main(
             end_result = state->fps_overlay
                 ? state->fps_overlay->end_frame(&submitted, fresh_synthetic)
                 : state->dispatch->end_frame(state->handle, &submitted);
+            // The synthetic has reached the runtime, so its current copy can
+            // go to the queue now rather than ahead of it. It has a display
+            // period before the current frame that reads it is submitted.
+            if (request && request->owned_frame) {
+                for (const auto& synthesizer :
+                     request->owned_frame->pending_current_copies) {
+                    if (synthesizer) {
+                        static_cast<void>(
+                            synthesizer->flush_current_copy());
+                    }
+                }
+            }
             {
                 // Advance the schedule by exactly one period so this loop's
                 // own cost does not compound into the cadence, and resync
@@ -3711,6 +3729,9 @@ struct PreparedGeneration {
     GenerationPrepareReason reason{GenerationPrepareReason::exception};
     XrSwapchain current_handle{XR_NULL_HANDLE};
     XrSwapchain synthetic_handle{XR_NULL_HANDLE};
+    // The synthesizer holding this pair's deferred current copy, so the
+    // presenter can submit it once the synthetic frame has gone.
+    std::shared_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
     bool anchor_is_current{};
 };
 
@@ -3831,7 +3852,8 @@ struct PreparedProjectionFrame {
                                           current_source_views,
                                           generation->synthetic.acquired_index,
                                           current_destination_index,
-                                          &ticket)
+                                          &ticket,
+                                          true)
                                     : generation->synthesizer->submit_prime(
                                           *capture,
                                           current_source_views,
@@ -3901,6 +3923,10 @@ struct PreparedProjectionFrame {
             // while this one is still queued behind the presenter.
             generation->current_slot =
                 (current_slot + 1) % kCurrentSlotCount;
+            // Only a pair defers its current copy; a prime submits it inline.
+            if (request_pair) {
+                output.synthesizer = generation->synthesizer;
+            }
             output.kind = request_pair ? PreparedGenerationKind::pair
                                        : PreparedGenerationKind::prime;
             output.reason = GenerationPrepareReason::ready;
@@ -4485,6 +4511,15 @@ XrResult layer_end_frame_impl(
                 current_destinations.data(), current_destinations.size()),
             &current_generated);
         if (synthetic_built && current_built) {
+            // The synthetic frame owns the deferred copies: they must reach
+            // the queue after it has been handed to the runtime.
+            for (const PreparedProjectionResource& resource :
+                 prepared.resources) {
+                if (resource.generation.synthesizer) {
+                    first_generated.pending_current_copies.push_back(
+                        resource.generation.synthesizer);
+                }
+            }
             submitted_end_info = &first_generated.info;
             pair_ready = true;
         } else {
@@ -4651,6 +4686,13 @@ XrResult layer_end_frame_impl(
         return result;
     }
 
+    // The synthetic has gone downstream; submit its current copy before the
+    // cycle that hands the runtime the frame which reads it.
+    for (const auto& synthesizer : first_generated.pending_current_copies) {
+        if (synthesizer) {
+            static_cast<void>(synthesizer->flush_current_copy());
+        }
+    }
     const InternalCycleResult current_cycle =
         submit_current_cycle(state, current_generated.info);
     if (!current_cycle.completed) {

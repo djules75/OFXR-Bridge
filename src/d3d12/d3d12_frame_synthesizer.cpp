@@ -555,6 +555,11 @@ struct D3D12FrameSynthesizer::Impl {
         ComPtr<ID3D12GraphicsCommandList> command_list;
         ComPtr<ID3D12CommandAllocator> synthesis_allocator;
         ComPtr<ID3D12GraphicsCommandList> synthesis_command_list;
+        // The bit-exact copy of B into the current output. Recorded apart from
+        // the synthesis and submitted only once the synthetic frame has been
+        // handed to the runtime, so it is not queued ahead of it.
+        ComPtr<ID3D12CommandAllocator> current_copy_allocator;
+        ComPtr<ID3D12GraphicsCommandList> current_copy_command_list;
         ComPtr<ID3D12CommandAllocator> timing_marker_allocator;
         ComPtr<ID3D12GraphicsCommandList> timing_marker_command_list;
         ComPtr<ID3D12DescriptorHeap> descriptor_heap;
@@ -647,6 +652,14 @@ struct D3D12FrameSynthesizer::Impl {
     UINT flow_block_size{};
     std::uint64_t next_fence_value{1};
     std::uint64_t last_submitted_fence_value{};
+    // The work slot whose current copy has been recorded and closed but not
+    // yet submitted, and the fence value that submission will signal. The
+    // slot cannot be recycled and the history lease cannot retire until it
+    // has, so every entry point that needs either flushes first.
+    static constexpr std::uint32_t kNoPendingCopy =
+        std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t pending_copy_slot{kNoPendingCopy};
+    std::uint64_t pending_copy_fence_value{};
     std::uint64_t next_nvidia_fence_value{1};
     std::uint64_t last_nvidia_fence_value{};
     std::uint64_t nvidia_timestamp_frequency{};
@@ -1390,6 +1403,25 @@ struct D3D12FrameSynthesizer::Impl {
             if (FAILED(result)) {
                 return result;
             }
+            result = device->CreateCommandAllocator(
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                IID_PPV_ARGS(slot.current_copy_allocator.GetAddressOf()));
+            if (FAILED(result)) {
+                return result;
+            }
+            result = device->CreateCommandList(
+                node_mask,
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                slot.current_copy_allocator.Get(),
+                nullptr,
+                IID_PPV_ARGS(slot.current_copy_command_list.GetAddressOf()));
+            if (FAILED(result)) {
+                return result;
+            }
+            result = slot.current_copy_command_list->Close();
+            if (FAILED(result)) {
+                return result;
+            }
             if (backend == D3D12OpticalFlowBackend::nvidia) {
                 result = device->CreateCommandAllocator(
                     D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -2114,6 +2146,18 @@ struct D3D12FrameSynthesizer::Impl {
             synthesis_enabled = false;
             return result;
         }
+        result = slot.current_copy_allocator->Reset();
+        if (FAILED(result)) {
+            synthesis_enabled = false;
+            return result;
+        }
+        result = slot.current_copy_command_list->Reset(
+            slot.current_copy_allocator.Get(),
+            nullptr);
+        if (FAILED(result)) {
+            synthesis_enabled = false;
+            return result;
+        }
         if (backend == D3D12OpticalFlowBackend::nvidia) {
             result = slot.synthesis_allocator->Reset();
             if (FAILED(result)) {
@@ -2577,18 +2621,29 @@ struct D3D12FrameSynthesizer::Impl {
             previous_resource,
             kShaderReadState,
             D3D12_RESOURCE_STATE_COMMON);
-        before_current_copy[before_current_copy_count++] = transition_barrier(
-            current_resource,
-            kShaderReadState,
-            D3D12_RESOURCE_STATE_COPY_SOURCE);
-        before_current_copy[before_current_copy_count++] = transition_barrier(
-            current_destination,
-            release_state,
-            D3D12_RESOURCE_STATE_COPY_DEST);
         synthesis->ResourceBarrier(
             before_current_copy_count,
             before_current_copy.data());
-        synthesis->CopyResource(current_destination, current_resource);
+        // The copy's own transitions travel with the copy, so the resources
+        // are left in their normal states while it waits to be submitted.
+        const std::array<D3D12_RESOURCE_BARRIER, 2> before_copy_states{
+            transition_barrier(
+                current_resource,
+                kShaderReadState,
+                D3D12_RESOURCE_STATE_COPY_SOURCE),
+            transition_barrier(
+                current_destination,
+                release_state,
+                D3D12_RESOURCE_STATE_COPY_DEST),
+        };
+        slot.current_copy_command_list->ResourceBarrier(
+            static_cast<UINT>(before_copy_states.size()),
+            before_copy_states.data());
+        // Recorded here but submitted only after the synthetic frame has gone
+        // to the runtime; see flush_current_copy.
+        slot.current_copy_command_list->CopyResource(
+            current_destination,
+            current_resource);
         const std::array<D3D12_RESOURCE_BARRIER, 2> after_current_copy{
             transition_barrier(
                 current_resource,
@@ -2599,7 +2654,7 @@ struct D3D12FrameSynthesizer::Impl {
                 D3D12_RESOURCE_STATE_COPY_DEST,
                 release_state),
         };
-        synthesis->ResourceBarrier(
+        slot.current_copy_command_list->ResourceBarrier(
             static_cast<UINT>(after_current_copy.size()),
             after_current_copy.data());
         if (nvidia_gpu_timing_enabled) {
@@ -2782,11 +2837,18 @@ struct D3D12FrameSynthesizer::Impl {
             slot.command_list->DrawInstanced(3, 1, 0, 0);
         }
 
-        const std::array<D3D12_RESOURCE_BARRIER, 3> before_current_copy{
+        const std::array<D3D12_RESOURCE_BARRIER, 1> before_current_copy{
             transition_barrier(
                 previous_resource,
                 kShaderReadState,
                 D3D12_RESOURCE_STATE_COMMON),
+        };
+        slot.command_list->ResourceBarrier(
+            static_cast<UINT>(before_current_copy.size()),
+            before_current_copy.data());
+        // The copy's own transitions travel with the copy, so the resources
+        // are left in their normal states while it waits to be submitted.
+        const std::array<D3D12_RESOURCE_BARRIER, 2> before_copy_states{
             transition_barrier(
                 current_resource,
                 kShaderReadState,
@@ -2796,10 +2858,14 @@ struct D3D12FrameSynthesizer::Impl {
                 release_state,
                 D3D12_RESOURCE_STATE_COPY_DEST),
         };
-        slot.command_list->ResourceBarrier(
-            static_cast<UINT>(before_current_copy.size()),
-            before_current_copy.data());
-        slot.command_list->CopyResource(current_destination, current_resource);
+        slot.current_copy_command_list->ResourceBarrier(
+            static_cast<UINT>(before_copy_states.size()),
+            before_copy_states.data());
+        // Recorded here but submitted only after the synthetic frame has gone
+        // to the runtime; see flush_current_copy.
+        slot.current_copy_command_list->CopyResource(
+            current_destination,
+            current_resource);
         const std::array<D3D12_RESOURCE_BARRIER, 2> after_current_copy{
             transition_barrier(
                 current_resource,
@@ -2810,7 +2876,7 @@ struct D3D12FrameSynthesizer::Impl {
                 D3D12_RESOURCE_STATE_COPY_DEST,
                 release_state),
         };
-        slot.command_list->ResourceBarrier(
+        slot.current_copy_command_list->ResourceBarrier(
             static_cast<UINT>(after_current_copy.size()),
             after_current_copy.data());
         return S_OK;
@@ -2945,13 +3011,24 @@ struct D3D12FrameSynthesizer::Impl {
         return S_OK;
     }
 
+    // Submits the recorded work. The current output's copy is closed either
+    // way, but with defer_current_copy it is held back for flush_current_copy
+    // to submit once the synthetic frame has reached the runtime. Two fence
+    // values are reserved in that case: the first is signalled here and marks
+    // the synthetic's pixels done, the second is what the copy will signal and
+    // is what the slot, the destination and the history lease are tracked
+    // against, so none of them come free until the copy has actually run.
     [[nodiscard]] HRESULT execute_and_signal(
         WorkSlot& slot,
+        std::uint32_t slot_index,
         RollingSource* newly_acquired,
-        std::uint64_t* output_fence_value) noexcept {
+        std::uint64_t* output_fence_value,
+        bool defer_current_copy) noexcept {
         if (newly_acquired == nullptr || output_fence_value == nullptr ||
+            slot.current_copy_command_list == nullptr ||
             next_fence_value == 0 ||
-            next_fence_value == std::numeric_limits<std::uint64_t>::max()) {
+            next_fence_value >=
+                std::numeric_limits<std::uint64_t>::max() - 1U) {
             synthesis_enabled = false;
             return E_FAIL;
         }
@@ -2961,32 +3038,85 @@ struct D3D12FrameSynthesizer::Impl {
             synthesis_enabled = false;
             return result;
         }
+        result = slot.current_copy_command_list->Close();
+        if (FAILED(result)) {
+            synthesis_enabled = false;
+            return result;
+        }
         ID3D12CommandList* lists[] = {slot.command_list.Get()};
         queue->ExecuteCommandLists(1, lists);
         completion_unknown = true;
 
-        const std::uint64_t value = next_fence_value;
-        result = queue->Signal(fence.Get(), value);
-        if (FAILED(result)) {
-            synthesis_enabled = false;
-            untracked_source = std::move(*newly_acquired);
-            return result;
+        std::uint64_t value = 0;
+        if (defer_current_copy) {
+            // Signal the synthetic first: its pixels exist now, and it goes
+            // to the runtime a display period before the current frame.
+            const std::uint64_t synthetic_value = next_fence_value;
+            HRESULT signal_result =
+                queue->Signal(fence.Get(), synthetic_value);
+            if (FAILED(signal_result)) {
+                synthesis_enabled = false;
+                untracked_source = std::move(*newly_acquired);
+                return signal_result;
+            }
+            ++next_fence_value;
+            value = next_fence_value;
+            ++next_fence_value;
+            pending_copy_slot = slot_index;
+            pending_copy_fence_value = value;
+        } else {
+            ID3D12CommandList* copy_lists[] = {
+                slot.current_copy_command_list.Get()};
+            queue->ExecuteCommandLists(1, copy_lists);
+            value = next_fence_value;
+            ++next_fence_value;
+            HRESULT signal_result = queue->Signal(fence.Get(), value);
+            if (FAILED(signal_result)) {
+                synthesis_enabled = false;
+                untracked_source = std::move(*newly_acquired);
+                return signal_result;
+            }
         }
 
         completion_unknown = false;
         slot.fence_value = value;
         last_submitted_fence_value = value;
-        ++next_fence_value;
         *output_fence_value = value;
         return S_OK;
     }
 
+    // Submits a copy left pending by execute_and_signal and signals the value
+    // the rest of the pipeline is already tracking against it.
+    [[nodiscard]] HRESULT flush_pending_copy() noexcept {
+        if (pending_copy_slot == kNoPendingCopy) {
+            return S_OK;
+        }
+        if (pending_copy_slot >= work_slots.size() || !synthesis_enabled) {
+            pending_copy_slot = kNoPendingCopy;
+            return E_FAIL;
+        }
+        WorkSlot& slot = work_slots[pending_copy_slot];
+        const std::uint64_t value = pending_copy_fence_value;
+        pending_copy_slot = kNoPendingCopy;
+        ID3D12CommandList* copy_lists[] = {
+            slot.current_copy_command_list.Get()};
+        queue->ExecuteCommandLists(1, copy_lists);
+        const HRESULT result = queue->Signal(fence.Get(), value);
+        if (FAILED(result)) {
+            synthesis_enabled = false;
+        }
+        return result;
+    }
+
     [[nodiscard]] HRESULT execute_nvidia_and_signal(
         WorkSlot& slot,
+        std::uint32_t slot_index,
         RollingSource* newly_acquired,
-        std::uint64_t* output_fence_value) noexcept {
+        std::uint64_t* output_fence_value,
+        bool defer_current_copy) noexcept {
         if (newly_acquired == nullptr || output_fence_value == nullptr ||
             slot.synthesis_command_list == nullptr ||
+            slot.current_copy_command_list == nullptr ||
             next_fence_value == 0 ||
             next_fence_value >=
                 std::numeric_limits<std::uint64_t>::max() - 1U ||
@@ -3004,6 +3134,11 @@ struct D3D12FrameSynthesizer::Impl {
             return result;
         }
         result = slot.synthesis_command_list->Close();
+        if (FAILED(result)) {
+            synthesis_enabled = false;
+            return result;
+        }
+        result = slot.current_copy_command_list->Close();
         if (FAILED(result)) {
             synthesis_enabled = false;
             return result;
@@ -3128,19 +3263,43 @@ struct D3D12FrameSynthesizer::Impl {
             slot.synthesis_command_list.Get()};
         queue->ExecuteCommandLists(1, synthesis_lists);
 
-        const std::uint64_t completion_value = next_fence_value;
-        result = queue->Signal(fence.Get(), completion_value);
-        if (FAILED(result)) {
-            synthesis_enabled = false;
-            untracked_source = std::move(*newly_acquired);
-            return result;
+        // The synthetic's pixels exist once this signals. The current copy
+        // is held back so it is not queued ahead of the synthetic frame.
+        std::uint64_t completion_value = 0;
+        if (defer_current_copy) {
+            // Signal the synthetic first: its pixels exist now, and it goes
+            // to the runtime a display period before the current frame.
+            const std::uint64_t synthetic_value = next_fence_value;
+            HRESULT signal_result =
+                queue->Signal(fence.Get(), synthetic_value);
+            if (FAILED(signal_result)) {
+                synthesis_enabled = false;
+                untracked_source = std::move(*newly_acquired);
+                return signal_result;
+            }
+            ++next_fence_value;
+            completion_value = next_fence_value;
+            ++next_fence_value;
+            pending_copy_slot = slot_index;
+            pending_copy_fence_value = completion_value;
+        } else {
+            ID3D12CommandList* copy_lists[] = {
+                slot.current_copy_command_list.Get()};
+            queue->ExecuteCommandLists(1, copy_lists);
+            completion_value = next_fence_value;
+            ++next_fence_value;
+            HRESULT signal_result = queue->Signal(fence.Get(), completion_value);
+            if (FAILED(signal_result)) {
+                synthesis_enabled = false;
+                untracked_source = std::move(*newly_acquired);
+                return signal_result;
+            }
         }
 
         completion_unknown = false;
         slot.fence_value = completion_value;
         slot.timing_pending = nvidia_gpu_timing_enabled;
         last_submitted_fence_value = completion_value;
-        ++next_fence_value;
         *output_fence_value = completion_value;
         return S_OK;
     }
@@ -3169,6 +3328,9 @@ struct D3D12FrameSynthesizer::Impl {
         if (FAILED(result)) {
             return result;
         }
+        // A copy still pending would hold its work slot and history lease, so
+        // a caller that never flushed cannot wedge the ring here.
+        static_cast<void>(flush_pending_copy());
         std::uint32_t work_slot_index = 0;
         result = acquire_work_slot(&work_slot_index);
         if (FAILED(result)) {
@@ -3212,7 +3374,8 @@ struct D3D12FrameSynthesizer::Impl {
         }
 
         std::uint64_t fence_value = 0;
-        result = execute_and_signal(slot, &next, &fence_value);
+        result = execute_and_signal(
+            slot, work_slot_index, &next, &fence_value, false);
         if (FAILED(result)) {
             if (next.active()) {
                 cancel_next();
@@ -3241,6 +3404,7 @@ struct D3D12FrameSynthesizer::Impl {
         std::span<const D3D12ReprojectionView> synthetic_target_views,
         std::uint32_t synthetic_destination_index,
         std::uint32_t current_destination_index,
+        bool defer_current_copy,
         D3D12FrameSynthesisTicket* output_ticket) noexcept {
         if (output_ticket == nullptr) {
             return E_POINTER;
@@ -3320,6 +3484,9 @@ struct D3D12FrameSynthesizer::Impl {
         if (FAILED(result)) {
             return result;
         }
+        // A copy still pending would hold its work slot and history lease, so
+        // a caller that never flushed cannot wedge the ring here.
+        static_cast<void>(flush_pending_copy());
         std::uint32_t work_slot_index = 0;
         result = acquire_work_slot(&work_slot_index);
         if (FAILED(result)) {
@@ -3363,7 +3530,7 @@ struct D3D12FrameSynthesizer::Impl {
             RollingSource no_new_source{};
             std::uint64_t fence_value = 0;
             result = execute_and_signal(
-                slot, &no_new_source, &fence_value);
+                slot, work_slot_index, &no_new_source, &fence_value, false);
             if (FAILED(result)) {
                 return result;
             }
@@ -3445,8 +3612,12 @@ struct D3D12FrameSynthesizer::Impl {
 
         std::uint64_t fence_value = 0;
         result = backend == D3D12OpticalFlowBackend::nvidia
-                     ? execute_nvidia_and_signal(slot, &next, &fence_value)
-                     : execute_and_signal(slot, &next, &fence_value);
+                     ? execute_nvidia_and_signal(
+                           slot, work_slot_index, &next, &fence_value,
+                           defer_current_copy)
+                     : execute_and_signal(
+                           slot, work_slot_index, &next, &fence_value,
+                           defer_current_copy);
         if (FAILED(result)) {
             if (next.active()) {
                 cancel_next();
@@ -3506,6 +3677,9 @@ struct D3D12FrameSynthesizer::Impl {
     }
 
     [[nodiscard]] HRESULT wait_for_idle() noexcept {
+        // last_submitted_fence_value is the value a deferred copy will signal,
+        // so waiting for it without submitting that copy would never return.
+        static_cast<void>(flush_pending_copy());
         HRESULT result = retire_previous();
         if (FAILED(result)) {
             return result;
@@ -3619,7 +3793,8 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
     std::span<const D3D12ReprojectionView> synthetic_target_views,
     std::uint32_t synthetic_destination_index,
     std::uint32_t current_destination_index,
-    D3D12FrameSynthesisTicket* ticket) noexcept {
+    D3D12FrameSynthesisTicket* ticket,
+    bool defer_current_copy) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr) {
@@ -3634,11 +3809,21 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
             synthetic_target_views,
             synthetic_destination_index,
             current_destination_index,
+            defer_current_copy,
             ticket);
     } catch (...) {
         if (ticket != nullptr) {
             *ticket = {};
         }
+        return E_FAIL;
+    }
+}
+
+HRESULT D3D12FrameSynthesizer::flush_current_copy() noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ == nullptr ? S_OK : impl_->flush_pending_copy();
+    } catch (...) {
         return E_FAIL;
     }
 }
