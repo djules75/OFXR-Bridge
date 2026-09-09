@@ -1964,7 +1964,7 @@ struct D3D12FrameSynthesizer::Impl {
         }
         const auto* timestamps = static_cast<const std::uint64_t*>(mapped) +
             slot.timing_query_base;
-        std::array<std::uint64_t, kNvidiaTimestampCount> values{};
+        std::array<std::uint64_t, kTimestampCount> values{};
         std::copy_n(timestamps, values.size(), values.begin());
         const D3D12_RANGE no_write{0, 0};
         nvidia_timestamp_readback->Unmap(0, &no_write);
@@ -2739,7 +2739,7 @@ struct D3D12FrameSynthesizer::Impl {
                 nvidia_timestamp_heap.Get(),
                 D3D12_QUERY_TYPE_TIMESTAMP,
                 slot.timing_query_base,
-                kNvidiaTimestampCount,
+                kTimestampCount,
                 nvidia_timestamp_readback.Get(),
                 static_cast<UINT64>(slot.timing_query_base) *
                     sizeof(std::uint64_t));
@@ -2927,6 +2927,17 @@ struct D3D12FrameSynthesizer::Impl {
                 nvidia_timestamp_heap.Get(),
                 D3D12_QUERY_TYPE_TIMESTAMP,
                 slot.timing_query_base + kSpanEnd);
+            // Only this path records a resolve of its own; the NVIDIA path
+            // resolves on its synthesis list. Without one the span marks
+            // never reach the readback buffer at all.
+            slot.command_list->ResolveQueryData(
+                nvidia_timestamp_heap.Get(),
+                D3D12_QUERY_TYPE_TIMESTAMP,
+                slot.timing_query_base,
+                kTimestampCount,
+                nvidia_timestamp_readback.Get(),
+                static_cast<UINT64>(slot.timing_query_base) *
+                    sizeof(std::uint64_t));
         }
         // The copy's own transitions travel with the copy, so the resources
         // are left in their normal states while it waits to be submitted.
@@ -3162,6 +3173,9 @@ struct D3D12FrameSynthesizer::Impl {
 
         completion_unknown = false;
         slot.fence_value = value;
+        // Both backends now write timestamps, so both must mark the slot as
+        // having a resolve waiting to be read back.
+        slot.timing_pending = nvidia_gpu_timing_enabled;
         last_submitted_fence_value = value;
         *output_fence_value = value;
         return S_OK;
