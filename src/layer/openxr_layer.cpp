@@ -433,6 +433,21 @@ void log_completed_nvidia_gpu_timings(
             timing.composition_microseconds,
             timing.total_microseconds,
             timing.current_serial);
+        // When the GPU actually began and ended this pair's synthesis, on
+        // the log's own timeline, so it can be compared directly with the
+        // internal_end_frame that handed the synthetic to the runtime.
+        if (timing.gpu_begin_qpc != 0 && timing.gpu_end_qpc != 0) {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::synthesis_gpu_span,
+                static_cast<std::int64_t>(timing.total_microseconds),
+                static_cast<std::uint64_t>(
+                    xrfg::bridge_flight_logger().microseconds_for_counter(
+                        static_cast<std::int64_t>(timing.gpu_begin_qpc))),
+                static_cast<std::uint64_t>(
+                    xrfg::bridge_flight_logger().microseconds_for_counter(
+                        static_cast<std::int64_t>(timing.gpu_end_qpc))),
+                timing.current_serial);
+        }
     }
 }
 

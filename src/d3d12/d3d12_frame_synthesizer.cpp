@@ -66,6 +66,13 @@ constexpr UINT kNvidiaTimestampPackEnd = 1;
 constexpr UINT kNvidiaTimestampEye0End = 2;
 constexpr UINT kNvidiaTimestampCompositionBegin = 3;
 constexpr UINT kNvidiaTimestampCompositionEnd = 4;
+// Two more, written by both backends, bracketing all of a pair's GPU work.
+// The NVIDIA stage marks above stay as they are; these exist so the
+// FidelityFX path is measurable too, and so the span can be reported as
+// absolute times rather than only as a duration.
+constexpr UINT kSpanBegin = 5;
+constexpr UINT kSpanEnd = 6;
+constexpr UINT kTimestampCount = 7;
 constexpr float kPositionToleranceMeters = 1.0e-4F;
 constexpr float kCameraTolerance = 1.0e-5F;
 constexpr D3D12_RESOURCE_STATES kShaderReadState =
@@ -635,6 +642,12 @@ struct D3D12FrameSynthesizer::Impl {
     ComPtr<ID3D12Fence> fence;
     ComPtr<ID3D12Fence> nvidia_fence;
     ComPtr<ID3D12QueryHeap> nvidia_timestamp_heap;
+    // Maps GPU ticks onto QueryPerformanceCounter, sampled once when the
+    // heap is created. Without it a timestamp is only a duration; with it
+    // it is a moment that can be compared to when the frame was submitted.
+    std::uint64_t calibration_gpu_ticks{};
+    std::uint64_t calibration_qpc_ticks{};
+    std::uint64_t qpc_frequency{};
     ComPtr<ID3D12Resource> nvidia_timestamp_readback;
     HANDLE fence_event{};
     RollingSource previous;
@@ -1322,6 +1335,25 @@ struct D3D12FrameSynthesizer::Impl {
         return S_OK;
     }
 
+    // A GPU timestamp as a QueryPerformanceCounter value, using the
+    // calibration sampled at creation. Both clocks run at a fixed rate, so
+    // one simultaneous sample plus the two frequencies is enough.
+    [[nodiscard]] std::uint64_t timestamp_qpc(
+        std::uint64_t gpu_ticks) const noexcept {
+        if (calibration_gpu_ticks == 0 || qpc_frequency == 0 ||
+            nvidia_timestamp_frequency == 0) {
+            return 0;
+        }
+        const double gpu_delta =
+            static_cast<double>(gpu_ticks) -
+            static_cast<double>(calibration_gpu_ticks);
+        const double qpc_delta = gpu_delta *
+            static_cast<double>(qpc_frequency) /
+            static_cast<double>(nvidia_timestamp_frequency);
+        return static_cast<std::uint64_t>(
+            static_cast<double>(calibration_qpc_ticks) + qpc_delta);
+    }
+
     [[nodiscard]] HRESULT create_nvidia_timing_resources(
         UINT node_mask) noexcept {
         if (!nvidia_gpu_timing_enabled) {
@@ -1336,8 +1368,17 @@ struct D3D12FrameSynthesizer::Impl {
         D3D12_QUERY_HEAP_DESC query_description{};
         query_description.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
         query_description.Count =
-            kNvidiaTimestampCount * static_cast<UINT>(work_slots.size());
+            kTimestampCount * static_cast<UINT>(work_slots.size());
         query_description.NodeMask = node_mask;
+        LARGE_INTEGER qpc_hz{};
+        if (QueryPerformanceFrequency(&qpc_hz) && qpc_hz.QuadPart > 0) {
+            qpc_frequency = static_cast<std::uint64_t>(qpc_hz.QuadPart);
+        }
+        if (FAILED(queue->GetClockCalibration(
+                &calibration_gpu_ticks, &calibration_qpc_ticks))) {
+            calibration_gpu_ticks = 0;
+            calibration_qpc_ticks = 0;
+        }
         result = device->CreateQueryHeap(
             &query_description,
             IID_PPV_ARGS(nvidia_timestamp_heap.GetAddressOf()));
@@ -1383,7 +1424,7 @@ struct D3D12FrameSynthesizer::Impl {
 
         for (WorkSlot& slot : work_slots) {
             slot.timing_query_base = static_cast<UINT>(
-                &slot - work_slots.data()) * kNvidiaTimestampCount;
+                &slot - work_slots.data()) * kTimestampCount;
             HRESULT result = device->CreateCommandAllocator(
                 D3D12_COMMAND_LIST_TYPE_DIRECT,
                 IID_PPV_ARGS(slot.allocator.GetAddressOf()));
@@ -1818,8 +1859,9 @@ struct D3D12FrameSynthesizer::Impl {
         release_state = input_release_state;
         backend = input_backend;
         nvidia_options = input_nvidia_options;
+        // Timing is no longer NVIDIA only: the span marks below are written by
+        // both backends, and FidelityFX is the one that had no measurement.
         nvidia_gpu_timing_enabled =
-            input_backend == D3D12OpticalFlowBackend::nvidia &&
             enable_nvidia_gpu_timing;
         const UINT node_mask = queue->GetDesc().NodeMask;
 
@@ -1911,7 +1953,7 @@ struct D3D12FrameSynthesizer::Impl {
             static_cast<SIZE_T>(slot.timing_query_base) *
             sizeof(std::uint64_t);
         const SIZE_T byte_end = byte_begin +
-            kNvidiaTimestampCount * sizeof(std::uint64_t);
+            kTimestampCount * sizeof(std::uint64_t);
         const D3D12_RANGE read_range{byte_begin, byte_end};
         void* mapped = nullptr;
         HRESULT result = nvidia_timestamp_readback->Map(
@@ -1927,6 +1969,18 @@ struct D3D12FrameSynthesizer::Impl {
         const D3D12_RANGE no_write{0, 0};
         nvidia_timestamp_readback->Unmap(0, &no_write);
 
+        // The span marks are written by both backends; the stage marks only
+        // by NVIDIA, so their ordering is checked only where they exist.
+        slot.cached_timing = slot.timing_metadata;
+        slot.cached_timing.gpu_begin_qpc = timestamp_qpc(values[kSpanBegin]);
+        slot.cached_timing.gpu_end_qpc = timestamp_qpc(values[kSpanEnd]);
+        slot.cached_timing.total_microseconds = timestamp_microseconds(
+            values[kSpanBegin], values[kSpanEnd]);
+        if (backend != D3D12OpticalFlowBackend::nvidia) {
+            slot.timing_pending = false;
+            slot.timing_cached = true;
+            return S_OK;
+        }
         if (values[kNvidiaTimestampPackBegin] >
                 values[kNvidiaTimestampPackEnd] ||
             values[kNvidiaTimestampPackEnd] >
@@ -1939,7 +1993,6 @@ struct D3D12FrameSynthesizer::Impl {
             return E_FAIL;
         }
 
-        slot.cached_timing = slot.timing_metadata;
         slot.cached_timing.pack_microseconds = timestamp_microseconds(
             values[kNvidiaTimestampPackBegin],
             values[kNvidiaTimestampPackEnd]);
@@ -2144,6 +2197,15 @@ struct D3D12FrameSynthesizer::Impl {
             return result;
         }
         result = slot.command_list->Reset(slot.allocator.Get(), nullptr);
+        if (SUCCEEDED(result) && nvidia_gpu_timing_enabled &&
+            nvidia_timestamp_heap) {
+            // First mark on the list both backends record into, so the span
+            // starts where the GPU starts this pair's work.
+            slot.command_list->EndQuery(
+                nvidia_timestamp_heap.Get(),
+                D3D12_QUERY_TYPE_TIMESTAMP,
+                slot.timing_query_base + kSpanBegin);
+        }
         if (FAILED(result)) {
             synthesis_enabled = false;
             return result;
@@ -2626,6 +2688,15 @@ struct D3D12FrameSynthesizer::Impl {
         synthesis->ResourceBarrier(
             before_current_copy_count,
             before_current_copy.data());
+        if (nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
+            // Last mark of the pair's synthesis, before the current copy
+            // that is submitted separately. The span therefore covers
+            // exactly the work the synthetic frame is waiting on.
+            synthesis->EndQuery(
+                nvidia_timestamp_heap.Get(),
+                D3D12_QUERY_TYPE_TIMESTAMP,
+                slot.timing_query_base + kSpanEnd);
+        }
         // The copy's own transitions travel with the copy, so the resources
         // are left in their normal states while it waits to be submitted.
         const std::array<D3D12_RESOURCE_BARRIER, 2> before_copy_states{
@@ -2848,6 +2919,15 @@ struct D3D12FrameSynthesizer::Impl {
         slot.command_list->ResourceBarrier(
             static_cast<UINT>(before_current_copy.size()),
             before_current_copy.data());
+        if (nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
+            // Last mark of the pair's synthesis, before the current copy
+            // that is submitted separately. The span therefore covers
+            // exactly the work the synthetic frame is waiting on.
+            slot.command_list->EndQuery(
+                nvidia_timestamp_heap.Get(),
+                D3D12_QUERY_TYPE_TIMESTAMP,
+                slot.timing_query_base + kSpanEnd);
+        }
         // The copy's own transitions travel with the copy, so the resources
         // are left in their normal states while it waits to be submitted.
         const std::array<D3D12_RESOURCE_BARRIER, 2> before_copy_states{

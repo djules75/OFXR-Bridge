@@ -62,6 +62,10 @@ struct D3D12NvidiaGpuTiming {
     std::uint64_t eye1_microseconds{};
     std::uint64_t composition_microseconds{};
     std::uint64_t total_microseconds{};
+    // The pair's whole GPU span, as QueryPerformanceCounter values. Zero
+    // when the device offered no calibration.
+    std::uint64_t gpu_begin_qpc{};
+    std::uint64_t gpu_end_qpc{};
     std::uint32_t eye_count{};
 };
 
