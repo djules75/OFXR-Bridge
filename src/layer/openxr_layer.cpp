@@ -2652,9 +2652,10 @@ void fail_pending_presenter_submissions_locked(
 // Pacing here rather than trusting the wait costs nothing where the wait
 // already paces: the elapsed check passes immediately and the runtime's own
 // blocking still sets the cadence. The wait is interruptible, and it happens
-// before the runtime frame cycle is entered so no begun frame is held open
-// across it. It must not run under presenter_content_mutex - waiting for
-// presenter progress while holding that lock has deadlocked this layer twice.
+// inside the begun frame, so the runtime measures a frame that contains the
+// work actually being done rather than an empty window. It must not run
+// under presenter_content_mutex - waiting for presenter progress while
+// holding that lock has deadlocked this layer twice.
 void pace_presenter_submission(
     const std::shared_ptr<SessionState>& state) noexcept {
     try {
@@ -2739,7 +2740,6 @@ void continuous_presenter_main(
             }
         }
 
-        pace_presenter_submission(state);
 
         XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
         XrFrameState frame_state{XR_TYPE_FRAME_STATE};
@@ -2878,6 +2878,20 @@ void continuous_presenter_main(
             state->presenter_condition.notify_all();
             break;
         }
+
+        // The pace runs here, inside the begun frame, rather than before the
+        // cycle. A runtime measures an application frame between xrBeginFrame
+        // and xrEndFrame; calling them back to back, as this loop did, gives
+        // it a frame containing nothing - measured as 0.73 ms of CPU and
+        // under a millisecond of GPU, while the real work costs 12 ms of
+        // application rendering and 3.59 ms of synthesis outside the window.
+        //
+        // A scheduler told its client costs a millisecond has every reason to
+        // ask for the frame late and to assume it will be ready. Holding the
+        // frame open across the pace is what every ordinary application does
+        // - begin, render, end - and lets the queue timestamps span the work
+        // actually being done.
+        pace_presenter_submission(state);
 
         std::shared_ptr<PresenterSubmission> request;
         std::shared_ptr<GeneratedFrameEndInfo> repeated_frame;
