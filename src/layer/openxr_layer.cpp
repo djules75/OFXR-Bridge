@@ -366,6 +366,19 @@ struct SessionState {
     std::uint64_t next_presenter_sequence{1};
     std::size_t outstanding_presenter_submissions{};
     bool presenter_frame_state_valid{};
+    // The presenter's frame counter, and the count the application was last
+    // released at. The application is handed a doubled period, so it has to be
+    // released once per pair, and the validity flag above cannot do that: it is
+    // a latch set on the presenter's first wait and cleared only on start and
+    // stop, so waiting on it returned in microseconds on every frame after the
+    // first. An application slow enough to be the limit never noticed, because
+    // its own rendering paced it. One fast enough to keep up ran at a frame per
+    // display period against a layer that can consume one per pair, and the
+    // surplus frame lost the history ring's capture slot and was rendered and
+    // thrown away -- one application frame in six on UEVR, at a steady beat,
+    // never two in a row.
+    std::uint64_t presenter_frame_serial{};
+    std::uint64_t application_served_serial{};
     bool presenter_stop_requested{};
     bool presenter_active{};
     XrSession handle{XR_NULL_HANDLE};
@@ -1865,8 +1878,19 @@ XrResult layer_wait_frame_impl(
             return XR_ERROR_VALIDATION_FAILURE;
         }
         std::unique_lock presenter_lock(state->presenter_mutex);
+        // Hold the application to the period it was handed. The layer submits
+        // one pair per application frame and a pair costs two presenter
+        // frames, so releasing this wait on every presenter frame lets an
+        // application that can render faster than half the display rate
+        // produce frames the pairing has no room for. Waiting out the pair is
+        // what an ordinary application gets from the runtime, and it is what
+        // the doubled predictedDisplayPeriod below already promises.
+        constexpr std::uint64_t kPresenterFramesPerPair = 2;
         state->presenter_condition.wait(presenter_lock, [&] {
-            return state->presenter_frame_state_valid ||
+            return (state->presenter_frame_state_valid &&
+                    state->presenter_frame_serial >=
+                        state->application_served_serial +
+                            kPresenterFramesPerPair) ||
                    XR_FAILED(state->presenter_failure) ||
                    state->presenter_stop_requested;
         });
@@ -1877,6 +1901,7 @@ XrResult layer_wait_frame_impl(
             state->presenter_stop_requested) {
             return XR_ERROR_SESSION_NOT_RUNNING;
         }
+        state->application_served_serial = state->presenter_frame_serial;
         const XrDuration virtual_period = doubled_display_period(
             state->presenter_frame_state.predictedDisplayPeriod);
         // The application's timeline is anchored to the runtime's own
@@ -2815,6 +2840,9 @@ void continuous_presenter_main(
             state->presenter_frame_state = frame_state;
             state->presenter_frame_state.next = nullptr;
             state->presenter_frame_state_valid = true;
+            // One tick per presenter frame. The application's wait counts these
+            // so that it is released once per pair rather than once per frame.
+            ++state->presenter_frame_serial;
             // Lock the grid to the display the runtime is actually scanning
             // out on. One frame per period means consecutive waits advance
             // predictedDisplayTime by exactly one period; a repeat says two
@@ -3136,6 +3164,10 @@ void continuous_presenter_main(
             state->presenter_last_frame = std::move(seed_frame);
         }
         state->presenter_frame_state_valid = false;
+        // A serial from a previous presenter would either release the first
+        // wait of this one straight away or never.
+        state->presenter_frame_serial = 0;
+        state->application_served_serial = 0;
         // A schedule left over from a previous presenter would stall the first
         // submission of this one.
         // A display time from a previous presenter says nothing about this
