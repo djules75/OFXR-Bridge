@@ -1880,17 +1880,29 @@ XrResult layer_wait_frame_impl(
         std::unique_lock presenter_lock(state->presenter_mutex);
         // Hold the application to the period it was handed. The layer submits
         // one pair per application frame and a pair costs two presenter
-        // frames, so releasing this wait on every presenter frame lets an
-        // application that can render faster than half the display rate
-        // produce frames the pairing has no room for. Waiting out the pair is
-        // what an ordinary application gets from the runtime, and it is what
-        // the doubled predictedDisplayPeriod below already promises.
-        constexpr std::uint64_t kPresenterFramesPerPair = 2;
+        // frames, so releasing on every presenter frame lets an application
+        // that can render faster than half the display rate produce frames the
+        // pairing has no room for.
+        //
+        // The hold itself is in xrEndFrame, not here. Two reasons, and the
+        // first is fatal on its own: this function holds frame_call_mutex
+        // across the wait, and xrEndFrame needs that mutex to enqueue
+        // anything. Gate here and an application whose wait and end run on
+        // different threads deadlocks on its first frame - the wait holds the
+        // mutex until the presenter advances, the presenter is parked waiting
+        // for composition, and the only call that could supply it is blocked
+        // on the mutex. MSFS 2024 froze on entering VR exactly there.
+        //
+        // The second is that this is the wrong end of the frame. Held here the
+        // application has not started rendering, so it wakes late and hands
+        // its frame over at the end of the period with nothing left for
+        // synthesis: on the Luke Ross mods that took the gap between queueing
+        // synthesis and handing the synthetic over from 8.19 ms to 0.04 ms
+        // against pixels needing 11.51 ms, so every synthetic reached the
+        // compositor unrendered and was reprojected - indistinguishable from
+        // the layer being off, with a flawless cadence in the log.
         state->presenter_condition.wait(presenter_lock, [&] {
-            return (state->presenter_frame_state_valid &&
-                    state->presenter_frame_serial >=
-                        state->application_served_serial +
-                            kPresenterFramesPerPair) ||
+            return state->presenter_frame_state_valid ||
                    XR_FAILED(state->presenter_failure) ||
                    state->presenter_stop_requested;
         });
@@ -1901,7 +1913,6 @@ XrResult layer_wait_frame_impl(
             state->presenter_stop_requested) {
             return XR_ERROR_SESSION_NOT_RUNNING;
         }
-        state->application_served_serial = state->presenter_frame_serial;
         const XrDuration virtual_period = doubled_display_period(
             state->presenter_frame_state.predictedDisplayPeriod);
         // The application's timeline is anchored to the runtime's own
@@ -3229,6 +3240,31 @@ void stop_continuous_presenter(
     return state->presenter_active && !state->presenter_stop_requested;
 }
 
+// Holds the application until the presenter has run a whole pair since it was
+// last released. Deliberately returns nothing: it is called after the frame has
+// already been handed over, so a presenter that stops or fails while this waits
+// must not turn a submitted frame into an error - it just stops waiting.
+void wait_for_presenter_pair(
+    const std::shared_ptr<SessionState>& state) noexcept {
+    try {
+        constexpr std::uint64_t kPresenterFramesPerPair = 2;
+        std::unique_lock lock(state->presenter_mutex);
+        state->presenter_condition.wait(lock, [&] {
+            return state->presenter_frame_serial >=
+                       state->application_served_serial +
+                           kPresenterFramesPerPair ||
+                   XR_FAILED(state->presenter_failure) ||
+                   state->presenter_stop_requested;
+        });
+        if (XR_FAILED(state->presenter_failure) ||
+            state->presenter_stop_requested) {
+            return;
+        }
+        state->application_served_serial = state->presenter_frame_serial;
+    } catch (...) {
+    }
+}
+
 [[nodiscard]] XrResult wait_for_presenter_capacity(
     const std::shared_ptr<SessionState>& state,
     std::size_t maximum_outstanding) noexcept {
@@ -4428,7 +4464,10 @@ XrResult layer_end_frame_impl(
         return XR_ERROR_HANDLE_INVALID;
     }
 
-    std::scoped_lock frame_call_lock(state->frame_call_mutex);
+    // Releasable, because the once-per-pair hold at the end of this function
+    // must not keep the application's other thread out of xrWaitFrame while it
+    // waits. Everything this mutex protects is finished by then.
+    std::unique_lock frame_call_lock(state->frame_call_mutex);
     const bool frame_had_overlapping_wait =
         state->application_frame_has_overlapping_wait;
     const bool pipelined_presenter_mode = state->pipelined_presenter_mode;
@@ -4912,6 +4951,24 @@ XrResult layer_end_frame_impl(
     }
 
     if (use_continuous_presenter) {
+        // The once-per-pair hold. The layer submits one pair per application
+        // frame and a pair costs two presenter frames, so without this an
+        // application that renders faster than half the display rate produces
+        // frames the pairing has no room for - they lose the history ring's
+        // capture slot and are rendered and thrown away.
+        //
+        // It sits here rather than in the virtual wait for two reasons. The
+        // frame is already handed over, so the presenter has composition to
+        // work with and its count keeps advancing - gating the wait instead
+        // deadlocked on the first frame, before anything had been enqueued.
+        // And the application is released at the top of its next period rather
+        // than the end of this one, so it renders straight away and synthesis
+        // is queued with most of a period still in front of it.
+        //
+        // The frame lock goes first: an application whose wait runs on another
+        // thread must not be shut out of xrWaitFrame while this waits.
+        frame_call_lock.unlock();
+        wait_for_presenter_pair(state);
         return result;
     }
 
