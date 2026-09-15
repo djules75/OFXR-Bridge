@@ -294,6 +294,10 @@ struct SessionState {
     XrTime generation_resume_display_time{};
     XrDuration minimum_runtime_display_period{};
     std::uint32_t steamvr_throttled_wait_streak{};
+    // Consecutive application frames the layer could not generate from. A
+    // single one says nothing - the frame passes through and the next one
+    // usually pairs - so the presenter is only demoted once they run together.
+    std::uint32_t generation_failure_streak{};
     xrfg::D3D12OpticalFlowBackend optical_flow_backend{
         xrfg::D3D12OpticalFlowBackend::fidelity_fx};
     xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options{};
@@ -4779,11 +4783,43 @@ XrResult layer_end_frame_impl(
         clear_generation_continuity(state);
         return result;
     }
-    if (use_continuous_presenter && !presenter_first_frame &&
-        !pipelined_presenter_mode) {
-        stop_continuous_presenter(state);
-        std::scoped_lock lock(state->mutex);
-        state->steamvr_throttled_wait_streak = 0;
+    if (use_continuous_presenter && !pipelined_presenter_mode) {
+        // A frame the layer could not generate from is already handled: it was
+        // passed through unchanged above. Demoting the presenter for it buys
+        // nothing and costs a great deal, because the promotion that follows
+        // is automatic - three throttled waits later the presenter is back.
+        //
+        // Cyberpunk 2077 through the Luke Ross mod fails one frame in fourteen
+        // on the D3D11 interop path, and every one of those failures was
+        // isolated: 175 failures in 59 s, 380 in 66 s, never two in a row. So
+        // the presenter was stopped and restarted three times a second, 524
+        // transitions in one session, each teardown submitting a frame with
+        // nothing in it - black until the shutdown frame repeated the last
+        // composition, and a stale pose under a newer image afterwards.
+        // Neither artifact is worth having, and both exist only because the
+        // presenter is being torn down mid-stride.
+        //
+        // Demote on a run of failures instead, which is what "generation is
+        // not working here" actually looks like, using the same count of three
+        // the promotion uses in the other direction.
+        constexpr std::uint32_t kGenerationFailureDemotionStreak = 3;
+        bool demote = false;
+        {
+            std::scoped_lock lock(state->mutex);
+            if (presenter_first_frame) {
+                state->generation_failure_streak = 0;
+            } else if (++state->generation_failure_streak >=
+                       kGenerationFailureDemotionStreak) {
+                demote = true;
+            }
+        }
+        if (demote) {
+            // Not under state->mutex: stopping the presenter joins its thread.
+            stop_continuous_presenter(state);
+            std::scoped_lock lock(state->mutex);
+            state->steamvr_throttled_wait_streak = 0;
+            state->generation_failure_streak = 0;
+        }
     }
 
     consume_application_frame(
