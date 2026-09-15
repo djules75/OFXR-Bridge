@@ -3998,6 +3998,17 @@ struct PreparedProjectionFrame {
                 submit_result =
                     generation->d3d11_interop->prepare_synthesis();
             }
+            // Deferring the current copy keeps a full-resolution copy the
+            // synthetic never reads off its critical path, but it only works
+            // where the copy's destination is read after flush_current_copy.
+            // The interop's publish below is read before it: it moves both
+            // results back across to the application's D3D11 images while the
+            // copy is still an unsubmitted command list, so it publishes the
+            // previous pair's B as this pair's current frame. The headset then
+            // runs forward to the midpoint and back a whole pair, every pair,
+            // which reads as doubling that scales with motion and disappears
+            // wherever the scene is still.
+            const bool defer_current_copy = generation->d3d11_interop == nullptr;
             if (!generation->d3d11_interop || SUCCEEDED(submit_result)) {
                 submit_result = request_pair
                                     ? generation->synthesizer->submit_pair(
@@ -4007,7 +4018,7 @@ struct PreparedProjectionFrame {
                                           generation->synthetic.acquired_index,
                                           current_destination_index,
                                           &ticket,
-                                          true)
+                                          defer_current_copy)
                                     : generation->synthesizer->submit_prime(
                                           *capture,
                                           current_source_views,
