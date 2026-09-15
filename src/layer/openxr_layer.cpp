@@ -1875,14 +1875,47 @@ XrResult layer_wait_frame_impl(
         }
         const XrDuration virtual_period = doubled_display_period(
             state->presenter_frame_state.predictedDisplayPeriod);
-        XrTime virtual_time = add_display_duration(
+        // The application's timeline is anchored to the runtime's own
+        // prediction, one virtual period ahead of the frame the presenter is
+        // about to submit.
+        const XrTime anchor = add_display_duration(
             state->presenter_frame_state.predictedDisplayTime,
             virtual_period);
+        // A second wait inside one presenter frame has to come back later than
+        // the first, so the guard below steps off the last time served. That
+        // step invents time the runtime never advanced, and the ceiling is
+        // what stops it becoming a clock of its own: every period handed out
+        // beyond the anchor is a period the application's prediction runs
+        // ahead of the runtime's, and nothing ever gives it back.
+        //
+        // It is not a corner case. Whenever the layer fails open - no
+        // projection layers in the submission, which is what a menu or a
+        // loading screen looks like - the application is paced one frame per
+        // presenter frame instead of one per pair, while still being handed a
+        // doubled period on every one of them. Unbounded, that drifts a full
+        // second per second: a captured session reached 637 s of lead,
+        // predicting poses ten minutes into the future, and never generated
+        // again once it got there, because the ratchet only turns one way.
+        // With the ceiling the clock simply ticks at the rate the application
+        // is actually being paced at, and re-anchors as soon as the pairing
+        // comes back.
+        const XrTime ceiling = add_display_duration(anchor, virtual_period);
+        XrTime virtual_time = anchor;
         if (state->last_virtual_display_time != 0 &&
             virtual_time <= state->last_virtual_display_time) {
             virtual_time = add_display_duration(
                 state->last_virtual_display_time,
                 virtual_period);
+        }
+        if (virtual_time > ceiling) {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::virtual_clock_clamp,
+                0,
+                static_cast<std::uint64_t>(virtual_time - ceiling),
+                static_cast<std::uint64_t>(ceiling),
+                static_cast<std::uint64_t>(
+                    state->presenter_frame_state.predictedDisplayTime));
+            virtual_time = ceiling;
         }
         state->last_virtual_display_time = virtual_time;
         frame_state->predictedDisplayTime = virtual_time;
@@ -1896,9 +1929,15 @@ XrResult layer_wait_frame_impl(
         }
         const XrDuration virtual_period = doubled_display_period(
             state->last_inline_frame_state.predictedDisplayPeriod);
-        XrTime virtual_time = add_display_duration(
+        const XrTime anchor = add_display_duration(
             state->last_inline_frame_state.predictedDisplayTime,
             virtual_period);
+        // Same ceiling as the presenter path above, for the same reason: this
+        // branch repeats for as long as the promotion takes, and each repeat
+        // would otherwise push the application's timeline a period further
+        // from the one the runtime is predicting on.
+        const XrTime ceiling = add_display_duration(anchor, virtual_period);
+        XrTime virtual_time = anchor;
         {
             std::scoped_lock presenter_lock(state->presenter_mutex);
             if (state->last_virtual_display_time != 0 &&
@@ -1906,6 +1945,9 @@ XrResult layer_wait_frame_impl(
                 virtual_time = add_display_duration(
                     state->last_virtual_display_time,
                     virtual_period);
+            }
+            if (virtual_time > ceiling) {
+                virtual_time = ceiling;
             }
             state->last_virtual_display_time = virtual_time;
         }

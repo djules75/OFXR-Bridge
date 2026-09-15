@@ -56,6 +56,10 @@ enum class BridgeFlightOperation : std::uint32_t {
     // the pixels existed when the presenter handed the frame over; only the
     // finish time against that submission can.
     synthesis_gpu_span,
+    // The application asked for more frames than the presenter produced and
+    // the virtual clock was held to the runtime's timeline instead of
+    // stepping past it. a is how far the step overshot, in nanoseconds.
+    virtual_clock_clamp,
 };
 
 struct BridgeFlightToken {
