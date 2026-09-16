@@ -4384,11 +4384,22 @@ build_reprojection_views(
 // A space/flag transition only invalidates the interpolation pair and can be
 // re-primed on the current application frame. A layout transition changes the
 // resources or regions consumed by generation and must cross the quarantine.
+//
+// A display time that does not advance belongs in the first category, not the
+// second, so it is deliberately not tested here. It names no different
+// swapchain, sub-image, view or blend mode - it only says the two snapshots
+// cannot be paired, which clearing continuity and priming again on this frame
+// already handles. Quarantining for it is self-sustaining: the outage puts the
+// application on the fail-open path, where it is paced one frame per presenter
+// frame while the runtime's own period is still bouncing between one and four
+// display intervals, which produces the next non-advancing time, which starts
+// the next outage. A captured MSFS 2024 session spent 3768 of 3895 frames in
+// structural quarantine that way, re-entering it every 1.05 s against a 1 s
+// duration, and generated 296 pairs in 57 s.
 [[nodiscard]] bool projection_resource_layout_compatible(
     const ProjectionSnapshot& previous,
     const ProjectionSnapshot& current) noexcept {
     if (previous.environment_blend_mode != current.environment_blend_mode ||
-        current.display_time <= previous.display_time ||
         previous.layers.size() != current.layers.size()) {
         return false;
     }
