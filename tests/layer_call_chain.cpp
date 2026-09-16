@@ -66,6 +66,11 @@ bool g_d3d11_interop_mode = false;
 bool g_inverted_vertical_fov = false;
 bool g_steamvr_runtime_mode = false;
 bool g_steamvr_presenter_mode = false;
+// Set while the application is inside xrEndFrame. The layer runs its inline
+// second wait/begin/end cycle from that call on this same thread, which is
+// exactly what a throttling SteamVR configuration slows down, so this tells
+// the two waits apart by what is happening rather than by counting calls.
+std::atomic<bool> g_application_in_end_frame{false};
 bool g_flight_simulator_mode = false;
 bool g_destroy_pending_swapchain = false;
 bool g_destroy_pending_space = false;
@@ -266,7 +271,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
         g_wait_frame_calls.fetch_add(1, std::memory_order_relaxed) + 1;
     if (g_steamvr_presenter_mode) {
         if (GetCurrentThreadId() == g_test_application_thread_id &&
-            wait_call >= 3 && (wait_call % 2) == 1) {
+            g_application_in_end_frame.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(7));
         } else if (GetCurrentThreadId() != g_test_application_thread_id) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1399,6 +1404,7 @@ int main(int argc, char** argv) {
         XrFrameBeginInfo frame_begin_info{XR_TYPE_FRAME_BEGIN_INFO};
         XrFrameState frame_a{XR_TYPE_FRAME_STATE};
         XrFrameState frame_b{XR_TYPE_FRAME_STATE};
+        XrFrameState frame_c{XR_TYPE_FRAME_STATE};
         const bool frame_sequence_succeeded =
             XR_SUCCEEDED(wait_frame(session, &frame_wait_info, &frame_a)) &&
             frame_a.predictedDisplayTime == 100 &&
@@ -1413,6 +1419,16 @@ int main(int argc, char** argv) {
             capture_application_image(left_swapchain) &&
             capture_application_image(right_swapchain) &&
             submit_frame(frame_b.predictedDisplayTime) &&
+            wait_for_queue_idle() &&
+            // The first frame arms generation and passes through, so reaching
+            // a generated pair takes one application frame longer than it did
+            // when the private swapchains were taken at enumeration.
+            XR_SUCCEEDED(wait_frame(session, &frame_wait_info, &frame_c)) &&
+            frame_c.predictedDisplayTime == 300 &&
+            XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
+            capture_application_image(left_swapchain) &&
+            capture_application_image(right_swapchain) &&
+            submit_frame(frame_c.predictedDisplayTime) &&
             wait_for_queue_idle();
 
         g_expected_passthrough_layer = nullptr;
@@ -1486,19 +1502,22 @@ int main(int argc, char** argv) {
         };
         const bool valid =
             frame_sequence_succeeded && teardown_succeeded &&
-            end_records.size() == 3 &&
-            record_matches(0, 100, SubmittedTarget::current, 100, 3, true, 2) &&
-            record_matches(1, 200, SubmittedTarget::synthetic, 200, 3, true, 2) &&
-            record_matches(2, 300, SubmittedTarget::current, 200, 3, true, 2) &&
-            g_wait_frame_calls.load(std::memory_order_relaxed) == 3 &&
-            g_begin_frame_calls.load(std::memory_order_relaxed) == 3 &&
-            g_end_frame_calls.load(std::memory_order_relaxed) == 3 &&
-            g_locate_views_calls.load(std::memory_order_relaxed) == 2 &&
+            end_records.size() == 4 &&
+            // The first frame arms and passes through, the second primes, and
+            // the pair is the third.
+            record_matches(0, 100, SubmittedTarget::original, 100, 3, true, 2) &&
+            record_matches(1, 200, SubmittedTarget::current, 200, 3, true, 2) &&
+            record_matches(2, 300, SubmittedTarget::synthetic, 300, 3, true, 2) &&
+            record_matches(3, 400, SubmittedTarget::current, 300, 3, true, 2) &&
+            g_wait_frame_calls.load(std::memory_order_relaxed) == 4 &&
+            g_begin_frame_calls.load(std::memory_order_relaxed) == 4 &&
+            g_end_frame_calls.load(std::memory_order_relaxed) == 4 &&
+            g_locate_views_calls.load(std::memory_order_relaxed) == 3 &&
             // Two application swapchains, each backed by two current slots
             // and one synthetic.
             g_create_swapchain_calls.load(std::memory_order_relaxed) == 8 &&
             g_destroy_swapchain_calls.load(std::memory_order_relaxed) == 8 &&
-            g_application_release_calls.load(std::memory_order_relaxed) == 4 &&
+            g_application_release_calls.load(std::memory_order_relaxed) == 6 &&
             g_current_acquire_calls.load(std::memory_order_relaxed) == 4 &&
             g_current_wait_calls.load(std::memory_order_relaxed) == 4 &&
             g_current_release_calls.load(std::memory_order_relaxed) == 4 &&
@@ -1721,7 +1740,16 @@ int main(int argc, char** argv) {
         frame_end_info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         frame_end_info.layerCount = g_flight_simulator_mode ? 2 : 1;
         frame_end_info.layers = layers;
-        return XR_SUCCEEDED(end_frame(session, &frame_end_info));
+        // SteamVR throttles the *inline* second cycle, not the application's
+        // own wait. Mark the window so the fake runtime can tell them apart by
+        // what is happening rather than by counting calls: the layer runs its
+        // internal wait from this thread while the application is inside
+        // xrEndFrame, and a parity rule breaks the moment the schedule shifts
+        // by a frame.
+        g_application_in_end_frame.store(true, std::memory_order_release);
+        const bool ended = XR_SUCCEEDED(end_frame(session, &frame_end_info));
+        g_application_in_end_frame.store(false, std::memory_order_release);
+        return ended;
     };
 
     auto capture_fresh_application_image = [&] {
@@ -1734,6 +1762,7 @@ int main(int argc, char** argv) {
     if (g_uevr_pipelined_display_time_mode) {
         XrFrameState uevr_frame_a{XR_TYPE_FRAME_STATE};
         XrFrameState uevr_frame_b{XR_TYPE_FRAME_STATE};
+        XrFrameState uevr_frame_c{XR_TYPE_FRAME_STATE};
         const bool frame_sequence_succeeded =
             XR_SUCCEEDED(wait_frame(session, &frame_wait_info, &uevr_frame_a)) &&
             uevr_frame_a.predictedDisplayTime == 100 &&
@@ -1745,6 +1774,13 @@ int main(int argc, char** argv) {
             XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
             capture_fresh_application_image() &&
             submit_frame(uevr_frame_b.predictedDisplayTime - 10) &&
+            wait_for_queue_idle() &&
+            // The first frame arms generation and passes through, so the pair
+            // is the third application frame rather than the second.
+            XR_SUCCEEDED(wait_frame(session, &frame_wait_info, &uevr_frame_c)) &&
+            XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
+            capture_fresh_application_image() &&
+            submit_frame(uevr_frame_c.predictedDisplayTime - 10) &&
             wait_for_queue_idle();
 
         const bool teardown_succeeded =
@@ -1761,17 +1797,22 @@ int main(int argc, char** argv) {
         }
         const bool valid =
             frame_sequence_succeeded && teardown_succeeded &&
-            end_records.size() == 3 &&
+            end_records.size() == 4 &&
+            // The first frame arms and passes through, the second primes, and
+            // the third is the pair. The internal cycle still takes the
+            // runtime's own next predicted time rather than the application's.
             end_records[0].display_time == 90 &&
-            end_records[0].target == SubmittedTarget::current &&
+            end_records[0].target == SubmittedTarget::original &&
             end_records[1].display_time == 190 &&
-            end_records[1].target == SubmittedTarget::synthetic &&
-            end_records[2].display_time == 300 &&
-            end_records[2].target == SubmittedTarget::current &&
-            g_wait_frame_calls.load(std::memory_order_relaxed) == 3 &&
+            end_records[1].target == SubmittedTarget::current &&
+            end_records[2].display_time == 290 &&
+            end_records[2].target == SubmittedTarget::synthetic &&
+            end_records[3].display_time == 400 &&
+            end_records[3].target == SubmittedTarget::current &&
+            g_wait_frame_calls.load(std::memory_order_relaxed) == 4 &&
             // Includes the harness's earlier exception-containment probe.
-            g_begin_frame_calls.load(std::memory_order_relaxed) == 4 &&
-            g_end_frame_calls.load(std::memory_order_relaxed) == 3 &&
+            g_begin_frame_calls.load(std::memory_order_relaxed) == 5 &&
+            g_end_frame_calls.load(std::memory_order_relaxed) == 4 &&
             g_waited_display_times.empty() && !g_begun_display_time;
         if (!valid) {
             return EXIT_FAILURE;
@@ -1782,7 +1823,8 @@ int main(int argc, char** argv) {
     }
 
     if (g_flight_simulator_mode) {
-        std::array<XrFrameState, 4> application_frames{{
+        std::array<XrFrameState, 5> application_frames{{
+            {XR_TYPE_FRAME_STATE},
             {XR_TYPE_FRAME_STATE},
             {XR_TYPE_FRAME_STATE},
             {XR_TYPE_FRAME_STATE},
@@ -1847,8 +1889,13 @@ int main(int argc, char** argv) {
             application_frames[3].predictedDisplayPeriod ==
                 kFakeDisplayPeriod * 2 &&
             submit_flight_frame(application_frames[2]) &&
+            // One more application frame than the pairing needs on its own:
+            // the frame that arms generation passes through, so reaching the
+            // same generation depth takes one frame longer.
+            wait_next_while_beginning_current(application_frames[4]) &&
+            submit_flight_frame(application_frames[3]) &&
             XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
-            submit_flight_frame(application_frames[3]);
+            submit_flight_frame(application_frames[4]);
 
         const bool destroyed_before_end_session = g_destroy_pending_swapchain &&
             XR_SUCCEEDED(destroy_swapchain(swapchain));
@@ -1925,7 +1972,8 @@ int main(int argc, char** argv) {
         // The promotion is requested when the throttled streak completes and
         // takes effect at the next xrEndFrame, so one more application frame
         // runs inline at the real rate before the virtual half-rate loop starts.
-        std::array<XrFrameState, 7> application_frames{{
+        std::array<XrFrameState, 8> application_frames{{
+            {XR_TYPE_FRAME_STATE},
             {XR_TYPE_FRAME_STATE},
             {XR_TYPE_FRAME_STATE},
             {XR_TYPE_FRAME_STATE},
@@ -1935,7 +1983,7 @@ int main(int argc, char** argv) {
             {XR_TYPE_FRAME_STATE},
         }};
         bool frame_sequence_succeeded = true;
-        for (std::size_t index = 0; index < 5; ++index) {
+        for (std::size_t index = 0; index < 6; ++index) {
             frame_sequence_succeeded = frame_sequence_succeeded &&
                 XR_SUCCEEDED(wait_frame(
                     session,
@@ -1959,14 +2007,14 @@ int main(int argc, char** argv) {
             XR_SUCCEEDED(wait_frame(
                 session,
                 nullptr,
-                &application_frames[5])) &&
-            application_frames[5].predictedDisplayPeriod ==
+                &application_frames[6])) &&
+            application_frames[6].predictedDisplayPeriod ==
                 kFakeDisplayPeriod * 2 &&
-            application_frames[5].predictedDisplayTime >
-                application_frames[4].predictedDisplayTime &&
+            application_frames[6].predictedDisplayTime >
+                application_frames[5].predictedDisplayTime &&
             XR_SUCCEEDED(begin_frame(session, nullptr)) &&
             capture_fresh_application_image() &&
-            submit_frame(application_frames[5].predictedDisplayTime);
+            submit_frame(application_frames[6].predictedDisplayTime);
 
         if (g_destroy_pending_space) {
             frame_sequence_succeeded = frame_sequence_succeeded && destroy_space &&
@@ -1982,13 +2030,13 @@ int main(int argc, char** argv) {
                 XR_SUCCEEDED(wait_frame(
                     session,
                     &frame_wait_info,
-                    &application_frames[6])) &&
-                application_frames[6].predictedDisplayPeriod ==
+                    &application_frames[7])) &&
+                application_frames[7].predictedDisplayPeriod ==
                     kFakeDisplayPeriod * 2 &&
-                application_frames[6].predictedDisplayTime >
-                    application_frames[5].predictedDisplayTime &&
+                application_frames[7].predictedDisplayTime >
+                    application_frames[6].predictedDisplayTime &&
                 XR_SUCCEEDED(begin_frame(session, &frame_begin_info));
-            empty_end.displayTime = application_frames[6].predictedDisplayTime;
+            empty_end.displayTime = application_frames[7].predictedDisplayTime;
             empty_end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
             frame_sequence_succeeded = frame_sequence_succeeded &&
                 XR_SUCCEEDED(end_frame(session, &empty_end));
@@ -2049,18 +2097,18 @@ int main(int argc, char** argv) {
         return EXIT_SUCCESS;
     }
 
-    // The layer takes its private swapchains when a projection layer first
-    // names an application swapchain rather than when that swapchain's images
-    // are enumerated. The D3D12 path is unaffected here: its history ring is
-    // still built at enumeration, so a capture exists from the first frame and
-    // the first generated submission lands where it always did. The D3D11
-    // interop has nothing to capture until the interop itself exists, which is
-    // now that first projection use, so its first generated frame is one
-    // display period later - every display time after it moves with it, and
-    // the session ends with one generated pair fewer and one more application
-    // frame passed through in its place.
-    const XrTime arm_shift = g_d3d11_interop_mode ? -100 : 0;
-    const std::uint32_t arm_skip = g_d3d11_interop_mode ? 1U : 0U;
+    // The frame that first names a swapchain as a projection view is the frame
+    // that arms generation, and it passes through unchanged: taking the
+    // resources between the application's xrEndFrame and the submission that
+    // follows would put their creation cost on that frame's deadline. So the
+    // first generated submission lands one display period later than the naive
+    // schedule, every display time after it moves with it, and the session
+    // ends with one generated pair fewer and one more application frame passed
+    // through in its place. This holds for every graphics API: the D3D11
+    // interop, which also does not exist until that first projection use, is
+    // no longer a special case.
+    const XrTime arm_shift = -100;
+    const std::uint32_t arm_skip = 1U;
 
     // A is primed while B is already waited, proving that the first generated
     // submission still performs exactly one downstream end.
@@ -2390,24 +2438,13 @@ int main(int argc, char** argv) {
         XrTime metadata_time;
     };
 
-    // The prime differs by graphics API. A native application already has a
-    // capture when its first frame ends, so that frame goes out through the
-    // private current swapchain and the pair after it is generated. The D3D11
-    // interop does not exist until the first projection use arms it, so the
-    // first frame passes through unchanged, the second one primes, and every
-    // submission from the failed-synthetic-release frame onwards lands one
-    // display period earlier than it does natively.
-    std::vector<ExpectedEnd> expected_ends =
-        g_d3d11_interop_mode
-            ? std::vector<ExpectedEnd>{
-                  {100, SubmittedTarget::original, 1, 100},
-                  {200, SubmittedTarget::current, 1, 200},
-              }
-            : std::vector<ExpectedEnd>{
-                  {100, SubmittedTarget::current, 1, 100},
-                  {200, SubmittedTarget::synthetic, 1, 200},
-                  {300, SubmittedTarget::current, 1, 200},
-              };
+    // The first frame arms and passes through, the second one primes, and the
+    // pair after that is the first generated one. Every submission from the
+    // failed-synthetic-release frame onwards therefore carries arm_shift.
+    std::vector<ExpectedEnd> expected_ends{
+        {100, SubmittedTarget::original, 1, 100},
+        {200, SubmittedTarget::current, 1, 200},
+    };
     for (const ExpectedEnd& record : std::initializer_list<ExpectedEnd>{
              {400, SubmittedTarget::original, 1, 400},
              {500, SubmittedTarget::synthetic, 1, 500},

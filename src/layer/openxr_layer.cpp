@@ -1715,6 +1715,35 @@ void release_session_generation_budget(
     return true;
 }
 
+// Whether any swapchain this frame submits as a projection view still owes the
+// work ensure_projection_frame_generation would do. Cheap: two locks per
+// mapping and no allocation, and it answers true at most once per swapchain
+// for the life of a session.
+[[nodiscard]] bool projection_frame_generation_pending(
+    const std::shared_ptr<SessionState>& session,
+    std::span<const ProjectionResourceMapping> mappings) noexcept {
+    try {
+        if (!session || session->generation_budget_exhausted.load(
+                            std::memory_order_acquire)) {
+            return false;
+        }
+        for (const ProjectionResourceMapping& mapping : mappings) {
+            const auto swapchain = find_swapchain(mapping.application_swapchain);
+            if (!swapchain) {
+                continue;
+            }
+            std::scoped_lock call_lock(swapchain->call_mutex);
+            if (swapchain->generation_eligible_pending &&
+                !swapchain->generation_declined) {
+                return true;
+            }
+        }
+        return false;
+    } catch (...) {
+        return false;
+    }
+}
+
 template <typename Function>
 [[nodiscard]] bool load_function(
     PFN_xrGetInstanceProcAddr get_instance_proc_addr,
@@ -5522,28 +5551,29 @@ XrResult layer_end_frame_impl(
         (static_cast<std::uint64_t>(current_snapshot.layers.size()) << 32) |
             resource_mappings.mappings.size(),
         resource_mappings.detail);
-    // This is the first point at which a swapchain is known to be a projection
-    // view rather than a UI quad, so it is where deferred generation resources
-    // are taken. A refusal here means the runtime has no swapchains left for
-    // the application either; give the whole budget back and pass through.
-    const bool generation_budget_refused =
+    // The first frame that names a swapchain as a projection view is where the
+    // deferred generation resources are taken - but taking them here, between
+    // the application's xrEndFrame and the submission that follows it, puts
+    // the cost of creating them on the frame's own deadline. Synthesizer
+    // initialization measured 80 ms and 46 ms in one captured session, which
+    // is seven display periods: the submission left 92 ms after the
+    // application entered xrEndFrame, the runtime rejected its display time
+    // with XR_ERROR_TIME_INVALID, and the failure quarantined generation for a
+    // second. Generation then engaged several seconds into the session instead
+    // of immediately.
+    //
+    // So the frame that triggers arming passes through, and the arming happens
+    // after its submission has gone out. It costs one frame at world load
+    // rather than a rejected submission and a second of outage, and the next
+    // frame generates.
+    const std::span<const ProjectionResourceMapping> projection_mappings(
+        resource_mappings.mappings.data(),
+        resource_mappings.mappings.size());
+    const bool generation_arming_pending =
         resource_mappings.ready() &&
-        !ensure_projection_frame_generation(
-            state,
-            std::span<const ProjectionResourceMapping>(
-                resource_mappings.mappings.data(),
-                resource_mappings.mappings.size()));
-    if (!resource_mappings.ready() || generation_budget_refused) {
+        projection_frame_generation_pending(state, projection_mappings);
+    if (!resource_mappings.ready() || generation_arming_pending) {
         clear_generation_continuity(state);
-        if (generation_budget_refused) {
-            // A queued submission names a private swapchain, so the presenter
-            // must be idle and its content lock held before one is destroyed.
-            const XrResult exclusive_result = enter_presenter_exclusive();
-            if (XR_FAILED(exclusive_result)) {
-                return exclusive_result;
-            }
-            release_session_generation_budget(state);
-        }
         if (!resource_mappings.ready() &&
             resource_mappings.reason !=
                 ProjectionMappingReason::no_projection_views) {
@@ -5553,7 +5583,25 @@ XrResult layer_end_frame_impl(
                 (static_cast<std::uint64_t>(resource_mappings.reason) << 56) |
                     (resource_mappings.detail & 0x00FFFFFFFFFFFFFFULL));
         }
-        return bypass_generation(GenerationPrepareReason::empty_mappings);
+        const XrResult passthrough_result =
+            bypass_generation(GenerationPrepareReason::empty_mappings);
+        if (!generation_arming_pending) {
+            return passthrough_result;
+        }
+        // The application's frame is already downstream; nothing this costs is
+        // on its deadline any more.
+        if (!ensure_projection_frame_generation(state, projection_mappings)) {
+            // A refusal means the runtime has no swapchains left for the
+            // application either. A queued submission names a private
+            // swapchain, so the presenter must be idle and its content lock
+            // held before one is destroyed.
+            const XrResult exclusive_result = enter_presenter_exclusive();
+            if (XR_FAILED(exclusive_result)) {
+                return exclusive_result;
+            }
+            release_session_generation_budget(state);
+        }
+        return passthrough_result;
     }
     const std::optional<XrDuration> application_display_period =
         latest_pending_application_period(
@@ -5806,6 +5854,19 @@ XrResult layer_end_frame_impl(
         pair_ready ? 1u : 0u,
         latest_application_frame ? 1u : 0u);
     if (XR_FAILED(result)) {
+        // A rejected display time says nothing about the generation
+        // resources. No swapchain changed shape, no private image is in an
+        // uncertain ownership phase - the runtime was handed a time it
+        // considers past, which is the application's own: MSFS 2024 submits a
+        // display time older than the previous frame's after a hitch, 3 times
+        // in 2350 frames in one capture. Clear continuity so the next frame
+        // primes, and leave the quarantine for failures that really do mean
+        // the resources are no longer safe to use. Quarantining cost a full
+        // second of generation for each of those three frames.
+        if (result == XR_ERROR_TIME_INVALID) {
+            clear_generation_continuity(state);
+            return result;
+        }
         enter_generation_quarantine(
             state,
             GenerationQuarantineReason::downstream_end_failed,

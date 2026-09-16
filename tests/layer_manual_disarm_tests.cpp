@@ -191,11 +191,19 @@ int main(int argc, char** argv) {
             XrFrameEndInfo e{XR_TYPE_FRAME_END_INFO};
             e.displayTime = time; e.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
             e.layerCount = 1; e.layers = &base;
-            require(XR_SUCCEEDED(end(session, &e)), "end frame");
+            // The layer runs its inline second cycle from inside this call;
+            // the fake runtime throttles that wait and not the application's.
+            g_application_in_end_frame.store(true, std::memory_order_release);
+            const XrResult end_result = end(session, &e);
+            g_application_in_end_frame.store(false, std::memory_order_release);
+            require(XR_SUCCEEDED(end_result), "end frame");
         };
         XrFrameState current{XR_TYPE_FRAME_STATE};
         require(XR_SUCCEEDED(wait(session, nullptr, &current)), "first wait");
-        for (int i = 0; i < 8; ++i) {
+        // One more warm-up frame than the promotion needs on its own: the frame
+        // that arms generation passes through, so the first pair - and the
+        // throttled inline cycle the promotion counts - is one frame later.
+        for (int i = 0; i < 9; ++i) {
             require(XR_SUCCEEDED(begin(session, nullptr)), "warmup begin");
             capture();
             XrFrameState next_frame{XR_TYPE_FRAME_STATE};
