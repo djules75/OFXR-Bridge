@@ -607,7 +607,7 @@ void show_context_menu(AppState& state) {
         menu,
         MF_POPUP,
         reinterpret_cast<UINT_PTR>(nvidia_scale_menu),
-        L"NVIDIA OFA resolution");
+        L"Optical flow resolution");
     AppendMenuW(
         menu,
         MF_STRING | (state.settings.diagnostics ? MF_CHECKED : MF_UNCHECKED),

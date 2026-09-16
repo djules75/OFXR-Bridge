@@ -81,6 +81,10 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::synthesis_frame_start_wait:
         return "synthesis_frame_start_wait";
     case BridgeFlightOperation::embedded_configuration: return "embedded_configuration";
+    case BridgeFlightOperation::synthesis_gpu_span:
+        return "synthesis_gpu_span";
+    case BridgeFlightOperation::virtual_clock_clamp:
+        return "virtual_clock_clamp";
     }
     return "unknown";
 }
@@ -328,6 +332,16 @@ void BridgeFlightLogger::shutdown() noexcept {
 
 bool BridgeFlightLogger::enabled() const noexcept {
     return impl_ && impl_->active;
+}
+
+std::int64_t BridgeFlightLogger::microseconds_for_counter(
+    std::int64_t counter) const noexcept {
+    if (impl_ == nullptr || impl_->frequency.QuadPart <= 0) {
+        return 0;
+    }
+    return static_cast<std::int64_t>(
+        (counter - impl_->origin.QuadPart) * 1000000ll /
+        impl_->frequency.QuadPart);
 }
 
 std::filesystem::path BridgeFlightLogger::log_path() const {

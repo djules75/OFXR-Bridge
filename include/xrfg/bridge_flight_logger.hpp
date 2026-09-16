@@ -53,6 +53,15 @@ enum class BridgeFlightOperation : std::uint32_t {
     presenter_pace,
     synthesis_frame_start_wait,
     embedded_configuration,
+    // When the GPU actually began and finished a pair's synthesis, on the
+    // same timeline as every other record. Duration alone cannot say whether
+    // the pixels existed when the presenter handed the frame over; only the
+    // finish time against that submission can.
+    synthesis_gpu_span,
+    // The application asked for more frames than the presenter produced and
+    // the virtual clock was held to the runtime's timeline instead of
+    // stepping past it. a is how far the step overshot, in nanoseconds.
+    virtual_clock_clamp,
 };
 
 struct BridgeFlightToken {
@@ -73,6 +82,12 @@ public:
 
     [[nodiscard]] bool enabled() const noexcept;
     [[nodiscard]] std::filesystem::path log_path() const;
+
+    // Places a QueryPerformanceCounter value on this log's own timeline,
+    // so a GPU timestamp calibrated to QPC can be compared directly with
+    // the ms column of every other record.
+    [[nodiscard]] std::int64_t microseconds_for_counter(
+        std::int64_t counter) const noexcept;
 
     [[nodiscard]] BridgeFlightToken begin(
         BridgeFlightOperation operation,

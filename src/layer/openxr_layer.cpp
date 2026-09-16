@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -470,12 +471,25 @@ struct SessionState {
     std::chrono::steady_clock::time_point generation_resume_wall_time{};
     XrDuration minimum_runtime_display_period{};
     std::uint32_t steamvr_throttled_wait_streak{};
+    // Consecutive application frames the layer could not generate from. A
+    // single one says nothing - the frame passes through and the next one
+    // usually pairs - so the presenter is only demoted once they run together.
+    std::uint32_t generation_failure_streak{};
     xrfg::D3D12OpticalFlowBackend optical_flow_backend{
         xrfg::D3D12OpticalFlowBackend::fidelity_fx};
     xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options{};
     bool dlss_motion_vectors{};
     SessionGraphicsBinding graphics_binding{SessionGraphicsBinding::none};
     std::uint64_t graphics_binding_capabilities{};
+    // Set once the runtime has refused a private swapchain. A runtime caps how
+    // many swapchains one session may hold at all -- SteamVR hands out 16 --
+    // and the application is usually still creating its own when the layer
+    // reaches that ceiling, so the private swapchains already taken are what
+    // makes the application's next creation fail. Hand the whole budget back
+    // and pass frames through for the rest of the session: an application that
+    // cannot finish creating its swapchains has no way to recover, while one
+    // that merely loses generation carries on.
+    std::atomic<bool> generation_budget_exhausted{false};
     Microsoft::WRL::ComPtr<ID3D11Device> d3d11_device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3d11_context;
     Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device;
@@ -501,6 +515,23 @@ struct SessionState {
     // of per-cycle overhead to a 10 ms pace and held the runtime to 64/s.
     std::chrono::steady_clock::time_point presenter_next_submit{};
     bool presenter_schedule_valid{};
+    // The display time the runtime reported for the previous internal
+    // xrWaitFrame, and how many slots the pace has been asked to give back.
+    //
+    // The schedule above is a steady_clock grid. The compositor scans out on
+    // the display's clock, and nothing related the two: the phase between
+    // them was whatever it happened to be when the presenter thread started,
+    // and no path corrected it. A grid sitting just after the compositor's
+    // deadline makes every submission miss the scanout it was built for and
+    // land in the next, so each scanout sees either nothing new or two
+    // frames - continuously, not occasionally, and latched for the life of
+    // the session, which is why leaving and re-entering changed everything.
+    //
+    // predictedDisplayTime is the runtime naming the scanout each frame is
+    // for, so consecutive waits advancing by exactly one period is the lock
+    // condition, and the delta is the error. Guarded by presenter_mutex.
+    XrTime presenter_last_predicted_display{};
+    bool presenter_last_predicted_valid{};
     // A condition variable waits on the system tick, which is 15.6 ms by
     // default on Windows. Every pace wait rounded up to that, so an 11.11 ms
     // schedule produced 15.5 ms submissions and exactly 64/s no matter what
@@ -522,6 +553,19 @@ struct SessionState {
     std::uint64_t next_presenter_sequence{1};
     std::size_t outstanding_presenter_submissions{};
     bool presenter_frame_state_valid{};
+    // The presenter's frame counter, and the count the application was last
+    // released at. The application is handed a doubled period, so it has to be
+    // released once per pair, and the validity flag above cannot do that: it is
+    // a latch set on the presenter's first wait and cleared only on start and
+    // stop, so waiting on it returned in microseconds on every frame after the
+    // first. An application slow enough to be the limit never noticed, because
+    // its own rendering paced it. One fast enough to keep up ran at a frame per
+    // display period against a layer that can consume one per pair, and the
+    // surplus frame lost the history ring's capture slot and was rendered and
+    // thrown away -- one application frame in six on UEVR, at a steady beat,
+    // never two in a row.
+    std::uint64_t presenter_frame_serial{};
+    std::uint64_t application_served_serial{};
     bool presenter_stop_requested{};
     bool presenter_active{};
     XrSession handle{XR_NULL_HANDLE};
@@ -593,6 +637,21 @@ void log_completed_nvidia_gpu_timings(
             timing.composition_microseconds,
             timing.total_microseconds,
             timing.current_serial);
+        // When the GPU actually began and ended this pair's synthesis, on
+        // the log's own timeline, so it can be compared directly with the
+        // internal_end_frame that handed the synthetic to the runtime.
+        if (timing.gpu_begin_qpc != 0 && timing.gpu_end_qpc != 0) {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::synthesis_gpu_span,
+                static_cast<std::int64_t>(timing.total_microseconds),
+                static_cast<std::uint64_t>(
+                    xrfg::bridge_flight_logger().microseconds_for_counter(
+                        static_cast<std::int64_t>(timing.gpu_begin_qpc))),
+                static_cast<std::uint64_t>(
+                    xrfg::bridge_flight_logger().microseconds_for_counter(
+                        static_cast<std::int64_t>(timing.gpu_end_qpc))),
+                timing.current_serial);
+        }
     }
 }
 
@@ -616,6 +675,8 @@ enum class SwapchainEligibilityReason : std::int64_t {
     exception = 14,
     d3d11_interop_initialize_failed = 15,
     invalid_d3d11_image = 16,
+    awaiting_projection_use = 17,
+    budget_exhausted = 18,
 };
 
 void log_swapchain_eligibility(
@@ -650,6 +711,17 @@ struct SwapchainState {
     std::optional<xrfg::D3D12HistoryCaptureTicket> last_released_capture;
     std::shared_ptr<const xrfg::DlssMotionVectorSet> last_released_motion_vectors;
     std::shared_ptr<FrameGenerationSwapchainState> frame_generation;
+    // Generation costs three runtime swapchains, and a swapchain that never
+    // reaches a projection layer never spends them: an application's UI quads
+    // and its stereo views are indistinguishable at enumeration time, so the
+    // decision waits until xrEndFrame names this swapchain as a projection
+    // view. Guarded by call_mutex.
+    bool generation_eligible_pending{};
+    std::uint32_t enumerated_image_count{};
+    // An attempt that failed for its own reasons -- synthesis, interop -- is
+    // not retried every frame. Cleared whenever the history is rebuilt, which
+    // is the point at which the images themselves changed.
+    bool generation_declined{};
 };
 
 void log_swapchain_eligibility(
@@ -956,7 +1028,11 @@ struct CreatedPrivateSwapchain {
 [[nodiscard]] bool create_private_swapchain(
     const std::shared_ptr<SwapchainState>& state,
     const XrSwapchainCreateInfo& create_info,
-    CreatedPrivateSwapchain* output) {
+    CreatedPrivateSwapchain* output,
+    XrResult* refusal = nullptr) {
+    if (refusal != nullptr) {
+        *refusal = XR_SUCCESS;
+    }
     if (!state || !state->session || !state->session->dispatch || output == nullptr) {
         return false;
     }
@@ -967,6 +1043,12 @@ struct CreatedPrivateSwapchain {
         &create_info,
         &handle);
     if (XR_FAILED(result) || handle == XR_NULL_HANDLE) {
+        // Which error the runtime gave separates a budget it will not exceed
+        // from a create info it rejects outright, and only the first is worth
+        // handing the whole session's private swapchains back for.
+        if (refusal != nullptr) {
+            *refusal = XR_FAILED(result) ? result : XR_ERROR_RUNTIME_FAILURE;
+        }
         return false;
     }
 
@@ -1059,12 +1141,17 @@ void destroy_current_ring(
 [[nodiscard]] bool create_current_ring(
     const std::shared_ptr<SwapchainState>& state,
     const XrSwapchainCreateInfo& create_info,
-    CreatedCurrentRing* output) {
+    CreatedCurrentRing* output,
+    XrResult* refusal = nullptr) {
+    if (refusal != nullptr) {
+        *refusal = XR_SUCCESS;
+    }
     if (output == nullptr) {
         return false;
     }
     for (std::size_t slot = 0; slot < kCurrentSlotCount; ++slot) {
-        if (!create_private_swapchain(state, create_info, &output->slots[slot])) {
+        if (!create_private_swapchain(
+                state, create_info, &output->slots[slot], refusal)) {
             return false;
         }
         const CreatedPrivateSwapchain& created = output->slots[slot];
@@ -1150,18 +1237,27 @@ create_d3d12_frame_generation_swapchains(
         private_info.next = nullptr;
         private_info.usageFlags |=
             XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-        if (!create_current_ring(state, private_info, &current)) {
+        XrResult refusal = XR_SUCCESS;
+        if (!create_current_ring(state, private_info, &current, &refusal)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
                     SwapchainEligibilityReason::current_private_swapchain_failed;
             }
+            if (failure_detail != nullptr) {
+                *failure_detail = static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(refusal));
+            }
             destroy_current_ring(dispatch, &current);
             return nullptr;
         }
-        if (!create_private_swapchain(state, private_info, &synthetic)) {
+        if (!create_private_swapchain(state, private_info, &synthetic, &refusal)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
                     SwapchainEligibilityReason::synthetic_private_swapchain_failed;
+            }
+            if (failure_detail != nullptr) {
+                *failure_detail = static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(refusal));
             }
             destroy_current_ring(dispatch, &current);
             return nullptr;
@@ -1299,18 +1395,27 @@ create_d3d11_frame_generation_swapchains(
         private_info.next = nullptr;
         private_info.usageFlags |= XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
                                    XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-        if (!create_current_ring(state, private_info, &current)) {
+        XrResult refusal = XR_SUCCESS;
+        if (!create_current_ring(state, private_info, &current, &refusal)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
                     SwapchainEligibilityReason::current_private_swapchain_failed;
             }
+            if (failure_detail != nullptr) {
+                *failure_detail = static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(refusal));
+            }
             destroy_private();
             return nullptr;
         }
-        if (!create_private_swapchain(state, private_info, &synthetic)) {
+        if (!create_private_swapchain(state, private_info, &synthetic, &refusal)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
                     SwapchainEligibilityReason::synthetic_private_swapchain_failed;
+            }
+            if (failure_detail != nullptr) {
+                *failure_detail = static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(refusal));
             }
             destroy_private();
             return nullptr;
@@ -1436,6 +1541,174 @@ create_d3d11_frame_generation_swapchains(
         }
         return nullptr;
     }
+}
+
+// A refused private swapchain is the only failure that says anything about the
+// rest of the session: whatever ceiling the runtime reached, the application's
+// own creations are competing for it. Synthesis, interop and an unusable image
+// are local to the one swapchain that hit them.
+[[nodiscard]] bool budget_refusal(SwapchainEligibilityReason reason) noexcept {
+    return reason ==
+               SwapchainEligibilityReason::current_private_swapchain_failed ||
+           reason ==
+               SwapchainEligibilityReason::synthetic_private_swapchain_failed;
+}
+
+// Hands every private swapchain in the session back to the runtime.
+//
+// The caller must own the frame call mutex and, when a presenter is running,
+// have drained it and taken the content lock first: a queued submission names
+// these swapchains, and destroying one the runtime still has queued latches a
+// presenter failure for the rest of the session.
+void release_session_generation_budget(
+    const std::shared_ptr<SessionState>& session) noexcept {
+    try {
+        if (!session) {
+            return;
+        }
+        {
+            // The retained repeat names private swapchains of its own.
+            std::scoped_lock lock(session->presenter_mutex);
+            session->presenter_last_frame.reset();
+        }
+        for (const auto& swapchain : find_swapchains(session)) {
+            std::scoped_lock call_lock(swapchain->call_mutex);
+            swapchain->generation_eligible_pending = false;
+            swapchain->generation_declined = true;
+            drain_swapchain_gpu(swapchain);
+            destroy_frame_generation_swapchains(swapchain);
+        }
+    } catch (...) {
+    }
+}
+
+// Creates the generation resources a swapchain deferred at enumeration time.
+// Returns false only when the runtime refused a private swapchain, which is
+// the caller's signal to hand the session's whole budget back.
+[[nodiscard]] bool ensure_frame_generation(
+    const std::shared_ptr<SwapchainState>& state) noexcept {
+    try {
+        if (!state || !state->session) {
+            return true;
+        }
+        std::scoped_lock call_lock(state->call_mutex);
+        if (!state->generation_eligible_pending || state->generation_declined) {
+            return true;
+        }
+        {
+            std::scoped_lock lock(state->mutex);
+            if (state->frame_generation) {
+                state->generation_eligible_pending = false;
+                return true;
+            }
+        }
+        const std::uint64_t auxiliary =
+            (static_cast<std::uint64_t>(state->enumerated_image_count) << 32) |
+            state->create_info.arraySize;
+        SwapchainEligibilityReason reason =
+            SwapchainEligibilityReason::exception;
+        std::uint64_t detail = 0;
+        // Enumeration ran before the application had submitted anything, so
+        // nothing else was touching the queue. This runs on the frame path,
+        // where a release on another thread may be capturing into history and
+        // synthesizer initialisation submits work of its own.
+        std::shared_ptr<FrameGenerationSwapchainState> candidate;
+        {
+            std::scoped_lock gpu_lock(state->session->gpu_mutex);
+            if (state->session->graphics_binding ==
+                SessionGraphicsBinding::d3d11) {
+                // Ask the runtime for the images again rather than holding a
+                // reference to each of them from enumeration until whenever
+                // the application first composites with this swapchain. Those
+                // are the application's textures: keeping them alive here
+                // outlives what the layer is entitled to hold, and an
+                // application that exits without destroying its swapchains
+                // then releases them during teardown, which hung the D3D11
+                // call chain tests at process exit. xrEnumerateSwapchainImages
+                // may be called as often as we like.
+                std::vector<XrSwapchainImageD3D11KHR> enumerated(
+                    state->enumerated_image_count,
+                    XrSwapchainImageD3D11KHR{
+                        XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR, nullptr, nullptr});
+                std::uint32_t count = 0;
+                const XrResult enumerate_result =
+                    state->session->dispatch->enumerate_swapchain_images(
+                        state->handle,
+                        state->enumerated_image_count,
+                        &count,
+                        reinterpret_cast<XrSwapchainImageBaseHeader*>(
+                            enumerated.data()));
+                std::vector<ID3D11Texture2D*> images;
+                if (XR_SUCCEEDED(enumerate_result) &&
+                    count == state->enumerated_image_count) {
+                    images.reserve(count);
+                    for (const XrSwapchainImageD3D11KHR& image : enumerated) {
+                        images.push_back(image.texture);
+                    }
+                }
+                if (images.empty()) {
+                    reason = SwapchainEligibilityReason::invalid_d3d11_image;
+                    detail = static_cast<std::uint64_t>(
+                        static_cast<std::int64_t>(enumerate_result));
+                } else {
+                    candidate = create_d3d11_frame_generation_swapchains(
+                        state,
+                        std::span<ID3D11Texture2D* const>(
+                            images.data(), images.size()),
+                        &reason,
+                        &detail);
+                }
+            } else {
+                candidate = create_d3d12_frame_generation_swapchains(
+                    state, &reason, &detail);
+            }
+        }
+        if (!candidate) {
+            state->generation_declined = true;
+            log_swapchain_eligibility(state, reason, detail, auxiliary);
+            return !budget_refusal(reason);
+        }
+        {
+            std::scoped_lock lock(state->mutex);
+            state->frame_generation = std::move(candidate);
+        }
+        state->generation_eligible_pending = false;
+        log_swapchain_eligibility(
+            state,
+            SwapchainEligibilityReason::ready,
+            state->enumerated_image_count,
+            auxiliary);
+        return true;
+    } catch (...) {
+        return true;
+    }
+}
+
+// Spends the generation budget on the swapchains this frame actually submits
+// as projection views. Returns false once the runtime has refused one, meaning
+// the caller must release the session's budget and stop generating.
+[[nodiscard]] bool ensure_projection_frame_generation(
+    const std::shared_ptr<SessionState>& session,
+    std::span<const ProjectionResourceMapping> mappings) noexcept {
+    if (!session ||
+        session->generation_budget_exhausted.load(std::memory_order_acquire)) {
+        return true;
+    }
+    for (const ProjectionResourceMapping& mapping : mappings) {
+        const auto swapchain = find_swapchain(mapping.application_swapchain);
+        if (!swapchain || ensure_frame_generation(swapchain)) {
+            continue;
+        }
+        session->generation_budget_exhausted.store(
+            true, std::memory_order_release);
+        log_swapchain_eligibility(
+            swapchain,
+            SwapchainEligibilityReason::budget_exhausted,
+            0,
+            handle_value(session->handle));
+        return false;
+    }
+    return true;
 }
 
 template <typename Function>
@@ -2064,6 +2337,29 @@ XrResult layer_wait_frame_impl(
             return XR_ERROR_VALIDATION_FAILURE;
         }
         std::unique_lock presenter_lock(state->presenter_mutex);
+        // Hold the application to the period it was handed. The layer submits
+        // one pair per application frame and a pair costs two presenter
+        // frames, so releasing on every presenter frame lets an application
+        // that can render faster than half the display rate produce frames the
+        // pairing has no room for.
+        //
+        // The hold itself is in xrEndFrame, not here. Two reasons, and the
+        // first is fatal on its own: this function holds frame_call_mutex
+        // across the wait, and xrEndFrame needs that mutex to enqueue
+        // anything. Gate here and an application whose wait and end run on
+        // different threads deadlocks on its first frame - the wait holds the
+        // mutex until the presenter advances, the presenter is parked waiting
+        // for composition, and the only call that could supply it is blocked
+        // on the mutex. MSFS 2024 froze on entering VR exactly there.
+        //
+        // The second is that this is the wrong end of the frame. Held here the
+        // application has not started rendering, so it wakes late and hands
+        // its frame over at the end of the period with nothing left for
+        // synthesis: on the Luke Ross mods that took the gap between queueing
+        // synthesis and handing the synthetic over from 8.19 ms to 0.04 ms
+        // against pixels needing 11.51 ms, so every synthetic reached the
+        // compositor unrendered and was reprojected - indistinguishable from
+        // the layer being off, with a flawless cadence in the log.
         state->presenter_condition.wait(presenter_lock, [&] {
             return state->presenter_frame_state_valid ||
                    XR_FAILED(state->presenter_failure) ||
@@ -2079,14 +2375,47 @@ XrResult layer_wait_frame_impl(
         const XrDuration virtual_period = (state->manual_control.stop_requested() || !state->menu_enabled)
             ? state->presenter_frame_state.predictedDisplayPeriod
             : doubled_display_period(state->presenter_frame_state.predictedDisplayPeriod);
-        XrTime virtual_time = add_display_duration(
+        // The application's timeline is anchored to the runtime's own
+        // prediction, one virtual period ahead of the frame the presenter is
+        // about to submit.
+        const XrTime anchor = add_display_duration(
             state->presenter_frame_state.predictedDisplayTime,
             virtual_period);
+        // A second wait inside one presenter frame has to come back later than
+        // the first, so the guard below steps off the last time served. That
+        // step invents time the runtime never advanced, and the ceiling is
+        // what stops it becoming a clock of its own: every period handed out
+        // beyond the anchor is a period the application's prediction runs
+        // ahead of the runtime's, and nothing ever gives it back.
+        //
+        // It is not a corner case. Whenever the layer fails open - no
+        // projection layers in the submission, which is what a menu or a
+        // loading screen looks like - the application is paced one frame per
+        // presenter frame instead of one per pair, while still being handed a
+        // doubled period on every one of them. Unbounded, that drifts a full
+        // second per second: a captured session reached 637 s of lead,
+        // predicting poses ten minutes into the future, and never generated
+        // again once it got there, because the ratchet only turns one way.
+        // With the ceiling the clock simply ticks at the rate the application
+        // is actually being paced at, and re-anchors as soon as the pairing
+        // comes back.
+        const XrTime ceiling = add_display_duration(anchor, virtual_period);
+        XrTime virtual_time = anchor;
         if (state->last_virtual_display_time != 0 &&
             virtual_time <= state->last_virtual_display_time) {
             virtual_time = add_display_duration(
                 state->last_virtual_display_time,
                 virtual_period);
+        }
+        if (virtual_time > ceiling) {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::virtual_clock_clamp,
+                0,
+                static_cast<std::uint64_t>(virtual_time - ceiling),
+                static_cast<std::uint64_t>(ceiling),
+                static_cast<std::uint64_t>(
+                    state->presenter_frame_state.predictedDisplayTime));
+            virtual_time = ceiling;
         }
         state->last_virtual_display_time = virtual_time;
         frame_state->predictedDisplayTime = virtual_time;
@@ -2101,9 +2430,15 @@ XrResult layer_wait_frame_impl(
         const XrDuration virtual_period = (state->manual_control.stop_requested() || !state->menu_enabled)
             ? state->last_inline_frame_state.predictedDisplayPeriod
             : doubled_display_period(state->last_inline_frame_state.predictedDisplayPeriod);
-        XrTime virtual_time = add_display_duration(
+        const XrTime anchor = add_display_duration(
             state->last_inline_frame_state.predictedDisplayTime,
             virtual_period);
+        // Same ceiling as the presenter path above, for the same reason: this
+        // branch repeats for as long as the promotion takes, and each repeat
+        // would otherwise push the application's timeline a period further
+        // from the one the runtime is predicting on.
+        const XrTime ceiling = add_display_duration(anchor, virtual_period);
+        XrTime virtual_time = anchor;
         {
             std::scoped_lock presenter_lock(state->presenter_mutex);
             if (state->last_virtual_display_time != 0 &&
@@ -2111,6 +2446,9 @@ XrResult layer_wait_frame_impl(
                 virtual_time = add_display_duration(
                     state->last_virtual_display_time,
                     virtual_period);
+            }
+            if (virtual_time > ceiling) {
+                virtual_time = ceiling;
             }
             state->last_virtual_display_time = virtual_time;
         }
@@ -2228,6 +2566,18 @@ XrResult layer_create_swapchain_impl(
         create_info,
         &created_swapchain);
     if (XR_FAILED(result)) {
+        // The application losing a swapchain of its own is the shape a layer
+        // that overspends the runtime's budget takes from the outside, and
+        // without this record the log ends at the last creation that worked.
+        // A negative result distinguishes it from the create-info records
+        // below, which carry a field index there.
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::swapchain_create,
+            result,
+            0,
+            (static_cast<std::uint64_t>(create_info->width) << 32) |
+                create_info->height,
+            static_cast<std::uint64_t>(create_info->usageFlags));
         return result;
     }
     swapchain_state->handle = created_swapchain;
@@ -2407,22 +2757,30 @@ XrResult layer_enumerate_swapchain_images_impl(
             SwapchainEligibilityReason eligibility_reason =
                 SwapchainEligibilityReason::ready;
             std::uint64_t eligibility_detail = count;
-            if (!has_generation) {
-                std::uint64_t generation_detail = 0;
-                auto candidate = create_d3d11_frame_generation_swapchains(
-                    state,
-                    std::span<ID3D11Texture2D* const>(
-                        resources.data(), resources.size()),
-                    &eligibility_reason,
-                    &generation_detail);
-                if (candidate) {
-                    std::scoped_lock lock(state->mutex);
-                    if (!state->frame_generation) {
-                        state->frame_generation = std::move(candidate);
-                    }
-                    has_generation = static_cast<bool>(state->frame_generation);
+            // Same deferral as the D3D12 path below, and for the same reason:
+            // an interop swapchain costs the session three runtime swapchains
+            // and an application's UI surfaces are indistinguishable from its
+            // stereo views here. The D3D12 path can rebuild its images from
+            // the history ring when it arms; this one has to keep them.
+            const bool static_image =
+                (state->create_info.createFlags &
+                 XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) != 0;
+            if (!has_generation && !state->generation_declined &&
+                !state->session->generation_budget_exhausted.load(
+                    std::memory_order_acquire)) {
+                if (static_image) {
+                    eligibility_reason =
+                        SwapchainEligibilityReason::static_image;
+                    eligibility_detail = state->create_info.createFlags;
+                } else if (state->create_info.faceCount != 1) {
+                    eligibility_reason =
+                        SwapchainEligibilityReason::unsupported_face_count;
+                    eligibility_detail = state->create_info.faceCount;
                 } else {
-                    eligibility_detail = generation_detail;
+                    state->enumerated_image_count = count;
+                    state->generation_eligible_pending = true;
+                    eligibility_reason =
+                        SwapchainEligibilityReason::awaiting_projection_use;
                 }
             }
             log_swapchain_eligibility(
@@ -2521,7 +2879,11 @@ XrResult layer_enumerate_swapchain_images_impl(
                 state->last_released_motion_vectors.reset();
             }
             retired_history.reset();
+            // The images themselves changed, so an earlier refusal says
+            // nothing about this set.
+            state->generation_declined = false;
         }
+        state->enumerated_image_count = count;
 
         bool has_generation = false;
         {
@@ -2547,22 +2909,37 @@ XrResult layer_enumerate_swapchain_images_impl(
             eligibility_reason = SwapchainEligibilityReason::depth_only;
             eligibility_detail = state->create_info.usageFlags;
         }
+        // Generation costs three runtime swapchains here and a runtime caps how
+        // many one session may hold at all. Nothing about a colour swapchain
+        // says whether the application will submit it as a projection view or
+        // as a UI quad it composites once, so spending the budget now spends it
+        // on both -- and the application, still creating its own swapchains,
+        // is the one that finds the ceiling. Record the swapchain as a
+        // candidate and let the first xrEndFrame that names it decide.
+        //
+        // What the create info alone settles is still settled here. A static
+        // image and a face count above one can never carry generation, so
+        // deferring them would put a candidacy in the log that is never
+        // resolved in place of the true reason, and leave an arming attempt to
+        // discover at the first frame what was knowable at creation.
+        const bool static_image =
+            (state->create_info.createFlags &
+             XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) != 0;
         if (history && release_state == D3D12_RESOURCE_STATE_RENDER_TARGET &&
-            !has_generation) {
-            SwapchainEligibilityReason generation_reason =
-                SwapchainEligibilityReason::exception;
-            std::uint64_t generation_detail = 0;
-            auto candidate = create_d3d12_frame_generation_swapchains(
-                state, &generation_reason, &generation_detail);
-            if (candidate) {
-                std::scoped_lock lock(state->mutex);
-                if (!state->frame_generation) {
-                    state->frame_generation = std::move(candidate);
-                }
-                has_generation = static_cast<bool>(state->frame_generation);
+            !has_generation && !state->generation_declined &&
+            !state->session->generation_budget_exhausted.load(
+                std::memory_order_acquire)) {
+            if (static_image) {
+                eligibility_reason = SwapchainEligibilityReason::static_image;
+                eligibility_detail = state->create_info.createFlags;
+            } else if (state->create_info.faceCount != 1) {
+                eligibility_reason =
+                    SwapchainEligibilityReason::unsupported_face_count;
+                eligibility_detail = state->create_info.faceCount;
             } else {
-                eligibility_reason = generation_reason;
-                eligibility_detail = generation_detail;
+                state->generation_eligible_pending = true;
+                eligibility_reason =
+                    SwapchainEligibilityReason::awaiting_projection_use;
             }
         }
 
@@ -2798,6 +3175,12 @@ struct GeneratedFrameEndInfo {
     std::vector<ProjectionLayerCopy> projections;
     std::vector<OwnedCompositionLayer> composition_layers;
     std::vector<const XrCompositionLayerBaseHeader*> layer_pointers;
+    // Synthesizers whose current copy is recorded but not yet submitted.
+    // Only the synthetic half of a pair carries these: the copy must reach
+    // the queue after this frame has been handed over and before the
+    // current frame follows a display period later.
+    std::vector<std::shared_ptr<xrfg::D3D12FrameSynthesizer>>
+        pending_current_copies;
 };
 
 [[nodiscard]] std::optional<OwnedCompositionLayer>
@@ -2955,9 +3338,10 @@ void fail_pending_presenter_submissions_locked(
 // Pacing here rather than trusting the wait costs nothing where the wait
 // already paces: the elapsed check passes immediately and the runtime's own
 // blocking still sets the cadence. The wait is interruptible, and it happens
-// before the runtime frame cycle is entered so no begun frame is held open
-// across it. It must not run under presenter_content_mutex - waiting for
-// presenter progress while holding that lock has deadlocked this layer twice.
+// inside the begun frame, so the runtime measures a frame that contains the
+// work actually being done rather than an empty window. It must not run
+// under presenter_content_mutex - waiting for presenter progress while
+// holding that lock has deadlocked this layer twice.
 void pace_presenter_submission(
     const std::shared_ptr<SessionState>& state) noexcept {
     try {
@@ -3042,7 +3426,6 @@ void continuous_presenter_main(
             }
         }
 
-        pace_presenter_submission(state);
 
         XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
         XrFrameState frame_state{XR_TYPE_FRAME_STATE};
@@ -3072,6 +3455,68 @@ void continuous_presenter_main(
             state->presenter_frame_state = frame_state;
             state->presenter_frame_state.next = nullptr;
             state->presenter_frame_state_valid = true;
+            // One tick per presenter frame. The application's wait counts these
+            // so that it is released once per pair rather than once per frame.
+            ++state->presenter_frame_serial;
+            // Lock the grid to the display the runtime is actually scanning
+            // out on. One frame per period means consecutive waits advance
+            // predictedDisplayTime by exactly one period; a repeat says two
+            // submissions were aimed at one scanout and the grid is ahead, a
+            // skip says a scanout went unfilled and it is behind. Correct by
+            // a bounded fraction so a single odd prediction cannot jerk the
+            // cadence, and only once the grid exists to be corrected.
+            const XrDuration locked_period =
+                state->presenter_display_period;
+            if (state->presenter_last_predicted_valid &&
+                state->presenter_schedule_valid && locked_period > 0) {
+                const XrTime previous =
+                    state->presenter_last_predicted_display;
+                const XrTime current = frame_state.predictedDisplayTime;
+                const XrDuration advance = current > previous
+                    ? static_cast<XrDuration>(current - previous)
+                    : 0;
+                // A predicted time that did not move, or moved absurdly,
+                // is the runtime not describing a new scanout - a session
+                // transition, a frame it does not want rendered, a stall.
+                // It is not evidence about this grid's phase, and treating
+                // a repeat as proof the grid was early is what let the
+                // deadline run away into the future.
+                const bool usable_signal =
+                    advance > 0 && advance < locked_period * 8;
+                const std::int64_t slots = usable_signal
+                    ? (advance + locked_period / 2) / locked_period
+                    : 1;
+                if (slots != 1) {
+                    const auto period_ns =
+                        std::chrono::nanoseconds(locked_period);
+                    // A repeated slot means the grid is early and must be
+                    // pushed later; a skipped one means it is late. Step by a
+                    // sixteenth of a period, which still walks out a whole slot
+                    // in about a fifth of a second and cannot bunch a pair
+                    // inside one scanout window on its own.
+                    const auto step = period_ns / 16;
+                    if (slots < 1) {
+                        state->presenter_next_submit += step;
+                        // Never let a correction put the deadline further
+                        // out than one period. Every other path moves it
+                        // later too, so without a ceiling the schedule can
+                        // only walk forwards, and a presenter that keeps
+                        // sleeping longer stops draining the queue the
+                        // application is admitted against.
+                        const auto ceiling =
+                            std::chrono::steady_clock::now() + period_ns;
+                        if (state->presenter_next_submit > ceiling) {
+                            state->presenter_next_submit = ceiling;
+                        }
+                    } else {
+                        state->presenter_next_submit -= step;
+                    }
+                }
+            }
+            state->presenter_last_predicted_display =
+                frame_state.predictedDisplayTime;
+            state->presenter_last_predicted_valid =
+                frame_state.predictedDisplayTime > 0;
             // Keep the smallest plausible period seen, so a runtime that
             // inflates the value under load cannot inflate the pace with it.
             constexpr XrDuration kShortestCredibleDisplayPeriod = 2'000'000;
@@ -3122,6 +3567,20 @@ void continuous_presenter_main(
             state->presenter_condition.notify_all();
             break;
         }
+
+        // The pace runs here, inside the begun frame, rather than before the
+        // cycle. A runtime measures an application frame between xrBeginFrame
+        // and xrEndFrame; calling them back to back, as this loop did, gives
+        // it a frame containing nothing - measured as 0.73 ms of CPU and
+        // under a millisecond of GPU, while the real work costs 12 ms of
+        // application rendering and 3.59 ms of synthesis outside the window.
+        //
+        // A scheduler told its client costs a millisecond has every reason to
+        // ask for the frame late and to assume it will be ready. Holding the
+        // frame open across the pace is what every ordinary application does
+        // - begin, render, end - and lets the queue timestamps span the work
+        // actually being done.
+        pace_presenter_submission(state);
 
         std::shared_ptr<PresenterSubmission> request;
         std::shared_ptr<GeneratedFrameEndInfo> repeated_frame;
@@ -3175,6 +3634,18 @@ void continuous_presenter_main(
             end_result = state->fps_overlay
                 ? state->fps_overlay->end_frame(&submitted, fresh_synthetic)
                 : state->dispatch->end_frame(state->handle, &submitted);
+            // The synthetic has reached the runtime, so its current copy can
+            // go to the queue now rather than ahead of it. It has a display
+            // period before the current frame that reads it is submitted.
+            if (request && request->owned_frame) {
+                for (const auto& synthesizer :
+                     request->owned_frame->pending_current_copies) {
+                    if (synthesizer) {
+                        static_cast<void>(
+                            synthesizer->flush_current_copy());
+                    }
+                }
+            }
             {
                 // Advance the schedule by exactly one period so this loop's
                 // own cost does not compound into the cadence, and resync
@@ -3310,8 +3781,15 @@ void continuous_presenter_main(
             state->presenter_last_frame = std::move(seed_frame);
         }
         state->presenter_frame_state_valid = false;
+        // A serial from a previous presenter would either release the first
+        // wait of this one straight away or never.
+        state->presenter_frame_serial = 0;
+        state->application_served_serial = 0;
         // A schedule left over from a previous presenter would stall the first
         // submission of this one.
+        // A display time from a previous presenter says nothing about this
+        // grid, and its schedule is about to be rebuilt.
+        state->presenter_last_predicted_valid = false;
         state->presenter_schedule_valid = false;
         state->presenter_display_period = 0;
         state->presenter_stop_requested = false;
@@ -3366,6 +3844,31 @@ void stop_continuous_presenter(
     const std::shared_ptr<SessionState>& state) noexcept {
     std::scoped_lock lock(state->presenter_mutex);
     return state->presenter_active && !state->presenter_stop_requested;
+}
+
+// Holds the application until the presenter has run a whole pair since it was
+// last released. Deliberately returns nothing: it is called after the frame has
+// already been handed over, so a presenter that stops or fails while this waits
+// must not turn a submitted frame into an error - it just stops waiting.
+void wait_for_presenter_pair(
+    const std::shared_ptr<SessionState>& state) noexcept {
+    try {
+        constexpr std::uint64_t kPresenterFramesPerPair = 2;
+        std::unique_lock lock(state->presenter_mutex);
+        state->presenter_condition.wait(lock, [&] {
+            return state->presenter_frame_serial >=
+                       state->application_served_serial +
+                           kPresenterFramesPerPair ||
+                   XR_FAILED(state->presenter_failure) ||
+                   state->presenter_stop_requested;
+        });
+        if (XR_FAILED(state->presenter_failure) ||
+            state->presenter_stop_requested) {
+            return;
+        }
+        state->application_served_serial = state->presenter_frame_serial;
+    } catch (...) {
+    }
 }
 
 [[nodiscard]] XrResult wait_for_presenter_capacity(
@@ -4098,6 +4601,9 @@ struct PreparedGeneration {
     GenerationPrepareReason reason{GenerationPrepareReason::exception};
     XrSwapchain current_handle{XR_NULL_HANDLE};
     XrSwapchain synthetic_handle{XR_NULL_HANDLE};
+    // The synthesizer holding this pair's deferred current copy, so the
+    // presenter can submit it once the synthetic frame has gone.
+    std::shared_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
     bool anchor_is_current{};
 };
 
@@ -4216,6 +4722,17 @@ struct PreparedProjectionFrame {
                 submit_result =
                     generation->d3d11_interop->prepare_synthesis();
             }
+            // Deferring the current copy keeps a full-resolution copy the
+            // synthetic never reads off its critical path, but it only works
+            // where the copy's destination is read after flush_current_copy.
+            // The interop's publish below is read before it: it moves both
+            // results back across to the application's D3D11 images while the
+            // copy is still an unsubmitted command list, so it publishes the
+            // previous pair's B as this pair's current frame. The headset then
+            // runs forward to the midpoint and back a whole pair, every pair,
+            // which reads as doubling that scales with motion and disappears
+            // wherever the scene is still.
+            const bool defer_current_copy = generation->d3d11_interop == nullptr;
             if (!generation->d3d11_interop || SUCCEEDED(submit_result)) {
                 submit_result = request_pair
                                     ? generation->synthesizer->submit_pair(
@@ -4226,7 +4743,8 @@ struct PreparedProjectionFrame {
                                           current_destination_index,
                                           &ticket,
                                           debug_marker,
-                                          motion_vectors)
+                                          motion_vectors,
+                                          defer_current_copy)
                                     : generation->synthesizer->submit_prime(
                                           *capture,
                                           current_source_views,
@@ -4297,6 +4815,10 @@ struct PreparedProjectionFrame {
             // while this one is still queued behind the presenter.
             generation->current_slot =
                 (current_slot + 1) % kCurrentSlotCount;
+            // Only a pair defers its current copy; a prime submits it inline.
+            if (request_pair) {
+                output.synthesizer = generation->synthesizer;
+            }
             output.kind = request_pair ? PreparedGenerationKind::pair
                                        : PreparedGenerationKind::prime;
             output.reason = GenerationPrepareReason::ready;
@@ -4757,7 +5279,10 @@ XrResult layer_end_frame_impl(
         return XR_ERROR_HANDLE_INVALID;
     }
 
-    std::scoped_lock frame_call_lock(state->frame_call_mutex);
+    // Releasable, because the once-per-pair hold at the end of this function
+    // must not keep the application's other thread out of xrWaitFrame while it
+    // waits. Everything this mutex protects is finished by then.
+    std::unique_lock frame_call_lock(state->frame_call_mutex);
     const auto application_end_now = std::chrono::steady_clock::now();
     const bool frame_had_overlapping_wait =
         state->application_frame_has_overlapping_wait;
@@ -4936,10 +5461,31 @@ XrResult layer_end_frame_impl(
         (static_cast<std::uint64_t>(current_snapshot.layers.size()) << 32) |
             resource_mappings.mappings.size(),
         resource_mappings.detail);
-    if (!resource_mappings.ready()) {
+    // This is the first point at which a swapchain is known to be a projection
+    // view rather than a UI quad, so it is where deferred generation resources
+    // are taken. A refusal here means the runtime has no swapchains left for
+    // the application either; give the whole budget back and pass through.
+    const bool generation_budget_refused =
+        resource_mappings.ready() &&
+        !ensure_projection_frame_generation(
+            state,
+            std::span<const ProjectionResourceMapping>(
+                resource_mappings.mappings.data(),
+                resource_mappings.mappings.size()));
+    if (!resource_mappings.ready() || generation_budget_refused) {
         clear_generation_continuity(state);
-        if (resource_mappings.reason !=
-            ProjectionMappingReason::no_projection_views) {
+        if (generation_budget_refused) {
+            // A queued submission names a private swapchain, so the presenter
+            // must be idle and its content lock held before one is destroyed.
+            const XrResult exclusive_result = enter_presenter_exclusive();
+            if (XR_FAILED(exclusive_result)) {
+                return exclusive_result;
+            }
+            release_session_generation_budget(state);
+        }
+        if (!resource_mappings.ready() &&
+            resource_mappings.reason !=
+                ProjectionMappingReason::no_projection_views) {
             schedule_generation_quarantine(
                 state,
                 GenerationQuarantineReason::projection_mapping_failed,
@@ -5080,6 +5626,15 @@ XrResult layer_end_frame_impl(
                 current_destinations.data(), current_destinations.size()),
             &current_generated);
         if (synthetic_built && current_built) {
+            // The synthetic frame owns the deferred copies: they must reach
+            // the queue after it has been handed to the runtime.
+            for (const PreparedProjectionResource& resource :
+                 prepared.resources) {
+                if (resource.generation.synthesizer) {
+                    first_generated.pending_current_copies.push_back(
+                        resource.generation.synthesizer);
+                }
+            }
             submitted_end_info = &first_generated.info;
             pair_ready = true;
         } else {
@@ -5199,11 +5754,43 @@ XrResult layer_end_frame_impl(
     if (pair_ready) {
         state->generation_steady_state_established = true;
     }
-    if (use_continuous_presenter && !presenter_first_frame &&
-        !pipelined_presenter_mode) {
-        stop_continuous_presenter(state);
-        std::scoped_lock lock(state->mutex);
-        state->steamvr_throttled_wait_streak = 0;
+    if (use_continuous_presenter && !pipelined_presenter_mode) {
+        // A frame the layer could not generate from is already handled: it was
+        // passed through unchanged above. Demoting the presenter for it buys
+        // nothing and costs a great deal, because the promotion that follows
+        // is automatic - three throttled waits later the presenter is back.
+        //
+        // Cyberpunk 2077 through the Luke Ross mod fails one frame in fourteen
+        // on the D3D11 interop path, and every one of those failures was
+        // isolated: 175 failures in 59 s, 380 in 66 s, never two in a row. So
+        // the presenter was stopped and restarted three times a second, 524
+        // transitions in one session, each teardown submitting a frame with
+        // nothing in it - black until the shutdown frame repeated the last
+        // composition, and a stale pose under a newer image afterwards.
+        // Neither artifact is worth having, and both exist only because the
+        // presenter is being torn down mid-stride.
+        //
+        // Demote on a run of failures instead, which is what "generation is
+        // not working here" actually looks like, using the same count of three
+        // the promotion uses in the other direction.
+        constexpr std::uint32_t kGenerationFailureDemotionStreak = 3;
+        bool demote = false;
+        {
+            std::scoped_lock lock(state->mutex);
+            if (presenter_first_frame) {
+                state->generation_failure_streak = 0;
+            } else if (++state->generation_failure_streak >=
+                       kGenerationFailureDemotionStreak) {
+                demote = true;
+            }
+        }
+        if (demote) {
+            // Not under state->mutex: stopping the presenter joins its thread.
+            stop_continuous_presenter(state);
+            std::scoped_lock lock(state->mutex);
+            state->steamvr_throttled_wait_streak = 0;
+            state->generation_failure_streak = 0;
+        }
     }
 
     consume_application_frame(
@@ -5253,9 +5840,34 @@ XrResult layer_end_frame_impl(
     }
 
     if (use_continuous_presenter) {
+        // The once-per-pair hold. The layer submits one pair per application
+        // frame and a pair costs two presenter frames, so without this an
+        // application that renders faster than half the display rate produces
+        // frames the pairing has no room for - they lose the history ring's
+        // capture slot and are rendered and thrown away.
+        //
+        // It sits here rather than in the virtual wait for two reasons. The
+        // frame is already handed over, so the presenter has composition to
+        // work with and its count keeps advancing - gating the wait instead
+        // deadlocked on the first frame, before anything had been enqueued.
+        // And the application is released at the top of its next period rather
+        // than the end of this one, so it renders straight away and synthesis
+        // is queued with most of a period still in front of it.
+        //
+        // The frame lock goes first: an application whose wait runs on another
+        // thread must not be shut out of xrWaitFrame while this waits.
+        frame_call_lock.unlock();
+        wait_for_presenter_pair(state);
         return result;
     }
 
+    // The synthetic has gone downstream; submit its current copy before the
+    // cycle that hands the runtime the frame which reads it.
+    for (const auto& synthesizer : first_generated.pending_current_copies) {
+        if (synthesizer) {
+            static_cast<void>(synthesizer->flush_current_copy());
+        }
+    }
     const InternalCycleResult current_cycle =
         submit_current_cycle(state, current_generated.info);
     if (!current_cycle.completed) {

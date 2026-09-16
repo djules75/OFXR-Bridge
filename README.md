@@ -20,7 +20,7 @@ See the [release notes](docs/releases/0.2.1.md).
 
 > [!TIP]
 > A typical real-world result is a **30–50% frame-rate increase** when using
-> FidelityFX, or NVIDIA Medium with NVIDIA OFA at 50% resolution. Actual results
+> FidelityFX, or NVIDIA Medium with optical flow resolution at 50%. Actual results
 > vary by game, GPU, resolution and base frame rate.
 
 The current build provides:
@@ -49,8 +49,8 @@ rotation are still possible.
 7. Select **Disarm bridge** or close the tray application when finished.
 
 For supported NVIDIA GPUs, the suggested starting configuration is **NVIDIA
-Medium** with **50% NVIDIA OFA resolution**. It should provide a decent
-performance boost with minimal visual-quality loss. Running NVIDIA OFA at
+Medium** with **50% optical flow resolution**. It should provide a decent
+performance boost with minimal visual-quality loss. Running the optical flow at
 100% resolution is usually too expensive and often produces only a small or
 negligible net performance gain, so it is not recommended for normal use.
 

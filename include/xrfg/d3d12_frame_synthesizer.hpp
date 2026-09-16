@@ -65,6 +65,10 @@ struct D3D12NvidiaGpuTiming {
     std::uint64_t eye1_microseconds{};
     std::uint64_t composition_microseconds{};
     std::uint64_t total_microseconds{};
+    // The pair's whole GPU span, as QueryPerformanceCounter values. Zero
+    // when the device offered no calibration.
+    std::uint64_t gpu_begin_qpc{};
+    std::uint64_t gpu_end_qpc{};
     std::uint32_t eye_count{};
 };
 
@@ -79,16 +83,26 @@ enum class D3D12NvidiaPerformancePreset {
     fast,
 };
 
-enum class D3D12NvidiaInputScale {
+// Ratio the optical-flow input is packed at. Shared by both backends: the
+// FidelityFX path ran at full resolution and honoured no scale at all, while
+// NVIDIA has defaulted to half per axis all along. One control now covers both.
+enum class D3D12OpticalFlowInputScale {
     full,
     three_quarter,
     half,
 };
 
+// The name the NVIDIA options and the tray settings already use.
+using D3D12NvidiaInputScale = D3D12OpticalFlowInputScale;
+
 struct D3D12NvidiaOpticalFlowOptions {
     D3D12NvidiaPerformancePreset preset{
         D3D12NvidiaPerformancePreset::medium};
-    D3D12NvidiaInputScale input_scale{D3D12NvidiaInputScale::half};
+    // Applies to whichever backend is running: the FidelityFX pack and flow
+    // honour it too, so there is one input-resolution control rather than
+    // one per backend.
+    D3D12OpticalFlowInputScale input_scale{
+        D3D12OpticalFlowInputScale::half};
     bool bidirectional{};
 };
 
@@ -144,7 +158,26 @@ public:
         std::uint32_t current_destination_index,
         D3D12FrameSynthesisTicket* ticket,
         std::optional<OverlayPlacement> debug_marker = std::nullopt,
-        std::shared_ptr<const DlssMotionVectorSet> motion_vectors = {}) noexcept;
+        std::shared_ptr<const DlssMotionVectorSet> motion_vectors = {},
+        // Records the current output's copy but leaves it unsubmitted for
+        // flush_current_copy to hand over once the synthetic frame has gone
+        // to the runtime. Defaults off: a caller that never flushes would
+        // publish a stale current frame.
+        bool defer_current_copy = false) noexcept;
+
+    // Executes the current output's copy, which submit_pair records but
+    // deliberately leaves unsubmitted. The synthetic frame is handed to the
+    // runtime a display period before the current one, and a runtime waits
+    // for the whole queue when it takes a frame, so a copy left queued ahead
+    // of the synthetic makes the frame with the tighter deadline wait for a
+    // full-resolution copy it never reads. The caller submits the synthetic
+    // first and calls this immediately afterwards, leaving the copy a whole
+    // period to finish before the current frame needs it.
+    //
+    // Safe to call when nothing is pending. Submission entry points flush
+    // any copy still outstanding themselves, so a caller that never gets
+    // here costs a frame of latency rather than correctness.
+    [[nodiscard]] HRESULT flush_current_copy() noexcept;
 
     // Relinquishes the retained rolling source against its last GPU-use fence.
     // This is nonblocking and is required before history invalidation.

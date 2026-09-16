@@ -78,6 +78,13 @@ constexpr UINT kNvidiaTimestampPackEnd = 1;
 constexpr UINT kNvidiaTimestampEye0End = 2;
 constexpr UINT kNvidiaTimestampCompositionBegin = 3;
 constexpr UINT kNvidiaTimestampCompositionEnd = 4;
+// Two more, written by both backends, bracketing all of a pair's GPU work.
+// The NVIDIA stage marks above stay as they are; these exist so the
+// FidelityFX path is measurable too, and so the span can be reported as
+// absolute times rather than only as a duration.
+constexpr UINT kSpanBegin = 5;
+constexpr UINT kSpanEnd = 6;
+constexpr UINT kTimestampCount = 7;
 constexpr float kPositionToleranceMeters = 1.0e-4F;
 constexpr float kCameraTolerance = 1.0e-5F;
 constexpr D3D12_RESOURCE_STATES kShaderReadState =
@@ -645,6 +652,11 @@ struct D3D12FrameSynthesizer::Impl {
         ComPtr<ID3D12GraphicsCommandList> command_list;
         ComPtr<ID3D12CommandAllocator> synthesis_allocator;
         ComPtr<ID3D12GraphicsCommandList> synthesis_command_list;
+        // The bit-exact copy of B into the current output. Recorded apart from
+        // the synthesis and submitted only once the synthetic frame has been
+        // handed to the runtime, so it is not queued ahead of it.
+        ComPtr<ID3D12CommandAllocator> current_copy_allocator;
+        ComPtr<ID3D12GraphicsCommandList> current_copy_command_list;
         ComPtr<ID3D12CommandAllocator> timing_marker_allocator;
         ComPtr<ID3D12GraphicsCommandList> timing_marker_command_list;
         ComPtr<ID3D12DescriptorHeap> descriptor_heap;
@@ -708,6 +720,12 @@ struct D3D12FrameSynthesizer::Impl {
     ComPtr<ID3D12Fence> fence;
     ComPtr<ID3D12Fence> nvidia_fence;
     ComPtr<ID3D12QueryHeap> nvidia_timestamp_heap;
+    // Maps GPU ticks onto QueryPerformanceCounter, sampled once when the
+    // heap is created. Without it a timestamp is only a duration; with it
+    // it is a moment that can be compared to when the frame was submitted.
+    std::uint64_t calibration_gpu_ticks{};
+    std::uint64_t calibration_qpc_ticks{};
+    std::uint64_t qpc_frequency{};
     ComPtr<ID3D12Resource> nvidia_timestamp_readback;
     HANDLE fence_event{};
     RollingSource previous;
@@ -725,6 +743,14 @@ struct D3D12FrameSynthesizer::Impl {
     UINT flow_block_size{};
     std::uint64_t next_fence_value{1};
     std::uint64_t last_submitted_fence_value{};
+    // The work slot whose current copy has been recorded and closed but not
+    // yet submitted, and the fence value that submission will signal. The
+    // slot cannot be recycled and the history lease cannot retire until it
+    // has, so every entry point that needs either flushes first.
+    static constexpr std::uint32_t kNoPendingCopy =
+        std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t pending_copy_slot{kNoPendingCopy};
+    std::uint64_t pending_copy_fence_value{};
     std::uint64_t next_nvidia_fence_value{1};
     std::uint64_t last_nvidia_fence_value{};
     std::uint64_t nvidia_timestamp_frequency{};
@@ -1419,6 +1445,25 @@ struct D3D12FrameSynthesizer::Impl {
         return S_OK;
     }
 
+    // A GPU timestamp as a QueryPerformanceCounter value, using the
+    // calibration sampled at creation. Both clocks run at a fixed rate, so
+    // one simultaneous sample plus the two frequencies is enough.
+    [[nodiscard]] std::uint64_t timestamp_qpc(
+        std::uint64_t gpu_ticks) const noexcept {
+        if (calibration_gpu_ticks == 0 || qpc_frequency == 0 ||
+            nvidia_timestamp_frequency == 0) {
+            return 0;
+        }
+        const double gpu_delta =
+            static_cast<double>(gpu_ticks) -
+            static_cast<double>(calibration_gpu_ticks);
+        const double qpc_delta = gpu_delta *
+            static_cast<double>(qpc_frequency) /
+            static_cast<double>(nvidia_timestamp_frequency);
+        return static_cast<std::uint64_t>(
+            static_cast<double>(calibration_qpc_ticks) + qpc_delta);
+    }
+
     [[nodiscard]] HRESULT create_nvidia_timing_resources(
         UINT node_mask) noexcept {
         if (!nvidia_gpu_timing_enabled) {
@@ -1433,8 +1478,17 @@ struct D3D12FrameSynthesizer::Impl {
         D3D12_QUERY_HEAP_DESC query_description{};
         query_description.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
         query_description.Count =
-            kNvidiaTimestampCount * static_cast<UINT>(work_slots.size());
+            kTimestampCount * static_cast<UINT>(work_slots.size());
         query_description.NodeMask = node_mask;
+        LARGE_INTEGER qpc_hz{};
+        if (QueryPerformanceFrequency(&qpc_hz) && qpc_hz.QuadPart > 0) {
+            qpc_frequency = static_cast<std::uint64_t>(qpc_hz.QuadPart);
+        }
+        if (FAILED(queue->GetClockCalibration(
+                &calibration_gpu_ticks, &calibration_qpc_ticks))) {
+            calibration_gpu_ticks = 0;
+            calibration_qpc_ticks = 0;
+        }
         result = device->CreateQueryHeap(
             &query_description,
             IID_PPV_ARGS(nvidia_timestamp_heap.GetAddressOf()));
@@ -1480,7 +1534,7 @@ struct D3D12FrameSynthesizer::Impl {
 
         for (WorkSlot& slot : work_slots) {
             slot.timing_query_base = static_cast<UINT>(
-                &slot - work_slots.data()) * kNvidiaTimestampCount;
+                &slot - work_slots.data()) * kTimestampCount;
             HRESULT result = device->CreateCommandAllocator(
                 D3D12_COMMAND_LIST_TYPE_DIRECT,
                 IID_PPV_ARGS(slot.allocator.GetAddressOf()));
@@ -1500,6 +1554,25 @@ struct D3D12FrameSynthesizer::Impl {
             // a GPU device removal occurred. They have no effect on command recording/order.
             slot.command_list->SetName(L"OFXR Pack and Composite");
             result = slot.command_list->Close();
+            if (FAILED(result)) {
+                return result;
+            }
+            result = device->CreateCommandAllocator(
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                IID_PPV_ARGS(slot.current_copy_allocator.GetAddressOf()));
+            if (FAILED(result)) {
+                return result;
+            }
+            result = device->CreateCommandList(
+                node_mask,
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                slot.current_copy_allocator.Get(),
+                nullptr,
+                IID_PPV_ARGS(slot.current_copy_command_list.GetAddressOf()));
+            if (FAILED(result)) {
+                return result;
+            }
+            result = slot.current_copy_command_list->Close();
             if (FAILED(result)) {
                 return result;
             }
@@ -1865,28 +1938,27 @@ struct D3D12FrameSynthesizer::Impl {
                 : kFidelityFxFlowBlockSize;
         const bool separate_nvidia_eyes =
             input_backend == D3D12OpticalFlowBackend::nvidia;
-        const NvidiaInputScaleRatio nvidia_scale = nvidia_input_scale_ratio(
-            input_nvidia_options.input_scale);
-        const UINT64 flow_input_width = separate_nvidia_eyes
-            ? (static_cast<UINT64>(width) * nvidia_scale.numerator +
-               nvidia_scale.denominator - 1U) /
-                  nvidia_scale.denominator
-            : width;
-        const UINT64 flow_input_height = separate_nvidia_eyes
-            ? (static_cast<UINT64>(description.Height) *
-                   nvidia_scale.numerator +
-               nvidia_scale.denominator - 1U) /
-                  nvidia_scale.denominator
-            : description.Height;
+        // One input scale for whichever backend is running. The FidelityFX
+        // path packs both eyes into one texture, so its stride and packed
+        // height come from the scaled per-eye height, not the source.
+        const NvidiaInputScaleRatio scale =
+            nvidia_input_scale_ratio(input_nvidia_options.input_scale);
+        const auto scaled = [&](UINT64 value) -> UINT64 {
+            return (value * scale.numerator + scale.denominator - 1U) /
+                scale.denominator;
+        };
+        const UINT64 flow_input_width = scaled(width);
+        const UINT64 flow_input_height =
+            scaled(description.Height);
         const UINT64 stride = separate_nvidia_eyes
             ? 0U
-            : (static_cast<UINT64>(description.Height) + kEyeGapPixels +
+            : (flow_input_height + kEyeGapPixels +
                flow_block_size - 1U) /
                   flow_block_size * flow_block_size;
         const UINT64 unaligned_packed_height = separate_nvidia_eyes
             ? flow_input_height
             : stride * (description.DepthOrArraySize - 1U) +
-                  description.Height;
+                  flow_input_height;
         const UINT64 packed_height_value = std::max<UINT64>(
             (unaligned_packed_height + flow_block_size - 1U) /
                 flow_block_size * flow_block_size,
@@ -1916,8 +1988,9 @@ struct D3D12FrameSynthesizer::Impl {
         release_state = input_release_state;
         backend = input_backend;
         nvidia_options = input_nvidia_options;
+        // Timing is no longer NVIDIA only: the span marks below are written by
+        // both backends, and FidelityFX is the one that had no measurement.
         nvidia_gpu_timing_enabled =
-            input_backend == D3D12OpticalFlowBackend::nvidia &&
             enable_nvidia_gpu_timing;
         const UINT node_mask = queue->GetDesc().NodeMask;
 
@@ -2009,7 +2082,7 @@ struct D3D12FrameSynthesizer::Impl {
             static_cast<SIZE_T>(slot.timing_query_base) *
             sizeof(std::uint64_t);
         const SIZE_T byte_end = byte_begin +
-            kNvidiaTimestampCount * sizeof(std::uint64_t);
+            kTimestampCount * sizeof(std::uint64_t);
         const D3D12_RANGE read_range{byte_begin, byte_end};
         void* mapped = nullptr;
         HRESULT result = nvidia_timestamp_readback->Map(
@@ -2020,11 +2093,23 @@ struct D3D12FrameSynthesizer::Impl {
         }
         const auto* timestamps = static_cast<const std::uint64_t*>(mapped) +
             slot.timing_query_base;
-        std::array<std::uint64_t, kNvidiaTimestampCount> values{};
+        std::array<std::uint64_t, kTimestampCount> values{};
         std::copy_n(timestamps, values.size(), values.begin());
         const D3D12_RANGE no_write{0, 0};
         nvidia_timestamp_readback->Unmap(0, &no_write);
 
+        // The span marks are written by both backends; the stage marks only
+        // by NVIDIA, so their ordering is checked only where they exist.
+        slot.cached_timing = slot.timing_metadata;
+        slot.cached_timing.gpu_begin_qpc = timestamp_qpc(values[kSpanBegin]);
+        slot.cached_timing.gpu_end_qpc = timestamp_qpc(values[kSpanEnd]);
+        slot.cached_timing.total_microseconds = timestamp_microseconds(
+            values[kSpanBegin], values[kSpanEnd]);
+        if (backend != D3D12OpticalFlowBackend::nvidia) {
+            slot.timing_pending = false;
+            slot.timing_cached = true;
+            return S_OK;
+        }
         if (values[kNvidiaTimestampPackBegin] >
                 values[kNvidiaTimestampPackEnd] ||
             values[kNvidiaTimestampPackEnd] >
@@ -2037,7 +2122,6 @@ struct D3D12FrameSynthesizer::Impl {
             return E_FAIL;
         }
 
-        slot.cached_timing = slot.timing_metadata;
         slot.cached_timing.pack_microseconds = timestamp_microseconds(
             values[kNvidiaTimestampPackBegin],
             values[kNvidiaTimestampPackEnd]);
@@ -2140,6 +2224,10 @@ struct D3D12FrameSynthesizer::Impl {
         if (last_submitted_fence_value == 0) {
             return S_OK;
         }
+
+        // last_submitted_fence_value is the value a deferred copy will signal,
+        // so waiting for it without submitting that copy can only time out.
+        static_cast<void>(flush_pending_copy());
 
         const HRESULT initial_status =
             fence_status(fence.Get(), last_submitted_fence_value);
@@ -2630,6 +2718,27 @@ struct D3D12FrameSynthesizer::Impl {
             return result;
         }
         result = slot.command_list->Reset(slot.allocator.Get(), nullptr);
+        if (SUCCEEDED(result) && nvidia_gpu_timing_enabled &&
+            nvidia_timestamp_heap) {
+            // First mark on the list both backends record into, so the span
+            // starts where the GPU starts this pair's work.
+            slot.command_list->EndQuery(
+                nvidia_timestamp_heap.Get(),
+                D3D12_QUERY_TYPE_TIMESTAMP,
+                slot.timing_query_base + kSpanBegin);
+        }
+        if (FAILED(result)) {
+            synthesis_enabled = false;
+            return result;
+        }
+        result = slot.current_copy_allocator->Reset();
+        if (FAILED(result)) {
+            synthesis_enabled = false;
+            return result;
+        }
+        result = slot.current_copy_command_list->Reset(
+            slot.current_copy_allocator.Get(),
+            nullptr);
         if (FAILED(result)) {
             synthesis_enabled = false;
             return result;
@@ -3112,19 +3221,39 @@ struct D3D12FrameSynthesizer::Impl {
             previous_resource,
             kShaderReadState,
             D3D12_RESOURCE_STATE_COMMON);
-        before_current_copy[before_current_copy_count++] = transition_barrier(
-            current_resource,
-            kShaderReadState,
-            D3D12_RESOURCE_STATE_COPY_SOURCE);
-        before_current_copy[before_current_copy_count++] = transition_barrier(
-            current_destination,
-            release_state,
-            D3D12_RESOURCE_STATE_COPY_DEST);
         synthesis->ResourceBarrier(
             before_current_copy_count,
             before_current_copy.data());
-        dred_marker(synthesis, "OFXR NVIDIA current copy");
-        synthesis->CopyResource(current_destination, current_resource);
+        if (nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
+            // Last mark of the pair's synthesis, before the current copy
+            // that is submitted separately. The span therefore covers
+            // exactly the work the synthetic frame is waiting on.
+            synthesis->EndQuery(
+                nvidia_timestamp_heap.Get(),
+                D3D12_QUERY_TYPE_TIMESTAMP,
+                slot.timing_query_base + kSpanEnd);
+        }
+        // The copy's own transitions travel with the copy, so the resources
+        // are left in their normal states while it waits to be submitted.
+        const std::array<D3D12_RESOURCE_BARRIER, 2> before_copy_states{
+            transition_barrier(
+                current_resource,
+                kShaderReadState,
+                D3D12_RESOURCE_STATE_COPY_SOURCE),
+            transition_barrier(
+                current_destination,
+                release_state,
+                D3D12_RESOURCE_STATE_COPY_DEST),
+        };
+        slot.current_copy_command_list->ResourceBarrier(
+            static_cast<UINT>(before_copy_states.size()),
+            before_copy_states.data());
+        // Recorded here but submitted only after the synthetic frame has gone
+        // to the runtime; see flush_current_copy.
+        dred_marker(slot.current_copy_command_list.Get(), "OFXR NVIDIA current copy");
+        slot.current_copy_command_list->CopyResource(
+            current_destination,
+            current_resource);
         const std::array<D3D12_RESOURCE_BARRIER, 2> after_current_copy{
             transition_barrier(
                 current_resource,
@@ -3135,7 +3264,7 @@ struct D3D12FrameSynthesizer::Impl {
                 D3D12_RESOURCE_STATE_COPY_DEST,
                 release_state),
         };
-        synthesis->ResourceBarrier(
+        slot.current_copy_command_list->ResourceBarrier(
             static_cast<UINT>(after_current_copy.size()),
             after_current_copy.data());
         if (nvidia_gpu_timing_enabled) {
@@ -3147,7 +3276,7 @@ struct D3D12FrameSynthesizer::Impl {
                 nvidia_timestamp_heap.Get(),
                 D3D12_QUERY_TYPE_TIMESTAMP,
                 slot.timing_query_base,
-                kNvidiaTimestampCount,
+                kTimestampCount,
                 nvidia_timestamp_readback.Get(),
                 static_cast<UINT64>(slot.timing_query_base) *
                     sizeof(std::uint64_t));
@@ -3342,11 +3471,38 @@ struct D3D12FrameSynthesizer::Impl {
                 static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
         }
 
-        const std::array<D3D12_RESOURCE_BARRIER, 3> before_current_copy{
+        const std::array<D3D12_RESOURCE_BARRIER, 1> before_current_copy{
             transition_barrier(
                 previous_resource,
                 kShaderReadState,
                 D3D12_RESOURCE_STATE_COMMON),
+        };
+        slot.command_list->ResourceBarrier(
+            static_cast<UINT>(before_current_copy.size()),
+            before_current_copy.data());
+        if (nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
+            // Last mark of the pair's synthesis, before the current copy
+            // that is submitted separately. The span therefore covers
+            // exactly the work the synthetic frame is waiting on.
+            slot.command_list->EndQuery(
+                nvidia_timestamp_heap.Get(),
+                D3D12_QUERY_TYPE_TIMESTAMP,
+                slot.timing_query_base + kSpanEnd);
+            // Only this path records a resolve of its own; the NVIDIA path
+            // resolves on its synthesis list. Without one the span marks
+            // never reach the readback buffer at all.
+            slot.command_list->ResolveQueryData(
+                nvidia_timestamp_heap.Get(),
+                D3D12_QUERY_TYPE_TIMESTAMP,
+                slot.timing_query_base,
+                kTimestampCount,
+                nvidia_timestamp_readback.Get(),
+                static_cast<UINT64>(slot.timing_query_base) *
+                    sizeof(std::uint64_t));
+        }
+        // The copy's own transitions travel with the copy, so the resources
+        // are left in their normal states while it waits to be submitted.
+        const std::array<D3D12_RESOURCE_BARRIER, 2> before_copy_states{
             transition_barrier(
                 current_resource,
                 kShaderReadState,
@@ -3356,11 +3512,15 @@ struct D3D12FrameSynthesizer::Impl {
                 release_state,
                 D3D12_RESOURCE_STATE_COPY_DEST),
         };
-        slot.command_list->ResourceBarrier(
-            static_cast<UINT>(before_current_copy.size()),
-            before_current_copy.data());
-        dred_marker(slot.command_list.Get(), "OFXR FidelityFX current copy");
-        slot.command_list->CopyResource(current_destination, current_resource);
+        slot.current_copy_command_list->ResourceBarrier(
+            static_cast<UINT>(before_copy_states.size()),
+            before_copy_states.data());
+        // Recorded here but submitted only after the synthetic frame has gone
+        // to the runtime; see flush_current_copy.
+        dred_marker(slot.current_copy_command_list.Get(), "OFXR FidelityFX current copy");
+        slot.current_copy_command_list->CopyResource(
+            current_destination,
+            current_resource);
         const std::array<D3D12_RESOURCE_BARRIER, 2> after_current_copy{
             transition_barrier(
                 current_resource,
@@ -3371,7 +3531,7 @@ struct D3D12FrameSynthesizer::Impl {
                 D3D12_RESOURCE_STATE_COPY_DEST,
                 release_state),
         };
-        slot.command_list->ResourceBarrier(
+        slot.current_copy_command_list->ResourceBarrier(
             static_cast<UINT>(after_current_copy.size()),
             after_current_copy.data());
         dred_marker(slot.command_list.Get(), "OFXR FidelityFX pair complete");
@@ -3512,13 +3672,24 @@ struct D3D12FrameSynthesizer::Impl {
         return S_OK;
     }
 
+    // Submits the recorded work. The current output's copy is closed either
+    // way, but with defer_current_copy it is held back for flush_current_copy
+    // to submit once the synthetic frame has reached the runtime. Two fence
+    // values are reserved in that case: the first is signalled here and marks
+    // the synthetic's pixels done, the second is what the copy will signal and
+    // is what the slot, the destination and the history lease are tracked
+    // against, so none of them come free until the copy has actually run.
     [[nodiscard]] HRESULT execute_and_signal(
         WorkSlot& slot,
+        std::uint32_t slot_index,
         RollingSource* newly_acquired,
-        std::uint64_t* output_fence_value) noexcept {
+        std::uint64_t* output_fence_value,
+        bool defer_current_copy) noexcept {
         if (newly_acquired == nullptr || output_fence_value == nullptr ||
+            slot.current_copy_command_list == nullptr ||
             next_fence_value == 0 ||
-            next_fence_value == std::numeric_limits<std::uint64_t>::max()) {
+            next_fence_value >=
+                std::numeric_limits<std::uint64_t>::max() - 1U) {
             synthesis_enabled = false;
             return E_FAIL;
         }
@@ -3528,32 +3699,88 @@ struct D3D12FrameSynthesizer::Impl {
             synthesis_enabled = false;
             return result;
         }
+        result = slot.current_copy_command_list->Close();
+        if (FAILED(result)) {
+            synthesis_enabled = false;
+            return result;
+        }
         ID3D12CommandList* lists[] = {slot.command_list.Get()};
         queue->ExecuteCommandLists(1, lists);
         completion_unknown = true;
 
-        const std::uint64_t value = next_fence_value;
-        result = queue->Signal(fence.Get(), value);
-        if (FAILED(result)) {
-            synthesis_enabled = false;
-            untracked_source = std::move(*newly_acquired);
-            return result;
+        std::uint64_t value = 0;
+        if (defer_current_copy) {
+            // Signal the synthetic first: its pixels exist now, and it goes
+            // to the runtime a display period before the current frame.
+            const std::uint64_t synthetic_value = next_fence_value;
+            HRESULT signal_result =
+                queue->Signal(fence.Get(), synthetic_value);
+            if (FAILED(signal_result)) {
+                synthesis_enabled = false;
+                untracked_source = std::move(*newly_acquired);
+                return signal_result;
+            }
+            ++next_fence_value;
+            value = next_fence_value;
+            ++next_fence_value;
+            pending_copy_slot = slot_index;
+            pending_copy_fence_value = value;
+        } else {
+            ID3D12CommandList* copy_lists[] = {
+                slot.current_copy_command_list.Get()};
+            queue->ExecuteCommandLists(1, copy_lists);
+            value = next_fence_value;
+            ++next_fence_value;
+            HRESULT signal_result = queue->Signal(fence.Get(), value);
+            if (FAILED(signal_result)) {
+                synthesis_enabled = false;
+                untracked_source = std::move(*newly_acquired);
+                return signal_result;
+            }
         }
 
         completion_unknown = false;
         slot.fence_value = value;
+        // Both backends now write timestamps, so both must mark the slot as
+        // having a resolve waiting to be read back.
+        slot.timing_pending = nvidia_gpu_timing_enabled;
         last_submitted_fence_value = value;
-        ++next_fence_value;
         *output_fence_value = value;
         return S_OK;
     }
 
+    // Submits a copy left pending by execute_and_signal and signals the value
+    // the rest of the pipeline is already tracking against it.
+    [[nodiscard]] HRESULT flush_pending_copy() noexcept {
+        if (pending_copy_slot == kNoPendingCopy) {
+            return S_OK;
+        }
+        if (pending_copy_slot >= work_slots.size() || !synthesis_enabled) {
+            pending_copy_slot = kNoPendingCopy;
+            return E_FAIL;
+        }
+        WorkSlot& slot = work_slots[pending_copy_slot];
+        const std::uint64_t value = pending_copy_fence_value;
+        pending_copy_slot = kNoPendingCopy;
+        ID3D12CommandList* copy_lists[] = {
+            slot.current_copy_command_list.Get()};
+        queue->ExecuteCommandLists(1, copy_lists);
+        const HRESULT result = queue->Signal(fence.Get(), value);
+        if (FAILED(result)) {
+            synthesis_enabled = false;
+        }
+        return result;
+    }
+
     [[nodiscard]] HRESULT execute_nvidia_and_signal(
         WorkSlot& slot,
+        std::uint32_t slot_index,
         RollingSource* newly_acquired,
-        std::uint64_t* output_fence_value) noexcept {
+        std::uint64_t* output_fence_value,
+        bool defer_current_copy) noexcept {
         if (newly_acquired == nullptr || output_fence_value == nullptr ||
             slot.synthesis_command_list == nullptr ||
+            slot.current_copy_command_list == nullptr ||
             next_fence_value == 0 ||
             next_fence_value >=
                 std::numeric_limits<std::uint64_t>::max() - 1U ||
@@ -3571,6 +3798,11 @@ struct D3D12FrameSynthesizer::Impl {
             return result;
         }
         result = slot.synthesis_command_list->Close();
+        if (FAILED(result)) {
+            synthesis_enabled = false;
+            return result;
+        }
+        result = slot.current_copy_command_list->Close();
         if (FAILED(result)) {
             synthesis_enabled = false;
             return result;
@@ -3695,19 +3927,43 @@ struct D3D12FrameSynthesizer::Impl {
             slot.synthesis_command_list.Get()};
         queue->ExecuteCommandLists(1, synthesis_lists);
 
-        const std::uint64_t completion_value = next_fence_value;
-        result = queue->Signal(fence.Get(), completion_value);
-        if (FAILED(result)) {
-            synthesis_enabled = false;
-            untracked_source = std::move(*newly_acquired);
-            return result;
+        // The synthetic's pixels exist once this signals. The current copy
+        // is held back so it is not queued ahead of the synthetic frame.
+        std::uint64_t completion_value = 0;
+        if (defer_current_copy) {
+            // Signal the synthetic first: its pixels exist now, and it goes
+            // to the runtime a display period before the current frame.
+            const std::uint64_t synthetic_value = next_fence_value;
+            HRESULT signal_result =
+                queue->Signal(fence.Get(), synthetic_value);
+            if (FAILED(signal_result)) {
+                synthesis_enabled = false;
+                untracked_source = std::move(*newly_acquired);
+                return signal_result;
+            }
+            ++next_fence_value;
+            completion_value = next_fence_value;
+            ++next_fence_value;
+            pending_copy_slot = slot_index;
+            pending_copy_fence_value = completion_value;
+        } else {
+            ID3D12CommandList* copy_lists[] = {
+                slot.current_copy_command_list.Get()};
+            queue->ExecuteCommandLists(1, copy_lists);
+            completion_value = next_fence_value;
+            ++next_fence_value;
+            HRESULT signal_result = queue->Signal(fence.Get(), completion_value);
+            if (FAILED(signal_result)) {
+                synthesis_enabled = false;
+                untracked_source = std::move(*newly_acquired);
+                return signal_result;
+            }
         }
 
         completion_unknown = false;
         slot.fence_value = completion_value;
         slot.timing_pending = nvidia_gpu_timing_enabled;
         last_submitted_fence_value = completion_value;
-        ++next_fence_value;
         *output_fence_value = completion_value;
         return S_OK;
     }
@@ -3732,6 +3988,13 @@ struct D3D12FrameSynthesizer::Impl {
             current_destination_index >= current_destinations.size()) {
             return E_INVALIDARG;
         }
+        // Before anything is asked about outstanding work. A copy still
+        // pending holds its work slot and history lease, and the value it
+        // will signal is the one submission_available and
+        // wait_for_previous_submission both test, so a caller that never
+        // flushed would otherwise read as permanently busy rather than
+        // costing a frame of latency.
+        static_cast<void>(flush_pending_copy());
         HRESULT result = submission_available();
         if (FAILED(result)) {
             return result;
@@ -3785,7 +4048,8 @@ struct D3D12FrameSynthesizer::Impl {
         }
 
         std::uint64_t fence_value = 0;
-        result = execute_and_signal(slot, &next, &fence_value);
+        result = execute_and_signal(
+            slot, work_slot_index, &next, &fence_value, false);
         if (FAILED(result)) {
             if (next.active()) {
                 cancel_next();
@@ -3816,7 +4080,8 @@ struct D3D12FrameSynthesizer::Impl {
         std::uint32_t current_destination_index,
         D3D12FrameSynthesisTicket* output_ticket,
         const std::optional<OverlayPlacement>& debug_marker,
-        std::shared_ptr<const DlssMotionVectorSet> motion_vectors) noexcept {
+        std::shared_ptr<const DlssMotionVectorSet> motion_vectors,
+        bool defer_current_copy) noexcept {
         if (output_ticket == nullptr) {
             return E_POINTER;
         }
@@ -3885,6 +4150,13 @@ struct D3D12FrameSynthesizer::Impl {
                 return E_INVALIDARG;
             }
         }
+        // Before anything is asked about outstanding work. A copy still
+        // pending holds its work slot and history lease, and the value it
+        // will signal is the one submission_available and
+        // wait_for_previous_submission both test, so a caller that never
+        // flushed would otherwise read as permanently busy rather than
+        // costing a frame of latency.
+        static_cast<void>(flush_pending_copy());
         HRESULT result = submission_available();
         if (FAILED(result)) {
             return result;
@@ -3943,7 +4215,7 @@ struct D3D12FrameSynthesizer::Impl {
             RollingSource no_new_source{};
             std::uint64_t fence_value = 0;
             result = execute_and_signal(
-                slot, &no_new_source, &fence_value);
+                slot, work_slot_index, &no_new_source, &fence_value, false);
             if (FAILED(result)) {
                 return result;
             }
@@ -4029,8 +4301,12 @@ struct D3D12FrameSynthesizer::Impl {
 
         std::uint64_t fence_value = 0;
         result = backend == D3D12OpticalFlowBackend::nvidia && !used_game_motion
-                     ? execute_nvidia_and_signal(slot, &next, &fence_value)
-                     : execute_and_signal(slot, &next, &fence_value);
+                     ? execute_nvidia_and_signal(
+                           slot, work_slot_index, &next, &fence_value,
+                           defer_current_copy)
+                     : execute_and_signal(
+                           slot, work_slot_index, &next, &fence_value,
+                           defer_current_copy);
         if (FAILED(result)) {
             if (next.active()) {
                 cancel_next();
@@ -4089,6 +4365,9 @@ struct D3D12FrameSynthesizer::Impl {
     }
 
     [[nodiscard]] HRESULT wait_for_idle() noexcept {
+        // last_submitted_fence_value is the value a deferred copy will signal,
+        // so waiting for it without submitting that copy would never return.
+        static_cast<void>(flush_pending_copy());
         HRESULT result = retire_previous();
         if (FAILED(result)) {
             return result;
@@ -4227,7 +4506,8 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
     std::uint32_t current_destination_index,
     D3D12FrameSynthesisTicket* ticket,
     std::optional<OverlayPlacement> debug_marker,
-    std::shared_ptr<const DlssMotionVectorSet> motion_vectors) noexcept {
+    std::shared_ptr<const DlssMotionVectorSet> motion_vectors,
+    bool defer_current_copy) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr) {
@@ -4244,11 +4524,21 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
             current_destination_index,
             ticket,
             debug_marker,
-            std::move(motion_vectors));
+            std::move(motion_vectors),
+            defer_current_copy);
     } catch (...) {
         if (ticket != nullptr) {
             *ticket = {};
         }
+        return E_FAIL;
+    }
+}
+
+HRESULT D3D12FrameSynthesizer::flush_current_copy() noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ == nullptr ? S_OK : impl_->flush_pending_copy();
+    } catch (...) {
         return E_FAIL;
     }
 }
