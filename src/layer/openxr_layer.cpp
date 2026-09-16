@@ -313,6 +313,10 @@ struct Dispatch {
     // Best-effort: a runtime that does not expose it simply never has a space
     // destroyed underneath a queued submission through this layer.
     PFN_xrDestroySpace destroy_space{};
+    // Best-effort, like destroy_space above. The layer does not act on events
+    // and never consumes one; it records session state transitions so a
+    // capture can say whether the runtime stopped asking for frames, and why.
+    PFN_xrPollEvent poll_event{};
     bool steamvr_runtime{};
     XrVersion runtime_version{};
     std::string runtime_name;
@@ -1761,6 +1765,9 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_create_swapchain(
     XrSwapchain* swapchain);
 XRAPI_ATTR XrResult XRAPI_CALL layer_destroy_swapchain(XrSwapchain swapchain);
 XRAPI_ATTR XrResult XRAPI_CALL layer_destroy_space(XrSpace space);
+XRAPI_ATTR XrResult XRAPI_CALL layer_poll_event(
+    XrInstance instance,
+    XrEventDataBuffer* event_data);
 XRAPI_ATTR XrResult XRAPI_CALL layer_enumerate_swapchain_images(
     XrSwapchain swapchain,
     std::uint32_t image_capacity_input,
@@ -1842,6 +1849,10 @@ XrResult layer_get_instance_proc_addr_impl(
     if (std::strcmp(name, "xrDestroySpace") == 0) {
         return expose_intercept(
             dispatch, dispatch->destroy_space, layer_destroy_space, function);
+    }
+    if (std::strcmp(name, "xrPollEvent") == 0) {
+        return expose_intercept(
+            dispatch, dispatch->poll_event, layer_poll_event, function);
     }
     if (std::strcmp(name, "xrEnumerateSwapchainImages") == 0) {
         return expose_intercept(
@@ -1930,6 +1941,14 @@ XrResult layer_create_api_layer_instance_impl(
              created_instance,
              "xrDestroySpace",
              dispatch->destroy_space)),
+         true) &&
+        // Best effort, deliberately not a load requirement: a runtime without
+        // it keeps working, the recorder just never sees a state transition.
+        (static_cast<void>(load_function(
+             next_get_instance_proc_addr,
+             created_instance,
+             "xrPollEvent",
+             dispatch->poll_event)),
          true) &&
         load_function(
             next_get_instance_proc_addr,
@@ -6125,6 +6144,45 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_destroy_space(XrSpace space) {
             guards.emplace_back(session);
         }
         return dispatch->destroy_space(space);
+    });
+}
+
+// Pure observation. The event is forwarded exactly as the runtime produced it
+// and is never consumed, reordered or synthesized: the application sees the
+// same queue it would without the layer.
+//
+// It exists because a session that stops being displayed is invisible from
+// everywhere else in this layer. When a runtime drops a session out of the
+// visible state it reports shouldRender=false and stops blocking xrWaitFrame,
+// the application stops submitting projection layers, and generation fails
+// open - which in a capture is indistinguishable from the layer breaking. A
+// captured MSFS 2024 session did exactly that 104 s in and never recovered,
+// and nothing in the log could say whether the runtime or the layer started
+// it. The state transition is the answer, and the layer only sees it here.
+XRAPI_ATTR XrResult XRAPI_CALL layer_poll_event(
+    XrInstance instance,
+    XrEventDataBuffer* event_data) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        const auto dispatch = find_dispatch(instance);
+        if (!dispatch || dispatch->poll_event == nullptr) {
+            return XR_ERROR_FUNCTION_UNSUPPORTED;
+        }
+        const XrResult result = dispatch->poll_event(instance, event_data);
+        // XR_EVENT_UNAVAILABLE is the common answer and carries no buffer, so
+        // this costs one comparison on the overwhelming majority of calls.
+        if (result == XR_SUCCESS && event_data != nullptr &&
+            event_data->type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
+            const auto* state_changed =
+                reinterpret_cast<const XrEventDataSessionStateChanged*>(
+                    event_data);
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::session_state,
+                static_cast<std::int64_t>(state_changed->state),
+                handle_value(state_changed->session),
+                static_cast<std::uint64_t>(state_changed->time),
+                0);
+        }
+        return result;
     });
 }
 

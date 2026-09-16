@@ -62,6 +62,11 @@ enum class BridgeFlightOperation : std::uint32_t {
     // the virtual clock was held to the runtime's timeline instead of
     // stepping past it. a is how far the step overshot, in nanoseconds.
     virtual_clock_clamp,
+    // A runtime session state transition, exactly as the application receives
+    // it. result is the new XrSessionState; a is the session, b the event's
+    // own time. A runtime that stops asking for frames says so here and
+    // nowhere else the layer can see.
+    session_state,
 };
 
 struct BridgeFlightToken {

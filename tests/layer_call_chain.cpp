@@ -652,6 +652,33 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_destroy_space(XrSpace space) {
     return XR_SUCCESS;
 }
 
+// Delivers one session state transition and then reports the queue empty, so
+// the call chain exercises both branches of the layer's pass-through: the
+// event it records and the XR_EVENT_UNAVAILABLE it must forward untouched.
+std::atomic<std::uint32_t> g_poll_event_calls{0};
+constexpr XrSessionState kFakeSessionState = XR_SESSION_STATE_VISIBLE;
+constexpr XrTime kFakeSessionStateTime = 4242;
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_poll_event(
+    XrInstance,
+    XrEventDataBuffer* event_data) {
+    if (event_data == nullptr) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    if (g_poll_event_calls.fetch_add(1, std::memory_order_relaxed) != 0) {
+        return XR_EVENT_UNAVAILABLE;
+    }
+    auto* state_changed =
+        reinterpret_cast<XrEventDataSessionStateChanged*>(event_data);
+    *state_changed = XrEventDataSessionStateChanged{
+        XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED,
+        nullptr,
+        g_session,
+        kFakeSessionState,
+        kFakeSessionStateTime};
+    return XR_SUCCESS;
+}
+
 XRAPI_ATTR XrResult XRAPI_CALL fake_destroy_swapchain(XrSwapchain) {
     g_swapchain_destroyed.store(true, std::memory_order_release);
     g_destroy_swapchain_calls.fetch_add(1, std::memory_order_relaxed);
@@ -816,6 +843,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_proc_addr(
     XRFG_FAKE_FUNCTION("xrCreateSwapchain", fake_create_swapchain)
     XRFG_FAKE_FUNCTION("xrDestroySwapchain", fake_destroy_swapchain)
     XRFG_FAKE_FUNCTION("xrDestroySpace", fake_destroy_space)
+    XRFG_FAKE_FUNCTION("xrPollEvent", fake_poll_event)
     XRFG_FAKE_FUNCTION("xrEnumerateSwapchainImages", fake_enumerate_swapchain_images)
     XRFG_FAKE_FUNCTION("xrAcquireSwapchainImage", fake_acquire_swapchain_image)
     XRFG_FAKE_FUNCTION("xrWaitSwapchainImage", fake_wait_swapchain_image)
@@ -1178,6 +1206,7 @@ int main(int argc, char** argv) {
     const auto create_swapchain = get_layer_function<PFN_xrCreateSwapchain>(request.getInstanceProcAddr, "xrCreateSwapchain");
     const auto destroy_swapchain = get_layer_function<PFN_xrDestroySwapchain>(request.getInstanceProcAddr, "xrDestroySwapchain");
     const auto destroy_space = get_layer_function<PFN_xrDestroySpace>(request.getInstanceProcAddr, "xrDestroySpace");
+    const auto poll_event = get_layer_function<PFN_xrPollEvent>(request.getInstanceProcAddr, "xrPollEvent");
     const auto enumerate_images = get_layer_function<PFN_xrEnumerateSwapchainImages>(request.getInstanceProcAddr, "xrEnumerateSwapchainImages");
     const auto acquire_image = get_layer_function<PFN_xrAcquireSwapchainImage>(request.getInstanceProcAddr, "xrAcquireSwapchainImage");
     const auto wait_image = get_layer_function<PFN_xrWaitSwapchainImage>(request.getInstanceProcAddr, "xrWaitSwapchainImage");
@@ -1186,7 +1215,26 @@ int main(int argc, char** argv) {
 
     if (!create_session || !destroy_session || !begin_session || !end_session || !wait_frame ||
         !begin_frame || !end_frame || !locate_views || !create_swapchain || !destroy_swapchain ||
-        !enumerate_images || !acquire_image || !wait_image || !release_image || !destroy_instance) {
+        !enumerate_images || !acquire_image || !wait_image || !release_image || !destroy_instance || !poll_event) {
+        return EXIT_FAILURE;
+    }
+
+    // The layer forwards events untouched. Both branches: the session state
+    // change it records, and the empty-queue answer it must pass through
+    // without inventing one.
+    XrEventDataBuffer polled{XR_TYPE_EVENT_DATA_BUFFER};
+    const XrResult first_poll = poll_event(instance, &polled);
+    const auto* polled_state =
+        reinterpret_cast<const XrEventDataSessionStateChanged*>(&polled);
+    XrEventDataBuffer drained{XR_TYPE_EVENT_DATA_BUFFER};
+    const XrResult second_poll = poll_event(instance, &drained);
+    if (first_poll != XR_SUCCESS ||
+        polled.type != XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED ||
+        polled_state->session != g_session ||
+        polled_state->state != kFakeSessionState ||
+        polled_state->time != kFakeSessionStateTime ||
+        second_poll != XR_EVENT_UNAVAILABLE ||
+        g_poll_event_calls.load(std::memory_order_relaxed) != 2) {
         return EXIT_FAILURE;
     }
 

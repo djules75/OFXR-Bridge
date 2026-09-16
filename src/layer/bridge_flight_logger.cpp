@@ -85,6 +85,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
         return "synthesis_gpu_span";
     case BridgeFlightOperation::virtual_clock_clamp:
         return "virtual_clock_clamp";
+    case BridgeFlightOperation::session_state:
+        return "session_state";
     }
     return "unknown";
 }
