@@ -2713,10 +2713,41 @@ XrResult layer_destroy_swapchain_impl(XrSwapchain swapchain) {
         (state->create_info.usageFlags &
          XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0;
     if (active_color_reconfiguration) {
-        schedule_generation_quarantine(
-            state->session,
-            GenerationQuarantineReason::swapchain_destroyed,
-            handle_value(swapchain));
+        // Drop the pair and the retained repeat - the repeat's composition
+        // names this swapchain - but do not hold generation off for the
+        // structural quarantine's full second.
+        //
+        // The wall-clock deadline was covering a race that lazy arming has
+        // since removed. The lines below drain this swapchain's GPU work and
+        // destroy its private swapchains synchronously, under the call lock
+        // and with the presenter held by the guard above, so nothing queued
+        // names anything being torn down by the time this returns. What the
+        // deadline additionally prevented was the layer arming the
+        // replacement swapchains the moment they were enumerated, mid
+        // reconfiguration; generation resources are now taken when a
+        // projection layer first names a swapchain, so the application
+        // decides when the replacement is ready and the layer cannot run
+        // ahead of it.
+        //
+        // It is not free to keep. MSFS 2024 recreates its swapchains on world
+        // and settings transitions - four times in 96 s in one capture - and
+        // each one cost almost exactly a second of generation: the
+        // replacements were enumerated within 40 ms and armed 1.07 s later,
+        // the delay being the deadline and nothing else. Every other
+        // quarantine reason is unchanged.
+        clear_generation_continuity(state->session);
+        {
+            std::scoped_lock presenter_lock(state->session->presenter_mutex);
+            state->session->presenter_last_frame.reset();
+        }
+        state->session->generation_steady_state_established = false;
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::continuity_reset,
+            static_cast<std::int64_t>(
+                GenerationQuarantineReason::swapchain_destroyed),
+            handle_value(state->session->handle),
+            handle_value(swapchain),
+            0);
     }
     std::scoped_lock call_lock(state->call_mutex);
     drain_swapchain_gpu(state);
