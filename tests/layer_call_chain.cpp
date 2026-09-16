@@ -269,6 +269,15 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
     }
     const std::uint32_t wait_call =
         g_wait_frame_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    // A SteamVR configuration that paces the application: the wait blocks for
+    // most of a display period, so the layer's pacing measurement finds
+    // nothing to correct and this mode stays on the inline path. The internal
+    // second cycle is deliberately not slowed - that is the other quirk, and
+    // the steamvr-presenter mode covers it.
+    if (g_steamvr_runtime_mode && !g_steamvr_presenter_mode &&
+        !g_application_in_end_frame.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(7));
+    }
     if (g_steamvr_presenter_mode) {
         if (GetCurrentThreadId() == g_test_application_thread_id &&
             g_application_in_end_frame.load(std::memory_order_acquire)) {
@@ -1983,7 +1992,7 @@ int main(int argc, char** argv) {
             {XR_TYPE_FRAME_STATE},
         }};
         bool frame_sequence_succeeded = true;
-        for (std::size_t index = 0; index < 6; ++index) {
+        for (std::size_t index = 0; index < 4; ++index) {
             frame_sequence_succeeded = frame_sequence_succeeded &&
                 XR_SUCCEEDED(wait_frame(
                     session,
@@ -1999,6 +2008,21 @@ int main(int argc, char** argv) {
                 submit_frame(application_frames[index].predictedDisplayTime);
         }
 
+        // Two ordinary paired frames. The presenter is promoted earlier now
+        // that the layer measures the runtime's pacing directly instead of
+        // waiting for three throttled inline cycles, so these stand in for the
+        // warm-up frames the old criterion needed to reach the same depth of
+        // generated submissions.
+        XrFrameState filler_frame{XR_TYPE_FRAME_STATE};
+        for (int filler = 0; filler < 2; ++filler) {
+            frame_sequence_succeeded = frame_sequence_succeeded &&
+                XR_SUCCEEDED(wait_frame(
+                    session, &frame_wait_info, &filler_frame)) &&
+                XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
+                capture_fresh_application_image() &&
+                submit_frame(filler_frame.predictedDisplayTime);
+        }
+
         // frameWaitInfo and frameBeginInfo are optional in the registry, and the
         // presenter answers both calls itself rather than forwarding them, so
         // this frame passes null to keep that path accepting what a runtime
@@ -2007,14 +2031,14 @@ int main(int argc, char** argv) {
             XR_SUCCEEDED(wait_frame(
                 session,
                 nullptr,
-                &application_frames[6])) &&
-            application_frames[6].predictedDisplayPeriod ==
+                &application_frames[4])) &&
+            application_frames[4].predictedDisplayPeriod ==
                 kFakeDisplayPeriod * 2 &&
-            application_frames[6].predictedDisplayTime >
-                application_frames[5].predictedDisplayTime &&
+            application_frames[4].predictedDisplayTime >
+                application_frames[3].predictedDisplayTime &&
             XR_SUCCEEDED(begin_frame(session, nullptr)) &&
             capture_fresh_application_image() &&
-            submit_frame(application_frames[6].predictedDisplayTime);
+            submit_frame(application_frames[4].predictedDisplayTime);
 
         if (g_destroy_pending_space) {
             frame_sequence_succeeded = frame_sequence_succeeded && destroy_space &&
@@ -2030,13 +2054,13 @@ int main(int argc, char** argv) {
                 XR_SUCCEEDED(wait_frame(
                     session,
                     &frame_wait_info,
-                    &application_frames[7])) &&
-                application_frames[7].predictedDisplayPeriod ==
+                    &application_frames[5])) &&
+                application_frames[5].predictedDisplayPeriod ==
                     kFakeDisplayPeriod * 2 &&
-                application_frames[7].predictedDisplayTime >
-                    application_frames[6].predictedDisplayTime &&
+                application_frames[5].predictedDisplayTime >
+                    application_frames[4].predictedDisplayTime &&
                 XR_SUCCEEDED(begin_frame(session, &frame_begin_info));
-            empty_end.displayTime = application_frames[7].predictedDisplayTime;
+            empty_end.displayTime = application_frames[5].predictedDisplayTime;
             empty_end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
             frame_sequence_succeeded = frame_sequence_succeeded &&
                 XR_SUCCEEDED(end_frame(session, &empty_end));

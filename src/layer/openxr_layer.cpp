@@ -474,6 +474,12 @@ struct SessionState {
     XrTime generation_resume_display_time{};
     std::chrono::steady_clock::time_point generation_resume_wall_time{};
     XrDuration minimum_runtime_display_period{};
+    // How long the runtime's own xrWaitFrame blocked, and how many consecutive
+    // waits came back too quickly to have been pacing anything. This is what
+    // the presenter's existence actually turns on; see
+    // runtime_wait_lacks_pacing.
+    std::chrono::steady_clock::duration last_application_wait_elapsed{};
+    std::uint32_t unpaced_wait_streak{};
     std::uint32_t steamvr_throttled_wait_streak{};
     // Consecutive application frames the layer could not generate from. A
     // single one says nothing - the frame passes through and the next one
@@ -2264,6 +2270,7 @@ void reset_frame_bookkeeping(const std::shared_ptr<SessionState>& state) {
         state->generation_resume_wall_time = {};
         state->minimum_runtime_display_period = 0;
         state->steamvr_throttled_wait_streak = 0;
+        state->unpaced_wait_streak = 0;
     }
 }
 
@@ -2362,6 +2369,7 @@ XrResult layer_wait_frame_impl(
     XrResult result = XR_SUCCESS;
     const bool use_continuous_presenter = continuous_presenter_active(state);
     bool use_provisional_pipelined_wait = false;
+    bool forwarded_application_wait = false;
     if (!use_continuous_presenter && state->application_frame_in_progress) {
         if (!state->application_frame_has_overlapping_wait) {
             state->application_frame_has_overlapping_wait = true;
@@ -2536,11 +2544,16 @@ XrResult layer_wait_frame_impl(
             static_cast<std::uint64_t>(virtual_time),
             static_cast<std::uint64_t>(virtual_period));
     } else {
+        const auto application_wait_started = std::chrono::steady_clock::now();
         result = state->dispatch->wait_frame(session, wait_info, frame_state);
+        const auto application_wait_elapsed =
+            std::chrono::steady_clock::now() - application_wait_started;
         if (XR_SUCCEEDED(result) && frame_state != nullptr) {
             state->last_inline_frame_state = *frame_state;
             state->last_inline_frame_state.next = nullptr;
             state->last_inline_frame_state_valid = true;
+            state->last_application_wait_elapsed = application_wait_elapsed;
+            forwarded_application_wait = true;
         }
     }
     if (XR_SUCCEEDED(result) && frame_state != nullptr) {
@@ -2560,6 +2573,21 @@ XrResult layer_wait_frame_impl(
                  state->minimum_runtime_display_period)) {
             state->minimum_runtime_display_period =
                 frame_state->predictedDisplayPeriod;
+        }
+        // A runtime that is pacing this application blocks the wait for most
+        // of a display period. SteamVR returns in about 1.55 ms against
+        // 11.11 ms, which is not pacing anything. Count the waits that came
+        // back too quickly, on the same half-period line the throttle detector
+        // uses in the other direction.
+        if (forwarded_application_wait &&
+            state->minimum_runtime_display_period > 0) {
+            const auto elapsed_nanoseconds =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    state->last_application_wait_elapsed).count();
+            state->unpaced_wait_streak =
+                elapsed_nanoseconds * 2 < state->minimum_runtime_display_period
+                    ? state->unpaced_wait_streak + 1
+                    : 0;
         }
         state->pending_frames.push_back({
             frame_state->predictedDisplayTime,
@@ -5237,6 +5265,39 @@ struct InternalCycleResult {
     return output;
 }
 
+
+// The presenter exists because some runtimes do not pace xrWaitFrame. The
+// layer submits two frames per application frame and they must land one
+// display period apart; a runtime that returns the wait immediately leaves
+// both in the same scanout window and the compositor discards one, so the
+// headset shows half rate while the GPU does all of the synthesis work.
+//
+// Inferring that from the application's threading - whether its second wait
+// lands inside the previous frame, twice in a row - reads a property of the
+// application under load rather than of the runtime. It moves with scene
+// cost, and because the promotion latches the first time the race resolves,
+// a session can run un-paced indefinitely and then engage the moment the
+// view happens to get cheap. Measuring the runtime does not have that
+// problem: how long its wait blocks is the same whether the headset is
+// pointed at the floor or at a city.
+//
+// Scoped to SteamVR, like the throttle detector it sits beside. The two are
+// the same runtime quirk seen from opposite ends - one throttles the inline
+// second cycle, the other does not pace the application at all - and VDXR,
+// which blocks a full period and gets this right for free, is deliberately
+// left alone rather than being told apart by a measurement that a merely
+// late application can also produce.
+[[nodiscard]] bool runtime_wait_lacks_pacing(
+    const std::shared_ptr<SessionState>& state) noexcept {
+    // Enough waits to rule out an application that was simply late for one.
+    constexpr std::uint32_t kUnpacedWaitPromotionStreak = 3;
+    if (!state->dispatch->steamvr_runtime) {
+        return false;
+    }
+    std::scoped_lock lock(state->mutex);
+    return state->minimum_runtime_display_period > 0 &&
+           state->unpaced_wait_streak >= kUnpacedWaitPromotionStreak;
+}
 [[nodiscard]] bool steamvr_wait_requires_continuous_presenter(
     const std::shared_ptr<SessionState>& state,
     const InternalCycleResult& cycle) noexcept {
@@ -5531,6 +5592,9 @@ XrResult layer_end_frame_impl(
                 stop_continuous_presenter(state);
                 std::scoped_lock lock(state->mutex);
                 state->steamvr_throttled_wait_streak = 0;
+                // Both promotion routes start over, or the demotion would be
+                // undone by the next frame that measures the same runtime.
+                state->unpaced_wait_streak = 0;
             }
             return end_result;
         };
@@ -5942,6 +6006,7 @@ XrResult layer_end_frame_impl(
             stop_continuous_presenter(state);
             std::scoped_lock lock(state->mutex);
             state->steamvr_throttled_wait_streak = 0;
+            state->unpaced_wait_streak = 0;
             state->generation_failure_streak = 0;
         }
     }
@@ -6031,7 +6096,8 @@ XrResult layer_end_frame_impl(
         clear_generation_continuity(state);
     } else if (steamvr_wait_requires_continuous_presenter(
                    state,
-                   current_cycle)) {
+                   current_cycle) ||
+               runtime_wait_lacks_pacing(state)) {
         // Request the promotion; do not perform it here. submit_current_cycle
         // has already submitted this frame, so seeding a freshly started
         // presenter thread with it handed a second owner to composition layers
