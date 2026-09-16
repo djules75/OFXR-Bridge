@@ -2417,6 +2417,24 @@ XrResult layer_wait_frame_impl(
                     state->presenter_frame_state.predictedDisplayTime));
             virtual_time = ceiling;
         }
+        // The ceiling can land at or below the time already served, because
+        // the anchor tracks a runtime prediction that does not advance by a
+        // whole period every time it is read. Never hand the application a
+        // display time that does not move: it is not something a caller has
+        // to tolerate, and the runtime safeguards added in v0.2.1 read a
+        // non-advancing time as a projection resource layout change and stop
+        // generation for a second, which the fail-open pacing that follows
+        // then reproduces on the next frame.
+        //
+        // A nanosecond is enough. The drift the ceiling exists to prevent
+        // accumulates in whole periods - it reached 637 s of lead in a
+        // captured session - so a floor measured in nanoseconds keeps the
+        // sequence strictly increasing without giving the ratchet anything
+        // to turn on.
+        if (state->last_virtual_display_time != 0 &&
+            virtual_time <= state->last_virtual_display_time) {
+            virtual_time = state->last_virtual_display_time + 1;
+        }
         state->last_virtual_display_time = virtual_time;
         frame_state->predictedDisplayTime = virtual_time;
         frame_state->predictedDisplayPeriod = virtual_period;
@@ -2449,6 +2467,13 @@ XrResult layer_wait_frame_impl(
             }
             if (virtual_time > ceiling) {
                 virtual_time = ceiling;
+            }
+            // Same floor as the presenter path, for the same reason: a
+            // display time that does not advance is not something a caller
+            // has to tolerate.
+            if (state->last_virtual_display_time != 0 &&
+                virtual_time <= state->last_virtual_display_time) {
+                virtual_time = state->last_virtual_display_time + 1;
             }
             state->last_virtual_display_time = virtual_time;
         }
@@ -4385,17 +4410,23 @@ build_reprojection_views(
 // re-primed on the current application frame. A layout transition changes the
 // resources or regions consumed by generation and must cross the quarantine.
 //
-// A display time that does not advance belongs in the first category, not the
-// second, so it is deliberately not tested here. It names no different
-// swapchain, sub-image, view or blend mode - it only says the two snapshots
-// cannot be paired, which clearing continuity and priming again on this frame
-// already handles. Quarantining for it is self-sustaining: the outage puts the
-// application on the fail-open path, where it is paced one frame per presenter
-// frame while the runtime's own period is still bouncing between one and four
-// display intervals, which produces the next non-advancing time, which starts
-// the next outage. A captured MSFS 2024 session spent 3768 of 3895 frames in
-// structural quarantine that way, re-entering it every 1.05 s against a 1 s
-// duration, and generated 296 pairs in 57 s.
+// A display time that does not advance is deliberately not tested here. It is
+// not a layout change - it names no different swapchain, sub-image, view or
+// blend mode - and it is not the layer's own timeline either. MSFS 2024
+// derives the time it submits from the predicted time it was given, and it
+// derives it non-monotonically: with the virtual clock made strictly
+// increasing and verified so over 1281 consecutive waits, 287 of the 1280
+// frames that application submitted still went backwards, by whole multiples
+// of the display period. A pipelined application that reorders two frames in
+// flight will do this, and no clock the layer hands it prevents it.
+//
+// Quarantining for it is also self-sustaining: the outage puts the
+// application on the fail-open path, which produces the next non-advancing
+// time, which starts the next outage. Captured MSFS 2024 sessions spent 3768
+// of 3895 and 1176 of 1280 frames in structural quarantine that way,
+// re-entering it faster than the one-second duration expires. Clearing
+// continuity and priming again on this frame handles it for the cost of one
+// prime.
 [[nodiscard]] bool projection_resource_layout_compatible(
     const ProjectionSnapshot& previous,
     const ProjectionSnapshot& current) noexcept {
