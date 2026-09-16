@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -303,6 +304,15 @@ struct SessionState {
     xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options{};
     SessionGraphicsBinding graphics_binding{SessionGraphicsBinding::none};
     std::uint64_t graphics_binding_capabilities{};
+    // Set once the runtime has refused a private swapchain. A runtime caps how
+    // many swapchains one session may hold at all -- SteamVR hands out 16 --
+    // and the application is usually still creating its own when the layer
+    // reaches that ceiling, so the private swapchains already taken are what
+    // makes the application's next creation fail. Hand the whole budget back
+    // and pass frames through for the rest of the session: an application that
+    // cannot finish creating its swapchains has no way to recover, while one
+    // that merely loses generation carries on.
+    std::atomic<bool> generation_budget_exhausted{false};
     Microsoft::WRL::ComPtr<ID3D11Device> d3d11_device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3d11_context;
     Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device;
@@ -488,6 +498,8 @@ enum class SwapchainEligibilityReason : std::int64_t {
     exception = 14,
     d3d11_interop_initialize_failed = 15,
     invalid_d3d11_image = 16,
+    awaiting_projection_use = 17,
+    budget_exhausted = 18,
 };
 
 void log_swapchain_eligibility(
@@ -519,6 +531,17 @@ struct SwapchainState {
     std::shared_ptr<xrfg::D3D12SwapchainHistory> d3d12_history;
     std::optional<xrfg::D3D12HistoryCaptureTicket> last_released_capture;
     std::shared_ptr<FrameGenerationSwapchainState> frame_generation;
+    // Generation costs three runtime swapchains, and a swapchain that never
+    // reaches a projection layer never spends them: an application's UI quads
+    // and its stereo views are indistinguishable at enumeration time, so the
+    // decision waits until xrEndFrame names this swapchain as a projection
+    // view. Guarded by call_mutex.
+    bool generation_eligible_pending{};
+    std::uint32_t enumerated_image_count{};
+    // An attempt that failed for its own reasons -- synthesis, interop -- is
+    // not retried every frame. Cleared whenever the history is rebuilt, which
+    // is the point at which the images themselves changed.
+    bool generation_declined{};
 };
 
 void log_swapchain_eligibility(
@@ -786,7 +809,11 @@ struct CreatedPrivateSwapchain {
 [[nodiscard]] bool create_private_swapchain(
     const std::shared_ptr<SwapchainState>& state,
     const XrSwapchainCreateInfo& create_info,
-    CreatedPrivateSwapchain* output) {
+    CreatedPrivateSwapchain* output,
+    XrResult* refusal = nullptr) {
+    if (refusal != nullptr) {
+        *refusal = XR_SUCCESS;
+    }
     if (!state || !state->session || !state->session->dispatch || output == nullptr) {
         return false;
     }
@@ -797,6 +824,12 @@ struct CreatedPrivateSwapchain {
         &create_info,
         &handle);
     if (XR_FAILED(result) || handle == XR_NULL_HANDLE) {
+        // Which error the runtime gave separates a budget it will not exceed
+        // from a create info it rejects outright, and only the first is worth
+        // handing the whole session's private swapchains back for.
+        if (refusal != nullptr) {
+            *refusal = XR_FAILED(result) ? result : XR_ERROR_RUNTIME_FAILURE;
+        }
         return false;
     }
 
@@ -889,12 +922,17 @@ void destroy_current_ring(
 [[nodiscard]] bool create_current_ring(
     const std::shared_ptr<SwapchainState>& state,
     const XrSwapchainCreateInfo& create_info,
-    CreatedCurrentRing* output) {
+    CreatedCurrentRing* output,
+    XrResult* refusal = nullptr) {
+    if (refusal != nullptr) {
+        *refusal = XR_SUCCESS;
+    }
     if (output == nullptr) {
         return false;
     }
     for (std::size_t slot = 0; slot < kCurrentSlotCount; ++slot) {
-        if (!create_private_swapchain(state, create_info, &output->slots[slot])) {
+        if (!create_private_swapchain(
+                state, create_info, &output->slots[slot], refusal)) {
             return false;
         }
         const CreatedPrivateSwapchain& created = output->slots[slot];
@@ -980,18 +1018,27 @@ create_d3d12_frame_generation_swapchains(
         private_info.next = nullptr;
         private_info.usageFlags |=
             XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-        if (!create_current_ring(state, private_info, &current)) {
+        XrResult refusal = XR_SUCCESS;
+        if (!create_current_ring(state, private_info, &current, &refusal)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
                     SwapchainEligibilityReason::current_private_swapchain_failed;
             }
+            if (failure_detail != nullptr) {
+                *failure_detail = static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(refusal));
+            }
             destroy_current_ring(dispatch, &current);
             return nullptr;
         }
-        if (!create_private_swapchain(state, private_info, &synthetic)) {
+        if (!create_private_swapchain(state, private_info, &synthetic, &refusal)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
                     SwapchainEligibilityReason::synthetic_private_swapchain_failed;
+            }
+            if (failure_detail != nullptr) {
+                *failure_detail = static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(refusal));
             }
             destroy_current_ring(dispatch, &current);
             return nullptr;
@@ -1127,18 +1174,27 @@ create_d3d11_frame_generation_swapchains(
         private_info.next = nullptr;
         private_info.usageFlags |= XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
                                    XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-        if (!create_current_ring(state, private_info, &current)) {
+        XrResult refusal = XR_SUCCESS;
+        if (!create_current_ring(state, private_info, &current, &refusal)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
                     SwapchainEligibilityReason::current_private_swapchain_failed;
             }
+            if (failure_detail != nullptr) {
+                *failure_detail = static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(refusal));
+            }
             destroy_private();
             return nullptr;
         }
-        if (!create_private_swapchain(state, private_info, &synthetic)) {
+        if (!create_private_swapchain(state, private_info, &synthetic, &refusal)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
                     SwapchainEligibilityReason::synthetic_private_swapchain_failed;
+            }
+            if (failure_detail != nullptr) {
+                *failure_detail = static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(refusal));
             }
             destroy_private();
             return nullptr;
@@ -1262,6 +1318,174 @@ create_d3d11_frame_generation_swapchains(
         }
         return nullptr;
     }
+}
+
+// A refused private swapchain is the only failure that says anything about the
+// rest of the session: whatever ceiling the runtime reached, the application's
+// own creations are competing for it. Synthesis, interop and an unusable image
+// are local to the one swapchain that hit them.
+[[nodiscard]] bool budget_refusal(SwapchainEligibilityReason reason) noexcept {
+    return reason ==
+               SwapchainEligibilityReason::current_private_swapchain_failed ||
+           reason ==
+               SwapchainEligibilityReason::synthetic_private_swapchain_failed;
+}
+
+// Hands every private swapchain in the session back to the runtime.
+//
+// The caller must own the frame call mutex and, when a presenter is running,
+// have drained it and taken the content lock first: a queued submission names
+// these swapchains, and destroying one the runtime still has queued latches a
+// presenter failure for the rest of the session.
+void release_session_generation_budget(
+    const std::shared_ptr<SessionState>& session) noexcept {
+    try {
+        if (!session) {
+            return;
+        }
+        {
+            // The retained repeat names private swapchains of its own.
+            std::scoped_lock lock(session->presenter_mutex);
+            session->presenter_last_frame.reset();
+        }
+        for (const auto& swapchain : find_swapchains(session)) {
+            std::scoped_lock call_lock(swapchain->call_mutex);
+            swapchain->generation_eligible_pending = false;
+            swapchain->generation_declined = true;
+            drain_swapchain_gpu(swapchain);
+            destroy_frame_generation_swapchains(swapchain);
+        }
+    } catch (...) {
+    }
+}
+
+// Creates the generation resources a swapchain deferred at enumeration time.
+// Returns false only when the runtime refused a private swapchain, which is
+// the caller's signal to hand the session's whole budget back.
+[[nodiscard]] bool ensure_frame_generation(
+    const std::shared_ptr<SwapchainState>& state) noexcept {
+    try {
+        if (!state || !state->session) {
+            return true;
+        }
+        std::scoped_lock call_lock(state->call_mutex);
+        if (!state->generation_eligible_pending || state->generation_declined) {
+            return true;
+        }
+        {
+            std::scoped_lock lock(state->mutex);
+            if (state->frame_generation) {
+                state->generation_eligible_pending = false;
+                return true;
+            }
+        }
+        const std::uint64_t auxiliary =
+            (static_cast<std::uint64_t>(state->enumerated_image_count) << 32) |
+            state->create_info.arraySize;
+        SwapchainEligibilityReason reason =
+            SwapchainEligibilityReason::exception;
+        std::uint64_t detail = 0;
+        // Enumeration ran before the application had submitted anything, so
+        // nothing else was touching the queue. This runs on the frame path,
+        // where a release on another thread may be capturing into history and
+        // synthesizer initialisation submits work of its own.
+        std::shared_ptr<FrameGenerationSwapchainState> candidate;
+        {
+            std::scoped_lock gpu_lock(state->session->gpu_mutex);
+            if (state->session->graphics_binding ==
+                SessionGraphicsBinding::d3d11) {
+                // Ask the runtime for the images again rather than holding a
+                // reference to each of them from enumeration until whenever
+                // the application first composites with this swapchain. Those
+                // are the application's textures: keeping them alive here
+                // outlives what the layer is entitled to hold, and an
+                // application that exits without destroying its swapchains
+                // then releases them during teardown, which hung the D3D11
+                // call chain tests at process exit. xrEnumerateSwapchainImages
+                // may be called as often as we like.
+                std::vector<XrSwapchainImageD3D11KHR> enumerated(
+                    state->enumerated_image_count,
+                    XrSwapchainImageD3D11KHR{
+                        XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR, nullptr, nullptr});
+                std::uint32_t count = 0;
+                const XrResult enumerate_result =
+                    state->session->dispatch->enumerate_swapchain_images(
+                        state->handle,
+                        state->enumerated_image_count,
+                        &count,
+                        reinterpret_cast<XrSwapchainImageBaseHeader*>(
+                            enumerated.data()));
+                std::vector<ID3D11Texture2D*> images;
+                if (XR_SUCCEEDED(enumerate_result) &&
+                    count == state->enumerated_image_count) {
+                    images.reserve(count);
+                    for (const XrSwapchainImageD3D11KHR& image : enumerated) {
+                        images.push_back(image.texture);
+                    }
+                }
+                if (images.empty()) {
+                    reason = SwapchainEligibilityReason::invalid_d3d11_image;
+                    detail = static_cast<std::uint64_t>(
+                        static_cast<std::int64_t>(enumerate_result));
+                } else {
+                    candidate = create_d3d11_frame_generation_swapchains(
+                        state,
+                        std::span<ID3D11Texture2D* const>(
+                            images.data(), images.size()),
+                        &reason,
+                        &detail);
+                }
+            } else {
+                candidate = create_d3d12_frame_generation_swapchains(
+                    state, &reason, &detail);
+            }
+        }
+        if (!candidate) {
+            state->generation_declined = true;
+            log_swapchain_eligibility(state, reason, detail, auxiliary);
+            return !budget_refusal(reason);
+        }
+        {
+            std::scoped_lock lock(state->mutex);
+            state->frame_generation = std::move(candidate);
+        }
+        state->generation_eligible_pending = false;
+        log_swapchain_eligibility(
+            state,
+            SwapchainEligibilityReason::ready,
+            state->enumerated_image_count,
+            auxiliary);
+        return true;
+    } catch (...) {
+        return true;
+    }
+}
+
+// Spends the generation budget on the swapchains this frame actually submits
+// as projection views. Returns false once the runtime has refused one, meaning
+// the caller must release the session's budget and stop generating.
+[[nodiscard]] bool ensure_projection_frame_generation(
+    const std::shared_ptr<SessionState>& session,
+    std::span<const ProjectionResourceMapping> mappings) noexcept {
+    if (!session ||
+        session->generation_budget_exhausted.load(std::memory_order_acquire)) {
+        return true;
+    }
+    for (const ProjectionResourceMapping& mapping : mappings) {
+        const auto swapchain = find_swapchain(mapping.application_swapchain);
+        if (!swapchain || ensure_frame_generation(swapchain)) {
+            continue;
+        }
+        session->generation_budget_exhausted.store(
+            true, std::memory_order_release);
+        log_swapchain_eligibility(
+            swapchain,
+            SwapchainEligibilityReason::budget_exhausted,
+            0,
+            handle_value(session->handle));
+        return false;
+    }
+    return true;
 }
 
 template <typename Function>
@@ -2093,6 +2317,18 @@ XrResult layer_create_swapchain_impl(
         create_info,
         &created_swapchain);
     if (XR_FAILED(result)) {
+        // The application losing a swapchain of its own is the shape a layer
+        // that overspends the runtime's budget takes from the outside, and
+        // without this record the log ends at the last creation that worked.
+        // A negative result distinguishes it from the create-info records
+        // below, which carry a field index there.
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::swapchain_create,
+            result,
+            0,
+            (static_cast<std::uint64_t>(create_info->width) << 32) |
+                create_info->height,
+            static_cast<std::uint64_t>(create_info->usageFlags));
         return result;
     }
     swapchain_state->handle = created_swapchain;
@@ -2219,22 +2455,30 @@ XrResult layer_enumerate_swapchain_images_impl(
             SwapchainEligibilityReason eligibility_reason =
                 SwapchainEligibilityReason::ready;
             std::uint64_t eligibility_detail = count;
-            if (!has_generation) {
-                std::uint64_t generation_detail = 0;
-                auto candidate = create_d3d11_frame_generation_swapchains(
-                    state,
-                    std::span<ID3D11Texture2D* const>(
-                        resources.data(), resources.size()),
-                    &eligibility_reason,
-                    &generation_detail);
-                if (candidate) {
-                    std::scoped_lock lock(state->mutex);
-                    if (!state->frame_generation) {
-                        state->frame_generation = std::move(candidate);
-                    }
-                    has_generation = static_cast<bool>(state->frame_generation);
+            // Same deferral as the D3D12 path below, and for the same reason:
+            // an interop swapchain costs the session three runtime swapchains
+            // and an application's UI surfaces are indistinguishable from its
+            // stereo views here. The D3D12 path can rebuild its images from
+            // the history ring when it arms; this one has to keep them.
+            const bool static_image =
+                (state->create_info.createFlags &
+                 XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) != 0;
+            if (!has_generation && !state->generation_declined &&
+                !state->session->generation_budget_exhausted.load(
+                    std::memory_order_acquire)) {
+                if (static_image) {
+                    eligibility_reason =
+                        SwapchainEligibilityReason::static_image;
+                    eligibility_detail = state->create_info.createFlags;
+                } else if (state->create_info.faceCount != 1) {
+                    eligibility_reason =
+                        SwapchainEligibilityReason::unsupported_face_count;
+                    eligibility_detail = state->create_info.faceCount;
                 } else {
-                    eligibility_detail = generation_detail;
+                    state->enumerated_image_count = count;
+                    state->generation_eligible_pending = true;
+                    eligibility_reason =
+                        SwapchainEligibilityReason::awaiting_projection_use;
                 }
             }
             log_swapchain_eligibility(
@@ -2313,7 +2557,11 @@ XrResult layer_enumerate_swapchain_images_impl(
                 state->last_released_capture.reset();
             }
             retired_history.reset();
+            // The images themselves changed, so an earlier refusal says
+            // nothing about this set.
+            state->generation_declined = false;
         }
+        state->enumerated_image_count = count;
 
         bool has_generation = false;
         {
@@ -2339,22 +2587,37 @@ XrResult layer_enumerate_swapchain_images_impl(
             eligibility_reason = SwapchainEligibilityReason::depth_only;
             eligibility_detail = state->create_info.usageFlags;
         }
+        // Generation costs three runtime swapchains here and a runtime caps how
+        // many one session may hold at all. Nothing about a colour swapchain
+        // says whether the application will submit it as a projection view or
+        // as a UI quad it composites once, so spending the budget now spends it
+        // on both -- and the application, still creating its own swapchains,
+        // is the one that finds the ceiling. Record the swapchain as a
+        // candidate and let the first xrEndFrame that names it decide.
+        //
+        // What the create info alone settles is still settled here. A static
+        // image and a face count above one can never carry generation, so
+        // deferring them would put a candidacy in the log that is never
+        // resolved in place of the true reason, and leave an arming attempt to
+        // discover at the first frame what was knowable at creation.
+        const bool static_image =
+            (state->create_info.createFlags &
+             XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) != 0;
         if (history && release_state == D3D12_RESOURCE_STATE_RENDER_TARGET &&
-            !has_generation) {
-            SwapchainEligibilityReason generation_reason =
-                SwapchainEligibilityReason::exception;
-            std::uint64_t generation_detail = 0;
-            auto candidate = create_d3d12_frame_generation_swapchains(
-                state, &generation_reason, &generation_detail);
-            if (candidate) {
-                std::scoped_lock lock(state->mutex);
-                if (!state->frame_generation) {
-                    state->frame_generation = std::move(candidate);
-                }
-                has_generation = static_cast<bool>(state->frame_generation);
+            !has_generation && !state->generation_declined &&
+            !state->session->generation_budget_exhausted.load(
+                std::memory_order_acquire)) {
+            if (static_image) {
+                eligibility_reason = SwapchainEligibilityReason::static_image;
+                eligibility_detail = state->create_info.createFlags;
+            } else if (state->create_info.faceCount != 1) {
+                eligibility_reason =
+                    SwapchainEligibilityReason::unsupported_face_count;
+                eligibility_detail = state->create_info.faceCount;
             } else {
-                eligibility_reason = generation_reason;
-                eligibility_detail = generation_detail;
+                state->generation_eligible_pending = true;
+                eligibility_reason =
+                    SwapchainEligibilityReason::awaiting_projection_use;
             }
         }
 
@@ -4611,11 +4874,27 @@ XrResult layer_end_frame_impl(
         (static_cast<std::uint64_t>(current_snapshot.layers.size()) << 32) |
             resource_mappings.mappings.size(),
         resource_mappings.detail);
-    if (!resource_mappings.ready()) {
+    // This is the first point at which a swapchain is known to be a projection
+    // view rather than a UI quad, so it is where deferred generation resources
+    // are taken. A refusal here means the runtime has no swapchains left for
+    // the application either; give the whole budget back and pass through.
+    const bool generation_budget_refused =
+        resource_mappings.ready() &&
+        !ensure_projection_frame_generation(
+            state,
+            std::span<const ProjectionResourceMapping>(
+                resource_mappings.mappings.data(),
+                resource_mappings.mappings.size()));
+    if (!resource_mappings.ready() || generation_budget_refused) {
         clear_generation_continuity(state);
         const XrResult exclusive_result = enter_presenter_exclusive();
         if (XR_FAILED(exclusive_result)) {
             return exclusive_result;
+        }
+        if (generation_budget_refused) {
+            // The presenter is idle and its content lock is held, so nothing
+            // the runtime still has queued names a private swapchain.
+            release_session_generation_budget(state);
         }
         const auto end_token = xrfg::bridge_flight_logger().begin(
             xrfg::BridgeFlightOperation::downstream_first_end_frame,
