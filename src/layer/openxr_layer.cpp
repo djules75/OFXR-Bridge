@@ -3896,14 +3896,49 @@ void continuous_presenter_main(
                     // the wrong place.
                     //
                     // predictedDisplayTime is the runtime's own scanout time,
-                    // so the interval from it back to the submission is an
-                    // absolute measure of where in the period this presenter
-                    // sits. Larger is further from the deadline and better;
-                    // the reference decays slowly so a genuine change in the
-                    // runtime's timing is followed rather than fought.
+                    // so the interval from it back to the submission says
+                    // where in the period this presenter sits. Only *where in
+                    // the period* though - the lead itself is not comparable
+                    // across a skipped slot. The runtime advances
+                    // predictedDisplayTime by exactly one period per wait
+                    // whether or not the presenter filled the slot, so missing
+                    // one costs a whole period of lead while changing nothing
+                    // about the phase. Measured on MSFS 2024 at a flat 45 in,
+                    // 90 out with nothing missing: the controller read every
+                    // skip as an 11 ms deficit, pulled the grid earlier by
+                    // period/16 each frame chasing a period it cannot recover,
+                    // and the walk tripped the step-over into the next skip.
+                    // A 5 Hz limit cycle - submissions 10.645 ms apart against
+                    // an 11.111 ms period across 3117 samples, ~4 slots a
+                    // second discarded, and the pace sleep sawtoothing from
+                    // 11 ms down to 2 and back, which is what the application
+                    // sees as ratcheting CPU frame time.
+                    //
+                    // So reduce both sides modulo the period before comparing.
+                    // A skipped slot then reads as no phase error at all,
+                    // which is the truth, and the correction is left to do the
+                    // one job it is for. Larger phase is further from the
+                    // deadline and better; the reference decays slowly so a
+                    // genuine change in the runtime's timing is followed
+                    // rather than fought.
+                    const std::int64_t period_ns = period.count();
+                    const std::int64_t submitted_phase =
+                        ((submitted_lead % period_ns) + period_ns) % period_ns;
+                    // Signed distance the short way round the period, in
+                    // (-period/2, period/2]. Positive means the reference is
+                    // ahead of where this submission landed.
+                    const auto phase_delta =
+                        [period_ns](std::int64_t difference) -> std::int64_t {
+                        difference =
+                            ((difference % period_ns) + period_ns) % period_ns;
+                        if (difference > period_ns / 2) {
+                            difference -= period_ns;
+                        }
+                        return difference;
+                    };
                     if (state->presenter_lead_valid) {
-                        const std::int64_t behind_best =
-                            state->presenter_lead_reference - submitted_lead;
+                        const std::int64_t behind_best = phase_delta(
+                            state->presenter_lead_reference - submitted_phase);
                         constexpr std::int64_t kLeadTolerance = 1'000'000;
                         if (behind_best > kLeadTolerance) {
                             const auto correction = std::min<std::chrono::nanoseconds>(
@@ -3941,12 +3976,19 @@ void continuous_presenter_main(
                         since_previous < period * 11 / 10;
                     if (landed_on_grid &&
                         (!state->presenter_lead_valid ||
-                         submitted_lead > state->presenter_lead_reference)) {
-                        state->presenter_lead_reference = submitted_lead;
+                         phase_delta(
+                             submitted_phase -
+                             state->presenter_lead_reference) > 0)) {
+                        state->presenter_lead_reference = submitted_phase;
                         state->presenter_lead_valid = true;
                     } else if (state->presenter_lead_valid) {
                         constexpr std::int64_t kLeadReferenceDecay = 31'000;
-                        state->presenter_lead_reference -= kLeadReferenceDecay;
+                        state->presenter_lead_reference =
+                            ((state->presenter_lead_reference -
+                              kLeadReferenceDecay) %
+                                 period_ns +
+                             period_ns) %
+                            period_ns;
                     }
                     state->presenter_last_submitted_at = now;
                     // fresh full period for being late. Resetting to now+period
