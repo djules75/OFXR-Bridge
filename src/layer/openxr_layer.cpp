@@ -3817,13 +3817,29 @@ void continuous_presenter_main(
                     // cadence with 28.8% of gaps under 9 ms against an 11.11 ms
                     // period.
                     //
-                    // Half a period is the threshold rather than a full one so
-                    // this cannot fire in steady state, where the deadline
-                    // already falls about 7 ms after the previous handover.
-                    // Chaining every deadline off the handover would instead
-                    // add the loop's own cost to each cycle, which is what held
-                    // an earlier build to 64/s.
-                    const auto earliest = now + period / 2;
+                    // The threshold has to clear the bunching without eating
+                    // slots the presenter could still have filled. Stepping
+                    // over costs a whole scanout - the slot shows a repeat -
+                    // so the band is not free, and at half a period it fires
+                    // on roughly half the deadlines left behind an overrun,
+                    // which is exactly the case where content is already
+                    // scarce. A quarter still clears the 3.7 ms typical
+                    // xrEndFrame that produces the bunching, and keeps the
+                    // deadlines between a quarter and a half of a period out
+                    // - about 2.8 ms of every 11.11 - that half a period
+                    // discarded.
+                    //
+                    // Steady state is unaffected either way: the deadline
+                    // there already falls about 7 ms after the handover, so
+                    // neither threshold fires. Chaining every deadline off
+                    // the handover instead would add the loop's own cost to
+                    // each cycle, which is what held an earlier build to
+                    // 64/s.
+                    //
+                    // If this is too narrow it will show as submission gaps
+                    // bunching under about 9 ms against the 11.11 ms period,
+                    // which is the compositor discarding one of a pair.
+                    const auto earliest = now + period / 4;
                     while (state->presenter_next_submit < earliest) {
                         state->presenter_next_submit += period;
                     }
