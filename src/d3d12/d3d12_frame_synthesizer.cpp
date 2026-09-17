@@ -751,6 +751,9 @@ struct D3D12FrameSynthesizer::Impl {
         std::numeric_limits<std::uint32_t>::max();
     std::uint32_t pending_copy_slot{kNoPendingCopy};
     std::uint64_t pending_copy_fence_value{};
+    // The value the most recent submission signalled once the synthetic's
+    // pixels existed, as opposed to the value the whole pair completes at.
+    std::uint64_t last_synthetic_fence_value{};
     std::uint64_t next_nvidia_fence_value{1};
     std::uint64_t last_nvidia_fence_value{};
     std::uint64_t nvidia_timestamp_frequency{};
@@ -3721,6 +3724,7 @@ struct D3D12FrameSynthesizer::Impl {
                 return signal_result;
             }
             ++next_fence_value;
+            last_synthetic_fence_value = synthetic_value;
             value = next_fence_value;
             ++next_fence_value;
             pending_copy_slot = slot_index;
@@ -3731,6 +3735,7 @@ struct D3D12FrameSynthesizer::Impl {
             queue->ExecuteCommandLists(1, copy_lists);
             value = next_fence_value;
             ++next_fence_value;
+            last_synthetic_fence_value = value;
             HRESULT signal_result = queue->Signal(fence.Get(), value);
             if (FAILED(signal_result)) {
                 synthesis_enabled = false;
@@ -3942,6 +3947,7 @@ struct D3D12FrameSynthesizer::Impl {
                 return signal_result;
             }
             ++next_fence_value;
+            last_synthetic_fence_value = synthetic_value;
             completion_value = next_fence_value;
             ++next_fence_value;
             pending_copy_slot = slot_index;
@@ -3952,6 +3958,7 @@ struct D3D12FrameSynthesizer::Impl {
             queue->ExecuteCommandLists(1, copy_lists);
             completion_value = next_fence_value;
             ++next_fence_value;
+            last_synthetic_fence_value = completion_value;
             HRESULT signal_result = queue->Signal(fence.Get(), completion_value);
             if (FAILED(signal_result)) {
                 synthesis_enabled = false;
@@ -4065,6 +4072,7 @@ struct D3D12FrameSynthesizer::Impl {
         output_ticket->previous_serial = 0;
         output_ticket->current_serial = current.serial;
         output_ticket->fence_value = fence_value;
+        output_ticket->synthetic_fence_value = last_synthetic_fence_value;
         output_ticket->work_slot = work_slot_index;
         output_ticket->synthetic_destination_index =
             std::numeric_limits<std::uint32_t>::max();
@@ -4336,6 +4344,7 @@ struct D3D12FrameSynthesizer::Impl {
         output_ticket->previous_serial = previous_serial;
         output_ticket->current_serial = current.serial;
         output_ticket->fence_value = fence_value;
+        output_ticket->synthetic_fence_value = last_synthetic_fence_value;
         output_ticket->work_slot = work_slot_index;
         output_ticket->synthetic_destination_index = synthetic_destination_index;
         output_ticket->current_destination_index = current_destination_index;
@@ -4534,10 +4543,26 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
     }
 }
 
-HRESULT D3D12FrameSynthesizer::flush_current_copy() noexcept {
+HRESULT D3D12FrameSynthesizer::flush_current_copy(
+    ID3D12CommandQueue* consumer_queue) noexcept {
     try {
         std::scoped_lock lock(mutex_);
-        return impl_ == nullptr ? S_OK : impl_->flush_pending_copy();
+        if (impl_ == nullptr) {
+            return S_OK;
+        }
+        const HRESULT result = impl_->flush_pending_copy();
+        // Now that the copy is on the queue, the value it will signal is a
+        // value something is actually working towards, so a consumer can
+        // wait on it without parking.
+        if (SUCCEEDED(result) && consumer_queue != nullptr &&
+            consumer_queue != impl_->queue.Get() &&
+            impl_->fence != nullptr &&
+            impl_->last_submitted_fence_value != 0) {
+            static_cast<void>(consumer_queue->Wait(
+                impl_->fence.Get(),
+                impl_->last_submitted_fence_value));
+        }
+        return result;
     } catch (...) {
         return E_FAIL;
     }
@@ -4588,6 +4613,36 @@ HRESULT D3D12FrameSynthesizer::consume_nvidia_gpu_timing(
         if (timing != nullptr) {
             *timing = {};
         }
+        return E_FAIL;
+    }
+}
+
+HRESULT D3D12FrameSynthesizer::synchronize_consumer_queue(
+    ID3D12CommandQueue* queue,
+    const D3D12FrameSynthesisTicket& ticket) noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if (impl_ == nullptr || queue == nullptr) {
+            return E_INVALIDARG;
+        }
+        // The synthetic's value, never the pair's. fence_value is what the
+        // deferred current copy will signal, and that copy is not submitted
+        // until the presenter flushes it a display period later - so waiting
+        // on it here parks the application's own queue for that whole window,
+        // every frame, and the game cannot start rendering until it clears.
+        const std::uint64_t value = ticket.synthetic_fence_value != 0
+            ? ticket.synthetic_fence_value
+            : ticket.fence_value;
+        if (value == 0 || impl_->fence == nullptr) {
+            return E_UNEXPECTED;
+        }
+        // Same queue on both sides means the submission is already ordered;
+        // the wait would be redundant rather than wrong.
+        if (queue == impl_->queue.Get()) {
+            return S_FALSE;
+        }
+        return queue->Wait(impl_->fence.Get(), value);
+    } catch (...) {
         return E_FAIL;
     }
 }

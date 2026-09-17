@@ -504,6 +504,16 @@ struct SessionState {
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3d11_context;
     Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> d3d12_queue;
+    // Synthesis runs here rather than on the application's queue. The work
+    // itself is short - the pack and composite command lists measure 249 us
+    // per swapchain against MSFS 2024, and the 1610 us of optical flow runs
+    // on the OFA engine rather than on any D3D12 queue - but the queue waits
+    // on the OFA fence between them, and submitting that on the application's
+    // queue blocks everything the application has already queued behind it,
+    // which is its next frame's rendering. On a queue of its own the wait
+    // holds only this. Null when the application binds D3D11, where
+    // d3d12_queue is already the layer's own bridge queue.
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> d3d12_synthesis_queue;
     // Some SteamVR configurations throttle the inline second wait/begin/end
     // cycle to the application's half-rate interval. After that behavior is
     // measured, the dedicated presenter becomes the sole owner of downstream
@@ -1285,7 +1295,9 @@ create_d3d12_frame_generation_swapchains(
                 backend, state->session->nvidia_options));
         const HRESULT gpu_result = synthesizer->initialize(
             state->session->d3d12_device.Get(),
-            state->session->d3d12_queue.Get(),
+            state->session->d3d12_synthesis_queue
+                ? state->session->d3d12_synthesis_queue.Get()
+                : state->session->d3d12_queue.Get(),
             state->d3d12_history,
             std::span<ID3D12Resource* const>(
                 current.d3d12_resources.data(),
@@ -1294,7 +1306,28 @@ create_d3d12_frame_generation_swapchains(
                 synthetic.d3d12_resources.data(),
                 synthetic.d3d12_resources.size()),
             static_cast<DXGI_FORMAT>(state->create_info.format),
-            D3D12_RESOURCE_STATE_RENDER_TARGET,
+            // These are the layer's own private swapchains, so the layer
+            // picks the state they rest in. On a private synthesis queue
+            // that has to be COMMON: D3D12 requires a non-simultaneous-
+            // access texture to be in COMMON at the point queue ownership
+            // transfers, and these transfer twice a pair - written by the
+            // synthesis queue, read by the runtime against the queue the
+            // application supplied. synchronize_consumer_queue orders the
+            // two; it does not transfer ownership, and a fence alone leaves
+            // what the reader sees undefined. Observed as synthetic frames
+            // that were generated, paced and complete on time, and still
+            // did not reach the headset: The Callisto Protocol under UEVR
+            // held 45 with 1257 pairs, 99.6% of submissions on grid and the
+            // synthetic marker flashing a few times a second rather than
+            // forty-five.
+            //
+            // Resting in COMMON costs nothing. Every transition in the
+            // synthesis lists already starts and ends at this state, and a
+            // resource in COMMON is implicitly promoted on first use, so a
+            // runtime that wants it as a render target still gets one.
+            state->session->d3d12_synthesis_queue
+                ? D3D12_RESOURCE_STATE_COMMON
+                : D3D12_RESOURCE_STATE_RENDER_TARGET,
             backend,
             state->session->nvidia_options,
             xrfg::bridge_flight_logger().enabled());
@@ -2183,6 +2216,32 @@ XrResult layer_create_session_impl(
         } else {
             state->d3d12_device.Reset();
             state->d3d12_queue.Reset();
+        }
+    }
+    // A queue of the layer's own for synthesis, so the GPU-side wait on the
+    // optical flow fence does not sit in the middle of the application's
+    // queue. Only for a native D3D12 application: a D3D11 one already runs
+    // synthesis on the bridge queue created just above.
+    if (state->graphics_binding == SessionGraphicsBinding::d3d12 &&
+        state->d3d12_device && state->d3d12_queue) {
+        D3D12_COMMAND_QUEUE_DESC synthesis_queue_description{};
+        synthesis_queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        // Synthesis has a hard deadline the application's rendering does
+        // not: it must finish inside one display period or its frame is
+        // reprojected away.
+        synthesis_queue_description.Priority =
+            D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+        synthesis_queue_description.NodeMask =
+            state->d3d12_queue->GetDesc().NodeMask;
+        if (FAILED(state->d3d12_device->CreateCommandQueue(
+                &synthesis_queue_description,
+                IID_PPV_ARGS(
+                    state->d3d12_synthesis_queue.ReleaseAndGetAddressOf())))) {
+            // Fail open: synthesis stays on the application's queue, which
+            // is what every build before this one did.
+            state->d3d12_synthesis_queue.Reset();
+        } else {
+            state->graphics_binding_capabilities |= 8ULL;
         }
     }
     xrfg::bridge_flight_logger().event(
@@ -3774,7 +3833,10 @@ void continuous_presenter_main(
                      request->owned_frame->pending_current_copies) {
                     if (synthesizer) {
                         static_cast<void>(
-                            synthesizer->flush_current_copy());
+                            synthesizer->flush_current_copy(
+                                state->d3d12_synthesis_queue
+                                    ? state->d3d12_queue.Get()
+                                    : nullptr));
                     }
                 }
             }
@@ -4937,6 +4999,17 @@ struct PreparedProjectionFrame {
             ticket.current_serial,
             ticket.fence_value);
 
+        // The runtime orders its use of these swapchain images against the
+        // queue the application supplied, so when synthesis ran elsewhere
+        // that queue has to wait for it before the release below hands the
+        // images over. GPU-side, so it costs the application thread nothing.
+        if (state->session->d3d12_synthesis_queue && SUCCEEDED(submit_result)) {
+            static_cast<void>(
+                generation->synthesizer->synchronize_consumer_queue(
+                    state->session->d3d12_queue.Get(),
+                    ticket));
+        }
+
         bool synthetic_released = true;
         if (request_pair) {
             synthetic_released = release_private_image(
@@ -6083,7 +6156,10 @@ XrResult layer_end_frame_impl(
     // cycle that hands the runtime the frame which reads it.
     for (const auto& synthesizer : first_generated.pending_current_copies) {
         if (synthesizer) {
-            static_cast<void>(synthesizer->flush_current_copy());
+            static_cast<void>(synthesizer->flush_current_copy(
+                state->d3d12_synthesis_queue
+                    ? state->d3d12_queue.Get()
+                    : nullptr));
         }
     }
     const InternalCycleResult current_cycle =

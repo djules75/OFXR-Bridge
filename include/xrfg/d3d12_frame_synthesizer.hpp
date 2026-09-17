@@ -47,7 +47,15 @@ struct D3D12ReprojectionView {
 struct D3D12FrameSynthesisTicket {
     std::uint64_t previous_serial{};
     std::uint64_t current_serial{};
+    // The value the whole pair completes at, which on the deferred path is
+    // what the held-back current copy will signal - so it is not signalled
+    // until flush_current_copy submits that copy, a display period later.
     std::uint64_t fence_value{};
+    // The value at which the synthetic's pixels exist, signalled as soon as
+    // the synthesis work is queued. Anything waiting for the synthetic and
+    // only the synthetic must use this: waiting on fence_value instead
+    // blocks until a copy that has not been submitted yet completes.
+    std::uint64_t synthetic_fence_value{};
     std::uint32_t work_slot{};
     std::uint32_t synthetic_destination_index{
         std::numeric_limits<std::uint32_t>::max()};
@@ -177,7 +185,12 @@ public:
     // Safe to call when nothing is pending. Submission entry points flush
     // any copy still outstanding themselves, so a caller that never gets
     // here costs a frame of latency rather than correctness.
-    [[nodiscard]] HRESULT flush_current_copy() noexcept;
+    // Submits the held-back copy. consumer_queue, when the synthesis runs on
+    // a queue of its own, is made to wait for that copy here rather than at
+    // the pair's submission: at submission the copy has not been queued yet,
+    // so the wait would park the consumer for a whole display period.
+    [[nodiscard]] HRESULT flush_current_copy(
+        ID3D12CommandQueue* consumer_queue = nullptr) noexcept;
 
     // Relinquishes the retained rolling source against its last GPU-use fence.
     // This is nonblocking and is required before history invalidation.
@@ -201,6 +214,17 @@ public:
     // when none is ready, or an error for an invalid output pointer/readback.
     [[nodiscard]] HRESULT consume_nvidia_gpu_timing(
         D3D12NvidiaGpuTiming* timing) noexcept;
+
+    // Makes another queue wait on this ticket's completion before its own
+    // later work runs. Required when the synthesizer owns a queue of its own
+    // and writes into swapchain images: an OpenXR D3D12 runtime synchronizes
+    // those images against the queue the application supplied at session
+    // create, and sees nothing submitted elsewhere. Joining the two queues
+    // here is what makes the runtime's own ordering cover the synthesis. This
+    // is a GPU-side wait queued on the target; it never blocks the CPU.
+    [[nodiscard]] HRESULT synchronize_consumer_queue(
+        ID3D12CommandQueue* queue,
+        const D3D12FrameSynthesisTicket& ticket) noexcept;
 
     [[nodiscard]] bool initialized() const noexcept;
 
