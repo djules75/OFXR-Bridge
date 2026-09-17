@@ -2520,35 +2520,25 @@ struct D3D12FrameSynthesizer::Impl {
         return S_OK;
     }
 
-    // The synthetic destination is drawn into, and a resource sitting in
-    // COMMON is not promoted to RENDER_TARGET implicitly - D3D12 promotes
-    // into the copy and shader-read states, not that one. When the private
-    // swapchains rest in COMMON, which is what a synthesis queue of the
-    // layer's own needs at a queue ownership transfer, the transition has to
-    // be recorded here. With RENDER_TARGET as the resting state the barrier
-    // would be a no-op, and a barrier whose before and after states match is
-    // itself invalid, so it is skipped.
-    void transition_synthetic_render_target(
-        ID3D12GraphicsCommandList* command_list,
-        std::uint32_t synthetic_destination_index,
-        bool acquire) noexcept {
-        if (command_list == nullptr ||
-            release_state == D3D12_RESOURCE_STATE_RENDER_TARGET ||
-            synthetic_destination_index >= synthetic_destinations.size()) {
-            return;
-        }
-        ID3D12Resource* const target =
-            synthetic_destinations[synthetic_destination_index].resource.Get();
-        if (target == nullptr) {
-            return;
-        }
-        const D3D12_RESOURCE_BARRIER barrier = acquire
-            ? transition_barrier(
-                  target, release_state, D3D12_RESOURCE_STATE_RENDER_TARGET)
-            : transition_barrier(
-                  target, D3D12_RESOURCE_STATE_RENDER_TARGET, release_state);
-        command_list->ResourceBarrier(1, &barrier);
-    }
+    // NOTE: the synthetic destination is drawn into while the private
+    // swapchains rest in COMMON, which is not a state D3D12 promotes to
+    // RENDER_TARGET implicitly - it promotes into the copy and shader-read
+    // states, not that one. Bracketing the draws with an explicit
+    // COMMON -> RENDER_TARGET -> COMMON pair is correct by the spec and was
+    // tried in V148: it cost about a third of the frame rate and made frame
+    // times erratic, which is what a barrier through COMMON does to a large
+    // render target - a full decompress, and on this path a serialisation
+    // against the other queue that gives back the overlap the private queue
+    // exists to win.
+    //
+    // So the draws are left as they are. This is undefined behaviour that
+    // NVIDIA tolerates, and the whole dedicated-queue path is NVIDIA-only by
+    // decision, but it is undefined behaviour and it is written down here
+    // rather than discovered again. The way out is not a cheaper barrier: it
+    // is to stop writing runtime-owned images from the private queue at all,
+    // compositing into layer-owned intermediates that can carry
+    // ALLOW_SIMULTANEOUS_ACCESS and copying across on the application's
+    // queue - which is what the D3D11 interop path already does.
 
     [[nodiscard]] bool valid_game_motion_pair(
         const RollingSource& previous_source,
@@ -2717,10 +2707,6 @@ struct D3D12FrameSynthesizer::Impl {
 
         const auto rtv_start = rtv_heap->GetCPUDescriptorHandleForHeapStart();
         const UINT first_rtv = synthetic_destination_index * image_description.DepthOrArraySize;
-        transition_synthetic_render_target(
-            slot.command_list.Get(),
-            synthetic_destination_index,
-            true);
         for (UINT view_index = 0; view_index < target_views.size(); ++view_index) {
             const UINT slice = resolved_array_slice(target_views[view_index], view_index,
                 target_views.size(), image_description.DepthOrArraySize);
@@ -2770,10 +2756,6 @@ struct D3D12FrameSynthesizer::Impl {
             clear_synthetic_marker(slot.command_list.Get(), rtv, target_views[view_index],
                 static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
         }
-        transition_synthetic_render_target(
-            slot.command_list.Get(),
-            synthetic_destination_index,
-            false);
 
         std::array<D3D12_RESOURCE_BARRIER, 5> after{};
         UINT after_count = 0;
@@ -3242,10 +3224,6 @@ struct D3D12FrameSynthesizer::Impl {
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
         const UINT first_rtv = synthetic_destination_index *
             image_description.DepthOrArraySize;
-        transition_synthetic_render_target(
-            synthesis,
-            synthetic_destination_index,
-            true);
         for (UINT view_index = 0;
              view_index < static_cast<UINT>(target_views.size());
              ++view_index) {
@@ -3286,10 +3264,6 @@ struct D3D12FrameSynthesizer::Impl {
             clear_synthetic_marker(synthesis, rtv, target_views[view_index],
                 static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
         }
-        transition_synthetic_render_target(
-            synthesis,
-            synthetic_destination_index,
-            false);
 
         std::array<D3D12_RESOURCE_BARRIER,
                    3U + 4U * kMaxReprojectionViews> before_current_copy{};
@@ -3546,10 +3520,6 @@ struct D3D12FrameSynthesizer::Impl {
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
         const UINT first_rtv = synthetic_destination_index *
             image_description.DepthOrArraySize;
-        transition_synthetic_render_target(
-            slot.command_list.Get(),
-            synthetic_destination_index,
-            true);
         for (UINT view_index = 0;
              view_index < static_cast<UINT>(target_views.size());
              ++view_index) {
@@ -3579,10 +3549,6 @@ struct D3D12FrameSynthesizer::Impl {
             clear_synthetic_marker(slot.command_list.Get(), rtv, target_views[view_index],
                 static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
         }
-        transition_synthetic_render_target(
-            slot.command_list.Get(),
-            synthetic_destination_index,
-            false);
 
         const std::array<D3D12_RESOURCE_BARRIER, 1> before_current_copy{
             transition_barrier(
@@ -3732,10 +3698,6 @@ struct D3D12FrameSynthesizer::Impl {
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
         const UINT first_rtv = synthetic_destination_index *
             image_description.DepthOrArraySize;
-        transition_synthetic_render_target(
-            slot.command_list.Get(),
-            synthetic_destination_index,
-            true);
         for (UINT view_index = 0;
              view_index < static_cast<UINT>(target_views.size());
              ++view_index) {
@@ -3780,10 +3742,6 @@ struct D3D12FrameSynthesizer::Impl {
             clear_synthetic_marker(slot.command_list.Get(), rtv, target_views[view_index],
                 static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
         }
-        transition_synthetic_render_target(
-            slot.command_list.Get(),
-            synthetic_destination_index,
-            false);
 
         const D3D12_RESOURCE_BARRIER after_synthesis = transition_barrier(
             source,

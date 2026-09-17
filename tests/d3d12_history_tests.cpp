@@ -1953,12 +1953,12 @@ void test_synthesis_on_a_dedicated_queue(D3D12WarpFixture& fixture) {
         create_source_texture(fixture),
     };
     std::array<ComPtr<ID3D12Resource>, 2> current_destinations{
-        create_source_texture(fixture, kWidth, kHeight, D3D12_RESOURCE_STATE_COMMON),
-        create_source_texture(fixture, kWidth, kHeight, D3D12_RESOURCE_STATE_COMMON),
+        create_source_texture(fixture),
+        create_source_texture(fixture),
     };
     std::array<ComPtr<ID3D12Resource>, 2> synthetic_destinations{
-        create_source_texture(fixture, kWidth, kHeight, D3D12_RESOURCE_STATE_COMMON),
-        create_source_texture(fixture, kWidth, kHeight, D3D12_RESOURCE_STATE_COMMON),
+        create_source_texture(fixture),
+        create_source_texture(fixture),
     };
     std::array<ID3D12Resource*, 3> source_pointers{
         sources[0].Get(), sources[1].Get(), sources[2].Get()};
@@ -1999,7 +1999,7 @@ void test_synthesis_on_a_dedicated_queue(D3D12WarpFixture& fixture) {
             std::span<ID3D12Resource* const>(
                 synthetic_pointers.data(), synthetic_pointers.size()),
             kFormat,
-            D3D12_RESOURCE_STATE_COMMON)),
+            D3D12_RESOURCE_STATE_RENDER_TARGET)),
         "dedicated-queue synthesizer initialization failed");
 
     const ReprojectionViews views = make_reprojection_views();
