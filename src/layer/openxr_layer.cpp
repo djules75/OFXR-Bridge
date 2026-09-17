@@ -233,6 +233,12 @@ struct Exports {
 constexpr char kLayerName[] = "XR_APILAYER_XRFrameBridge_diagnostic";
 constexpr XrVersion kLayerApiVersion = XR_MAKE_VERSION(1, 0, 0);
 constexpr XrDuration kGenerationCooldownDuration = 1'000'000'000;
+// Consecutive submissions one scanout apart before any phase correction is
+// allowed to run. Phase means nothing until the rate is right: a grid that is
+// skipping slots has no stable phase to correct towards, and correcting one
+// anyway drives a feedback loop - see the comments at both correction sites.
+// Eight is a quarter of a second at 90 Hz.
+constexpr std::uint32_t kPhaseCorrectionGridStreak = 8;
 constexpr auto kStructuralQuarantineDuration = std::chrono::seconds(1);
 // The runtime's own xrWaitFrame pacing happens first. Only a bridge transaction
 // still pending after that natural idle window may hold the application here.
@@ -3638,7 +3644,30 @@ void pace_presenter_submission(
                 // The floor applies when the presenter is already past its
                 // deadline too - `remaining` is zero there, and that is the
                 // case that empties the window completely.
-                if (remaining > period * 3 / 4) {
+                //
+                // Both ends wait for a run of on-grid submissions, for the
+                // same reason the phase reference does: a grid that is
+                // skipping slots has no stable phase to correct towards, and
+                // correcting one anyway closes a loop. Measured in Atomic
+                // Heart on V157, where the application hitched to 16-33/s for
+                // four seconds: the starvation skips pushed the grid later
+                // through the catch-up, that lifted the hold over the ceiling,
+                // the pull then fired on 44-83% of frames and held the grid at
+                // 10.55-10.78 ms against 11.111, and running fast tripped the
+                // step-over into the next skip. It sustained itself for nine
+                // seconds after the application was back at 43-45/s, throwing
+                // away five to seven slots a second where two would have done,
+                // and stopped only when the hold drifted back under the
+                // ceiling on its own.
+                //
+                // The gate costs nothing in the cases the band exists for.
+                // Both were clean grids: Callisto parked at the ceiling for
+                // 47 s with no skips at all, and The Witcher 3 walked to the
+                // floor with 0.0-0.4 skips a second.
+                if (state->presenter_on_grid_streak <
+                    kPhaseCorrectionGridStreak) {
+                    // Rate is wrong; leave the schedule alone.
+                } else if (remaining > period * 3 / 4) {
                     state->presenter_next_submit -= period / 16;
                     pace_band_correction = -1;
                 } else if (remaining < period / 4) {
@@ -4087,7 +4116,6 @@ void continuous_presenter_main(
                     // capture was a deliberately hard scene skipping slots
                     // about twelve times a second, where it stays switched off
                     // and cannot ratchet.
-                    constexpr std::uint32_t kPhaseCorrectionGridStreak = 8;
                     if (state->presenter_on_grid_streak >=
                         kPhaseCorrectionGridStreak) {
                         const std::int64_t deficit = phase_deficit(
