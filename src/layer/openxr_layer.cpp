@@ -3559,6 +3559,7 @@ void pace_presenter_submission(
         const auto entered = std::chrono::steady_clock::now();
         std::int64_t behind_us = 0;
         std::chrono::nanoseconds remaining{0};
+        bool pulled_off_the_ceiling = false;
         {
             std::scoped_lock lock(state->presenter_mutex);
             if (!state->presenter_schedule_valid ||
@@ -3579,6 +3580,34 @@ void pace_presenter_submission(
                 // never be able to hold the presenter back instead.
                 ready_at = std::min(ready_at, entered + period);
                 remaining = ready_at - entered;
+                // The one restoring force on the grid's phase. Every other
+                // path here moves the deadline later - the catch-up adds whole
+                // periods, the step-over adds one - and the phase reference
+                // below cannot pull it back, because it tracks whatever phase
+                // the presenter is already holding and so has no opinion about
+                // a grid that is self-consistent and parked at the worst place
+                // in the period. Left alone the schedule ratchets to the end
+                // of the period and stays there.
+                //
+                // Measured in Callisto Protocol on SteamVR: V155 held 10.30 ms
+                // of an 11.11 ms period, dead flat from the seventh second to
+                // the end of the run, with 45.0 in, 90.0 out, an 11.111 ms
+                // grid and no skips or bunching at all. Every submission
+                // landed as late in its period as it could, the compositor
+                // kept the real frame and dropped the synthetic, and the
+                // headset showed 45. The builds that worked held 1.7 to 9.6 ms
+                // and moved about.
+                //
+                // `entered` is the moment the runtime's own xrWaitFrame
+                // released this presenter, so the hold is measured against the
+                // runtime's timeline rather than the layer's own, and the
+                // threshold means something absolute. Three quarters leaves
+                // the working range untouched and only acts on a schedule that
+                // has walked to the end.
+                if (remaining > period * 3 / 4) {
+                    state->presenter_next_submit -= period / 16;
+                    pulled_off_the_ceiling = true;
+                }
             }
         }
         // Slept without the lock: the application thread enqueues against this
@@ -3614,9 +3643,12 @@ void pace_presenter_submission(
                 }
             }
         }
+        // result=1 marks a frame where the hold had reached the ceiling and
+        // the grid was pulled back off it, so a capture shows whether the
+        // restoring force is working or fighting.
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::presenter_pace,
-            0,
+            pulled_off_the_ceiling ? 1 : 0,
             static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now() - entered)
