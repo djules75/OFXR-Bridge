@@ -3559,7 +3559,8 @@ void pace_presenter_submission(
         const auto entered = std::chrono::steady_clock::now();
         std::int64_t behind_us = 0;
         std::chrono::nanoseconds remaining{0};
-        bool pulled_off_the_ceiling = false;
+        // -1 pulled earlier off the ceiling, +1 pushed later off the floor.
+        int pace_band_correction = 0;
         {
             std::scoped_lock lock(state->presenter_mutex);
             if (!state->presenter_schedule_valid ||
@@ -3580,6 +3581,8 @@ void pace_presenter_submission(
                 // never be able to hold the presenter back instead.
                 ready_at = std::min(ready_at, entered + period);
                 remaining = ready_at - entered;
+            }
+            {
                 // The one restoring force on the grid's phase. Every other
                 // path here moves the deadline later - the catch-up adds whole
                 // periods, the step-over adds one - and the phase reference
@@ -3604,9 +3607,43 @@ void pace_presenter_submission(
                 // threshold means something absolute. Three quarters leaves
                 // the working range untouched and only acts on a schedule that
                 // has walked to the end.
+                //
+                // There is a floor as well as a ceiling, and it is not
+                // symmetry for its own sake. This hold *is* the window the
+                // runtime measures its client across: the pace runs inside the
+                // begun frame precisely so that begin-to-end spans the real
+                // work rather than an empty gap (47d8590). Let the hold reach
+                // zero and begin and end go back to back again, the runtime is
+                // handed a frame that costs a millisecond, and it schedules
+                // against that - asking for the frame late, assuming it will
+                // be ready, and reprojecting when it is not.
+                //
+                // That regressed here. The phase correction walks the grid
+                // earlier and nothing bounded it from below, so in The
+                // Witcher 3 the measured window fell from 8.0 ms at 35 s to
+                // 0.06 ms at 50 s, with 97.3% of frames reporting under a
+                // millisecond, and recovered only when the catch-up and
+                // step-over had pushed the schedule back later. Twenty-five
+                // seconds of the runtime scheduling against an empty client,
+                // with the layer's own view a flawless 45 in, 90 out, 11.111
+                // ms grid, no skips and no bunching throughout.
+                //
+                // So drive the hold into a band rather than off one edge. A
+                // quarter to three quarters of a period brackets the 5.7 to
+                // 8.5 ms the healthy stretches of that same run held, and
+                // since every other path moves the deadline later the
+                // schedule settles near the top of the band, which is also
+                // where the measured window is longest.
+                //
+                // The floor applies when the presenter is already past its
+                // deadline too - `remaining` is zero there, and that is the
+                // case that empties the window completely.
                 if (remaining > period * 3 / 4) {
                     state->presenter_next_submit -= period / 16;
-                    pulled_off_the_ceiling = true;
+                    pace_band_correction = -1;
+                } else if (remaining < period / 4) {
+                    state->presenter_next_submit += period / 16;
+                    pace_band_correction = 1;
                 }
             }
         }
@@ -3644,11 +3681,12 @@ void pace_presenter_submission(
             }
         }
         // result=1 marks a frame where the hold had reached the ceiling and
-        // the grid was pulled back off it, so a capture shows whether the
-        // restoring force is working or fighting.
+        // the grid was pulled back off it, result=2 one pushed up off the
+        // floor, so a capture shows which edge the schedule is being held away
+        // from and whether the band is working or fighting.
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::presenter_pace,
-            pulled_off_the_ceiling ? 1 : 0,
+            pace_band_correction < 0 ? 1 : (pace_band_correction > 0 ? 2 : 0),
             static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now() - entered)
