@@ -226,6 +226,20 @@ public:
         ID3D12CommandQueue* queue,
         const D3D12FrameSynthesisTicket& ticket) noexcept;
 
+    // The other half of that join, and the one a fence alone cannot be
+    // assumed to cover. xrWaitSwapchainImage makes an image safe to write on
+    // the queue the application supplied at session create; the runtime knows
+    // nothing about a private synthesis queue and inserts no wait for it. So
+    // the guarantee has to be carried across explicitly: the application's
+    // queue signals once the acquire has returned, and the synthesis queue
+    // waits on that before it writes. Without it the synthesis can land in an
+    // image the compositor has not finished with, which shows up as a
+    // synthetic that was generated, paced and complete and still never
+    // reached the headset. Call once per pair, after the images are acquired
+    // and before the pair is submitted.
+    [[nodiscard]] HRESULT synchronize_producer_queue(
+        ID3D12CommandQueue* queue) noexcept;
+
     [[nodiscard]] bool initialized() const noexcept;
 
 private:

@@ -4905,6 +4905,17 @@ struct PreparedProjectionFrame {
             return output;
         }
 
+        // Both private images are acquired. The runtime made them safe to
+        // write on the queue the application supplied, which is not the one
+        // about to write them, so carry that guarantee across before any
+        // synthesis is queued.
+        if (state->session->d3d12_synthesis_queue) {
+            std::scoped_lock gpu_lock(state->session->gpu_mutex);
+            static_cast<void>(
+                generation->synthesizer->synchronize_producer_queue(
+                    state->session->d3d12_queue.Get()));
+        }
+
         const std::uint32_t current_destination_index =
             static_cast<std::uint32_t>(current_slot) *
                 generation->current_images_per_slot +

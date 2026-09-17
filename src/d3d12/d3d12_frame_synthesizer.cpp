@@ -718,6 +718,11 @@ struct D3D12FrameSynthesizer::Impl {
     NV_OF_D3D12_API_FUNCTION_LIST nvidia_api{};
     std::array<NvOFHandle, kMaxReprojectionViews> nvidia_contexts{};
     ComPtr<ID3D12Fence> fence;
+    // Carries the runtime's acquire guarantee from the queue it knows about
+    // onto the one it does not. Kept apart from `fence` so it cannot disturb
+    // the submission values the rest of the pipeline tracks against that one.
+    ComPtr<ID3D12Fence> acquire_fence;
+    std::uint64_t next_acquire_fence_value{1};
     ComPtr<ID3D12Fence> nvidia_fence;
     ComPtr<ID3D12QueryHeap> nvidia_timestamp_heap;
     // Maps GPU ticks onto QueryPerformanceCounter, sampled once when the
@@ -2005,6 +2010,13 @@ struct D3D12FrameSynthesizer::Impl {
             0,
             D3D12_FENCE_FLAG_NONE,
             IID_PPV_ARGS(fence.GetAddressOf()));
+        if (FAILED(result)) {
+            return result;
+        }
+        result = device->CreateFence(
+            0,
+            D3D12_FENCE_FLAG_NONE,
+            IID_PPV_ARGS(acquire_fence.GetAddressOf()));
         if (FAILED(result)) {
             return result;
         }
@@ -4613,6 +4625,34 @@ HRESULT D3D12FrameSynthesizer::consume_nvidia_gpu_timing(
         if (timing != nullptr) {
             *timing = {};
         }
+        return E_FAIL;
+    }
+}
+
+HRESULT D3D12FrameSynthesizer::synchronize_producer_queue(
+    ID3D12CommandQueue* queue) noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if (impl_ == nullptr || queue == nullptr) {
+            return E_INVALIDARG;
+        }
+        if (impl_->queue == nullptr || impl_->acquire_fence == nullptr) {
+            return E_UNEXPECTED;
+        }
+        // Same queue on both sides means the acquire already applies; the
+        // signal and wait would be redundant rather than wrong.
+        if (queue == impl_->queue.Get()) {
+            return S_FALSE;
+        }
+        const std::uint64_t value = impl_->next_acquire_fence_value;
+        const HRESULT signal_result =
+            queue->Signal(impl_->acquire_fence.Get(), value);
+        if (FAILED(signal_result)) {
+            return signal_result;
+        }
+        ++impl_->next_acquire_fence_value;
+        return impl_->queue->Wait(impl_->acquire_fence.Get(), value);
+    } catch (...) {
         return E_FAIL;
     }
 }
