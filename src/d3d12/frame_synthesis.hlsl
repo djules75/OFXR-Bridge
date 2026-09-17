@@ -35,8 +35,24 @@ cbuffer SynthesisParameters : register(b0) {
     float2 GameMotionJitterDelta;
     CameraMapping PreviousMappings[2];
     uint Slice;
-    uint RepeatedCapture;
+    // Bit 0 is the repeated-capture flag. Bits 8-23 carry the synthetic's
+    // position between the two captures in 1/65535ths - 0 at the previous
+    // capture, 1 at the current. They share a slot because the root signature
+    // is full: 62 constants plus two descriptor tables is the whole 64-DWORD
+    // budget, leaving no room for a 63rd.
+    uint SynthesisFlags;
 };
+
+uint repeated_capture_flag() {
+    return SynthesisFlags & 1u;
+}
+
+// An unset field decodes to 0.5, which is the fixed midpoint this shader
+// used before the layer began deriving it.
+float synthesis_fraction() {
+    uint packed = (SynthesisFlags >> 8) & 0xffffu;
+    return packed == 0u ? 0.5 : float(packed) / 65535.0;
+}
 
 float3 rotate_by_quaternion(float4 quaternion, float3 input_vector) {
     return input_vector + 2.0 * cross(
@@ -614,16 +630,18 @@ float4 synthesize_midpoint(
         MappedCoordinate previous_coverage = map_target_to_source(
             pixel,
             PreviousMappings[ViewIndex]);
-        bool scene_changed = RepeatedCapture == 0 && !use_game_motion_pipeline &&
+        bool scene_changed = repeated_capture_flag() == 0 && !use_game_motion_pipeline &&
             !use_nvidia_cost &&
             (FlowAuxiliary.Load(int3(1, 0, 0)) & 0x0fU) != 0;
         if (previous_coverage.valid >= 0.5 && !scene_changed) {
-            bool preserve_stationary = validate_fast && RepeatedCapture == 0 &&
+            bool preserve_stationary = validate_fast && repeated_capture_flag() == 0 &&
                 current_fallback.valid >= 0.5 &&
                 fast_stationary_patch(pixel, Slice, current_fallback.color);
             if (preserve_stationary) {
-                output_color = saturate(0.5 * (current_fallback.color +
-                    sample_previous_target(pixel, Slice, ViewIndex).color));
+                output_color = saturate(lerp(
+                    sample_previous_target(pixel, Slice, ViewIndex).color,
+                    current_fallback.color,
+                    synthesis_fraction()));
             } else {
                 float2 raw_backward = float2(0.0, 0.0);
                 CameraSample previous_sample = (CameraSample)0;
@@ -638,7 +656,7 @@ float4 synthesize_midpoint(
                     float2 current_endpoint = pixel;
                     MappedCoordinate previous_endpoint;
                     [unroll] for (uint iteration = 0; iteration < 3; ++iteration) {
-                        raw_backward = RepeatedCapture != 0
+                        raw_backward = repeated_capture_flag() != 0
                             ? float2(0.0, 0.0)
                             : game_motion_for_pixel(
                                 current_endpoint, Slice, ViewIndex);
@@ -651,10 +669,11 @@ float4 synthesize_midpoint(
                         }
                         float2 target_displacement =
                             previous_endpoint.coordinate - current_endpoint;
-                        current_endpoint = pixel - 0.5 * target_displacement;
+                        current_endpoint =
+                            pixel - (1.0 - synthesis_fraction()) * target_displacement;
                     }
                     if (endpoints_valid) {
-                        raw_backward = RepeatedCapture != 0
+                        raw_backward = repeated_capture_flag() != 0
                             ? float2(0.0, 0.0)
                             : game_motion_for_pixel(
                                 current_endpoint, Slice, ViewIndex);
@@ -670,7 +689,7 @@ float4 synthesize_midpoint(
                             current_endpoint, Slice, ViewIndex);
                     }
                 } else {
-                    raw_backward = RepeatedCapture != 0
+                    raw_backward = repeated_capture_flag() != 0
                         ? float2(0.0, 0.0)
                         : flow_for_pixel(
                             pixel,
@@ -681,27 +700,30 @@ float4 synthesize_midpoint(
                     float2 pose_backward = previous_coverage.coordinate - pixel;
                     float2 residual_backward = raw_backward - pose_backward;
                     previous_sample = sample_previous_target(
-                        pixel + residual_backward * 0.5, Slice, ViewIndex);
+                        pixel + residual_backward * synthesis_fraction(), Slice, ViewIndex);
                     current_sample = sample_current_target(
-                        pixel - residual_backward * 0.5, Slice, ViewIndex);
+                        pixel - residual_backward * (1.0 - synthesis_fraction()),
+                        Slice,
+                        ViewIndex);
                 }
                 if (endpoints_valid) {
                     if (previous_sample.valid >= 0.5 && current_sample.valid >= 0.5) {
-                    float4 flow_midpoint = 0.5 * (
-                        previous_sample.color + current_sample.color);
+                    float4 flow_midpoint = lerp(
+                        previous_sample.color, current_sample.color, synthesis_fraction());
                     float disagreement = max(
                         abs(previous_sample.color.r - current_sample.color.r),
                         max(
                             abs(previous_sample.color.g - current_sample.color.g),
                             abs(previous_sample.color.b - current_sample.color.b)));
                     float confidence = saturate(1.0 - disagreement * 6.0);
-                    float4 stable_midpoint = 0.5 * (
-                        sample_previous_target(pixel, Slice, ViewIndex).color +
-                        current_fallback.color);
+                    float4 stable_midpoint = lerp(
+                        sample_previous_target(pixel, Slice, ViewIndex).color,
+                        current_fallback.color,
+                        synthesis_fraction());
                     if (use_nvidia_cost) {
                         float consistency_confidence = 1.0;
                         float cost_confidence = 1.0;
-                        if (RepeatedCapture == 0) {
+                        if (repeated_capture_flag() == 0) {
                             if (validate_fast) {
                                 confidence *= fast_endpoint_confidence(pixel, raw_backward, Slice);
                             }
