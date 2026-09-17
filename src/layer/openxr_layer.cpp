@@ -480,6 +480,9 @@ struct SessionState {
     // runtime_wait_lacks_pacing.
     std::chrono::steady_clock::duration last_application_wait_elapsed{};
     std::uint32_t unpaced_wait_streak{};
+    // Consecutive pairs whose two frames left the layer close enough together
+    // to land in one scanout window - see inline_pair_lands_in_one_scanout.
+    std::uint32_t bunched_pair_streak{};
     std::uint32_t steamvr_throttled_wait_streak{};
     // Consecutive application frames the layer could not generate from. A
     // single one says nothing - the frame passes through and the next one
@@ -5503,6 +5506,65 @@ struct InternalCycleResult {
     return state->minimum_runtime_display_period > 0 &&
            state->unpaced_wait_streak >= kUnpacedWaitPromotionStreak;
 }
+// The inline path hands the synthetic to the runtime and then, immediately
+// after, the real frame. Nothing in the layer decides how far apart those two
+// land: the gap is whatever the runtime imposes when it blocks the second
+// wait. When that gap is much shorter than a display period both frames
+// arrive inside one scanout window, the compositor keeps the later one - the
+// real frame - and drops the synthetic. The next window has nothing new and
+// repeats. Half the layer's work is discarded, the overlay still counts it,
+// and the application is separately halved because each of its frames now
+// costs two runtime cycles. A game that held the full rate without the layer
+// drops to half with it.
+//
+// The presenter fixes this by construction: it sleeps to its own
+// scanout-locked grid between hand-overs, so the two frames are a period
+// apart whatever the runtime does with a wait.
+//
+// Measured here rather than inferred. The two existing detectors ask whether
+// the situation looks like one that needs a presenter - how many threads the
+// application uses, how long a wait took - and on Atomic Heart both answer
+// no while the output is plainly wrong. Captured on that title across two
+// runtimes and two refresh rates, the gap sits at 0.42, 0.45 and 0.54 of a
+// period against about 1.0 when the spacing is right, so three quarters
+// separates them with margin either way.
+//
+// A long streak because promoting is a large switch - it hands every
+// downstream frame call to another thread, and an over-eager version of the
+// SteamVR detector once hung the GPU four milliseconds after firing. Thirty
+// pairs is a quarter of a second at 120 Hz and cannot be reached by a hitch,
+// while the real thing holds for thousands of consecutive frames.
+[[nodiscard]] bool inline_pair_lands_in_one_scanout(
+    const std::shared_ptr<SessionState>& state,
+    std::chrono::steady_clock::duration gap) noexcept {
+    constexpr std::uint32_t kBunchedPairPromotionStreak = 30;
+    constexpr std::int64_t kBunchedNumerator = 3;
+    constexpr std::int64_t kBunchedDenominator = 4;
+    const auto gap_nanoseconds =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(gap).count();
+    std::scoped_lock lock(state->mutex);
+    const XrDuration period = state->minimum_runtime_display_period;
+    if (period <= 0 || gap_nanoseconds < 0) {
+        state->bunched_pair_streak = 0;
+        return false;
+    }
+    const bool bunched =
+        gap_nanoseconds * kBunchedDenominator < period * kBunchedNumerator;
+    state->bunched_pair_streak =
+        bunched ? state->bunched_pair_streak + 1 : 0;
+    if (!bunched ||
+        state->bunched_pair_streak < kBunchedPairPromotionStreak) {
+        return false;
+    }
+    xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::presenter_transition,
+        static_cast<std::int64_t>(state->bunched_pair_streak),
+        static_cast<std::uint64_t>(gap_nanoseconds),
+        static_cast<std::uint64_t>(period),
+        200);
+    return true;
+}
+
 [[nodiscard]] bool steamvr_wait_requires_continuous_presenter(
     const std::shared_ptr<SessionState>& state,
     const InternalCycleResult& cycle) noexcept {
@@ -6310,6 +6372,10 @@ XrResult layer_end_frame_impl(
     }
     const InternalCycleResult current_cycle =
         submit_current_cycle(state, current_generated.info);
+    // How far apart the runtime actually received the two frames of this
+    // pair: from the synthetic's hand-over completing to the real frame's.
+    const auto inline_pair_gap = std::chrono::steady_clock::now() -
+        (first_end_started + first_end_elapsed);
     if (!current_cycle.completed) {
         // The synthetic submission has already completed. A transient runtime
         // failure in the optional second cycle is recovered by the established
@@ -6319,7 +6385,8 @@ XrResult layer_end_frame_impl(
     } else if (steamvr_wait_requires_continuous_presenter(
                    state,
                    current_cycle) ||
-               runtime_wait_lacks_pacing(state)) {
+               runtime_wait_lacks_pacing(state) ||
+               inline_pair_lands_in_one_scanout(state, inline_pair_gap)) {
         // Request the promotion; do not perform it here. submit_current_cycle
         // has already submitted this frame, so seeding a freshly started
         // presenter thread with it handed a second owner to composition layers
