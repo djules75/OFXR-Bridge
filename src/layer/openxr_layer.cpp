@@ -534,6 +534,12 @@ struct SessionState {
     // cadence. Chaining each wait off the last submission added about 4.6 ms
     // of per-cycle overhead to a 10 ms pace and held the runtime to 64/s.
     std::chrono::steady_clock::time_point presenter_next_submit{};
+    // The best lead this presenter has managed lately: predictedDisplayTime
+    // minus the moment the frame aimed at it was actually submitted. The two
+    // clocks have different epochs, so the value is meaningless on its own
+    // and exact as a comparison - which is all the phase needs.
+    std::int64_t presenter_lead_reference{};
+    bool presenter_lead_valid{};
     bool presenter_schedule_valid{};
     // The display time the runtime reported for the previous internal
     // xrWaitFrame, and how many slots the pace has been asked to give back.
@@ -3840,6 +3846,15 @@ void continuous_presenter_main(
                     }
                 }
             }
+            // Where in the period this submission landed, measured against the
+            // scanout the runtime aimed it at. The epochs differ, so only
+            // comparisons between these values mean anything - which is what
+            // the phase correction below uses them for.
+            const std::int64_t submitted_lead =
+                static_cast<std::int64_t>(frame_state.predictedDisplayTime) -
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count();
             {
                 // Advance the schedule by exactly one period so this loop's
                 // own cost does not compound into the cadence, and resync
@@ -3857,6 +3872,49 @@ void continuous_presenter_main(
                         state->presenter_display_period > 0;
                 } else {
                     state->presenter_next_submit += period;
+                    // Pull the grid back towards the best phase this
+                    // presenter has managed. Everything else here corrects
+                    // the grid's *rate* - a repeated scanout or a skipped
+                    // one - and so only runs when the rate is wrong. Once one
+                    // submission lands per scanout the rate is right at every
+                    // phase, including phases that put the submission on top
+                    // of the runtime's deadline, so those corrections switch
+                    // off and whatever offset the last disturbance left is
+                    // frozen. Captured: a hard scene walked the offset 7.7 ms
+                    // later in two steps and it never came back, while the
+                    // layer's own view stayed a flawless 45 in, 90 out, 100%
+                    // on grid - the grid was self-consistent and simply in
+                    // the wrong place.
+                    //
+                    // predictedDisplayTime is the runtime's own scanout time,
+                    // so the interval from it back to the submission is an
+                    // absolute measure of where in the period this presenter
+                    // sits. Larger is further from the deadline and better;
+                    // the reference decays slowly so a genuine change in the
+                    // runtime's timing is followed rather than fought.
+                    if (state->presenter_lead_valid) {
+                        const std::int64_t behind_best =
+                            state->presenter_lead_reference - submitted_lead;
+                        constexpr std::int64_t kLeadTolerance = 1'000'000;
+                        if (behind_best > kLeadTolerance) {
+                            const auto correction = std::min<std::chrono::nanoseconds>(
+                                period / 16,
+                                std::chrono::nanoseconds(behind_best));
+                            state->presenter_next_submit -= correction;
+                        }
+                    }
+                    // The reference follows the best phase achieved, and bleeds
+                    // down about a period every four seconds so a runtime that
+                    // genuinely changes its timing is tracked rather than
+                    // chased forever against a stale best.
+                    if (!state->presenter_lead_valid ||
+                        submitted_lead > state->presenter_lead_reference) {
+                        state->presenter_lead_reference = submitted_lead;
+                        state->presenter_lead_valid = true;
+                    } else {
+                        constexpr std::int64_t kLeadReferenceDecay = 31'000;
+                        state->presenter_lead_reference -= kLeadReferenceDecay;
+                    }
                     // fresh full period for being late. Resetting to now+period
                     // instead made every cycle cost a period plus whatever the
                     // loop took, which is how a 11.11 ms pace produced 15.5 ms
