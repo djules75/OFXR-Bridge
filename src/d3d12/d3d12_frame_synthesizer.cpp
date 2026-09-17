@@ -282,8 +282,24 @@ struct SynthesisParameters {
     std::array<float, 2> game_motion_jitter_delta{};
     std::array<CameraMapping, kMaxReprojectionViews> previous_mappings{};
     UINT slice{};
-    UINT repeated_capture{};
+    // Bit 0 is the repeated-capture flag; bits 8-23 carry the synthetic's
+    // position between the two captures in 1/65535ths. They share a slot
+    // because the root signature is full - see the assert below.
+    UINT synthesis_flags{};
 };
+
+// Packs the synthetic's position between the two captures into the spare
+// bits of synthesis_flags. Zero is reserved for "not set", which the shader
+// decodes as the old fixed midpoint, so a half that rounds to zero is nudged
+// rather than silently meaning something else.
+[[nodiscard]] constexpr UINT packed_synthesis_fraction(float fraction) noexcept {
+    const float clamped = fraction < 0.0F ? 0.0F : (fraction > 1.0F ? 1.0F : fraction);
+    UINT packed = static_cast<UINT>(clamped * 65535.0F + 0.5F);
+    if (packed == 0U) {
+        packed = 1U;
+    }
+    return packed << 8U;
+}
 
 constexpr UINT kSynthesisConstantCount =
     static_cast<UINT>(sizeof(SynthesisParameters) / sizeof(UINT));
@@ -748,6 +764,10 @@ struct D3D12FrameSynthesizer::Impl {
     UINT flow_block_size{};
     std::uint64_t next_fence_value{1};
     std::uint64_t last_submitted_fence_value{};
+    // Set by each submit_pair from the interval its two captures span. Half
+    // is only correct when the application runs at exactly half the display
+    // rate; away from that the synthetic belongs somewhere else between them.
+    float synthetic_fraction{0.5F};
     // The work slot whose current copy has been recorded and closed but not
     // yet submitted, and the fence value that submission will signal. The
     // slot cannot be recycled and the history lease cannot retire until it
@@ -2633,6 +2653,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         SynthesisParameters parameters{};
+        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;
@@ -2846,6 +2867,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.command_list->SetPipelineState(pack_pipeline.Get());
 
         SynthesisParameters parameters{};
+        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;
@@ -3007,6 +3029,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.command_list->SetPipelineState(nvidia_pack_pipeline.Get());
 
         SynthesisParameters parameters{};
+        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;
@@ -3375,6 +3398,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.command_list->SetPipelineState(pack_pipeline.Get());
 
         SynthesisParameters parameters{};
+        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;
@@ -3607,6 +3631,7 @@ struct D3D12FrameSynthesizer::Impl {
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         SynthesisParameters parameters{};
+        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;
@@ -3616,7 +3641,7 @@ struct D3D12FrameSynthesizer::Impl {
         parameters.flow_width = flow_width;
         parameters.flow_height = flow_height;
         parameters.flow_block_size = flow_block_size;
-        parameters.repeated_capture = 1;
+        parameters.synthesis_flags |= 1U;
         for (UINT view_index = 0;
              view_index < static_cast<UINT>(target_views.size());
              ++view_index) {
@@ -4101,7 +4126,14 @@ struct D3D12FrameSynthesizer::Impl {
         D3D12FrameSynthesisTicket* output_ticket,
         const std::optional<OverlayPlacement>& debug_marker,
         std::shared_ptr<const DlssMotionVectorSet> motion_vectors,
-        bool defer_current_copy) noexcept {
+        bool defer_current_copy,
+        float interpolation_fraction) noexcept {
+        // A degenerate interval says the pairing is not in a steady cadence;
+        // half is the safe answer there, not an extrapolation.
+        synthetic_fraction =
+            (interpolation_fraction > 0.05F && interpolation_fraction < 0.95F)
+                ? interpolation_fraction
+                : 0.5F;
         if (output_ticket == nullptr) {
             return E_POINTER;
         }
@@ -4528,7 +4560,8 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
     D3D12FrameSynthesisTicket* ticket,
     std::optional<OverlayPlacement> debug_marker,
     std::shared_ptr<const DlssMotionVectorSet> motion_vectors,
-    bool defer_current_copy) noexcept {
+    bool defer_current_copy,
+    float interpolation_fraction) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr) {
@@ -4546,7 +4579,8 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
             ticket,
             debug_marker,
             std::move(motion_vectors),
-            defer_current_copy);
+            defer_current_copy,
+            interpolation_fraction);
     } catch (...) {
         if (ticket != nullptr) {
             *ticket = {};

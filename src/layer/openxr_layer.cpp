@@ -2630,8 +2630,11 @@ XrResult layer_wait_frame_impl(
         static_cast<void>(wait_for_previous_session_synthesis(state));
         state->application_wait_pending_begin = true;
         std::scoped_lock lock(state->mutex);
-        if (state->dispatch->steamvr_runtime &&
-            !use_continuous_presenter &&
+        // Every runtime, not only SteamVR: the synthetic interpolation fraction
+        // needs a display period wherever generation runs, and the promotion
+        // that also reads this guards on the runtime itself. A runtime that
+        // never reports one keeps the fixed midpoint.
+        if (!use_continuous_presenter &&
             frame_state->predictedDisplayPeriod > 0 &&
             (state->minimum_runtime_display_period == 0 ||
              frame_state->predictedDisplayPeriod <
@@ -4908,7 +4911,8 @@ struct PreparedProjectionFrame {
 [[nodiscard]] PreparedGeneration prepare_frame_generation(
     XrSwapchain application_swapchain,
     bool request_pair,
-    std::span<const xrfg::D3D12ReprojectionView> current_source_views) noexcept {
+    std::span<const xrfg::D3D12ReprojectionView> current_source_views,
+    float interpolation_fraction) noexcept {
     PreparedGeneration output{};
     try {
         const auto state = find_swapchain(application_swapchain);
@@ -5040,7 +5044,8 @@ struct PreparedProjectionFrame {
                                           &ticket,
                                           debug_marker,
                                           motion_vectors,
-                                          defer_current_copy)
+                                          defer_current_copy,
+                                          interpolation_fraction)
                                     : generation->synthesizer->submit_prime(
                                           *capture,
                                           current_source_views,
@@ -5140,10 +5145,51 @@ struct PreparedProjectionFrame {
     }
 }
 
+
+// Where the synthetic belongs between the previous capture and the current
+// one, given that the presenter shows it one display period before the
+// current frame. The scene should therefore be as it was one period before
+// the current capture:
+//
+//     fraction = 1 - period / (current_time - previous_time)
+//
+// Two display periods between captures - an application running at exactly
+// half the display rate - gives 0.5, which is what the synthesis shader used
+// unconditionally. Anywhere else 0.5 puts the synthetic at the wrong instant,
+// and since the error follows the application's frame interval it moves every
+// frame instead of being a constant nobody would notice.
+//
+// Half is also the right answer when the inputs cannot support anything
+// better: no previous snapshot, no observed display period, or an interval
+// that is not a plausible cadence. Those are the cases where extrapolating
+// would be worse than the old fixed behaviour.
+[[nodiscard]] float synthetic_interpolation_fraction(
+    const std::shared_ptr<SessionState>& state,
+    const std::optional<ProjectionSnapshot>& previous_snapshot,
+    const ProjectionSnapshot& current_snapshot) noexcept {
+    constexpr float kFixedMidpoint = 0.5F;
+    if (!state || !previous_snapshot) {
+        return kFixedMidpoint;
+    }
+    XrDuration period = 0;
+    {
+        std::scoped_lock lock(state->mutex);
+        period = state->minimum_runtime_display_period;
+    }
+    const XrTime interval =
+        current_snapshot.display_time - previous_snapshot->display_time;
+    // One period or less cannot hold a synthetic at all, and an interval wider
+    // than four says the pairing has already lost its cadence.
+    if (period <= 0 || interval <= period || interval > period * 4) {
+        return kFixedMidpoint;
+    }
+    return 1.0F - static_cast<float>(period) / static_cast<float>(interval);
+}
 [[nodiscard]] PreparedProjectionFrame prepare_projection_frame(
     const ProjectionSnapshot& snapshot,
     std::span<const ProjectionResourceMapping> mappings,
-    bool request_pair) noexcept {
+    bool request_pair,
+    float interpolation_fraction) noexcept {
     PreparedProjectionFrame output{};
     try {
         if (mappings.empty()) {
@@ -5169,7 +5215,8 @@ struct PreparedProjectionFrame {
                 request_pair,
                 std::span<const xrfg::D3D12ReprojectionView>(
                     reprojection_views->data(),
-                    reprojection_views->size()));
+                    reprojection_views->size()),
+                interpolation_fraction);
             all_expected_kind =
                 all_expected_kind && generation.kind == expected_kind;
             all_anchor_current =
@@ -5905,12 +5952,26 @@ XrResult layer_end_frame_impl(
             return capacity_result;
         }
     }
+    // The synthetic is displayed one display period before the current frame,
+    // so it should show the scene as it was one period before the current
+    // capture - which is halfway between the two captures only when they are
+    // two display periods apart, that is when the application is running at
+    // exactly half the display rate. Away from that the fixed midpoint places
+    // the synthetic at the wrong instant, and because the error tracks the
+    // application's frame interval it changes every frame rather than being a
+    // constant offset nobody would see. Alternating early and late is what
+    // reads as judder.
+    const float interpolation_fraction = synthetic_interpolation_fraction(
+        state,
+        previous_snapshot,
+        current_snapshot);
     PreparedProjectionFrame prepared = prepare_projection_frame(
         current_snapshot,
         std::span<const ProjectionResourceMapping>(
             resource_mappings.mappings.data(),
             resource_mappings.mappings.size()),
-        metadata_pairable);
+        metadata_pairable,
+        interpolation_fraction);
     // Acquire, synthesis and release all ran without the content lock, so the
     // presenter kept submitting throughout. Hold it only across the handoff.
     if (use_continuous_presenter) {

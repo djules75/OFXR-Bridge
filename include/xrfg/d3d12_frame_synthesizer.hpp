@@ -171,7 +171,14 @@ public:
         // flush_current_copy to hand over once the synthetic frame has gone
         // to the runtime. Defaults off: a caller that never flushes would
         // publish a stale current frame.
-        bool defer_current_copy = false) noexcept;
+        bool defer_current_copy = false,
+        // Where the synthetic sits between the previous capture and the
+        // current one, 0 at the previous and 1 at the current. Half is right
+        // only when the application runs at exactly half the display rate,
+        // because only then are the two captures two display periods apart
+        // and the synthetic shown one period before the current frame.
+        // Clamped internally; out-of-range values fall back to half.
+        float interpolation_fraction = 0.5F) noexcept;
 
     // Executes the current output's copy, which submit_pair records but
     // deliberately leaves unsubmitted. The synthetic frame is handed to the
