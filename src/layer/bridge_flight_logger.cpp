@@ -87,6 +87,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
         return "virtual_clock_clamp";
     case BridgeFlightOperation::session_state:
         return "session_state";
+    case BridgeFlightOperation::presenter_pair_release:
+        return "presenter_pair_release";
     }
     return "unknown";
 }

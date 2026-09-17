@@ -4337,6 +4337,7 @@ void wait_for_presenter_pair(
     const std::shared_ptr<SessionState>& state) noexcept {
     try {
         constexpr std::uint64_t kPresenterFramesPerPair = 2;
+        const auto entered = std::chrono::steady_clock::now();
         std::unique_lock lock(state->presenter_mutex);
         state->presenter_condition.wait(lock, [&] {
             return state->presenter_frame_serial >=
@@ -4349,7 +4350,32 @@ void wait_for_presenter_pair(
             state->presenter_stop_requested) {
             return;
         }
-        state->application_served_serial = state->presenter_frame_serial;
+        // Diagnostic only, and the number this hold is judged by. Assigning
+        // the presenter's serial rather than advancing by the pair means an
+        // application that arrives late catches up in one step: the surplus
+        // below is what that step discards, and while it is non-zero this
+        // hold is not throttling anything - the application is gated only by
+        // whatever it blocks on next, which is the frame-start synthesis
+        // fence, and that one meters nothing.
+        const std::uint64_t served = state->application_served_serial;
+        const std::uint64_t reached = state->presenter_frame_serial;
+        const std::uint64_t surplus =
+            reached > served + kPresenterFramesPerPair
+            ? reached - served - kPresenterFramesPerPair
+            : 0;
+        state->application_served_serial = reached;
+        // Never record under presenter_mutex: the presenter thread takes it
+        // every frame, and this path has deadlocked the layer twice.
+        lock.unlock();
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::presenter_pair_release,
+            static_cast<std::int64_t>(surplus),
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - entered)
+                    .count()),
+            reached,
+            served);
     } catch (...) {
     }
 }
