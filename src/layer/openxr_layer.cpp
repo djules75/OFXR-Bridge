@@ -543,6 +543,9 @@ struct SessionState {
     // and exact as a comparison - which is all the phase needs.
     std::int64_t presenter_lead_reference{};
     bool presenter_lead_valid{};
+    // When the previous submission actually went out, so the phase controller
+    // can tell whether a lead was achieved on the grid or by overshooting it.
+    std::chrono::steady_clock::time_point presenter_last_submitted_at{};
     bool presenter_schedule_valid{};
     // The display time the runtime reported for the previous internal
     // xrWaitFrame, and how many slots the pace has been asked to give back.
@@ -3913,14 +3916,39 @@ void continuous_presenter_main(
                     // down about a period every four seconds so a runtime that
                     // genuinely changes its timing is tracked rather than
                     // chased forever against a stale best.
-                    if (!state->presenter_lead_valid ||
-                        submitted_lead > state->presenter_lead_reference) {
+                    // Only a submission that landed on the grid may raise the
+                    // reference. Without that test the controller feeds
+                    // itself: pulling the deadline earlier lengthens the
+                    // lead, the longer lead becomes the new best, and the
+                    // next frame is pulled earlier again. It creeps forward
+                    // until the step-over shoves the deadline a whole period
+                    // and starts over. Measured on a 90 Hz Pimax with the
+                    // application flat at 45/s and the GPU at 35%: the phase
+                    // walked 6 ms earlier across a minute, the mean gap stayed
+                    // a perfect 11.11 ms, and only 78% of submissions landed
+                    // in their slot - 3.3% bunched under 6 ms and 12.4% a
+                    // period or more late, which is frames doubled and
+                    // dropped. An overshoot produces an off-grid submission by
+                    // definition, so gating on the grid breaks the loop while
+                    // leaving a genuinely good phase free to set the mark.
+                    const auto since_previous =
+                        state->presenter_last_submitted_at ==
+                            std::chrono::steady_clock::time_point{}
+                        ? period
+                        : (now - state->presenter_last_submitted_at);
+                    const bool landed_on_grid =
+                        since_previous > period * 9 / 10 &&
+                        since_previous < period * 11 / 10;
+                    if (landed_on_grid &&
+                        (!state->presenter_lead_valid ||
+                         submitted_lead > state->presenter_lead_reference)) {
                         state->presenter_lead_reference = submitted_lead;
                         state->presenter_lead_valid = true;
-                    } else {
+                    } else if (state->presenter_lead_valid) {
                         constexpr std::int64_t kLeadReferenceDecay = 31'000;
                         state->presenter_lead_reference -= kLeadReferenceDecay;
                     }
+                    state->presenter_last_submitted_at = now;
                     // fresh full period for being late. Resetting to now+period
                     // instead made every cycle cost a period plus whatever the
                     // loop took, which is how a 11.11 ms pace produced 15.5 ms
