@@ -326,7 +326,12 @@ private:
 [[nodiscard]] ComPtr<ID3D12Resource> create_source_texture(
     D3D12WarpFixture& fixture,
     UINT width = kWidth,
-    UINT height = kHeight) {
+    UINT height = kHeight,
+    // The layer's private swapchains rest in COMMON when the synthesis runs
+    // on a queue of its own, because that is the state D3D12 wants at a queue
+    // ownership transfer. A destination created in any other state would not
+    // match the first barrier those command lists record.
+    D3D12_RESOURCE_STATES initial_state = D3D12_RESOURCE_STATE_RENDER_TARGET) {
     const D3D12_HEAP_PROPERTIES properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
     const D3D12_RESOURCE_DESC description = stereo_texture_description(width, height);
     ComPtr<ID3D12Resource> texture;
@@ -335,7 +340,7 @@ private:
             &properties,
             D3D12_HEAP_FLAG_NONE,
             &description,
-            D3D12_RESOURCE_STATE_RENDER_TARGET,
+            initial_state,
             nullptr,
             IID_PPV_ARGS(texture.GetAddressOf())),
         "ID3D12Device::CreateCommittedResource(source texture)");
@@ -1924,6 +1929,161 @@ void test_depth_private_history_allows_shader_resource_views(D3D12WarpFixture& f
     require(
         operation_succeeded(history.wait_for_idle()),
         "shader-readable history wait_for_idle failed");
+}
+
+// Synthesis on a queue of the layer's own, which is what the layer does for a
+// native D3D12 application. The debug layer is on here, so a cross-queue
+// ownership violation is reported rather than silently producing the wrong
+// pixels - the failure this configuration actually had, where every timing
+// record said the frame was generated, paced and complete and the runtime
+// still displayed something else.
+void test_synthesis_on_a_dedicated_queue(D3D12WarpFixture& fixture) {
+    D3D12_COMMAND_QUEUE_DESC queue_description{};
+    queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    queue_description.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+    ComPtr<ID3D12CommandQueue> synthesis_queue;
+    require_hresult(
+        fixture.device()->CreateCommandQueue(
+            &queue_description, IID_PPV_ARGS(synthesis_queue.GetAddressOf())),
+        "dedicated synthesis queue creation");
+
+    std::array<ComPtr<ID3D12Resource>, 3> sources{
+        create_source_texture(fixture),
+        create_source_texture(fixture),
+        create_source_texture(fixture),
+    };
+    std::array<ComPtr<ID3D12Resource>, 2> current_destinations{
+        create_source_texture(fixture, kWidth, kHeight, D3D12_RESOURCE_STATE_COMMON),
+        create_source_texture(fixture, kWidth, kHeight, D3D12_RESOURCE_STATE_COMMON),
+    };
+    std::array<ComPtr<ID3D12Resource>, 2> synthetic_destinations{
+        create_source_texture(fixture, kWidth, kHeight, D3D12_RESOURCE_STATE_COMMON),
+        create_source_texture(fixture, kWidth, kHeight, D3D12_RESOURCE_STATE_COMMON),
+    };
+    std::array<ID3D12Resource*, 3> source_pointers{
+        sources[0].Get(), sources[1].Get(), sources[2].Get()};
+    std::array<ID3D12Resource*, 2> current_pointers{
+        current_destinations[0].Get(), current_destinations[1].Get()};
+    std::array<ID3D12Resource*, 2> synthetic_pointers{
+        synthetic_destinations[0].Get(), synthetic_destinations[1].Get()};
+
+    upload_pattern(fixture, sources[0].Get(), make_solid_pattern({
+        RgbaBytes{16, 40, 72, 255}, RgbaBytes{32, 56, 88, 255}}));
+    upload_pattern(fixture, sources[1].Get(), make_solid_pattern({
+        RgbaBytes{80, 104, 136, 255}, RgbaBytes{96, 120, 152, 255}}));
+
+    // The history stays on the application's queue. Its capture has to be
+    // ordered after the application's own rendering, which is exactly what
+    // that queue gives it.
+    auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
+    require(
+        operation_succeeded(history->initialize(
+            fixture.device(),
+            fixture.queue(),
+            std::span<ID3D12Resource* const>(
+                source_pointers.data(), source_pointers.size()),
+            D3D12_RESOURCE_STATE_RENDER_TARGET)),
+        "dedicated-queue history initialization failed");
+
+    // COMMON rather than RENDER_TARGET: these stand in for the layer's own
+    // private swapchains, and COMMON is the state D3D12 requires at the point
+    // queue ownership transfers.
+    xrfg::D3D12FrameSynthesizer synthesizer;
+    require(
+        operation_succeeded(synthesizer.initialize(
+            fixture.device(),
+            synthesis_queue.Get(),
+            history,
+            std::span<ID3D12Resource* const>(
+                current_pointers.data(), current_pointers.size()),
+            std::span<ID3D12Resource* const>(
+                synthetic_pointers.data(), synthetic_pointers.size()),
+            kFormat,
+            D3D12_RESOURCE_STATE_COMMON)),
+        "dedicated-queue synthesizer initialization failed");
+
+    const ReprojectionViews views = make_reprojection_views();
+
+    // A join against the queue the synthesis already runs on is redundant
+    // rather than wrong, and has to say so instead of queueing a wait.
+    require(
+        synthesizer.synchronize_producer_queue(synthesis_queue.Get()) == S_FALSE,
+        "producer join did not report the same queue as already ordered");
+    require(
+        operation_succeeded(
+            synthesizer.synchronize_producer_queue(fixture.queue())),
+        "producer join across queues failed");
+
+    xrfg::D3D12HistoryCaptureTicket capture_a{};
+    require(
+        operation_succeeded(history->capture(0, &capture_a)) &&
+            operation_succeeded(history->commit(capture_a)),
+        "dedicated-queue capture A failed");
+    xrfg::D3D12FrameSynthesisTicket prime_ticket{};
+    require(
+        operation_succeeded(synthesizer.submit_prime(
+            capture_a, views, 0, &prime_ticket)),
+        "prime on the dedicated queue failed");
+
+    // The prime is still queued; the pair tests the same submission slot, so
+    // let it land first the way the frame-start poll does in the layer.
+    require(
+        operation_succeeded(synthesizer.wait_for_previous_submission(500)),
+        "waiting out the dedicated-queue prime failed");
+
+    xrfg::D3D12HistoryCaptureTicket capture_b{};
+    require(
+        operation_succeeded(history->capture(1, &capture_b)) &&
+            operation_succeeded(history->commit(capture_b)),
+        "dedicated-queue capture B failed");
+
+    // Deferred, as the native D3D12 path always is. The pair then reserves two
+    // fence values: the synthetic's, signalled now, and the pair's, which the
+    // held-back copy signals only once flush_current_copy submits it.
+    xrfg::D3D12FrameSynthesisTicket pair_ticket{};
+    require(
+        operation_succeeded(synthesizer.submit_pair(
+            capture_b,
+            views,
+            views,
+            0,
+            1,
+            &pair_ticket,
+            std::nullopt,
+            {},
+            true)),
+        "deferred pair on the dedicated queue failed");
+    require(
+        pair_ticket.synthetic_fence_value != 0,
+        "deferred pair reported no value for the synthetic");
+    require(
+        pair_ticket.synthetic_fence_value < pair_ticket.fence_value,
+        "deferred pair put the synthetic at or after the pair's own value; a "
+        "consumer joined on that would park until the copy is flushed a "
+        "display period later");
+
+    // The consumer join carries the synthesis back to the queue the runtime
+    // orders its own reads against.
+    require(
+        operation_succeeded(
+            synthesizer.synchronize_consumer_queue(fixture.queue(), pair_ticket)),
+        "consumer join across queues failed");
+    require(
+        synthesizer.synchronize_consumer_queue(
+            synthesis_queue.Get(), pair_ticket) == S_FALSE,
+        "consumer join did not report the same queue as already ordered");
+
+    require(
+        operation_succeeded(synthesizer.flush_current_copy(fixture.queue())),
+        "flushing the held-back copy across queues failed");
+    require(
+        operation_succeeded(synthesizer.wait_for_idle()),
+        "dedicated-queue synthesizer did not go idle");
+
+    // The synthesizer falls out of scope here. Its destructor has to drain the
+    // synthesis queue itself, because nothing outside waits on it. Without
+    // that the slot allocators are released with work still in flight, which
+    // crashed six call-chain tests at process teardown.
 }
 
 void test_rolling_frame_synthesizer(D3D12WarpFixture& fixture) {
@@ -3830,6 +3990,7 @@ int main() {
         test_depth_capture_path(fixture);
         test_depth_private_history_allows_shader_resource_views(fixture);
         test_rolling_frame_synthesizer(fixture);
+        test_synthesis_on_a_dedicated_queue(fixture);
         test_double_wide_single_slice_views(fixture);
         test_stereo_motion_synthesis_beats_same_pixel_blend(fixture);
         test_dlss_motion_vector_stereo_stream_pairing(fixture);
