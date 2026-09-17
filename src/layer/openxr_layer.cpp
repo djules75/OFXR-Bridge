@@ -537,15 +537,20 @@ struct SessionState {
     // cadence. Chaining each wait off the last submission added about 4.6 ms
     // of per-cycle overhead to a 10 ms pace and held the runtime to 64/s.
     std::chrono::steady_clock::time_point presenter_next_submit{};
-    // The best lead this presenter has managed lately: predictedDisplayTime
-    // minus the moment the frame aimed at it was actually submitted. The two
-    // clocks have different epochs, so the value is meaningless on its own
-    // and exact as a comparison - which is all the phase needs.
+    // The best phase this presenter has managed lately: predictedDisplayTime
+    // minus the moment the frame aimed at it was actually submitted, reduced
+    // modulo the display period. The two clocks have different epochs, so the
+    // value is meaningless on its own and exact as a comparison - which is
+    // all the phase needs.
     std::int64_t presenter_lead_reference{};
     bool presenter_lead_valid{};
     // When the previous submission actually went out, so the phase controller
     // can tell whether a lead was achieved on the grid or by overshooting it.
     std::chrono::steady_clock::time_point presenter_last_submitted_at{};
+    // Consecutive submissions that landed one scanout apart. Phase only means
+    // anything once the rate is right, so the correction waits for a run of
+    // them - see the comment at the controller.
+    std::uint32_t presenter_on_grid_streak{};
     bool presenter_schedule_valid{};
     // The display time the runtime reported for the previous internal
     // xrWaitFrame, and how many slots the pace has been asked to give back.
@@ -3916,56 +3921,47 @@ void continuous_presenter_main(
                     //
                     // So reduce both sides modulo the period before comparing.
                     // A skipped slot then reads as no phase error at all,
-                    // which is the truth, and the correction is left to do the
-                    // one job it is for. Larger phase is further from the
-                    // deadline and better; the reference decays slowly so a
-                    // genuine change in the runtime's timing is followed
-                    // rather than fought.
+                    // which is the truth.
+                    //
+                    // Reducing is not enough on its own, and the first attempt
+                    // at it (V154) made a worse failure than the one it fixed.
+                    // It took the difference the short way round the period,
+                    // into (-period/2, period/2], so a loss of more than half
+                    // a period came back with the wrong sign. Measured in
+                    // Callisto Protocol: SteamVR's own xrEndFrame ran 3.8 to
+                    // 8.0 ms on alternating frames for 80 ms, the presenter
+                    // overran and recovered onto a grid point through one
+                    // 19.4 ms gap, and the margin to the runtime's scanout
+                    // dropped 8.3 ms in one step. The controller read that as
+                    // being 2.8 ms *early*, corrected nothing, and the grid
+                    // stayed 8.3 ms closer to the deadline for the remaining
+                    // 26 seconds - a flawless 45 in, 90 out, 99.92% on grid,
+                    // all of it landing too late to be shown.
+                    //
+                    // The two readings describe the same timeline and the lead
+                    // cannot separate them. So do not try: take the deficit
+                    // into [0, period) and always read it as being behind,
+                    // because pulling earlier is the direction that gains
+                    // margin and the step-over below is what stops it bunching.
+                    // Two dead bands keep that from firing on noise - nothing
+                    // under a millisecond, and nothing within an eighth of a
+                    // period of a whole one, which is the reference sitting
+                    // just under a steady phase after a decay step.
                     const std::int64_t period_ns = period.count();
                     const std::int64_t submitted_phase =
                         ((submitted_lead % period_ns) + period_ns) % period_ns;
-                    // Signed distance the short way round the period, in
-                    // (-period/2, period/2]. Positive means the reference is
-                    // ahead of where this submission landed.
-                    const auto phase_delta =
+                    // Distance from b forward to a, in [0, period).
+                    const auto phase_deficit =
                         [period_ns](std::int64_t difference) -> std::int64_t {
-                        difference =
-                            ((difference % period_ns) + period_ns) % period_ns;
-                        if (difference > period_ns / 2) {
-                            difference -= period_ns;
-                        }
-                        return difference;
+                        return ((difference % period_ns) + period_ns) %
+                            period_ns;
                     };
-                    if (state->presenter_lead_valid) {
-                        const std::int64_t behind_best = phase_delta(
-                            state->presenter_lead_reference - submitted_phase);
-                        constexpr std::int64_t kLeadTolerance = 1'000'000;
-                        if (behind_best > kLeadTolerance) {
-                            const auto correction = std::min<std::chrono::nanoseconds>(
-                                period / 16,
-                                std::chrono::nanoseconds(behind_best));
-                            state->presenter_next_submit -= correction;
-                        }
-                    }
-                    // The reference follows the best phase achieved, and bleeds
-                    // down about a period every four seconds so a runtime that
-                    // genuinely changes its timing is tracked rather than
-                    // chased forever against a stale best.
-                    // Only a submission that landed on the grid may raise the
-                    // reference. Without that test the controller feeds
-                    // itself: pulling the deadline earlier lengthens the
-                    // lead, the longer lead becomes the new best, and the
-                    // next frame is pulled earlier again. It creeps forward
-                    // until the step-over shoves the deadline a whole period
-                    // and starts over. Measured on a 90 Hz Pimax with the
-                    // application flat at 45/s and the GPU at 35%: the phase
-                    // walked 6 ms earlier across a minute, the mean gap stayed
-                    // a perfect 11.11 ms, and only 78% of submissions landed
-                    // in their slot - 3.3% bunched under 6 ms and 12.4% a
-                    // period or more late, which is frames doubled and
-                    // dropped. An overshoot produces an off-grid submission by
-                    // definition, so gating on the grid breaks the loop while
-                    // leaving a genuinely good phase free to set the mark.
+                    const std::int64_t kAheadBand = period_ns / 8;
+
+                    // Whether the *rate* was right for this submission. Phase
+                    // is only meaningful once it is - a grid that is skipping
+                    // slots has no stable phase to correct towards - so the
+                    // correction waits for a run of these.
                     const auto since_previous =
                         state->presenter_last_submitted_at ==
                             std::chrono::steady_clock::time_point{}
@@ -3974,23 +3970,68 @@ void continuous_presenter_main(
                     const bool landed_on_grid =
                         since_previous > period * 9 / 10 &&
                         since_previous < period * 11 / 10;
-                    if (landed_on_grid &&
-                        (!state->presenter_lead_valid ||
-                         phase_delta(
-                             submitted_phase -
-                             state->presenter_lead_reference) > 0)) {
+                    state->presenter_on_grid_streak =
+                        landed_on_grid ? state->presenter_on_grid_streak + 1 : 0;
+                    state->presenter_last_submitted_at = now;
+
+                    // The reference follows the best phase achieved, and bleeds
+                    // down about a period every four seconds so a runtime that
+                    // genuinely changes its timing is tracked rather than
+                    // chased forever against a stale best.
+                    //
+                    // Only a submission that landed on the grid may raise the
+                    // reference, and only by a small step. Without the grid
+                    // test the controller feeds itself: pulling the deadline
+                    // earlier lengthens the lead, the longer lead becomes the
+                    // new best, and the next frame is pulled earlier again,
+                    // creeping forward until the step-over shoves the deadline
+                    // a whole period and starts over. Measured on a 90 Hz
+                    // Pimax with the application flat at 45/s: the phase
+                    // walked 6 ms earlier across a minute, the mean gap stayed
+                    // a perfect 11.11 ms, and only 78% of submissions landed in
+                    // their slot. Without the step limit the Callisto case
+                    // above would latch its own 8.3 ms loss as the new best,
+                    // because that loss is also readable as a small gain.
+                    //
+                    // This runs before the correction so that a submission
+                    // which really is ahead sets the mark rather than being
+                    // corrected towards a mark it has already passed.
+                    const std::int64_t ahead_of_reference = phase_deficit(
+                        submitted_phase - state->presenter_lead_reference);
+                    if (!state->presenter_lead_valid ||
+                        (landed_on_grid && ahead_of_reference > 0 &&
+                         ahead_of_reference <= kAheadBand)) {
                         state->presenter_lead_reference = submitted_phase;
                         state->presenter_lead_valid = true;
-                    } else if (state->presenter_lead_valid) {
+                    } else {
                         constexpr std::int64_t kLeadReferenceDecay = 31'000;
-                        state->presenter_lead_reference =
-                            ((state->presenter_lead_reference -
-                              kLeadReferenceDecay) %
-                                 period_ns +
-                             period_ns) %
-                            period_ns;
+                        state->presenter_lead_reference = phase_deficit(
+                            state->presenter_lead_reference -
+                            kLeadReferenceDecay);
                     }
-                    state->presenter_last_submitted_at = now;
+
+                    // Eight consecutive on-grid submissions is a quarter of a
+                    // second at 90 Hz. It is what separates the two captures
+                    // above: Callisto ran clean for 26 s carrying its 8.3 ms
+                    // loss, so the correction gets to run, while the MSFS
+                    // capture was a deliberately hard scene skipping slots
+                    // about twelve times a second, where it stays switched off
+                    // and cannot ratchet.
+                    constexpr std::uint32_t kPhaseCorrectionGridStreak = 8;
+                    if (state->presenter_on_grid_streak >=
+                        kPhaseCorrectionGridStreak) {
+                        const std::int64_t deficit = phase_deficit(
+                            state->presenter_lead_reference - submitted_phase);
+                        constexpr std::int64_t kLeadTolerance = 1'000'000;
+                        if (deficit > kLeadTolerance &&
+                            deficit < period_ns - kAheadBand) {
+                            const auto correction =
+                                std::min<std::chrono::nanoseconds>(
+                                    period / 16,
+                                    std::chrono::nanoseconds(deficit));
+                            state->presenter_next_submit -= correction;
+                        }
+                    }
                     // fresh full period for being late. Resetting to now+period
                     // instead made every cycle cost a period plus whatever the
                     // loop took, which is how a 11.11 ms pace produced 15.5 ms
