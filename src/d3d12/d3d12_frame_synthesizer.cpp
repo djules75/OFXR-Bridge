@@ -493,7 +493,8 @@ void set_viewport_and_scissor(
 
 void clear_synthetic_marker(ID3D12GraphicsCommandList* commands,
     D3D12_CPU_DESCRIPTOR_HANDLE rtv, const D3D12ReprojectionView& view,
-    UINT width, UINT height, const std::optional<OverlayPlacement>& marker) noexcept {
+    UINT width, UINT height, const std::optional<OverlayPlacement>& marker,
+    const float* colour = nullptr, float x_shift = 0.0F) noexcept {
     if (!marker) return; // No extra GPU work with diagnostics off.
     const auto& box = *marker;
     if (!finite(box.x) || !finite(box.y) || !finite(box.z) ||
@@ -505,8 +506,9 @@ void clear_synthetic_marker(ID3D12GraphicsCommandList* commands,
     const float up = std::tan(view.fov.angle_up);
     const float down = std::tan(view.fov.angle_down);
     const float depth = -box.z;
-    const float x0 = ((box.x - box.width * 0.5F) / depth - left) / (right - left);
-    const float x1 = ((box.x + box.width * 0.5F) / depth - left) / (right - left);
+    const float shifted = box.x + x_shift * box.width;
+    const float x0 = ((shifted - box.width * 0.5F) / depth - left) / (right - left);
+    const float x1 = ((shifted + box.width * 0.5F) / depth - left) / (right - left);
     const float y0 = ((box.y - box.height * 0.5F) / depth - up) / (down - up);
     const float y1 = ((box.y + box.height * 0.5F) / depth - up) / (down - up);
     if (!finite(x0) || !finite(x1) || !finite(y0) || !finite(y1)) return;
@@ -522,7 +524,7 @@ void clear_synthetic_marker(ID3D12GraphicsCommandList* commands,
     // Only the bridge-owned S render target is touched, AFTER interpolation.
     // It then follows the same fence, D3D11 publication and XR release as S.
     constexpr float purple[4]{0.75F, 0.0F, 1.0F, 1.0F};
-    commands->ClearRenderTargetView(rtv, purple, 1, &mark);
+    commands->ClearRenderTargetView(rtv, colour ? colour : purple, 1, &mark);
 }
 
 [[nodiscard]] bool same_position(
@@ -718,6 +720,7 @@ struct D3D12FrameSynthesizer::Impl {
     std::vector<Destination> synthetic_destinations;
     std::array<WorkSlot, kWorkSlotCount> work_slots;
     ComPtr<ID3D12DescriptorHeap> rtv_heap;
+    UINT current_rtv_base{};
     ComPtr<ID3D12RootSignature> root_signature;
     ComPtr<ID3D12PipelineState> pack_pipeline;
     ComPtr<ID3D12PipelineState> graphics_pipeline;
@@ -1818,8 +1821,12 @@ struct D3D12FrameSynthesizer::Impl {
     }
 
     [[nodiscard]] HRESULT create_rtv_heap(UINT node_mask) noexcept {
+        // Synthetic destinations first, then current: the current ones exist
+        // only so the diagnostic marker can be drawn on the real frame, which
+        // is otherwise indistinguishable from a frame that never arrived.
         const UINT64 descriptor_count =
-            static_cast<UINT64>(synthetic_destinations.size()) *
+            static_cast<UINT64>(synthetic_destinations.size() +
+                current_destinations.size()) *
             image_description.DepthOrArraySize;
         if (descriptor_count == 0 ||
             descriptor_count > std::numeric_limits<UINT>::max()) {
@@ -1853,6 +1860,18 @@ struct D3D12FrameSynthesizer::Impl {
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
         UINT descriptor_index = 0;
         for (const Destination& destination : synthetic_destinations) {
+            for (UINT slice = 0; slice < image_description.DepthOrArraySize;
+                 ++slice) {
+                rtv_description.Texture2DArray.FirstArraySlice = slice;
+                device->CreateRenderTargetView(
+                    destination.resource.Get(),
+                    &rtv_description,
+                    offset_cpu_handle(start, descriptor_index, rtv_increment));
+                ++descriptor_index;
+            }
+        }
+        current_rtv_base = descriptor_index;
+        for (const Destination& destination : current_destinations) {
             for (UINT slice = 0; slice < image_description.DepthOrArraySize;
                  ++slice) {
                 rtv_description.Texture2DArray.FirstArraySlice = slice;
@@ -3332,6 +3351,49 @@ struct D3D12FrameSynthesizer::Impl {
         slot.current_copy_command_list->CopyResource(
             current_destination,
             current_resource);
+        // DIAGNOSTIC. The real frame is otherwise indistinguishable from one
+        // that never arrived: the purple marker rides only on the synthetic,
+        // so a steady purple square means either "only synthetics are shown"
+        // or "both are shown and 45 Hz reads as steady". Green, offset to the
+        // right of the purple one, separates those two readings in one look.
+        if (debug_marker) {
+            constexpr float green[4]{0.0F, 0.9F, 0.2F, 1.0F};
+            const auto marker_to_rt = transition_barrier(
+                current_destination,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_RENDER_TARGET);
+            slot.current_copy_command_list->ResourceBarrier(1, &marker_to_rt);
+            const D3D12_CPU_DESCRIPTOR_HANDLE marker_rtv_start =
+                rtv_heap->GetCPUDescriptorHandleForHeapStart();
+            const UINT marker_first_rtv = current_rtv_base +
+                current_destination_index * image_description.DepthOrArraySize;
+            for (UINT marker_view = 0;
+                 marker_view < static_cast<UINT>(target_views.size());
+                 ++marker_view) {
+                const UINT marker_slice = resolved_array_slice(
+                    target_views[marker_view],
+                    marker_view,
+                    target_views.size(),
+                    image_description.DepthOrArraySize);
+                clear_synthetic_marker(
+                    slot.current_copy_command_list.Get(),
+                    offset_cpu_handle(
+                        marker_rtv_start,
+                        marker_first_rtv + marker_slice,
+                        rtv_increment),
+                    target_views[marker_view],
+                    static_cast<UINT>(image_description.Width),
+                    image_description.Height,
+                    debug_marker,
+                    green,
+                    1.6F);
+            }
+            const auto marker_from_rt = transition_barrier(
+                current_destination,
+                D3D12_RESOURCE_STATE_RENDER_TARGET,
+                D3D12_RESOURCE_STATE_COPY_DEST);
+            slot.current_copy_command_list->ResourceBarrier(1, &marker_from_rt);
+        }
         const std::array<D3D12_RESOURCE_BARRIER, 2> after_current_copy{
             transition_barrier(
                 current_resource,
@@ -3600,6 +3662,49 @@ struct D3D12FrameSynthesizer::Impl {
         slot.current_copy_command_list->CopyResource(
             current_destination,
             current_resource);
+        // DIAGNOSTIC. The real frame is otherwise indistinguishable from one
+        // that never arrived: the purple marker rides only on the synthetic,
+        // so a steady purple square means either "only synthetics are shown"
+        // or "both are shown and 45 Hz reads as steady". Green, offset to the
+        // right of the purple one, separates those two readings in one look.
+        if (debug_marker) {
+            constexpr float green[4]{0.0F, 0.9F, 0.2F, 1.0F};
+            const auto marker_to_rt = transition_barrier(
+                current_destination,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_RENDER_TARGET);
+            slot.current_copy_command_list->ResourceBarrier(1, &marker_to_rt);
+            const D3D12_CPU_DESCRIPTOR_HANDLE marker_rtv_start =
+                rtv_heap->GetCPUDescriptorHandleForHeapStart();
+            const UINT marker_first_rtv = current_rtv_base +
+                current_destination_index * image_description.DepthOrArraySize;
+            for (UINT marker_view = 0;
+                 marker_view < static_cast<UINT>(target_views.size());
+                 ++marker_view) {
+                const UINT marker_slice = resolved_array_slice(
+                    target_views[marker_view],
+                    marker_view,
+                    target_views.size(),
+                    image_description.DepthOrArraySize);
+                clear_synthetic_marker(
+                    slot.current_copy_command_list.Get(),
+                    offset_cpu_handle(
+                        marker_rtv_start,
+                        marker_first_rtv + marker_slice,
+                        rtv_increment),
+                    target_views[marker_view],
+                    static_cast<UINT>(image_description.Width),
+                    image_description.Height,
+                    debug_marker,
+                    green,
+                    1.6F);
+            }
+            const auto marker_from_rt = transition_barrier(
+                current_destination,
+                D3D12_RESOURCE_STATE_RENDER_TARGET,
+                D3D12_RESOURCE_STATE_COPY_DEST);
+            slot.current_copy_command_list->ResourceBarrier(1, &marker_from_rt);
+        }
         const std::array<D3D12_RESOURCE_BARRIER, 2> after_current_copy{
             transition_barrier(
                 current_resource,

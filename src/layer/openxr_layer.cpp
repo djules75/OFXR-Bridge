@@ -553,6 +553,9 @@ struct SessionState {
     // When the previous submission actually went out, so the phase controller
     // can tell whether a lead was achieved on the grid or by overshooting it.
     std::chrono::steady_clock::time_point presenter_last_submitted_at{};
+    // What the schedule expected the last interval to be. The pair is biased,
+    // so "on grid" is not always one period - see the comment at the advance.
+    std::chrono::nanoseconds presenter_expected_interval{};
     // Consecutive submissions that landed one scanout apart. Phase only means
     // anything once the rate is right, so the correction waits for a run of
     // them - see the comment at the controller.
@@ -3896,6 +3899,9 @@ void continuous_presenter_main(
         std::shared_ptr<GeneratedFrameEndInfo> repeated_frame;
         XrResult end_result = XR_ERROR_RUNTIME_FAILURE;
         std::uint32_t submitted_layer_count = 0;
+        // Which half of the pair the presenter submitted, kept at this scope so
+        // the flight record below can carry it.
+        bool fresh_synthetic = false;
         {
             // Do not let the application release a newer private output while
             // the runtime is resolving the previous handle's last image.
@@ -3937,7 +3943,7 @@ void continuous_presenter_main(
                 handle_value(state->handle),
                 static_cast<std::uint64_t>(submitted.displayTime),
                 submitted.layerCount);
-            const bool fresh_synthetic = request && request->owned_frame &&
+            fresh_synthetic = request && request->owned_frame &&
                 request->owned_frame->synthetic;
             if (state->fps_overlay && state->manual_control.stop_requested())
                 state->fps_overlay->suspend();
@@ -3984,7 +3990,70 @@ void continuous_presenter_main(
                     state->presenter_schedule_valid =
                         state->presenter_display_period > 0;
                 } else {
-                    state->presenter_next_submit += period;
+                    // The two frames of a pair do not cost the runtime the
+                    // same, so spacing them evenly gives them unequal margin.
+                    // Measured in Atomic Heart across 1479 pairs, with the
+                    // submission record finally carrying which half of the
+                    // pair it was: the synthetic's xrEndFrame takes 2.12 ms
+                    // against the current's 0.68, and the synthetic lands
+                    // 2.36 ms closer to its own scanout. (V163 asserted the
+                    // opposite from a capture anchored on the enqueue, which
+                    // labels the previous pair's current as this pair's
+                    // synthetic. It was wrong by exactly that swap.)
+                    //
+                    // That 1.44 ms of extra call time falls *between* the two
+                    // submissions, so an even deadline spacing produces an
+                    // uneven arrival spacing:
+                    //
+                    //   synthetic -> current   11.11 + 0.68 - 2.12 =  9.67 ms
+                    //   current -> synthetic   11.11 + 2.12 - 0.68 = 12.55 ms
+                    //
+                    // Two arrivals 9.67 ms apart can land in one scanout
+                    // window, and the compositor keeps one of them. Every
+                    // metric the layer owns still reads 45 in, 90 out, two
+                    // submissions per pair - which is why ten builds of pace
+                    // work moved this around without fixing it. Moving the
+                    // grid carries the asymmetry with it.
+                    //
+                    // So bias the pair, not the grid, and give the room to the
+                    // frame whose call is long: an eighth of a period after
+                    // the synthetic, the same back after the current. The two
+                    // sum to exactly two periods, so the schedule does not
+                    // drift, and both frames arrive one period apart. A repeat
+                    // is not part of a pair and advances plainly.
+                    // Give the real frame the margin, not the synthetic.
+                    //
+                    // Both frames of a pair exist - the synthetic cannot be
+                    // produced without the real one - and both are submitted
+                    // successfully with distinct display times. The compositor
+                    // discards the real one, and the reason is margin, not
+                    // readiness: the real frame's image is finished first, but
+                    // measured at hand-over rather than at call return it
+                    // reaches its own scanout with less room than the
+                    // synthetic does.
+                    //
+                    // Measured in Atomic Heart with the submission record
+                    // carrying which half of the pair each one is:
+                    //
+                    //   synthetic   margin at hand-over  112.5258
+                    //   real frame                       111.7370   (0.79 ms less)
+                    //
+                    // So shorten the interval after the synthetic, which moves
+                    // the real frame earlier relative to its own scanout, and
+                    // give the period back after it so the pair still sums to
+                    // exactly two and the schedule does not drift.
+                    //
+                    // An earlier build had this sign, and it was the only
+                    // change in the sequence that visibly improved delivery.
+                    // It was then inverted from a capture taken at call return
+                    // - where the synthetic's 3x longer call reverses the
+                    // comparison - and stayed inverted for five builds.
+                    const auto pair_bias = period / 4;
+                    const auto advance = request
+                        ? (fresh_synthetic ? period - pair_bias
+                                           : period + pair_bias)
+                        : period;
+                    state->presenter_next_submit += advance;
                     // Pull the grid back towards the best phase this
                     // presenter has managed. Everything else here corrects
                     // the grid's *rate* - a repeated scanout or a skipped
@@ -4066,12 +4135,22 @@ void continuous_presenter_main(
                             std::chrono::steady_clock::time_point{}
                         ? period
                         : (now - state->presenter_last_submitted_at);
+                    // Against what the schedule asked for, not against one
+                    // period: the pair is deliberately biased above, so an
+                    // even period is the wrong expectation for both halves of
+                    // it and would read every submission as off grid.
+                    const auto expected =
+                        state->presenter_expected_interval >
+                            std::chrono::nanoseconds::zero()
+                        ? state->presenter_expected_interval
+                        : period;
                     const bool landed_on_grid =
-                        since_previous > period * 9 / 10 &&
-                        since_previous < period * 11 / 10;
+                        since_previous > expected - period / 10 &&
+                        since_previous < expected + period / 10;
                     state->presenter_on_grid_streak =
                         landed_on_grid ? state->presenter_on_grid_streak + 1 : 0;
                     state->presenter_last_submitted_at = now;
+                    state->presenter_expected_interval = advance;
 
                     // The reference follows the best phase achieved, and bleeds
                     // down about a period every four seconds so a runtime that
@@ -4188,12 +4267,18 @@ void continuous_presenter_main(
                 submitted.layerCount,
                 frame_state.shouldRender);
         }
+        // c carries which half of the pair this was: 2 synthetic, 1 current,
+        // 0 a repeat. Without it the two are indistinguishable in a capture -
+        // anchoring on the enqueue does not work, because the submission that
+        // follows it is the previous pair's current, not this pair's
+        // synthetic. That mislabelling is what made the V162 margin
+        // comparison name the wrong frame.
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::presenter_submission,
             end_result,
             request ? request->sequence : 0,
             static_cast<std::uint64_t>(frame_state.predictedDisplayTime),
-            submitted_layer_count);
+            request ? (fresh_synthetic ? 2u : 1u) : 0u);
         {
             std::scoped_lock lock(state->presenter_mutex);
             if (request) {
