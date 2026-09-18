@@ -237,8 +237,42 @@ struct D3D11D3D12SwapchainInterop::Impl {
         ComPtr<ID3D11Texture2D> d3d11;
     };
 
+    // Every D3D11 call the layer makes lands on the application's immediate
+    // context, and so does every call the runtime makes when it reads a
+    // submitted swapchain image - on the presenter thread, while the
+    // application thread is inside capture or publish. SetMultithreadProtected
+    // makes each individual call atomic, which is not enough on its own:
+    // capture and publish are four-call sequences (wait, copy, signal, flush)
+    // and a runtime call landing between two of them leaves the driver's
+    // dependency tracking walking a chain the layer has already moved on from.
+    // Hold the same device-wide section across the whole sequence instead.
+    //
+    // Not theoretical: in four captures of one D3D11 title on SteamVR, the
+    // presenter's downstream xrEndFrame overlapped application-thread D3D11
+    // work on 4-8% of submissions - thousands of collisions a minute - and
+    // three of those four runs died inside that call, in nvwgf2umx.
+    struct ContextSection {
+        explicit ContextSection(ID3D11Multithread* section) noexcept
+            : section_(section) {
+            if (section_ != nullptr) {
+                section_->Enter();
+            }
+        }
+        ContextSection(const ContextSection&) = delete;
+        ContextSection& operator=(const ContextSection&) = delete;
+        ~ContextSection() {
+            if (section_ != nullptr) {
+                section_->Leave();
+            }
+        }
+
+    private:
+        ID3D11Multithread* section_{};
+    };
+
     ComPtr<ID3D11Device> d3d11_device;
     ComPtr<ID3D11DeviceContext> d3d11_context;
+    ComPtr<ID3D11Multithread> d3d11_multithread;
     ComPtr<ID3D11Device5> d3d11_device5;
     ComPtr<ID3D11DeviceContext4> d3d11_context4;
     ComPtr<ID3D12Device> d3d12_device;
@@ -501,9 +535,10 @@ struct D3D11D3D12SwapchainInterop::Impl {
         // which surfaces as a GPU fault rather than an error the layer could fail
         // open on. Enable it for the life of the device; it is never turned back
         // off because the application may keep its own threads on the context.
-        Microsoft::WRL::ComPtr<ID3D11Multithread> multithread;
-        if (SUCCEEDED(d3d11_context.As(&multithread)) && multithread) {
-            static_cast<void>(multithread->SetMultithreadProtected(TRUE));
+        if (SUCCEEDED(d3d11_context.As(&d3d11_multithread)) &&
+            d3d11_multithread) {
+            static_cast<void>(
+                d3d11_multithread->SetMultithreadProtected(TRUE));
         }
 
         for (ID3D11Texture2D* image : input_sources) {
@@ -604,6 +639,7 @@ struct D3D11D3D12SwapchainInterop::Impl {
             source_index >= shared_sources.size()) {
             return E_INVALIDARG;
         }
+        const ContextSection section(d3d11_multithread.Get());
         HRESULT result = S_OK;
         if (last_d3d12_access_value != 0) {
             result = d3d11_context4->Wait(
@@ -696,6 +732,7 @@ struct D3D11D3D12SwapchainInterop::Impl {
             enabled = false;
             return result;
         }
+        const ContextSection section(d3d11_multithread.Get());
         result = d3d11_context4->Wait(d3d11_fence.Get(), ready_value);
         if (FAILED(result)) {
             enabled = false;
