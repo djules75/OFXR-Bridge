@@ -489,6 +489,13 @@ struct SessionState {
     // Consecutive pairs whose two frames left the layer close enough together
     // to land in one scanout window - see inline_pair_lands_in_one_scanout.
     std::uint32_t bunched_pair_streak{};
+    // Logged once when a D3D11 session asked for a presenter and was refused.
+    bool d3d11_presenter_suppressed{};
+    // What that refusal costs, sampled over a window of pairs - see
+    // report_suppressed_pair_spacing.
+    std::uint64_t suppressed_gap_total{};
+    std::uint32_t suppressed_gap_samples{};
+    std::uint32_t suppressed_gap_bunched{};
     std::uint32_t steamvr_throttled_wait_streak{};
     // Consecutive application frames the layer could not generate from. A
     // single one says nothing - the frame passes through and the next one
@@ -6047,6 +6054,61 @@ struct InternalCycleResult {
     return true;
 }
 
+// The D3D11 gate refuses a presenter the session asked for, and a refusal is
+// silent about what it cost. Measure it with the same hand-over gap the
+// promotion route reads: a pair still landing about a period apart means the
+// refusal cost nothing, while a bunched one means the compositor is dropping
+// half the layer's work and this configuration has no route to a fix today.
+//
+// Averaged over a window rather than reported per pair, because one gap is
+// noise and the question is about a regime. Every D3D11 capture with a usable
+// inline sample has sat at 0.82 to 0.99 of a period, so the expensive case may
+// not exist in practice - saying so in a log is how that stops being an
+// assumption and starts being a measurement.
+void report_suppressed_pair_spacing(
+    const std::shared_ptr<SessionState>& state,
+    std::chrono::steady_clock::duration gap) noexcept {
+    constexpr std::uint32_t kSpacingWindowPairs = 128;
+    constexpr std::int64_t kBunchedNumerator = 3;
+    constexpr std::int64_t kBunchedDenominator = 4;
+    const auto gap_nanoseconds =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(gap).count();
+    XrDuration period = 0;
+    std::uint64_t mean = 0;
+    std::uint32_t bunched_percent = 0;
+    {
+        std::scoped_lock lock(state->mutex);
+        period = state->minimum_runtime_display_period;
+        if (period <= 0 || gap_nanoseconds < 0) {
+            return;
+        }
+        state->suppressed_gap_total +=
+            static_cast<std::uint64_t>(gap_nanoseconds);
+        if (gap_nanoseconds * kBunchedDenominator <
+            period * kBunchedNumerator) {
+            ++state->suppressed_gap_bunched;
+        }
+        if (++state->suppressed_gap_samples < kSpacingWindowPairs) {
+            return;
+        }
+        mean = state->suppressed_gap_total / state->suppressed_gap_samples;
+        bunched_percent = state->suppressed_gap_bunched * 100 /
+            state->suppressed_gap_samples;
+        state->suppressed_gap_total = 0;
+        state->suppressed_gap_samples = 0;
+        state->suppressed_gap_bunched = 0;
+    }
+    // result is the percentage of the window that landed inside one scanout,
+    // a the mean gap and b the display period, both nanoseconds. Zero percent
+    // is the gate costing this session nothing.
+    xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::presenter_transition,
+        bunched_percent,
+        mean,
+        static_cast<std::uint64_t>(period),
+        401);
+}
+
 [[nodiscard]] bool steamvr_wait_requires_continuous_presenter(
     const std::shared_ptr<SessionState>& state,
     const InternalCycleResult& cycle) noexcept {
@@ -6864,19 +6926,58 @@ XrResult layer_end_frame_impl(
         // continuity reset; treating it as a structural resize would retain a
         // private image in an uncertain ownership phase for the whole timeout.
         clear_generation_continuity(state);
-    } else if (steamvr_wait_requires_continuous_presenter(
-                   state,
-                   current_cycle) ||
-               runtime_wait_lacks_pacing(state) ||
-               inline_pair_lands_in_one_scanout(state, inline_pair_gap)) {
-        // Request the promotion; do not perform it here. submit_current_cycle
-        // has already submitted this frame, so seeding a freshly started
-        // presenter thread with it handed a second owner to composition layers
-        // and private swapchain leases that this frame still holds. The next
-        // xrEndFrame starts the presenter through the same path the pipelined
-        // promotion uses, before the inline cycle runs and with a frame nothing
-        // else has submitted.
-        state->steamvr_presenter_start_requested = true;
+    } else {
+        // A refusal already made goes on costing something every pair, so keep
+        // measuring it rather than only deciding once.
+        if (state->d3d11_presenter_suppressed) {
+            report_suppressed_pair_spacing(state, inline_pair_gap);
+        }
+        if (steamvr_wait_requires_continuous_presenter(state, current_cycle) ||
+            runtime_wait_lacks_pacing(state) ||
+            inline_pair_lands_in_one_scanout(state, inline_pair_gap)) {
+            // A D3D11 session cannot take the presenter. Promotion moves the
+            // downstream frame calls onto their own thread while the application's
+            // thread carries on making swapchain calls, and on D3D11 both of those
+            // are work the runtime performs on the application's single immediate
+            // context - so promotion is what first puts two threads inside the
+            // runtime's own D3D11 code.
+            //
+            // Measured on one title over SteamVR: every capture with a dedicated
+            // presenter died inside xrEndFrame in nvwgf2umx, at 5.3, 6.8, 10.0 and
+            // 14.1 seconds, while the one D3D11 capture that stayed inline ran
+            // 63.6 seconds and exited cleanly. Holding the device section across
+            // the layer's own sequences did not help and recorded no contention at
+            // all, which places the interleaving in the runtime's calls rather
+            // than the layer's.
+            //
+            // Staying inline costs this session whatever promotion would have
+            // bought - on SteamVR that is the pair landing in one scanout, so half
+            // the layer's work is dropped and the rate halves. That is the right
+            // trade against a crash six seconds in, and it is the invariant the
+            // layer already holds everywhere else: fail open rather than take a
+            // path that cannot be made safe.
+            if (state->d3d11_device != nullptr) {
+                if (!state->d3d11_presenter_suppressed) {
+                    state->d3d11_presenter_suppressed = true;
+                    xrfg::bridge_flight_logger().event(
+                        xrfg::BridgeFlightOperation::presenter_transition,
+                        0,
+                        0,
+                        0,
+                        400);
+                }
+            } else {
+                // Request the promotion; do not perform it here.
+                // submit_current_cycle has already submitted this frame, so
+                // seeding a freshly started presenter thread with it handed a
+                // second owner to composition layers and private swapchain leases
+                // that this frame still holds. The next xrEndFrame starts the
+                // presenter through the same path the pipelined promotion uses,
+                // before the inline cycle runs and with a frame nothing else has
+                // submitted.
+                state->steamvr_presenter_start_requested = true;
+            }
+        }
     }
     return XR_FAILED(current_cycle.result) ? current_cycle.result : result;
 }
