@@ -1,10 +1,13 @@
 #include "xrfg/d3d11_d3d12_interop.hpp"
 
+#include "xrfg/bridge_flight_logger.hpp"
+
 #include <windows.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <new>
 #include <utility>
@@ -252,10 +255,30 @@ struct D3D11D3D12SwapchainInterop::Impl {
     // work on 4-8% of submissions - thousands of collisions a minute - and
     // three of those four runs died inside that call, in nvwgf2umx.
     struct ContextSection {
+        // A wait here is the whole point of the change made visible: the
+        // section is only contended when the runtime is inside a D3D11 call
+        // on this context at the moment the layer wants one, which is the
+        // interleaving the driver could not survive. Logged above a threshold
+        // so the ordinary uncontended take costs a counter read and nothing
+        // else, and so a capture counts collisions rather than sequences.
+        static constexpr std::int64_t kReportMicroseconds = 20;
+
         explicit ContextSection(ID3D11Multithread* section) noexcept
             : section_(section) {
-            if (section_ != nullptr) {
-                section_->Enter();
+            if (section_ == nullptr) {
+                return;
+            }
+            const auto entered = std::chrono::steady_clock::now();
+            section_->Enter();
+            const auto blocked =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - entered)
+                    .count();
+            if (blocked >= kReportMicroseconds) {
+                bridge_flight_logger().event(
+                    BridgeFlightOperation::d3d11_context_section,
+                    1,
+                    static_cast<std::uint64_t>(blocked));
             }
         }
         ContextSection(const ContextSection&) = delete;
@@ -535,11 +558,22 @@ struct D3D11D3D12SwapchainInterop::Impl {
         // which surfaces as a GPU fault rather than an error the layer could fail
         // open on. Enable it for the life of the device; it is never turned back
         // off because the application may keep its own threads on the context.
-        if (SUCCEEDED(d3d11_context.As(&d3d11_multithread)) &&
-            d3d11_multithread) {
-            static_cast<void>(
-                d3d11_multithread->SetMultithreadProtected(TRUE));
+        BOOL previously_protected = FALSE;
+        const bool section_available =
+            SUCCEEDED(d3d11_context.As(&d3d11_multithread)) &&
+            d3d11_multithread;
+        if (section_available) {
+            previously_protected =
+                d3d11_multithread->SetMultithreadProtected(TRUE);
         }
+        // Record it: Enter and Leave are only a hold if the interface is
+        // there, so a session that survives without this record survived on
+        // luck rather than on the fix.
+        bridge_flight_logger().event(
+            BridgeFlightOperation::d3d11_context_section,
+            0,
+            section_available ? 1u : 0u,
+            previously_protected ? 1u : 0u);
 
         for (ID3D11Texture2D* image : input_sources) {
             source_images.emplace_back(image);

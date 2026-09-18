@@ -76,6 +76,21 @@ enum class BridgeFlightOperation : std::uint32_t {
     // surplus is the application running free, gated only by whatever it
     // blocks on next.
     presenter_pair_release,
+    // The D3D11 interop's hold on the application's immediate context. Two
+    // threads reach that context - the layer on the application's, and the
+    // runtime on the presenter's whenever it reads a submitted image - and
+    // per-call protection is not enough for a four-call sequence, so capture
+    // and publish take the device section across the whole of theirs.
+    //
+    // result=0 is the one-off arming record: a says whether the section was
+    // obtained at all, b the protection state the application had before the
+    // layer turned it on. Without a=1 the hold is not there and a clean run
+    // proves nothing.
+    //
+    // result=1 is a sequence that had to wait for the section, with a the
+    // microseconds it blocked. Each one is a collision that used to run
+    // concurrently.
+    d3d11_context_section,
 };
 
 struct BridgeFlightToken {
