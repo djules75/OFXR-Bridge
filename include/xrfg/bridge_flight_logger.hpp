@@ -76,6 +76,14 @@ enum class BridgeFlightOperation : std::uint32_t {
     // surplus is the application running free, gated only by whatever it
     // blocks on next.
     presenter_pair_release,
+    // How hard the runtime-entry gate is actually working on a D3D11 session.
+    // result is the number of entries in this window that had to wait, a the
+    // mean wait and b the longest, both nanoseconds, c the longest any single
+    // entry held the gate. Zero contention across a session means the two
+    // threads were never inside the runtime together, so the gate is not what
+    // is protecting it - the earlier device-section attempt reported exactly
+    // that and it was read as a clean result rather than as a refutation.
+    runtime_entry_section,
 };
 
 struct BridgeFlightToken {

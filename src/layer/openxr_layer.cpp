@@ -511,6 +511,16 @@ struct SessionState {
     std::atomic<bool> generation_budget_exhausted{false};
     Microsoft::WRL::ComPtr<ID3D11Device> d3d11_device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3d11_context;
+    // Serialises this layer's entries into the runtime for as long as the
+    // application's binding is D3D11. See RuntimeEntry below for why the gate
+    // is here rather than on the device. Recursive because the frame path
+    // already nests these calls inside one another on one thread.
+    std::recursive_mutex runtime_entry_mutex;
+    std::uint64_t runtime_entry_count{};       // runtime_entry_mutex
+    std::uint64_t runtime_entry_contended{};   // runtime_entry_mutex
+    std::uint64_t runtime_entry_wait_ns{};     // runtime_entry_mutex
+    std::uint64_t runtime_entry_wait_max_ns{}; // runtime_entry_mutex
+    std::uint64_t runtime_entry_hold_max_ns{}; // runtime_entry_mutex
     Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> d3d12_queue;
     // Synthesis runs here rather than on the application's queue. The work
@@ -633,6 +643,126 @@ struct SessionState {
     bool presenter_active{};
     XrSession handle{XR_NULL_HANDLE};
 };
+
+// Inside xrEndFrame, and inside each swapchain image call, the runtime drives
+// the application's single D3D11 immediate context. ID3D11Multithread makes
+// each of the runtime's own D3D11 calls atomic and no more, so the sequence
+// one of those OpenXR calls issues interleaves with the sequence another
+// issues on the other thread, and the driver's dependency tracking walks a
+// chain that has moved. That is what kills nvwgf2umx when a presenter thread
+// runs beside the application thread on a D3D11 session.
+//
+// Holding the layer's own device section could not cover it and recorded no
+// contention at all: that guards the layer's D3D11 work, while the work that
+// collides is the runtime's, inside the runtime's own calls. The gate has to
+// wrap our entry into the runtime, because that is the only place from which
+// the runtime's sequence is reachable.
+//
+// One OpenXR call's worth of D3D11 work is the unit that has to be atomic, so
+// this wraps single calls and never a longer span. xrWaitFrame stays outside
+// it deliberately: it blocks for most of a display period and issues no D3D11
+// work, and holding it here would hand the application thread exactly the
+// stall the presenter exists to remove.
+thread_local int runtime_entry_depth = 0;
+
+struct RuntimeEntry {
+    explicit RuntimeEntry(SessionState* session) noexcept
+        : session_(session != nullptr && session->d3d11_device != nullptr
+                       ? session
+                       : nullptr) {
+        if (session_ == nullptr) {
+            return;
+        }
+        outermost_ = runtime_entry_depth == 0;
+        const auto before = std::chrono::steady_clock::now();
+        session_->runtime_entry_mutex.lock();
+        entered_ = std::chrono::steady_clock::now();
+        ++runtime_entry_depth;
+        if (!outermost_) {
+            return;
+        }
+        const auto waited = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                entered_ - before)
+                .count());
+        ++session_->runtime_entry_count;
+        session_->runtime_entry_wait_ns += waited;
+        if (waited > session_->runtime_entry_wait_max_ns) {
+            session_->runtime_entry_wait_max_ns = waited;
+        }
+        // A lock handed over uncontended still costs a few hundred
+        // nanoseconds, so only a wait long enough to be a real hand-off
+        // counts as one thread having found the other inside the runtime.
+        if (waited >= 20'000) {
+            ++session_->runtime_entry_contended;
+        }
+    }
+
+    ~RuntimeEntry() {
+        if (session_ == nullptr) {
+            return;
+        }
+        --runtime_entry_depth;
+        if (outermost_) {
+            const auto held = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - entered_)
+                    .count());
+            if (held > session_->runtime_entry_hold_max_ns) {
+                session_->runtime_entry_hold_max_ns = held;
+            }
+            // Reported in windows rather than per entry: one record per frame
+            // would bury the log, and the question this answers - whether the
+            // two threads ever meet here - is a rate, not an event.
+            // Eight application frames' worth, so a short capture still
+            // reports and a long one costs a handful of records a second.
+            if (session_->runtime_entry_count >= 64) {
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::runtime_entry_section,
+                    static_cast<std::int64_t>(session_->runtime_entry_contended),
+                    session_->runtime_entry_wait_ns /
+                        session_->runtime_entry_count,
+                    session_->runtime_entry_wait_max_ns,
+                    session_->runtime_entry_hold_max_ns);
+                session_->runtime_entry_count = 0;
+                session_->runtime_entry_contended = 0;
+                session_->runtime_entry_wait_ns = 0;
+                session_->runtime_entry_wait_max_ns = 0;
+                session_->runtime_entry_hold_max_ns = 0;
+            }
+        }
+        session_->runtime_entry_mutex.unlock();
+    }
+
+    RuntimeEntry(const RuntimeEntry&) = delete;
+    RuntimeEntry& operator=(const RuntimeEntry&) = delete;
+
+private:
+    SessionState* session_{};
+    bool outermost_{};
+    std::chrono::steady_clock::time_point entered_{};
+};
+
+// The gate covers exactly one call into the runtime, so a call is what it
+// takes. Several frame submissions reach the runtime through the overlay
+// rather than through the dispatch pointer, and those are the ones a live
+// session actually uses, so the whole submitting expression is handed over
+// rather than the dispatch call inside it.
+template <typename Call>
+[[nodiscard]] auto with_runtime_entry(SessionState* session, Call&& call)
+    -> decltype(call()) {
+    const RuntimeEntry gate(session);
+    return call();
+}
+
+// The frame paths hold the session by shared_ptr and the swapchain paths by
+// raw pointer; the gate does not care which.
+template <typename Call>
+[[nodiscard]] auto with_runtime_entry(
+    const std::shared_ptr<SessionState>& session, Call&& call)
+    -> decltype(call()) {
+    return with_runtime_entry(session.get(), std::forward<Call>(call));
+}
 
 enum class PrivateOwnershipPhase {
     idle,
@@ -975,6 +1105,7 @@ void drain_swapchain_gpu(const std::shared_ptr<SwapchainState>& state) noexcept 
 }
 
 [[nodiscard]] bool release_private_image(
+    SessionState* session,
     const std::shared_ptr<Dispatch>& dispatch,
     PrivateSwapchainState& image) noexcept {
     try {
@@ -993,8 +1124,9 @@ void drain_swapchain_gpu(const std::shared_ptr<SwapchainState>& state) noexcept 
                 handle_value(image.handle),
                 image.acquired_index,
                 static_cast<std::uint64_t>(image.phase));
-            const XrResult wait_result =
-                dispatch->wait_swapchain_image(image.handle, &wait_info);
+            const XrResult wait_result = with_runtime_entry(session, [&] {
+                return dispatch->wait_swapchain_image(image.handle, &wait_info);
+            });
             xrfg::bridge_flight_logger().end(
                 wait_token,
                 xrfg::BridgeFlightOperation::private_swapchain_wait,
@@ -1013,8 +1145,9 @@ void drain_swapchain_gpu(const std::shared_ptr<SwapchainState>& state) noexcept 
             handle_value(image.handle),
             image.acquired_index,
             static_cast<std::uint64_t>(image.phase));
-        const XrResult release_result =
-            dispatch->release_swapchain_image(image.handle, &release_info);
+        const XrResult release_result = with_runtime_entry(session, [&] {
+            return dispatch->release_swapchain_image(image.handle, &release_info);
+        });
         xrfg::bridge_flight_logger().end(
             release_token,
             xrfg::BridgeFlightOperation::private_swapchain_release,
@@ -1046,9 +1179,11 @@ void destroy_frame_generation_swapchains(
         }
 
         const auto& dispatch = state->session->dispatch;
-        static_cast<void>(release_private_image(dispatch, generation->synthetic));
+        static_cast<void>(release_private_image(
+            state->session.get(), dispatch, generation->synthetic));
         for (PrivateSwapchainState& image : generation->current) {
-            static_cast<void>(release_private_image(dispatch, image));
+            static_cast<void>(
+                release_private_image(state->session.get(), dispatch, image));
         }
         if (dispatch->destroy_swapchain == nullptr) {
             return;
@@ -2724,7 +2859,9 @@ XrResult layer_begin_frame_impl(
         } else if (state->pipelined_presenter_mode) {
             result = XR_ERROR_RUNTIME_FAILURE;
         } else {
-            result = state->dispatch->begin_frame(session, begin_info);
+            result = with_runtime_entry(state, [&] {
+                return state->dispatch->begin_frame(session, begin_info);
+            });
         }
     } catch (...) {
         if (state->application_wait_pending_begin) {
@@ -3205,10 +3342,10 @@ XrResult layer_acquire_swapchain_image_impl(
     }
 
     std::scoped_lock call_lock(state->call_mutex);
-    const XrResult result = state->session->dispatch->acquire_swapchain_image(
-        swapchain,
-        acquire_info,
-        index);
+    const XrResult result = with_runtime_entry(state->session.get(), [&] {
+        return state->session->dispatch->acquire_swapchain_image(
+            swapchain, acquire_info, index);
+    });
     if (XR_SUCCEEDED(result) && index != nullptr) {
         std::scoped_lock lock(state->mutex);
         if (state->ownership_tracking_valid) {
@@ -3235,7 +3372,10 @@ XrResult layer_wait_swapchain_image_impl(
     }
 
     std::scoped_lock call_lock(state->call_mutex);
-    const XrResult result = state->session->dispatch->wait_swapchain_image(swapchain, wait_info);
+    const XrResult result = with_runtime_entry(state->session.get(), [&] {
+        return state->session->dispatch->wait_swapchain_image(
+            swapchain, wait_info);
+    });
     if (result == XR_SUCCESS || result == XR_SESSION_LOSS_PENDING) {
         std::scoped_lock lock(state->mutex);
         if (state->ownership_tracking_valid) {
@@ -3338,7 +3478,10 @@ XrResult layer_release_swapchain_image_impl(
 
     XrResult result = XR_ERROR_RUNTIME_FAILURE;
     try {
-        result = state->session->dispatch->release_swapchain_image(swapchain, release_info);
+        result = with_runtime_entry(state->session.get(), [&] {
+            return state->session->dispatch->release_swapchain_image(
+                swapchain, release_info);
+        });
     } catch (...) {
         if (pending_capture && history) {
             history->discard(*pending_capture);
@@ -3893,9 +4036,9 @@ void continuous_presenter_main(
         const auto begin_token = xrfg::bridge_flight_logger().begin(
             xrfg::BridgeFlightOperation::internal_begin_frame,
             handle_value(state->handle));
-        const XrResult begin_result = state->dispatch->begin_frame(
-            state->handle,
-            &begin_info);
+        const XrResult begin_result = with_runtime_entry(state, [&] {
+            return state->dispatch->begin_frame(state->handle, &begin_info);
+        });
         xrfg::bridge_flight_logger().end(
             begin_token,
             xrfg::BridgeFlightOperation::internal_begin_frame,
@@ -3978,9 +4121,11 @@ void continuous_presenter_main(
             if (state->fps_overlay && state->manual_control.stop_requested())
                 state->fps_overlay->suspend();
             downstream_end_started = std::chrono::steady_clock::now();
-            end_result = state->fps_overlay
-                ? state->fps_overlay->end_frame(&submitted, fresh_synthetic)
-                : state->dispatch->end_frame(state->handle, &submitted);
+            end_result = with_runtime_entry(state, [&] {
+                return state->fps_overlay
+                    ? state->fps_overlay->end_frame(&submitted, fresh_synthetic)
+                    : state->dispatch->end_frame(state->handle, &submitted);
+            });
             // The synthetic has reached the runtime, so its current copy can
             // go to the queue now rather than ahead of it. It has a display
             // period before the current frame that reads it is submitted.
@@ -5267,6 +5412,7 @@ struct ProjectionResourceDestination {
 }
 
 [[nodiscard]] bool acquire_and_wait_private_image(
+    SessionState* session,
     const std::shared_ptr<Dispatch>& dispatch,
     PrivateSwapchainState& image) noexcept {
     try {
@@ -5277,7 +5423,7 @@ struct ProjectionResourceDestination {
             return false;
         }
         if (image.phase != PrivateOwnershipPhase::idle &&
-            !release_private_image(dispatch, image)) {
+            !release_private_image(session, dispatch, image)) {
             return false;
         }
 
@@ -5287,10 +5433,10 @@ struct ProjectionResourceDestination {
             xrfg::BridgeFlightOperation::private_swapchain_acquire,
             handle_value(image.handle),
             static_cast<std::uint64_t>(image.phase));
-        const XrResult acquire_result = dispatch->acquire_swapchain_image(
-            image.handle,
-            &acquire_info,
-            &acquired_index);
+        const XrResult acquire_result = with_runtime_entry(session, [&] {
+            return dispatch->acquire_swapchain_image(
+                image.handle, &acquire_info, &acquired_index);
+        });
         xrfg::bridge_flight_logger().end(
             acquire_token,
             xrfg::BridgeFlightOperation::private_swapchain_acquire,
@@ -5311,8 +5457,9 @@ struct ProjectionResourceDestination {
             handle_value(image.handle),
             image.acquired_index,
             static_cast<std::uint64_t>(image.phase));
-        const XrResult wait_result =
-            dispatch->wait_swapchain_image(image.handle, &wait_info);
+        const XrResult wait_result = with_runtime_entry(session, [&] {
+            return dispatch->wait_swapchain_image(image.handle, &wait_info);
+        });
         xrfg::bridge_flight_logger().end(
             wait_token,
             xrfg::BridgeFlightOperation::private_swapchain_wait,
@@ -5444,6 +5591,7 @@ struct PreparedProjectionFrame {
         }
 
         if (!acquire_and_wait_private_image(
+                state->session.get(),
                 state->session->dispatch,
                 current_image)) {
             output.reason = GenerationPrepareReason::current_private_acquire_failed;
@@ -5456,11 +5604,13 @@ struct PreparedProjectionFrame {
 
         if (request_pair &&
             !acquire_and_wait_private_image(
+                state->session.get(),
                 state->session->dispatch,
                 generation->synthetic)) {
             output.reason =
                 GenerationPrepareReason::synthetic_private_acquire_failed;
             static_cast<void>(release_private_image(
+                state->session.get(),
                 state->session->dispatch,
                 current_image));
             std::scoped_lock gpu_lock(state->session->gpu_mutex);
@@ -5588,10 +5738,12 @@ struct PreparedProjectionFrame {
         bool synthetic_released = true;
         if (request_pair) {
             synthetic_released = release_private_image(
+                state->session.get(),
                 state->session->dispatch,
                 generation->synthetic);
         }
         const bool current_released = release_private_image(
+            state->session.get(),
             state->session->dispatch,
             current_image);
 
@@ -5910,9 +6062,9 @@ struct InternalCycleResult {
     const auto begin_token = xrfg::bridge_flight_logger().begin(
         xrfg::BridgeFlightOperation::internal_begin_frame,
         handle_value(state->handle));
-    const XrResult begin_result = state->dispatch->begin_frame(
-        state->handle,
-        &begin_info);
+    const XrResult begin_result = with_runtime_entry(state, [&] {
+        return state->dispatch->begin_frame(state->handle, &begin_info);
+    });
     xrfg::bridge_flight_logger().end(
         begin_token,
         xrfg::BridgeFlightOperation::internal_begin_frame,
@@ -5936,9 +6088,11 @@ struct InternalCycleResult {
         handle_value(state->handle),
         static_cast<std::uint64_t>(submitted.displayTime),
         submitted.layerCount);
-    const XrResult end_result = state->fps_overlay
-        ? state->fps_overlay->end_frame(&submitted, false)
-        : state->dispatch->end_frame(state->handle, &submitted);
+    const XrResult end_result = with_runtime_entry(state, [&] {
+        return state->fps_overlay
+            ? state->fps_overlay->end_frame(&submitted, false)
+            : state->dispatch->end_frame(state->handle, &submitted);
+    });
     xrfg::bridge_flight_logger().end(
         end_token,
         xrfg::BridgeFlightOperation::internal_end_frame,
@@ -6314,9 +6468,11 @@ XrResult layer_end_frame_impl(
                 end_info ? end_info->layerCount : 0);
             const XrResult end_result = use_continuous_presenter
                 ? submit_borrowed_to_presenter()
-                : state->fps_overlay
-                    ? state->fps_overlay->end_frame(end_info, false)
-                    : state->dispatch->end_frame(session, end_info);
+                : with_runtime_entry(state, [&] {
+                      return state->fps_overlay
+                          ? state->fps_overlay->end_frame(end_info, false)
+                          : state->dispatch->end_frame(session, end_info);
+                  });
             xrfg::bridge_flight_logger().end(
                 end_token,
                 xrfg::BridgeFlightOperation::downstream_first_end_frame,
@@ -6698,9 +6854,11 @@ XrResult layer_end_frame_impl(
             result = submit_borrowed_to_presenter();
         }
     } else {
-        result = state->fps_overlay
-            ? state->fps_overlay->end_frame(submitted_end_info, pair_ready)
-            : state->dispatch->end_frame(session, submitted_end_info);
+        result = with_runtime_entry(state, [&] {
+            return state->fps_overlay
+                ? state->fps_overlay->end_frame(submitted_end_info, pair_ready)
+                : state->dispatch->end_frame(session, submitted_end_info);
+        });
     }
     const auto first_end_elapsed =
         std::chrono::steady_clock::now() - first_end_started;
