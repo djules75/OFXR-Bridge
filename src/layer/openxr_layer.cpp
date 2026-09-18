@@ -560,6 +560,23 @@ struct SessionState {
     // anything once the rate is right, so the correction waits for a run of
     // them - see the comment at the controller.
     std::uint32_t presenter_on_grid_streak{};
+    // The adaptive pair bias and the two smoothed costs it is derived from.
+    // The synthetic's downstream xrEndFrame costs more than the real frame's
+    // exactly when the runtime is blocking on pixels that are not finished,
+    // so the difference is the block and the bias buys it out. The real
+    // frame is the baseline rather than a constant because it absorbs
+    // whatever the runtime charges per submission regardless - 0.65 to
+    // 0.81 ms across every capture here, and different elsewhere.
+    std::chrono::nanoseconds presenter_synthetic_call_mean{};
+    std::chrono::nanoseconds presenter_real_call_mean{};
+    std::chrono::nanoseconds presenter_pair_bias{};
+    std::uint32_t presenter_bias_tick{};
+    // The other constraint on the bias, and the one the controller was blind
+    // to: the interval between the two hand-overs of a pair. Too small and
+    // they share a scanout and the compositor keeps one - 11.90 ms measured
+    // 0.0% sharing, 8.50 ms measured 76.4%.
+    std::chrono::steady_clock::time_point presenter_synthetic_returned_at{};
+    std::chrono::nanoseconds presenter_pair_gap_mean{};
     bool presenter_schedule_valid{};
     // The display time the runtime reported for the previous internal
     // xrWaitFrame, and how many slots the pace has been asked to give back.
@@ -3667,10 +3684,20 @@ void pace_presenter_submission(
                 // Both were clean grids: Callisto parked at the ceiling for
                 // 47 s with no skips at all, and The Witcher 3 walked to the
                 // floor with 0.0-0.4 skips a second.
+                // The ceiling carries the bias. The pair is deliberately unevenly
+                // spaced, so the hold before a synthetic is longer by exactly
+                // that much; against a bare 3/4 of a period the band reads it
+                // as a grid that has walked to the end and pulls against the
+                // bias. Measured while the bias was being walked by hand: mean
+                // hold 4.46 -> 6.88 -> 8.29 ms against an 8.33 ms ceiling, with
+                // the pull rate going 2.6% -> 7.2% -> 8.5%. Offset, never
+                // removed - section 14 is what happens without a ceiling at all.
+                const auto band_ceiling =
+                    period * 3 / 4 + state->presenter_pair_bias;
                 if (state->presenter_on_grid_streak <
                     kPhaseCorrectionGridStreak) {
                     // Rate is wrong; leave the schedule alone.
-                } else if (remaining > period * 3 / 4) {
+                } else if (remaining > band_ceiling) {
                     state->presenter_next_submit -= period / 16;
                     pace_band_correction = -1;
                 } else if (remaining < period / 4) {
@@ -3902,6 +3929,9 @@ void continuous_presenter_main(
         // Which half of the pair the presenter submitted, kept at this scope so
         // the flight record below can carry it.
         bool fresh_synthetic = false;
+        // When the downstream xrEndFrame was entered, so the bias controller
+        // below can see how long the runtime held this submission.
+        auto downstream_end_started = std::chrono::steady_clock::now();
         {
             // Do not let the application release a newer private output while
             // the runtime is resolving the previous handle's last image.
@@ -3947,6 +3977,7 @@ void continuous_presenter_main(
                 request->owned_frame->synthetic;
             if (state->fps_overlay && state->manual_control.stop_requested())
                 state->fps_overlay->suspend();
+            downstream_end_started = std::chrono::steady_clock::now();
             end_result = state->fps_overlay
                 ? state->fps_overlay->end_frame(&submitted, fresh_synthetic)
                 : state->dispatch->end_frame(state->handle, &submitted);
@@ -4021,34 +4052,165 @@ void continuous_presenter_main(
                     // sum to exactly two periods, so the schedule does not
                     // drift, and both frames arrive one period apart. A repeat
                     // is not part of a pair and advances plainly.
-                    // Give the real frame the margin, not the synthetic.
+                    // Adaptive pair bias. Shortening the interval after the
+                    // synthetic lengthens the one before the *next* one, which
+                    // gives that synthetic more age before its slot arrives -
+                    // so the runtime blocks less, the gap to the real frame
+                    // stops collapsing, and the real frame stops being
+                    // discarded. See LOW_HEADROOM_PLAN.md section 16.
                     //
-                    // Both frames of a pair exist - the synthetic cannot be
-                    // produced without the real one - and both are submitted
-                    // successfully with distinct display times. The compositor
-                    // discards the real one, and the reason is margin, not
-                    // readiness: the real frame's image is finished first, but
-                    // measured at hand-over rather than at call return it
-                    // reaches its own scanout with less room than the
-                    // synthetic does.
+                    // Walked rather than computed: bias and excess are coupled,
+                    // because raising the bias lowers the excess it is derived
+                    // from. Predicting the result from the current distribution
+                    // is the mistake section 9 forbids, so nudge and re-measure.
                     //
-                    // Measured in Atomic Heart with the submission record
-                    // carrying which half of the pair each one is:
-                    //
-                    //   synthetic   margin at hand-over  112.5258
-                    //   real frame                       111.7370   (0.79 ms less)
-                    //
-                    // So shorten the interval after the synthetic, which moves
-                    // the real frame earlier relative to its own scanout, and
-                    // give the period back after it so the pair still sums to
-                    // exactly two and the schedule does not drift.
-                    //
-                    // An earlier build had this sign, and it was the only
-                    // change in the sequence that visibly improved delivery.
-                    // It was then inverted from a capture taken at call return
-                    // - where the synthetic's 3x longer call reverses the
-                    // comparison - and stayed inverted for five builds.
-                    const auto pair_bias = period / 4;
+                    // Zero restores even spacing exactly, which is what makes
+                    // this safe where there is no block to buy out - another
+                    // runtime, a lower resolution, a heavier game, any refresh
+                    // rate. It self-gates; the SteamVR test is belt and braces
+                    // until there is a capture from each runtime rather than
+                    // one smooth Quest 3 run.
+                    if (request) {
+                        const auto call = now - downstream_end_started;
+                        auto& mean = fresh_synthetic
+                            ? state->presenter_synthetic_call_mean
+                            : state->presenter_real_call_mean;
+                        mean = mean.count() == 0
+                            ? std::chrono::duration_cast<
+                                  std::chrono::nanoseconds>(call)
+                            : mean + (std::chrono::duration_cast<
+                                          std::chrono::nanoseconds>(call) -
+                                      mean) / 16;
+                        // The arrival gap, measured where it matters: between
+                        // the two hand-overs, so it already carries whatever
+                        // the runtime spent inside the synthetic's call.
+                        if (fresh_synthetic) {
+                            state->presenter_synthetic_returned_at = now;
+                        } else if (state->presenter_synthetic_returned_at !=
+                                   std::chrono::steady_clock::time_point{}) {
+                            const auto gap = std::chrono::duration_cast<
+                                std::chrono::nanoseconds>(
+                                now - state->presenter_synthetic_returned_at);
+                            if (gap > std::chrono::nanoseconds::zero() &&
+                                gap < period * 4) {
+                                state->presenter_pair_gap_mean =
+                                    state->presenter_pair_gap_mean.count() == 0
+                                        ? gap
+                                        : state->presenter_pair_gap_mean +
+                                              (gap -
+                                               state->presenter_pair_gap_mean) /
+                                                  16;
+                            }
+                            state->presenter_synthetic_returned_at = {};
+                        }
+                    }
+                    // Six times a second, not once. The block grows and shrinks
+                    // with scene load - it is larger while the view is moving
+                    // and smaller when it is still - so a controller that takes
+                    // fifteen seconds to cover a change loses frames for the
+                    // first several of them and gets them back only once the
+                    // scene settles. Reported exactly that way: losing it at
+                    // times, recovering after a second or two when standing
+                    // still.
+                    constexpr std::uint32_t kBiasUpdateFrames = 15;
+                    if (++state->presenter_bias_tick >= kBiasUpdateFrames) {
+                        state->presenter_bias_tick = 0;
+                        // A dead band, and the rates are deliberately not
+                        // symmetric. A low excess is the *success* condition -
+                        // the block is suppressed because the bias is holding
+                        // it down - so treating it as a reason to back off
+                        // makes the controller remove its own correction and
+                        // hunt. Measured doing exactly that: bias oscillating
+                        // between 1.39 and 2.43 ms, with the excess swinging
+                        // 0.11 to 4.24 in step with it, where the value found
+                        // by hand was 2.78 and stable.
+                        //
+                        // So climb while the block is present, hold across the
+                        // band, and decay only when the excess is clearly low,
+                        // slowly enough to keep the level it found. Decay
+                        // still has to exist: a genuine change - lower
+                        // resolution, a heavier game, a different runtime -
+                        // must bring it back to zero, and at this rate a full
+                        // bias unwinds in about two minutes.
+                        constexpr auto kBlockThreshold =
+                            std::chrono::microseconds(500);
+                        constexpr auto kSuppressedThreshold =
+                            std::chrono::microseconds(200);
+                        const auto excess =
+                            state->presenter_synthetic_call_mean -
+                            state->presenter_real_call_mean;
+                        // Climb in proportion to the block, so a large one is
+                        // covered in a step or two rather than walked up to.
+                        // Bounded at both ends: a floor so it always makes
+                        // progress, a cap so a single bad frame cannot throw
+                        // the spacing. Overshoot is cheap here because the
+                        // ceiling bounds it and the decay unwinds it.
+                        auto climb = excess / 4;
+                        const auto climb_floor = period / 128;
+                        const auto climb_cap = period / 32;
+                        if (climb < climb_floor) climb = climb_floor;
+                        if (climb > climb_cap) climb = climb_cap;
+                        const auto decay = period / 2048;
+                        // period/4 was where the hand-walk stopped, not a value
+                        // anything justified, and the controller saturates
+                        // against it: measured pinned at 2.78 ms through a
+                        // heavy stretch while the excess reached 3.53 ms, with
+                        // the real frames lost for the duration.
+                        //
+                        // The trade is explicit. Every millisecond of bias is a
+                        // millisecond less between the synthetic and the real
+                        // frame, and below about 9 ms the two risk the same
+                        // scanout - which is the failure this whole mechanism
+                        // exists to prevent. period/3 leaves 7.4 ms and is
+                        // about as far as that can go before the two
+                        // constraints meet.
+                        const auto ceiling = period / 4;
+                        const bool steamvr = state->dispatch &&
+                            state->dispatch->steamvr_runtime;
+                        // Both failures are now observable, so the bias is bounded
+                        // by measurement at both ends instead of by a constant.
+                        // Too little and the synthetic goes over unfinished,
+                        // the runtime blocks and the real frame is lost; too
+                        // much and the real frame follows too soon and the
+                        // synthetic is lost. Walking on the excess alone only
+                        // ever saw the first, so it pushed until the second
+                        // stopped it - period/6 short, period/4 close,
+                        // period/3 past it, and none of those numbers survive a
+                        // different headset.
+                        //
+                        // Order matters. While the block is present the gap is
+                        // compressed *by the block*, not by the bias, so the
+                        // block is dealt with first; the gap only governs once
+                        // it is suppressed. Without that the controller cannot
+                        // climb out of a bad state, because the state it is in
+                        // makes the gap look too tight to act.
+                        const auto gap_floor = period * 9 / 10;
+                        const bool gap_tight =
+                            state->presenter_pair_gap_mean.count() != 0 &&
+                            state->presenter_pair_gap_mean < gap_floor;
+                        if (steamvr && excess > kBlockThreshold) {
+                            state->presenter_pair_bias =
+                                state->presenter_pair_bias + climb > ceiling
+                                    ? ceiling
+                                    : state->presenter_pair_bias + climb;
+                        } else if (gap_tight || !steamvr ||
+                                   excess < kSuppressedThreshold) {
+                            state->presenter_pair_bias =
+                                state->presenter_pair_bias > decay
+                                    ? state->presenter_pair_bias - decay
+                                    : std::chrono::nanoseconds::zero();
+                        }
+                        xrfg::bridge_flight_logger().event(
+                            xrfg::BridgeFlightOperation::presenter_transition,
+                            300,
+                            static_cast<std::uint64_t>(
+                                state->presenter_pair_bias.count()),
+                            static_cast<std::uint64_t>(
+                                state->presenter_synthetic_call_mean.count()),
+                            static_cast<std::uint64_t>(
+                                state->presenter_pair_gap_mean.count()));
+                    }
+                    const auto pair_bias = state->presenter_pair_bias;
                     const auto advance = request
                         ? (fresh_synthetic ? period - pair_bias
                                            : period + pair_bias)
