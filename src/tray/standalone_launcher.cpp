@@ -160,6 +160,14 @@ LauncherSettings parse_settings(std::string_view text) {
                         lower_ascii(value) == "true";
                 } else if (key == "overlay_position") {
                     settings.overlay_position = parse_overlay_position(lower_ascii(value));
+                } else if (key == "grid_phase_us") {
+                    try {
+                        const int parsed = std::stoi(std::string(value));
+                        settings.grid_phase_us =
+                            parsed > 0 && parsed < 100000 ? parsed : 0;
+                    } catch (...) {
+                        settings.grid_phase_us = 0;
+                    }
                 } else if (key == "diagnostics") {
                     settings.diagnostics = value == "1" ||
                                            lower_ascii(value) == "true";
@@ -184,6 +192,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            (settings.nvidia_bidirectional ? "1" : "0") +
            "\r\ndiagnostics=" + (settings.diagnostics ? "1" : "0") +
            "\r\noverlay_position=" + overlay_position_name(settings.overlay_position) +
+           "\r\ngrid_phase_us=" + std::to_string(settings.grid_phase_us) +
            "\r\n";
 }
 
@@ -220,6 +229,7 @@ std::string build_runtime_ini(
            nvidia_input_scale_ini_value(settings.nvidia_input_scale) +
            "\r\nnvidia_bidirectional=" +
            (settings.nvidia_bidirectional ? "1" : "0") +
+           "\r\ngrid_phase_us=" + std::to_string(settings.grid_phase_us) +
            "\r\n\r\n[diagnostics]\r\nlogging_enabled=" +
            (settings.diagnostics ? "1" : "0") +
            "\r\nmax_file_mb=" + std::to_string(max_file_mb) +

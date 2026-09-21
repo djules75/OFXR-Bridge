@@ -35,6 +35,13 @@ struct LauncherSettings {
     bool nvidia_bidirectional{};
     bool diagnostics{};
     FpsOverlayPosition overlay_position{FpsOverlayPosition::upper_right};
+    // Where on the display's scanout the layer places its submission grid, in
+    // microseconds after a vsync; zero leaves it wherever the schedule was
+    // seeded. Diagnostic: the phase that works is a margin against the
+    // compositor's deadline and the pair's own spacing, so the value that
+    // belongs here has to be computed rather than dialled in. Adjustable while
+    // a game runs because finding it any other way costs a session per point.
+    int grid_phase_us{};
 };
 
 [[nodiscard]] std::string backend_ini_value(FlowBackend backend);
