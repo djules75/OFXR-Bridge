@@ -52,8 +52,9 @@ struct OpenXrFpsOverlay::Impl {
     bool attempted{}, initialized{}, image_valid{}, acquired{}, waited{}, disabled{};
     // The number the overlay draws is what the headset received where that
     // can be known, and what was submitted everywhere else. Only SteamVR
-    // reports the former; see SteamVrDelivery.
-    std::unique_ptr<SteamVrDelivery> delivery;
+    // reports the former. Borrowed: the session owns it, because the presenter
+    // reads the vsync anchor from the same connection.
+    SteamVrDelivery* delivery{};
     XrSpace space{};
     XrSwapchain swapchain{};
     std::uint32_t index{}, width{}, height{}, max_layers{};
@@ -339,16 +340,12 @@ OpenXrFpsOverlay::OpenXrFpsOverlay(XrInstance instance, XrSession session, XrSys
     PFN_xrGetInstanceProcAddr get_proc, PFN_xrEndFrame end_frame,
     ID3D12Device* device12, ID3D12CommandQueue* queue12,
     ID3D11Device* device11, const std::filesystem::path& ini,
-    bool steamvr_runtime) : impl_(std::make_unique<Impl>()) {
+    SteamVrDelivery* delivery) : impl_(std::make_unique<Impl>()) {
     impl_->instance = instance; impl_->session = session; impl_->system = system;
     impl_->get = get_proc; impl_->downstream_end = end_frame;
     impl_->device12 = device12; impl_->queue12 = queue12; impl_->device11 = device11;
     impl_->ini = ini;
-    try {
-        impl_->delivery = std::make_unique<SteamVrDelivery>(steamvr_runtime);
-    } catch (...) {
-        // Optional, like the rest of the overlay: never fail a session for it.
-    }
+    impl_->delivery = delivery;
 }
 OpenXrFpsOverlay::~OpenXrFpsOverlay() = default;
 

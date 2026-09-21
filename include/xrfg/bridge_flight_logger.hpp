@@ -93,6 +93,21 @@ enum class BridgeFlightOperation : std::uint32_t {
     // second x1000, b= frames the compositor reprojected in the window,
     // c= what the counter read cost in microseconds.
     steamvr_delivery,
+    // The vsync phase lock, once every few submissions while the rate is
+    // right. result= the signed error against the held offset in ns, a= the
+    // correction applied in ns (it always opposes the error, so its sign is
+    // known), b= the offset being held, c= what the vsync read cost in
+    // microseconds - it runs on the paced thread, so that is the number that
+    // says whether it belongs there. An error that does not settle toward
+    // zero means the grid is being dragged rather than held.
+    presenter_vsync_lock,
+    // Per submission: did the compositor put a settled frame on the vsync it
+    // was predicted for. result= mispresented, a= our submission serial,
+    // b= the compositor's frame index, c= presents in the low byte and frames
+    // skipped since the last record above it. This is the attribution no
+    // submission count can give. Read a frame that has actually been presented
+    // - frames-ago zero is still in flight and reports zero for everything.
+    presenter_frame_presented,
 };
 
 struct BridgeFlightToken {

@@ -234,7 +234,7 @@ int main(int argc, char** argv) {
         write_position(ini, L"upper_right");
         {
             xrfg::OpenXrFpsOverlay overlay(handle<XrInstance>(1), session, 1, get, end,
-                device.Get(), queue.Get(), device11.Get(), ini, false);
+                device.Get(), queue.Get(), device11.Get(), ini, nullptr);
             overlay.application_frame(&info);
             check(acquires == 1 && waits == 1 && releases == 0, "timeout ownership violated");
             check(overlay.end_frame(&info, false) == XR_SUCCESS && observed_count == 1, "uninitialized quad submitted");
@@ -328,7 +328,7 @@ int main(int argc, char** argv) {
         info.layerCount = expected_count = 2;
         {
             xrfg::OpenXrFpsOverlay overlay(handle<XrInstance>(1), session, 1, get, end,
-                device.Get(), queue.Get(), device11.Get(), ini, false);
+                device.Get(), queue.Get(), device11.Get(), ini, nullptr);
             overlay.application_frame(&info);
             check(overlay.end_frame(&info, false) == XR_SUCCESS && observed_count == 2, "optional API failure broke game");
         }

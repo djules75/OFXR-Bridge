@@ -9,6 +9,7 @@
 #include "xrfg/provider_api.hpp"
 #include <atomic>
 #include "xrfg/openxr_fps_overlay.hpp"
+#include "xrfg/steamvr_delivery.hpp"
 
 #include <windows.h>
 #include <psapi.h>
@@ -454,6 +455,24 @@ struct SessionState {
     std::atomic<bool> generation_steady_state_established{false};
     bool manual_stop_applied{}; // frame_call_mutex; terminal for this XrSession.
     std::unique_ptr<xrfg::OpenXrFpsOverlay> fps_overlay;
+    // Owned here rather than by the overlay because the presenter reads the
+    // vsync anchor from the same connection. Null off SteamVR.
+    std::unique_ptr<xrfg::SteamVrDelivery> steamvr_delivery;
+    // The offset from a real vsync that the schedule is held at. Learned from
+    // wherever the existing servo had settled when the first anchor arrived,
+    // never chosen: the lock's job is to stop the grid drifting away from the
+    // scanout, not to decide where on the scanout it belongs. Guarded by
+    // presenter_mutex.
+    std::chrono::nanoseconds presenter_vsync_offset{};
+    bool presenter_vsync_offset_valid{};
+    std::uint32_t presenter_vsync_tick{};
+    // Phases seen while on-grid, before an offset is settled on. The first
+    // build took the offset from a single anchor and landed 1.5 ms away from
+    // where the schedule actually rests, so the lock spent a whole session
+    // saturated against an error it could never close. A median over a window
+    // is what that sample was meant to approximate.
+    std::array<std::int64_t, 64> presenter_vsync_phase_samples{};
+    std::uint32_t presenter_vsync_sample_count{};
     // Serializes each generated synthetic/real frame pair atomically with
     // respect to application frame calls. A successful application wait owns
     // the next admission until its matching begin has been attempted, so a
@@ -2377,12 +2396,14 @@ XrResult layer_create_session_impl(
     state->handle = created_session;
     // Optional instrumentation cannot fail an otherwise valid session.
     try {
+        state->steamvr_delivery =
+            std::make_unique<xrfg::SteamVrDelivery>(dispatch->steamvr_runtime);
         state->fps_overlay = std::make_unique<xrfg::OpenXrFpsOverlay>(
             instance, created_session, create_info ? create_info->systemId : 0,
             dispatch->get_instance_proc_addr, dispatch->end_frame,
             state->d3d12_device.Get(), state->d3d12_queue.Get(),
             state->d3d11_device.Get(), current_layer_directory() / L"ofxr_bridge.ini",
-            dispatch->steamvr_runtime);
+            state->steamvr_delivery.get());
     } catch (...) {}
     if (state->graphics_binding == SessionGraphicsBinding::d3d11 &&
         (state->graphics_binding_capabilities & 3ULL) == 3ULL) {
@@ -3724,6 +3745,94 @@ void fail_pending_presenter_submissions_locked(
 // work actually being done rather than an empty window. It must not run
 // under presenter_content_mutex - waiting for presenter progress while
 // holding that lock has deadlocked this layer twice.
+// Holds presenter_next_submit at a fixed offset from a real vsync.
+//
+// Returns the correction applied, in nanoseconds, and writes the error it saw
+// before correcting. Zero means it did nothing: no connection, no anchor - the
+// runtime is explicitly allowed to have no vsync times - or the grid was
+// already where it should be. Every one of those leaves the existing servo in
+// sole charge, which is why it can be removed at any point without a fallback.
+//
+// Caller holds presenter_mutex.
+[[nodiscard]] std::int64_t apply_vsync_phase_lock(
+    const std::shared_ptr<SessionState>& state,
+    std::chrono::nanoseconds period,
+    std::int64_t* error_out,
+    std::int64_t* cost_out) noexcept {
+    if (error_out != nullptr) {
+        *error_out = 0;
+    }
+    if (cost_out != nullptr) {
+        *cost_out = 0;
+    }
+    if (period <= std::chrono::nanoseconds::zero()) {
+        return 0;
+    }
+    const auto anchor = state->steamvr_delivery->vsync_anchor();
+    if (!anchor) {
+        return 0;
+    }
+    if (cost_out != nullptr) {
+        *cost_out = anchor->cost.count();
+    }
+    // Where the schedule sits within one scanout interval, measured from the
+    // anchor. Modulo, so it does not matter how many periods separate them.
+    const auto since = state->presenter_next_submit - anchor->at;
+    auto phase = since % period;
+    if (phase < std::chrono::nanoseconds::zero()) {
+        phase += period;
+    }
+    if (!state->presenter_vsync_offset_valid) {
+        // Adopt whatever phase the schedule already rests at, judged over a
+        // window rather than caught once. This deliberately does not decide
+        // where the grid belongs - moving it to a phase nothing has validated
+        // is the one way this can be worse than doing nothing - but one sample
+        // is not where the schedule rests, it is where it happened to be.
+        auto& samples = state->presenter_vsync_phase_samples;
+        auto& count = state->presenter_vsync_sample_count;
+        if (count < samples.size()) {
+            samples[count++] = phase.count();
+            return 0;
+        }
+        // Median, not mean: a handful of outliers from a hitch should not move
+        // the target the rest of the session is held to.
+        auto sorted = samples;
+        std::sort(sorted.begin(), sorted.end());
+        state->presenter_vsync_offset =
+            std::chrono::nanoseconds(sorted[sorted.size() / 2]);
+        state->presenter_vsync_offset_valid = true;
+        return 0;
+    }
+    // Signed distance to the held offset, taken the short way round so a grid
+    // just past the offset is pulled back rather than dragged a whole period
+    // forward. Getting this wrong is what section 13 of the low-headroom notes
+    // cost, in the phase reference that had the same shape.
+    auto error = phase - state->presenter_vsync_offset;
+    if (error > period / 2) {
+        error -= period;
+    } else if (error < -(period / 2)) {
+        error += period;
+    }
+    if (error_out != nullptr) {
+        *error_out = error.count();
+    }
+    // A fraction of the error, bounded. Drift is a slow accumulation, so the
+    // correction that cancels it can be slow too, and a small step cannot move
+    // the grid far enough in one go to matter if the anchor was wrong.
+    auto correction = error / 8;
+    const auto limit = period / 32;
+    if (correction > limit) {
+        correction = limit;
+    } else if (correction < -limit) {
+        correction = -limit;
+    }
+    if (correction == std::chrono::nanoseconds::zero()) {
+        return 0;
+    }
+    state->presenter_next_submit -= correction;
+    return correction.count();
+}
+
 void pace_presenter_submission(
     const std::shared_ptr<SessionState>& state) noexcept {
     try {
@@ -4065,6 +4174,14 @@ void continuous_presenter_main(
         // Which half of the pair the presenter submitted, kept at this scope so
         // the flight record below can carry it.
         bool fresh_synthetic = false;
+        // Same, for the vsync lock. Recorded after presenter_mutex is released:
+        // the presenter thread takes it every frame and logging under it has
+        // deadlocked the layer twice.
+        std::int64_t vsync_lock_correction = 0;
+        std::int64_t vsync_lock_error_ns = 0;
+        std::int64_t vsync_lock_offset_ns = 0;
+        std::int64_t vsync_lock_cost_us = 0;
+        bool pending_vsync_lock = false;
         // When the downstream xrEndFrame was entered, so the call means below
         // can record how long the runtime held this submission.
         auto downstream_end_started = std::chrono::steady_clock::now();
@@ -4257,6 +4374,46 @@ void continuous_presenter_main(
                     // One period per submission, both halves of the pair alike.
                     const auto advance = period;
                     state->presenter_next_submit += advance;
+                    // Hold the grid against the display's own clock.
+                    //
+                    // Everything else in this function infers where the scanout
+                    // is from how the runtime behaved. It has to, because the
+                    // schedule is a steady_clock grid advancing by a nominal
+                    // period against a display whose true period is not exactly
+                    // that - so it drifts, continuously, and every correction
+                    // here is chasing that drift after the fact.
+                    //
+                    // GetTimeSinceLastVsync says where the scanout actually is.
+                    // The offset to hold is not chosen: the first anchor records
+                    // wherever the servo had already settled, and from then on
+                    // this only removes the drift away from it. That cannot put
+                    // the grid anywhere the existing machinery would not have,
+                    // which is the point - a wrong offset is the failure the
+                    // comment on presenter_next_submit describes, where every
+                    // submission misses and is latched there for the session.
+                    //
+                    // Bounded and gradual for the same reason, and it runs only
+                    // once the rate is right: a grid that is skipping slots has
+                    // no stable phase to hold.
+                    if (state->steamvr_delivery &&
+                        state->presenter_on_grid_streak >=
+                            kPhaseCorrectionGridStreak) {
+                        constexpr std::uint32_t kVsyncLockFrames = 4;
+                        if (++state->presenter_vsync_tick >= kVsyncLockFrames) {
+                            state->presenter_vsync_tick = 0;
+                            vsync_lock_correction = apply_vsync_phase_lock(
+                                state,
+                                period,
+                                &vsync_lock_error_ns,
+                                &vsync_lock_cost_us);
+                        }
+                    }
+                    if (vsync_lock_correction != 0 ||
+                        vsync_lock_error_ns != 0 || vsync_lock_cost_us != 0) {
+                        pending_vsync_lock = true;
+                        vsync_lock_offset_ns =
+                            state->presenter_vsync_offset.count();
+                    }
                     // Pull the grid back towards the best phase this
                     // presenter has managed. Everything else here corrects
                     // the grid's *rate* - a repeated scanout or a skipped
@@ -4398,8 +4555,19 @@ void continuous_presenter_main(
                     // capture was a deliberately hard scene skipping slots
                     // about twelve times a second, where it stays switched off
                     // and cannot ratchet.
+                    // Stand down once the vsync lock has a settled offset.
+                    // Both correct the grid's phase on the same gate, this one
+                    // by up to period/16 against the lock's period/32, and they
+                    // pull to different targets - this one to the best phase
+                    // inferred from the runtime's own behaviour, the lock to a
+                    // measured scanout. Two controllers on one variable is not
+                    // a tuning problem: measured, the lock sat saturated at its
+                    // clamp for sixty-eight seconds while this dragged the grid
+                    // back every fourth sample, a perfect sawtooth that never
+                    // converged. The lock knows the phase; this infers it.
                     if (state->presenter_on_grid_streak >=
-                        kPhaseCorrectionGridStreak) {
+                            kPhaseCorrectionGridStreak &&
+                        !state->presenter_vsync_offset_valid) {
                         const std::int64_t deficit = phase_deficit(
                             state->presenter_lead_reference - submitted_phase);
                         constexpr std::int64_t kLeadTolerance = 1'000'000;
@@ -4482,6 +4650,34 @@ void continuous_presenter_main(
             request ? request->sequence : 0,
             static_cast<std::uint64_t>(frame_state.predictedDisplayTime),
             request ? (fresh_synthetic ? 2u : 1u) : 0u);
+        if (pending_vsync_lock) {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::presenter_vsync_lock,
+                vsync_lock_error_ns,
+                static_cast<std::uint64_t>(
+                    vsync_lock_correction < 0 ? -vsync_lock_correction
+                                              : vsync_lock_correction),
+                static_cast<std::uint64_t>(vsync_lock_offset_ns),
+                static_cast<std::uint64_t>(vsync_lock_cost_us));
+        }
+        // Whether the compositor put the frame before this one on the vsync it
+        // was predicted for. Submission counts cannot see this: a frame can be
+        // accepted, correctly spaced and aimed at a distinct slot and still be
+        // shown somewhere else, which is the loss every layer-side instrument
+        // reads as healthy. Recorded per submission so a dip can be attributed
+        // to individual frames rather than averaged across a second.
+        if (state->steamvr_delivery) {
+            if (const auto presented =
+                    state->steamvr_delivery->last_presentation()) {
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::presenter_frame_presented,
+                    presented->mispresented,
+                    request ? request->sequence : 0,
+                    presented->frame_index,
+                    (static_cast<std::uint64_t>(presented->skipped) << 8) |
+                        presented->presents);
+            }
+        }
         {
             std::scoped_lock lock(state->presenter_mutex);
             if (request) {

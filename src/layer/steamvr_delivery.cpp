@@ -6,8 +6,10 @@
 
 #include <windows.h>
 
+#include <array>
 #include <chrono>
 #include <cstdio>
+#include <mutex>
 #include <string>
 
 namespace xrfg {
@@ -94,12 +96,16 @@ constexpr std::int64_t kStaleNanoseconds = 5'000'000'000;
 } // namespace
 
 struct SteamVrDelivery::Impl {
+    std::mutex mutex;
     bool steamvr{};
     bool attempted{};
     bool usable{};
     HMODULE module{};
     PfnShutdownInternal shutdown{};
     vr::IVRCompositor* compositor{};
+    // Held separately because GetTimeSinceLastVsync is on IVRSystem, not the
+    // compositor. Its absence is not fatal: the delivered rate still works.
+    vr::IVRSystem* system{};
     AttachRoute route{AttachRoute::none};
     bool owns_context{};
 
@@ -112,6 +118,9 @@ struct SteamVrDelivery::Impl {
 
     float delivered{};
     std::int64_t delivered_at_ns{-1};
+
+    std::uint32_t last_frame_index{};
+    bool reported_frames{};
 
     void attach() noexcept {
         attempted = true;
@@ -190,13 +199,17 @@ struct SteamVrDelivery::Impl {
                 static_cast<std::uint64_t>(error));
             return;
         }
+        error = vr::VRInitError_None;
+        system = static_cast<vr::IVRSystem*>(
+            generic(vr::IVRSystem_Version, &error));
         pid = GetCurrentProcessId();
         usable = true;
         bridge_flight_logger().event(
             BridgeFlightOperation::steamvr_delivery_attach,
             0,
             static_cast<std::uint64_t>(route),
-            pid);
+            pid,
+            system != nullptr ? 1 : 0);
     }
 
     void sample(std::int64_t now) noexcept {
@@ -281,6 +294,7 @@ std::optional<float> SteamVrDelivery::delivered_fps(std::int64_t now) noexcept {
         if (!impl_) {
             return std::nullopt;
         }
+        std::scoped_lock lock(impl_->mutex);
         if (!impl_->attempted) {
             impl_->attach();
         }
@@ -293,6 +307,99 @@ std::optional<float> SteamVrDelivery::delivered_fps(std::int64_t now) noexcept {
             return std::nullopt;
         }
         return impl_->delivered;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<SteamVrDelivery::VsyncAnchor>
+SteamVrDelivery::vsync_anchor() noexcept {
+    try {
+        if (!impl_) {
+            return std::nullopt;
+        }
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->attempted) {
+            impl_->attach();
+        }
+        if (!impl_->usable || impl_->system == nullptr) {
+            return std::nullopt;
+        }
+        float seconds = 0.0F;
+        std::uint64_t counter = 0;
+        const auto entered = std::chrono::steady_clock::now();
+        // Read the clock immediately after, not before: the value is relative
+        // to the moment of the call, and anything between the two becomes
+        // phase error in whatever uses it.
+        const bool ok = impl_->system->GetTimeSinceLastVsync(&seconds, &counter);
+        const auto now = std::chrono::steady_clock::now();
+        // Documented to return false with zeroes when the runtime has no vsync
+        // times. A negative or absurd value would be worse than none, since a
+        // caller would treat it as a real anchor.
+        if (!ok || !(seconds >= 0.0F) || seconds > 1.0F) {
+            return std::nullopt;
+        }
+        VsyncAnchor anchor{};
+        anchor.at = now - std::chrono::nanoseconds(
+            static_cast<std::int64_t>(static_cast<double>(seconds) * 1e9));
+        anchor.frame_counter = counter;
+        anchor.cost = std::chrono::duration_cast<std::chrono::microseconds>(
+            now - entered);
+        return anchor;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<SteamVrDelivery::FramePresentation>
+SteamVrDelivery::last_presentation() noexcept {
+    try {
+        if (!impl_) {
+            return std::nullopt;
+        }
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->attempted) {
+            impl_->attach();
+        }
+        if (!impl_->usable) {
+            return std::nullopt;
+        }
+        // Frames ago 0 is the one still in flight: nothing has happened to it
+        // yet, so it reports zero presents and zero mispresents whatever the
+        // compositor ends up doing. Reading it made this record uniformly zero
+        // across 6161 submissions while frames were demonstrably being lost.
+        // Walk back to the newest frame that has actually been presented.
+        constexpr std::uint32_t kLookback = 8;
+        std::array<vr::Compositor_FrameTiming, kLookback> timings{};
+        timings[0].m_nSize = sizeof(vr::Compositor_FrameTiming);
+        const std::uint32_t filled =
+            impl_->compositor->GetFrameTimings(timings.data(), kLookback);
+        if (filled == 0 || filled > kLookback) {
+            return std::nullopt;
+        }
+        // Ascending, oldest to newest.
+        for (std::uint32_t offset = filled; offset-- > 0;) {
+            const auto& timing = timings[offset];
+            if (timing.m_nNumFramePresents == 0) {
+                continue;
+            }
+            if (impl_->reported_frames && 
+                timing.m_nFrameIndex <= impl_->last_frame_index) {
+                return std::nullopt; // Nothing has settled since the last call.
+            }
+            FramePresentation presentation{};
+            presentation.frame_index = timing.m_nFrameIndex;
+            presentation.mispresented = timing.m_nNumMisPresented;
+            presentation.presents = timing.m_nNumFramePresents;
+            presentation.dropped = timing.m_nNumDroppedFrames;
+            presentation.skipped = impl_->reported_frames
+                ? timing.m_nFrameIndex - impl_->last_frame_index - 1
+                : 0;
+            impl_->last_frame_index = timing.m_nFrameIndex;
+            impl_->reported_frames = true;
+            return presentation;
+        }
+        return std::nullopt;
     } catch (...) {
         return std::nullopt;
     }

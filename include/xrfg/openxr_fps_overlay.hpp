@@ -1,6 +1,7 @@
 #pragma once
 
 #include "xrfg/fps_overlay_model.hpp"
+#include "xrfg/steamvr_delivery.hpp"
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <openxr/openxr.h>
@@ -18,7 +19,9 @@ public:
         PFN_xrGetInstanceProcAddr get_proc, PFN_xrEndFrame end_frame,
         ID3D12Device* device12, ID3D12CommandQueue* queue12,
         ID3D11Device* device11, const std::filesystem::path& ini,
-        bool steamvr_runtime);
+        // Borrowed, owned by the session, and may be null. Shared with the
+        // presenter, which reads the vsync anchor from the same connection.
+        SteamVrDelivery* delivery);
     ~OpenXrFpsOverlay();
     // Called on the application's end-frame thread, not the presenter thread.
     // Uploads at most 4 Hz; no explicit GPU fence wait, image-wait timeout zero.
