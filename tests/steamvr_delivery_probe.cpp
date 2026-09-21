@@ -26,10 +26,12 @@
 
 #include <share.h>
 
+#include <array>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -163,6 +165,113 @@ struct Sample {
     bool valid{};
 };
 
+// Distinct compositor frames per second, timed on SteamVR's own clock.
+//
+// The cumulative counters cannot give this. m_nNumNumReprojectedFrames counts
+// routine reprojection, not lost frames: MSFS 2024 runs with prediction two
+// frames ahead (flags 0x024) and every frame comes back marked reprojected and
+// mispresented while the headset is receiving all 90, so presents minus dropped
+// minus reprojected collapses to zero through a healthy session.
+//
+// The frame index alone is not enough either: it advances once per distinct
+// frame where the compositor ran out of content and repeated one - MSFS's
+// repeat held its index and stretched the gap to 22.227 ms - but it keeps
+// advancing at the refresh rate where the loss is on our side, two submissions
+// landing in one scanout window and the compositor keeping one. Callisto does
+// the second, and the index rate reads 90 while the headset shows 45.
+//
+// What separates a lost frame from a routine one is m_nNumMisPresented against
+// how far ahead the compositor is predicting. Presenting on a vsync other than
+// the one first predicted is expected when it predicts ahead, and a fault when
+// it does not:
+//
+//   Callisto healthy   mispres   0%   predicted 0   ->  90, matches fpsVR
+//   Callisto dropping  mispres  49%   predicted 0   ->  46, matches fpsVR 45-40
+//   MSFS 2024          mispres 100%   predicted 2   ->  90, matches fpsVR
+//
+// With one exception, which the MSFS capture also shows: the frame after a
+// repeat is mispresented *because of* the repeat. It arrives a period late, so
+// it lands on a vsync other than the one predicted, and the MSFS repeat's
+// successor duly carried mispres 2 against flags 0x014 predicting one ahead.
+// But the index rate has already subtracted that scanout - the repeat held its
+// index rather than advancing it - so charging the successor as well counts the
+// same lost frame twice. Where every frame is repeated, as MSFS is when it
+// holds 45, that double count takes the whole rate to zero.
+//
+// So the mispresent only counts when the previous distinct frame was scanned
+// out once. Beyond that the index rate has it covered.
+//
+// Timed on m_flSystemTimeInSeconds rather than the wall clock: it is the
+// compositor's own vsync-aligned reference, so it needs no correction for when
+// we happened to poll.
+struct FrameRate {
+    std::uint32_t first_index{};
+    double first_time{};
+    std::uint32_t last_index{};
+    double last_time{};
+    std::uint32_t seen{};
+    std::uint32_t lost{};
+    // Scanouts the previous distinct frame occupied. One means this frame is
+    // as early as it could be, so a mispresent here is a real displacement.
+    std::uint32_t previous_presents{1};
+    bool started{};
+
+    void observe(const vr::Compositor_FrameTiming& timing) {
+        if (!started || timing.m_nFrameIndex < last_index) {
+            first_index = last_index = timing.m_nFrameIndex;
+            first_time = last_time = timing.m_flSystemTimeInSeconds;
+            seen = lost = 0;
+            previous_presents = timing.m_nNumFramePresents;
+            started = true;
+            return;
+        }
+        if (timing.m_nFrameIndex <= last_index) {
+            return;
+        }
+        last_index = timing.m_nFrameIndex;
+        last_time = timing.m_flSystemTimeInSeconds;
+        ++seen;
+        const std::uint32_t predicted =
+            (timing.m_nReprojectionFlags & vr::VRCompositor_PredictionMask) >> 4;
+        if (previous_presents <= 1 && timing.m_nNumMisPresented > predicted) {
+            ++lost;
+        }
+        previous_presents = timing.m_nNumFramePresents;
+    }
+    // Scanouts per second, less the share of them that carried nothing new.
+    [[nodiscard]] double per_second() const {
+        const double span = last_time - first_time;
+        if (span <= 0.05 || seen == 0) {
+            return -1.0;
+        }
+        const double scanouts =
+            static_cast<double>(last_index - first_index) / span;
+        return scanouts *
+            (1.0 - static_cast<double>(lost) / static_cast<double>(seen));
+    }
+    [[nodiscard]] double lost_share() const {
+        return seen == 0 ? 0.0
+                         : 100.0 * static_cast<double>(lost) /
+                               static_cast<double>(seen);
+    }
+    void restart() { started = false; }
+};
+
+// Folds whatever settled since the last look into the rate. The newest entry
+// is left for the next poll: m_nNumFramePresents is still rising while a frame
+// is on screen, and the rule above reads it, so a frame is only counted once a
+// later one exists and its scanout count is final.
+void accumulate(vr::IVRCompositor* compositor, FrameRate* rate) {
+    std::array<vr::Compositor_FrameTiming, 64> window{};
+    window[0].m_nSize = sizeof(vr::Compositor_FrameTiming);
+    const std::uint32_t filled = compositor->GetFrameTimings(window.data(), 64);
+    for (std::uint32_t i = 0; i + 1 < filled; ++i) {
+        if (window[i].m_nNumFramePresents != 0) {
+            rate->observe(window[i]);
+        }
+    }
+}
+
 [[nodiscard]] Sample take(vr::IVRCompositor* compositor) {
     vr::Compositor_CumulativeStats stats{};
     compositor->GetCumulativeStats(&stats, sizeof(stats));
@@ -214,7 +323,18 @@ void describe_reprojection(std::uint32_t flags) {
 } // namespace
 
 int main(int argc, char** argv) {
-    const int seconds = argc > 1 ? std::atoi(argv[1]) : 300;
+    int seconds = 300;
+    bool raw = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "raw") == 0) {
+            raw = true;
+        } else {
+            const int value = std::atoi(argv[i]);
+            if (value > 0) {
+                seconds = value;
+            }
+        }
+    }
 
     const std::string runtime = runtime_path_from_vrpath();
     if (runtime.empty()) {
@@ -278,12 +398,78 @@ int main(int argc, char** argv) {
         describe_reprojection(timing.m_nReprojectionFlags);
     }
 
-    emit("      clock   sec    pid  presents  dropped  reproj  delivered\n");
     Sample previous = take(compositor);
+
+    // Three delivery formulas have now been fitted to captures with nothing to
+    // check them against, and each was wrong somewhere: presents minus dropped
+    // minus reprojected reads zero wherever the compositor reprojects as a
+    // matter of course, counting frame indices returns the refresh rate by
+    // construction, and subtracting per-frame repeats produced 104 scanouts a
+    // second on a 90 Hz display. So dump what the compositor actually reports,
+    // per frame, and derive the formula from that rather than guessing at the
+    // counter semantics a fourth time.
+    //
+    // Polled at 100 ms over a 64-frame window - the compositor produces about
+    // nine frames in that time, so nothing is missed - and deduped on
+    // m_nFrameIndex. Pass "raw" on the command line.
+    if (raw) {
+        emit("\nRAW  index  presents  mispres  dropped  flags  sinceLastMs\n");
+        std::uint32_t last_index = 0;
+        bool have_last = false;
+        double last_system = 0.0;
+        const ULONGLONG raw_until =
+            GetTickCount64() + static_cast<ULONGLONG>(seconds) * 1000ULL;
+        while (GetTickCount64() < raw_until) {
+            std::array<vr::Compositor_FrameTiming, 64> window{};
+            window[0].m_nSize = sizeof(vr::Compositor_FrameTiming);
+            const std::uint32_t filled =
+                compositor->GetFrameTimings(window.data(), 64);
+            for (std::uint32_t i = 0; i < filled; ++i) {
+                const auto& t = window[i];
+                if (have_last && t.m_nFrameIndex <= last_index) {
+                    continue;
+                }
+                emit("RAW  %6u  %8u  %7u  %7u  0x%03X  %11.3f\n",
+                    t.m_nFrameIndex,
+                    t.m_nNumFramePresents,
+                    t.m_nNumMisPresented,
+                    t.m_nNumDroppedFrames,
+                    t.m_nReprojectionFlags,
+                    have_last
+                        ? (t.m_flSystemTimeInSeconds - last_system) * 1000.0
+                        : 0.0);
+                last_system = t.m_flSystemTimeInSeconds;
+                last_index = t.m_nFrameIndex;
+                have_last = true;
+            }
+            Sleep(100);
+        }
+        // The cumulative counters over the same window, so the per-frame data
+        // can be checked against what the current formula would have said.
+        const Sample after = take(compositor);
+        emit("\nRAW-TOTALS presents %u  dropped %u  reprojected %u  over %d s\n",
+            after.presents - previous.presents,
+            after.dropped - previous.dropped,
+            after.reprojected - previous.reprojected,
+            seconds);
+        shutdown();
+        if (g_log != nullptr) {
+            fclose(g_log);
+        }
+        return 0;
+    }
+
+    emit("      clock   sec    pid  presents  dropped  reproj  delivered   lost%\n");
+    FrameRate rate;
     std::uint32_t total_presents = 0;
     std::uint32_t total_lost = 0;
     for (int second = 1; second <= seconds; ++second) {
-        Sleep(1000);
+        // Sampled often enough that the 64-frame window cannot overflow at
+        // 90 Hz, so no distinct frame goes unseen.
+        for (int slice = 0; slice < 10; ++slice) {
+            accumulate(compositor, &rate);
+            Sleep(100);
+        }
         const Sample current = take(compositor);
         if (current.pid != previous.pid) {
             // A different scene application; the counters restarted with it.
@@ -298,11 +484,11 @@ int main(int argc, char** argv) {
         // distinct images the headset actually received is what is left after
         // the two kinds of repeat are removed. This is the number to compare
         // against fpsVR, and against the layer's submitted_fps.
-        const std::int64_t delivered =
-            static_cast<std::int64_t>(presents) - dropped - reprojected;
-        emit("  %s  %4d  %5u  %8u  %7u  %6u  %9lld\n",
+        const double delivered = rate.per_second();
+        emit("  %s  %4d  %5u  %8u  %7u  %6u  %9.1f  %5.1f\n",
             wall_clock().c_str(), second, current.pid, presents, dropped,
-            reprojected, static_cast<long long>(delivered));
+            reprojected, delivered, rate.lost_share());
+        rate.restart();
         total_presents += presents;
         total_lost += dropped + reprojected;
         previous = current;

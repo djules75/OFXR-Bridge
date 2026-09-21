@@ -115,12 +115,69 @@ struct SteamVrDelivery::Impl {
     std::uint32_t last_frame_index{};
     bool reported_frames{};
 
-    // Distinct compositor frames counted since the window opened, and the
-    // repeats among them. The displayed rate is derived from these rather than
-    // from the cumulative counters - see the note on sample().
-    std::uint32_t window_frames{};
-    std::uint32_t window_repeats{};
-    std::int64_t window_started_ns{-1};
+    // Distinct frames the headset received, counted on the compositor's own
+    // vsync-aligned clock.
+    //
+    // The cumulative counters cannot give this and neither can the frame index
+    // alone. m_nNumNumReprojectedFrames counts routine reprojection, not loss:
+    // MSFS 2024 predicts two frames ahead and marks every frame reprojected
+    // while the headset receives all 90, so presents minus dropped minus
+    // reprojected reads zero through a healthy session. The index rate fixes
+    // that but misses the other shape of loss - two of our submissions landing
+    // in one scanout window, where the compositor still produces a frame per
+    // scanout and the index keeps advancing at 90 while the headset shows 45.
+    //
+    // What separates the two is m_nNumMisPresented against how far ahead the
+    // compositor says it is predicting. Landing on a vsync other than the one
+    // first predicted is expected when it predicts ahead and a fault when it
+    // does not:
+    //
+    //   Callisto healthy   mispres   0%   predicted 0   ->  90, matches fpsVR
+    //   Callisto dropping  mispres  49%   predicted 0   ->  46, matches 45-40
+    //   MSFS 2024          mispres 100%   predicted 2   ->  90, matches fpsVR
+    //
+    // With one exception. The frame after a repeat is mispresented *because of*
+    // the repeat: it arrives a period late and so lands on a vsync other than
+    // the one predicted. The index rate has already subtracted that scanout,
+    // because a repeat holds its index instead of advancing it, so charging the
+    // successor as well counts one lost frame twice. Where every frame is
+    // repeated - MSFS holding 45 on a 90 Hz display - that takes the rate to
+    // zero. The mispresent therefore only counts when the previous distinct
+    // frame was scanned out once; past that the index rate covers it.
+    std::uint32_t rate_first_index{};
+    double rate_first_time{};
+    std::uint32_t rate_last_index{};
+    double rate_last_time{};
+    std::uint32_t rate_seen{};
+    std::uint32_t rate_lost{};
+    // Scanouts the previous distinct frame occupied. One means this frame is as
+    // early as it could be, so a mispresent here is a real displacement.
+    std::uint32_t rate_previous_presents{1};
+    bool rate_started{};
+
+    void observe(const vr::Compositor_FrameTiming& timing) noexcept {
+        if (!rate_started || timing.m_nFrameIndex < rate_last_index) {
+            rate_first_index = rate_last_index = timing.m_nFrameIndex;
+            rate_first_time = rate_last_time = timing.m_flSystemTimeInSeconds;
+            rate_seen = rate_lost = 0;
+            rate_previous_presents = timing.m_nNumFramePresents;
+            rate_started = true;
+            return;
+        }
+        if (timing.m_nFrameIndex <= rate_last_index) {
+            return;
+        }
+        rate_last_index = timing.m_nFrameIndex;
+        rate_last_time = timing.m_flSystemTimeInSeconds;
+        ++rate_seen;
+        const std::uint32_t predicted =
+            (timing.m_nReprojectionFlags & vr::VRCompositor_PredictionMask) >> 4;
+        if (rate_previous_presents <= 1 &&
+            timing.m_nNumMisPresented > predicted) {
+            ++rate_lost;
+        }
+        rate_previous_presents = timing.m_nNumFramePresents;
+    }
 
     void attach() noexcept {
         attempted = true;
@@ -211,42 +268,53 @@ struct SteamVrDelivery::Impl {
             system != nullptr ? 1 : 0);
     }
 
-    // Closes the delivery window from frames counted by last_presentation.
-    //
-    // This used to be presents - dropped - reprojected, read from
-    // GetCumulativeStats, and that is wrong wherever the compositor reprojects
-    // as a matter of course. MSFS 2024 runs with prediction two frames ahead
-    // (reprojection flags 0x024), so nearly every frame is marked reprojected
-    // and mispresented by construction - 92% of them - while 91% are still
-    // presented exactly once and the headset is fine. The subtraction collapsed
-    // to zero and the overlay read 0 through a healthy session.
-    //
-    // Counting distinct frames does not care how the compositor labels its
-    // timewarp. Measured against the same captures: Callisto 90.0/s either way,
-    // MSFS 84.7/s against the old formula's 0.9.
+    // The probe's accumulate(). A 64-frame window is not a detail: observe()
+    // restarts whenever it sees an index below the last one, and the oldest
+    // entry of an overlapping window always is one, so the rate only ever spans
+    // a single window. Sixty-four frames is 0.7 s at 90 Hz and 63 usable
+    // samples; the eight-frame lookback last_presentation() needs for its own
+    // record is seven, and a lost share estimated from seven frames taken
+    // whenever the overlay happened to ask is why this read 90 through drops
+    // the probe resolved.
+    void poll_window() noexcept {
+        std::array<vr::Compositor_FrameTiming, 64> window{};
+        window[0].m_nSize = sizeof(vr::Compositor_FrameTiming);
+        const std::uint32_t filled = compositor->GetFrameTimings(window.data(), 64);
+        if (filled > window.size()) {
+            return;
+        }
+        for (std::uint32_t i = 0; i + 1 < filled; ++i) {
+            if (window[i].m_nNumFramePresents != 0) {
+                observe(window[i]);
+            }
+        }
+    }
+
+    // Scanouts per second, less the share of them that carried nothing new.
     void close_window(std::int64_t now) noexcept {
-        if (window_started_ns < 0) {
-            window_started_ns = now;
+        if (!rate_started || rate_seen == 0) {
             return;
         }
-        const auto elapsed = now - window_started_ns;
-        if (elapsed < kWindowNanoseconds) {
+        // The probe's threshold, and it has to be short: the span is one
+        // window, about 0.7 s, never longer. A one-second requirement never
+        // fires at all, which leaves the overlay showing submitted frames.
+        const double span = rate_last_time - rate_first_time;
+        if (span < 0.05) {
             return;
         }
-        if (window_frames != 0) {
-            delivered = static_cast<float>(window_frames) *
-                (1e9f / static_cast<float>(elapsed));
-            delivered_at_ns = now;
-            bridge_flight_logger().event(
-                BridgeFlightOperation::steamvr_delivery,
-                0,
-                static_cast<std::uint64_t>(delivered * 1000.0F),
-                window_repeats,
-                window_frames);
-        }
-        window_frames = 0;
-        window_repeats = 0;
-        window_started_ns = now;
+        const double scanouts =
+            static_cast<double>(rate_last_index - rate_first_index) / span;
+        const double lost_share =
+            static_cast<double>(rate_lost) / static_cast<double>(rate_seen);
+        delivered = static_cast<float>(scanouts * (1.0 - lost_share));
+        delivered_at_ns = now;
+        bridge_flight_logger().event(
+            BridgeFlightOperation::steamvr_delivery,
+            0,
+            static_cast<std::uint64_t>(delivered * 1000.0F),
+            static_cast<std::uint64_t>(lost_share * 1000.0),
+            rate_seen);
+        rate_started = false;
     }
 };
 
@@ -285,6 +353,7 @@ std::optional<float> SteamVrDelivery::delivered_fps(std::int64_t now) noexcept {
         if (!impl_->usable) {
             return std::nullopt;
         }
+        impl_->poll_window();
         impl_->close_window(now);
         if (impl_->delivered_at_ns < 0 ||
             now - impl_->delivered_at_ns > kStaleNanoseconds) {
@@ -379,13 +448,6 @@ SteamVrDelivery::last_presentation() noexcept {
             presentation.skipped = impl_->reported_frames
                 ? timing.m_nFrameIndex - impl_->last_frame_index - 1
                 : 0;
-            // Frames the compositor produced since the last look: this one plus
-            // any that settled between calls. This is what the displayed rate
-            // is counted from.
-            impl_->window_frames += 1 + presentation.skipped;
-            if (presentation.presents > 1) {
-                impl_->window_repeats += presentation.presents - 1;
-            }
             impl_->last_frame_index = timing.m_nFrameIndex;
             impl_->reported_frames = true;
             return presentation;

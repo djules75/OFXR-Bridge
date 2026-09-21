@@ -90,14 +90,8 @@ enum class BridgeFlightOperation : std::uint32_t {
     // the step that refused.
     steamvr_delivery_attach,
     // Once per closed window: a= distinct frames the headset received per
-    // second x1000, b= repeats among them (a frame occupying more than one
-    // scanout), c= how many distinct compositor frames the window counted.
-    //
-    // Counted from the per-frame stream, not from GetCumulativeStats. The
-    // cumulative reprojected counter includes routine reprojection, so where
-    // the compositor predicts ahead - MSFS 2024, flags 0x024 - it marks nearly
-    // every frame and presents minus reprojected collapses to zero through a
-    // healthy session.
+    // second x1000, b= the share of counted frames that carried nothing new
+    // x1000, c= how many distinct compositor frames the window counted.
     steamvr_delivery,
     // Six times a second while a pair is being submitted: result 300, a= the
     // pair bias in ns, b= the synthetic's downstream call mean, c= the arrival
