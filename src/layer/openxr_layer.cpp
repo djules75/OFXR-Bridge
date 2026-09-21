@@ -6791,7 +6791,32 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
     state->dlss_motion_vectors = control.desired.motion_vectors == 1;
     for (const auto& chain : swapchains) {
         std::unique_lock lock(chain->mutex);
-        if (!chain->frame_generation && control.desired.enabled) {
+        // The same gates the enumeration path applies, and for the same reason.
+        //
+        // This loop used to build generation for every colour swapchain in the
+        // session. That is what 023bed4 removed from xrEnumerateSwapchainImages:
+        // two private swapchains for everything judged eligible spent the
+        // runtime's whole swapchain budget on UI quads, mirrors and per-pass
+        // targets that never carry a projection view, and The Callisto Protocol
+        // under UEVR hit the ceiling hard enough that xrCreateSession returned
+        // XR_ERROR_LIMIT_REACHED four times and the game did not reach VR at
+        // all. The fix went into the enumeration path; this one was missed, so
+        // the same allocation still happened on any control revision - arming,
+        // disarming, or changing a setting while a session is live. It only
+        // stayed hidden because arming before launch leaves nothing here to
+        // iterate.
+        //
+        // generation_eligible_pending is the projection-use gate: set at
+        // enumeration, cleared once a projection layer has actually used the
+        // swapchain. generation_declined means creation already failed for this
+        // one, and retrying it on every settings change is how a transient
+        // refusal becomes a permanent budget leak. The budget flag latches when
+        // a runtime refuses a private swapchain, which says something about the
+        // whole session rather than this swapchain.
+        const bool eligible = chain->generation_eligible_pending &&
+            !chain->generation_declined &&
+            !state->generation_budget_exhausted.load(std::memory_order_acquire);
+        if (!chain->frame_generation && control.desired.enabled && eligible) {
             std::vector<ID3D11Texture2D*> sources;
             for (const auto& image : chain->enumerated_d3d11_images) sources.push_back(image.Get());
             lock.unlock();
@@ -6801,9 +6826,30 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
                 ? create_d3d11_frame_generation_swapchains(chain, sources, &reason, &detail)
                 : create_d3d12_frame_generation_swapchains(chain, &reason, &detail);
             lock.lock();
-            if (candidate) chain->frame_generation = std::move(candidate);
-            else if (reason == SwapchainEligibilityReason::synthesis_initialize_failed)
-                result = static_cast<HRESULT>(detail);
+            const std::uint64_t auxiliary =
+                (static_cast<std::uint64_t>(chain->enumerated_image_count) << 32) |
+                chain->create_info.arraySize;
+            if (candidate) {
+                chain->frame_generation = std::move(candidate);
+                chain->generation_eligible_pending = false;
+                lock.unlock();
+                // Logged, unlike before. Its silence is why a build armed this
+                // way showed no eligibility record at all and the two creation
+                // paths could not be told apart in a capture.
+                log_swapchain_eligibility(
+                    chain,
+                    SwapchainEligibilityReason::ready,
+                    chain->enumerated_image_count,
+                    auxiliary);
+                lock.lock();
+            } else {
+                chain->generation_declined = true;
+                if (reason == SwapchainEligibilityReason::synthesis_initialize_failed)
+                    result = static_cast<HRESULT>(detail);
+                lock.unlock();
+                log_swapchain_eligibility(chain, reason, detail, auxiliary);
+                lock.lock();
+            }
         }
         if (chain->frame_generation && chain->frame_generation->synthesizer) {
             auto& synthesis = chain->frame_generation->synthesizer;
