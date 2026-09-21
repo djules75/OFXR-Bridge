@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.185.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.187.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -625,5 +625,31 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 NOMINMAX
                 WIN32_LEAN_AND_MEAN)
         endif()
+    endif()
+endif()
+
+# SteamVR compositor delivery probe. Deliberately outside the layer block: it
+# needs no D3D12, no FidelityFX and no layer, only openvr.h, so it stays
+# buildable on a checkout that cannot build the layer at all.
+#
+# external/openvr is not committed, for the same reason the FidelityFX SDK is
+# not - see docs/BUILDING.md. Nothing from OpenVR is redistributed: the probe
+# loads SteamVR's own openvr_api.dll at runtime.
+#
+# Not registered as a test. It needs a live SteamVR session with an application
+# running, so it is run by hand, like xrfg_nvidia_optical_flow_probe.
+set(XRFG_OPENVR_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/openvr"
+    CACHE PATH "Directory containing openvr.h")
+if(WIN32 AND EXISTS "${XRFG_OPENVR_INCLUDE_DIR}/openvr.h")
+    add_executable(xrfg_steamvr_delivery_probe tests/steamvr_delivery_probe.cpp)
+    target_include_directories(xrfg_steamvr_delivery_probe PRIVATE
+        "${XRFG_OPENVR_INCLUDE_DIR}")
+    target_compile_features(xrfg_steamvr_delivery_probe PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(xrfg_steamvr_delivery_probe PRIVATE
+            /W4 /permissive- /EHsc)
+        target_compile_definitions(xrfg_steamvr_delivery_probe PRIVATE
+            NOMINMAX
+            WIN32_LEAN_AND_MEAN)
     endif()
 endif()

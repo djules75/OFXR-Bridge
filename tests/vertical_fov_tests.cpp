@@ -123,7 +123,8 @@ StereoPattern run_fov_pair(D3D12WarpFixture& fixture,
     // there. That is deliberate: the purple marker rides only on the
     // synthetic, so a steady purple square cannot distinguish "only synthetics
     // are shown" from "both are shown and 45 Hz reads as steady", and nothing
-    // in the flight log can either - see LOW_HEADROOM_PLAN.md section 16.
+    // in the flight log can either - every record it carries is written before
+    // the frame is handed to the runtime.
     //
     // Everything outside the marked rect must still be a bit-exact copy of B,
     // which is what this assertion is for and what the mask preserves. With no

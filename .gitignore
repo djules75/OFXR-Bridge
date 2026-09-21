@@ -2,6 +2,7 @@
 /build*/
 /out/
 /external/FidelityFX-SDK-v1.1.4/
+/external/openvr/
 /RuntimeLayer/
 
 CMakeCache.txt

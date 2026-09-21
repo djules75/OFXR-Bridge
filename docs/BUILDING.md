@@ -53,3 +53,44 @@ ofxr/
 ```
 
 Do not distribute PDBs, static libraries, test executables or the NVIDIA SDK.
+
+## Optional: OpenVR header, for the SteamVR delivery probe
+
+`xrfg_steamvr_delivery_probe` reads SteamVR's compositor counters — the only
+signal on that stack that reports what the headset actually scanned out, rather
+than what the layer submitted. It is optional and nothing else depends on it.
+
+Place a single header at `external/openvr/openvr.h`:
+
+```powershell
+curl -sSL -o external/openvr/openvr.h `
+  https://raw.githubusercontent.com/ValveSoftware/openvr/v2.5.1/headers/openvr.h
+```
+
+| File | Tag | SHA-256 |
+| --- | --- | --- |
+| `openvr.h` | `v2.5.1` | `94E5545370159C85F87CD6E15DD3739F7C919FC7A6E869F5E4ED463533A07ED0` |
+
+Like the FidelityFX SDK, the checkout is intentionally not committed. Unlike it,
+**nothing from OpenVR is redistributed**: the probe loads SteamVR's own
+`openvr_api.dll` at run time, located through
+`%LOCALAPPDATA%\openvr\openvrpaths.vrpath`. `THIRD_PARTY.md`, `licenses/` and
+the release archive are therefore unaffected. OpenVR is BSD-3-Clause.
+
+Without the header the target is simply skipped; the rest of the build is
+unchanged. The probe needs no D3D12, no FidelityFX and no layer, so it builds on
+a checkout that cannot build the layer:
+
+```powershell
+cmake -S . -B build-probe -G "Visual Studio 17 2022" -A x64 `
+  -DXRFG_BUILD_LAYER=OFF -DXRFG_BUILD_STANDALONE=OFF -DXRFG_BUILD_TESTS=OFF
+cmake --build build-probe --config Release --target xrfg_steamvr_delivery_probe
+```
+
+It is **not registered as a test**: it needs a live SteamVR session with an
+application running, so it is run by hand, like `xrfg_nvidia_optical_flow_probe`.
+
+It writes to `%LOCALAPPDATA%\OFXR Bridge\DeliveryProbe\` - beside the flight
+logs rather than in them - one line per second, stamped with the wall clock.
+The flight log's `ms=` is elapsed since session start and its filename carries
+the wall clock of that start, so the two join offline on that column.

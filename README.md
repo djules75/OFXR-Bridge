@@ -3,7 +3,7 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current pre-release: **v0.2.2_beta6 (internal build V185)**.
+Current pre-release: **v0.2.2_beta6 (internal build V187)**.
 See the [release notes](docs/releases/0.2.2_beta6.md).
 
 > [!WARNING]
