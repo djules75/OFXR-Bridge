@@ -80,6 +80,10 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
         return "presenter_pace";
     case BridgeFlightOperation::runtime_entry_section:
         return "runtime_entry_section";
+    case BridgeFlightOperation::steamvr_delivery_attach:
+        return "steamvr_delivery_attach";
+    case BridgeFlightOperation::steamvr_delivery:
+        return "steamvr_delivery";
     case BridgeFlightOperation::synthesis_frame_start_wait:
         return "synthesis_frame_start_wait";
     case BridgeFlightOperation::embedded_configuration: return "embedded_configuration";

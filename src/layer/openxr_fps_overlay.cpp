@@ -1,4 +1,5 @@
 #include "xrfg/openxr_fps_overlay.hpp"
+#include "xrfg/steamvr_delivery.hpp"
 #include <openxr/openxr_platform.h>
 #include <windows.h>
 #include <wrl/client.h>
@@ -49,6 +50,10 @@ struct OpenXrFpsOverlay::Impl {
     FpsOverlayPosition position{FpsOverlayPosition::upper_right};
     std::int64_t next_refresh{};
     bool attempted{}, initialized{}, image_valid{}, acquired{}, waited{}, disabled{};
+    // The number the overlay draws is what the headset received where that
+    // can be known, and what was submitted everywhere else. Only SteamVR
+    // reports the former; see SteamVrDelivery.
+    std::unique_ptr<SteamVrDelivery> delivery;
     XrSpace space{};
     XrSwapchain swapchain{};
     std::uint32_t index{}, width{}, height{}, max_layers{};
@@ -311,20 +316,39 @@ struct OpenXrFpsOverlay::Impl {
         placement = overlay_placement(position, left, right, down, up);
         placement_valid = true;
         if (!initialize(eye_width)) return;
+        // A quad layer in front of the view, which the runtime composites in
+        // the order the layer list gives. An application that submits its own
+        // layer over the whole view - a HUD, a menu, a loading or fade overlay
+        // - is composited on top of this one and hides the counter until the
+        // head turns enough to move it off. Reproduced in Callisto Protocol,
+        // and reported as the counter vanishing, so rule it out before
+        // suspecting the upload path.
         quad.pose.position = {placement.x, placement.y, placement.z};
         quad.size = {placement.width, placement.height};
-        upload(counter.snapshot(now));
+        auto snapshot = counter.snapshot(now);
+        if (delivery) {
+            if (const auto received = delivery->delivered_fps(now)) {
+                snapshot.submitted_fps = *received;
+            }
+        }
+        upload(snapshot);
     }
 };
 
 OpenXrFpsOverlay::OpenXrFpsOverlay(XrInstance instance, XrSession session, XrSystemId system,
     PFN_xrGetInstanceProcAddr get_proc, PFN_xrEndFrame end_frame,
     ID3D12Device* device12, ID3D12CommandQueue* queue12,
-    ID3D11Device* device11, const std::filesystem::path& ini) : impl_(std::make_unique<Impl>()) {
+    ID3D11Device* device11, const std::filesystem::path& ini,
+    bool steamvr_runtime) : impl_(std::make_unique<Impl>()) {
     impl_->instance = instance; impl_->session = session; impl_->system = system;
     impl_->get = get_proc; impl_->downstream_end = end_frame;
     impl_->device12 = device12; impl_->queue12 = queue12; impl_->device11 = device11;
     impl_->ini = ini;
+    try {
+        impl_->delivery = std::make_unique<SteamVrDelivery>(steamvr_runtime);
+    } catch (...) {
+        // Optional, like the rest of the overlay: never fail a session for it.
+    }
 }
 OpenXrFpsOverlay::~OpenXrFpsOverlay() = default;
 

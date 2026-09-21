@@ -2381,7 +2381,8 @@ XrResult layer_create_session_impl(
             instance, created_session, create_info ? create_info->systemId : 0,
             dispatch->get_instance_proc_addr, dispatch->end_frame,
             state->d3d12_device.Get(), state->d3d12_queue.Get(),
-            state->d3d11_device.Get(), current_layer_directory() / L"ofxr_bridge.ini");
+            state->d3d11_device.Get(), current_layer_directory() / L"ofxr_bridge.ini",
+            dispatch->steamvr_runtime);
     } catch (...) {}
     if (state->graphics_binding == SessionGraphicsBinding::d3d11 &&
         (state->graphics_binding_capabilities & 3ULL) == 3ULL) {

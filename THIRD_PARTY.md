@@ -36,6 +36,31 @@ The SDK source and linked components carry AMD's MIT license; its notice is
 preserved in `licenses/AMD-FidelityFX-MIT.txt`. SDK tools are build-time inputs
 and are not linked into the bridge DLL.
 
+## Valve OpenVR header
+
+The layer reads what SteamVR's compositor actually scanned out - no OpenXR call
+reports it - through `IVRCompositor::GetCumulativeStats`, the same source fpsVR
+uses. That needs one public header, `openvr.h`, taken unmodified from
+ValveSoftware/openvr tag `v2.5.1`:
+
+| File | SHA-256 |
+| --- | --- |
+| `openvr.h` | `94E5545370159C85F87CD6E15DD3739F7C919FC7A6E869F5E4ED463533A07ED0` |
+
+Its checkout is intentionally not committed, the same arrangement the FidelityFX
+SDK has; `docs/BUILDING.md` explains how to place it under `external/openvr`.
+
+**Nothing from OpenVR is linked or redistributed.** The bridge loads SteamVR's
+own `openvr_api.dll` at runtime, located through
+`%LOCALAPPDATA%\openvr\openvrpaths.vrpath`, and resolves its entry points with
+`GetProcAddress` - so the layer DLL carries no import on it and runs unchanged
+where SteamVR is absent. The header is a compile-time input only, and the
+feature is inert on every non-SteamVR runtime.
+
+OpenVR is licensed under BSD-3-Clause. Because the released layer binary is
+built from that header, Valve's notice is reproduced in
+`licenses/OpenVR-BSD-3-Clause.txt` and ships with the release archive.
+
 ## NVIDIA Optical Flow SDK interface
 
 `XRFG-V012` uses the two public D3D12 interface headers from NVIDIA Optical

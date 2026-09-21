@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.187.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.188.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -17,6 +17,13 @@ set(XRFG_OPENXR_SDK_ROOT
     "${CMAKE_CURRENT_SOURCE_DIR}/external/OpenXR-SDK"
     CACHE PATH
     "Path to Khronos OpenXR-SDK containing include/openxr/openxr.h")
+
+# OpenVR headers. The layer needs them to read what SteamVR's compositor
+# actually scanned out - no OpenXR call reports it. Like the FidelityFX SDK
+# the checkout is not committed; nothing from OpenVR is redistributed, since
+# openvr_api.dll is loaded from the SteamVR installation at run time.
+set(XRFG_OPENVR_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/openvr"
+    CACHE PATH "Directory containing openvr.h")
 
 set(XRFG_FIDELITYFX_SDK_ROOT
     "${CMAKE_CURRENT_SOURCE_DIR}/external/FidelityFX-SDK-v1.1.4/sdk"
@@ -237,12 +244,22 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             /W4 /permissive- /EHsc)
     endif()
 
-    add_library(xrfg_fps_overlay STATIC src/layer/openxr_fps_overlay.cpp)
+    if(NOT EXISTS "${XRFG_OPENVR_INCLUDE_DIR}/openvr.h")
+        message(FATAL_ERROR
+            "openvr.h is required for the layer: the overlay reports what the "
+            "compositor delivered, which no OpenXR call exposes. Place it at "
+            "${XRFG_OPENVR_INCLUDE_DIR}/openvr.h - see docs/BUILDING.md.")
+    endif()
+
+    add_library(xrfg_fps_overlay STATIC
+        src/layer/openxr_fps_overlay.cpp
+        src/layer/steamvr_delivery.cpp)
     target_include_directories(xrfg_fps_overlay PUBLIC include "${XRFG_OPENXR_SDK_ROOT}/include")
+    target_include_directories(xrfg_fps_overlay PRIVATE "${XRFG_OPENVR_INCLUDE_DIR}")
     target_compile_features(xrfg_fps_overlay PUBLIC cxx_std_20)
     target_compile_definitions(xrfg_fps_overlay PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN
         XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_PLATFORM_WIN32)
-    target_link_libraries(xrfg_fps_overlay PUBLIC xrfg_core d3d11 d3d12 dxgi)
+    target_link_libraries(xrfg_fps_overlay PUBLIC xrfg_core xrfg_bridge_flight_logger d3d11 d3d12 dxgi)
     if(MSVC)
         target_compile_options(xrfg_fps_overlay PRIVATE /W4 /permissive- /EHsc)
     endif()
@@ -638,8 +655,6 @@ endif()
 #
 # Not registered as a test. It needs a live SteamVR session with an application
 # running, so it is run by hand, like xrfg_nvidia_optical_flow_probe.
-set(XRFG_OPENVR_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/openvr"
-    CACHE PATH "Directory containing openvr.h")
 if(WIN32 AND EXISTS "${XRFG_OPENVR_INCLUDE_DIR}/openvr.h")
     add_executable(xrfg_steamvr_delivery_probe tests/steamvr_delivery_probe.cpp)
     target_include_directories(xrfg_steamvr_delivery_probe PRIVATE

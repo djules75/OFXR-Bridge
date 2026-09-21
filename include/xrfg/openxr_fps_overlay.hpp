@@ -17,7 +17,8 @@ public:
     OpenXrFpsOverlay(XrInstance instance, XrSession session, XrSystemId system,
         PFN_xrGetInstanceProcAddr get_proc, PFN_xrEndFrame end_frame,
         ID3D12Device* device12, ID3D12CommandQueue* queue12,
-        ID3D11Device* device11, const std::filesystem::path& ini);
+        ID3D11Device* device11, const std::filesystem::path& ini,
+        bool steamvr_runtime);
     ~OpenXrFpsOverlay();
     // Called on the application's end-frame thread, not the presenter thread.
     // Uploads at most 4 Hz; no explicit GPU fence wait, image-wait timeout zero.

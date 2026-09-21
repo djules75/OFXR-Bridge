@@ -54,11 +54,13 @@ ofxr/
 
 Do not distribute PDBs, static libraries, test executables or the NVIDIA SDK.
 
-## Optional: OpenVR header, for the SteamVR delivery probe
+## OpenVR header
 
-`xrfg_steamvr_delivery_probe` reads SteamVR's compositor counters — the only
-signal on that stack that reports what the headset actually scanned out, rather
-than what the layer submitted. It is optional and nothing else depends on it.
+**Required for the layer.** The overlay reports what the headset actually
+received, not what the layer submitted, and SteamVR only exposes that through
+OpenVR — `IVRCompositor::GetCumulativeStats`, the same source fpsVR reads. No
+OpenXR call reports it. The standalone `xrfg_steamvr_delivery_probe` uses the
+same header.
 
 Place a single header at `external/openvr/openvr.h`:
 
@@ -71,15 +73,20 @@ curl -sSL -o external/openvr/openvr.h `
 | --- | --- | --- |
 | `openvr.h` | `v2.5.1` | `94E5545370159C85F87CD6E15DD3739F7C919FC7A6E869F5E4ED463533A07ED0` |
 
-Like the FidelityFX SDK, the checkout is intentionally not committed. Unlike it,
-**nothing from OpenVR is redistributed**: the probe loads SteamVR's own
-`openvr_api.dll` at run time, located through
-`%LOCALAPPDATA%\openvr\openvrpaths.vrpath`. `THIRD_PARTY.md`, `licenses/` and
-the release archive are therefore unaffected. OpenVR is BSD-3-Clause.
+Like the FidelityFX SDK, the checkout is intentionally not committed, and the
+layer build hard-fails without it. **Nothing from OpenVR is linked or
+redistributed**: the layer loads SteamVR's own `openvr_api.dll` at run time,
+located through `%LOCALAPPDATA%\openvr\openvrpaths.vrpath`, and resolves its
+entry points with `GetProcAddress`. The layer DLL therefore carries no import on
+it and runs unchanged where SteamVR is absent — the feature is inert on every
+other runtime.
 
-Without the header the target is simply skipped; the rest of the build is
-unchanged. The probe needs no D3D12, no FidelityFX and no layer, so it builds on
-a checkout that cannot build the layer:
+OpenVR is BSD-3-Clause, and because the released binary is built from that
+header, Valve's notice ships in `licenses/OpenVR-BSD-3-Clause.txt`. See
+`THIRD_PARTY.md`.
+
+The probe needs no D3D12, no FidelityFX and no layer, so it still builds on a
+checkout that cannot build the layer:
 
 ```powershell
 cmake -S . -B build-probe -G "Visual Studio 17 2022" -A x64 `

@@ -84,6 +84,15 @@ enum class BridgeFlightOperation : std::uint32_t {
     // is protecting it - the earlier device-section attempt reported exactly
     // that and it was read as a clean result rather than as a refutation.
     runtime_entry_section,
+    // Once per session: how the compositor interface was obtained, or why
+    // it was not. result 0 with a=1 borrowed the process's existing OpenVR
+    // context, a=2 opened a background one of its own; negative results are
+    // the step that refused.
+    steamvr_delivery_attach,
+    // Once per closed window: a= distinct frames the headset received per
+    // second x1000, b= frames the compositor reprojected in the window,
+    // c= what the counter read cost in microseconds.
+    steamvr_delivery,
 };
 
 struct BridgeFlightToken {
