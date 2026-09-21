@@ -465,11 +465,13 @@ struct SessionState {
     // presenter_mutex.
     std::chrono::nanoseconds presenter_vsync_offset{};
     bool presenter_vsync_offset_valid{};
-    // Phases seen while on-grid, before an offset is settled on. A single
-    // anchor landed 1.5 ms from where the schedule actually rests and the lock
-    // spent a session saturated against an error it could never close.
-    std::array<std::int64_t, 64> presenter_vsync_phase_samples{};
-    std::uint32_t presenter_vsync_sample_count{};
+    // How far the last submission actually landed from the phase being held,
+    // signed and taken the short way round. Written and read only by the
+    // presenter thread, between measuring it and applying it a few lines later.
+    std::chrono::nanoseconds presenter_landed_error{};
+    // The phase the tray last asked for, and when it was last read.
+    std::chrono::nanoseconds presenter_requested_phase{};
+    std::chrono::steady_clock::time_point presenter_phase_read_at{};
     std::uint32_t presenter_vsync_tick{};
     // Serializes each generated synthetic/real frame pair atomically with
     // respect to application frame calls. A successful application wait owns
@@ -3857,6 +3859,27 @@ void fail_pending_presenter_submissions_locked(
 // already where it should be. Every one of those leaves the existing servo in
 // sole charge, which is why it can be removed at any point without a fallback.
 //
+// The grid phase the tray asks for, in nanoseconds, or zero for "inherit
+// whatever the schedule was seeded at". Read from the same INI the overlay
+// position is read from and on the same cadence, because the phase that works
+// is a margin against the compositor's deadline and the pair's spacing - it
+// has to be found by measurement before it can be computed, and moving it
+// without restarting the game is what makes finding it practical.
+//
+// Off the frame path: a quarter second apart, on the presenter thread, and
+// never while the presenter mutex is held.
+[[nodiscard]] std::chrono::nanoseconds requested_grid_phase() noexcept {
+    static const auto path = current_layer_directory() / L"ofxr_bridge.ini";
+    // The profile functions cache the file they last read, and the tray
+    // replaces this INI wholesale instead of writing through them, so without
+    // this the layer serves a stale copy for the life of the session.
+    WritePrivateProfileStringW(nullptr, nullptr, nullptr, path.c_str());
+    const auto microseconds = GetPrivateProfileIntW(
+        L"ofxr", L"grid_phase_us", 0, path.c_str());
+    return std::chrono::microseconds(
+        microseconds > 0 && microseconds < 100'000 ? microseconds : 0);
+}
+
 // Caller holds presenter_mutex.
 [[nodiscard]] std::int64_t apply_vsync_phase_lock(
     const std::shared_ptr<SessionState>& state,
@@ -3887,38 +3910,12 @@ void fail_pending_presenter_submissions_locked(
         phase += period;
     }
     if (!state->presenter_vsync_offset_valid) {
-        // Adopt whatever phase the schedule already rests at, judged over a
-        // window rather than caught once. This deliberately does not decide
-        // where the grid belongs - moving it to a phase nothing has validated
-        // is the one way this can be worse than doing nothing - but one sample
-        // is not where the schedule rests, it is where it happened to be.
-        //
-        // Choosing it was tried and cost more than it bought. A fixed quarter
-        // period collided with the pair bias, whose ceiling is also a quarter
-        // period, so at full bias the real frame sat at phase 0.00 - the vsync
-        // boundary - and which compositor frame it belonged to then followed the
-        // prediction depth: synthetic 28.8% presented against real 86.9% at
-        // depth 0, and 92.3% against 36.8% at depth 1, swapping. Moving it to
-        // half a period fixed that and took one title to 86-90 delivered frames
-        // a second, and cost another a third of its delivery - 1.75 frames a
-        // pair down to 1.3. The inherited phase has neither problem: with the
-        // bias between zero and its ceiling the real frame lands at 5.3 to 8.1
-        // ms of an 11.111 ms period, clear of a boundary at any bias.
-        //
-        // The phase a title's own submission pattern settles at is not a
-        // constant to be picked. Leave it where it rests.
-        auto& samples = state->presenter_vsync_phase_samples;
-        auto& count = state->presenter_vsync_sample_count;
-        if (count < samples.size()) {
-            samples[count++] = phase.count();
-            return 0;
-        }
-        // Median, not mean: a handful of outliers from a hitch should not move
-        // the target the rest of the session is held to.
-        auto sorted = samples;
-        std::sort(sorted.begin(), sorted.end());
-        state->presenter_vsync_offset =
-            std::chrono::nanoseconds(sorted[sorted.size() / 2]);
+        // The schedule is normally given its phase where it is seeded, before
+        // anything has had a chance to move it. This covers the case where no
+        // vsync anchor was available then: take the first phase seen rather
+        // than averaging a window, because the window is time the grid spends
+        // with nothing holding it.
+        state->presenter_vsync_offset = phase;
         state->presenter_vsync_offset_valid = true;
         return 0;
     }
@@ -4361,6 +4358,49 @@ void continuous_presenter_main(
             if (state->fps_overlay && state->manual_control.stop_requested())
                 state->fps_overlay->suspend();
             downstream_end_started = std::chrono::steady_clock::now();
+            // Where this submission actually lands in the scanout interval,
+            // once per frame rather than only when the lock happens to
+            // evaluate. Every explanation of why a working phase stops working
+            // after ten to thirty seconds has assumed the grid walks away from
+            // where it was put; nothing has measured it. If the phase recorded
+            // here is constant while delivery decays, the schedule is exactly
+            // where it was placed and it is the compositor's acceptance that
+            // changed - which rules out the whole class of drift explanations.
+            if (state->steamvr_delivery &&
+                state->presenter_display_period > 0) {
+                if (const auto anchor =
+                        state->steamvr_delivery->vsync_anchor()) {
+                    const auto scanout = std::chrono::nanoseconds(
+                        static_cast<std::int64_t>(
+                            state->presenter_display_period));
+                    auto landed =
+                        (downstream_end_started - anchor->at) % scanout;
+                    if (landed < std::chrono::nanoseconds::zero()) {
+                        landed += scanout;
+                    }
+                    xrfg::bridge_flight_logger().event(
+                        xrfg::BridgeFlightOperation::presenter_vsync_lock,
+                        905,
+                        static_cast<std::uint64_t>(landed.count()),
+                        static_cast<std::uint64_t>(
+                            state->presenter_vsync_offset.count()),
+                        fresh_synthetic ? 2u : 1u);
+                    // Only the real frame is measured against the offset. The
+                    // synthetic is deliberately spaced away from it by the pair
+                    // bias, so holding both to one phase would be asking the
+                    // schedule to close a gap that is there on purpose.
+                    if (state->presenter_vsync_offset_valid &&
+                        !fresh_synthetic) {
+                        auto error = landed - state->presenter_vsync_offset;
+                        if (error > scanout / 2) {
+                            error -= scanout;
+                        } else if (error < -(scanout / 2)) {
+                            error += scanout;
+                        }
+                        state->presenter_landed_error = error;
+                    }
+                }
+            }
             end_result = with_runtime_entry(state, [&] {
                 return state->fps_overlay
                     ? state->fps_overlay->end_frame(&submitted, fresh_synthetic)
@@ -4396,6 +4436,17 @@ void continuous_presenter_main(
                 // rather than chase if a stall has put the schedule in the
                 // past - catching up would submit a burst, which is the very
                 // thing the pace exists to prevent.
+                // Four times a second, and never under the lock: the
+                // application thread blocks on that mutex, and this reads a
+                // file. Both fields belong to this thread alone.
+                auto requested_phase = state->presenter_requested_phase;
+                const auto read_at = std::chrono::steady_clock::now();
+                if (read_at - state->presenter_phase_read_at >=
+                    std::chrono::milliseconds(250)) {
+                    state->presenter_phase_read_at = read_at;
+                    requested_phase = requested_grid_phase();
+                }
+
                 std::scoped_lock lock(state->presenter_mutex);
                 const auto now = std::chrono::steady_clock::now();
                 const auto period = std::chrono::nanoseconds(
@@ -4405,6 +4456,71 @@ void continuous_presenter_main(
                     state->presenter_next_submit = now + period;
                     state->presenter_schedule_valid =
                         state->presenter_display_period > 0;
+                    // Give the grid its phase here, at the instant the schedule
+                    // is seeded, rather than sampling for it over the following
+                    // seconds.
+                    //
+                    // Nothing is chosen: this is still whatever phase the
+                    // schedule rests at, only taken before anything has moved
+                    // it. What the sampling window it replaces cost was the
+                    // three seconds it took - the correction that holds the
+                    // phase is gated on the offset being valid, while the lead
+                    // band that moves the schedule is not, so for that whole
+                    // window the grid was pushed around with nothing holding
+                    // it. Measured against the compositor with a fixed
+                    // producer, it drifted within the first second into a state
+                    // where every synthetic frame was discarded - 45 delivered
+                    // frames a second out of 90 submitted - and stayed there
+                    // for the rest of the session, because the window then
+                    // adopted the median of its own drift and held the grid
+                    // exactly where it had ended up. Taking the phase at the
+                    // seed instead raised the same measurement to 77.
+                    //
+                    // Every later step advances the schedule by whole periods,
+                    // so the phase set here is the phase for the session.
+                    //
+                    // Before placing it deliberately, note what constrains the
+                    // choice. A fixed quarter period collides with the pair
+                    // bias, whose ceiling is also a quarter period: at full
+                    // bias the real frame sits exactly on a vsync boundary, and
+                    // which compositor frame it belongs to then follows the
+                    // prediction depth - synthetic 28.8% presented against real
+                    // 86.9% at depth 0, and 92.3% against 36.8% at depth 1,
+                    // swapping between them. Half a period avoided that and
+                    // took one title to 86-90 delivered frames a second while
+                    // costing another a third of its delivery. So a phase
+                    // cannot be picked as a constant; it has to be computed
+                    // against the pair's own spacing and the compositor's
+                    // deadline.
+                    if (state->steamvr_delivery &&
+                        period > std::chrono::nanoseconds::zero()) {
+                        if (const auto anchor =
+                                state->steamvr_delivery->vsync_anchor()) {
+                            auto seed_phase =
+                                (state->presenter_next_submit - anchor->at) %
+                                period;
+                            if (seed_phase < std::chrono::nanoseconds::zero()) {
+                                seed_phase += period;
+                            }
+                            state->presenter_vsync_offset = seed_phase;
+                            state->presenter_vsync_offset_valid = true;
+
+                            // A placed phase, when one is configured, takes
+                            // precedence over the inherited one. Same
+                            // arithmetic as the live adjustment below, applied
+                            // once here so the very first pair is already on
+                            // the configured grid.
+                            if (requested_phase > std::chrono::nanoseconds::zero() &&
+                                requested_phase < period) {
+                                const auto ahead =
+                                    state->presenter_next_submit - anchor->at;
+                                const auto whole = ahead / period;
+                                state->presenter_next_submit = anchor->at +
+                                    (whole + 1) * period + requested_phase;
+                                state->presenter_vsync_offset = requested_phase;
+                            }
+                        }
+                    }
                 } else {
                     // The two frames of a pair do not cost the runtime the
                     // same, so spacing them evenly gives them unequal margin.
@@ -4724,6 +4840,72 @@ void continuous_presenter_main(
                                            : period + pair_bias)
                         : period;
                     state->presenter_next_submit += advance;
+                    // Cancel the drift between this schedule's clock and the
+                    // display's.
+                    //
+                    // The schedule advances by a nominal period on
+                    // steady_clock; the scanout runs on the headset's own
+                    // oscillator. Measured against the compositor, the two
+                    // differ by about twenty parts per million - the submission
+                    // walked 0.22 ms up the scanout interval in fifteen seconds
+                    // - and delivery is only whole while it sits inside a
+                    // window roughly 0.2 ms wide. So a phase that works stops
+                    // working in ten to fifteen seconds, which is what made
+                    // every attempt to choose one contradict the last.
+                    //
+                    // Proportional and small on purpose: twenty ppm is 0.22
+                    // microseconds a frame, so a thirty-second of the error
+                    // holds it with about seven microseconds left over, a
+                    // thirtieth of the window. Nothing here needs to move fast,
+                    // and a correction that can move fast is one that can walk
+                    // the grid somewhere worse.
+                    if (state->presenter_vsync_offset_valid) {
+                        constexpr std::int64_t kDriftGain = 32;
+                        constexpr auto kDriftStepCeiling =
+                            std::chrono::nanoseconds(10'000);
+                        auto step = state->presenter_landed_error / kDriftGain;
+                        if (step > kDriftStepCeiling) {
+                            step = kDriftStepCeiling;
+                        } else if (step < -kDriftStepCeiling) {
+                            step = -kDriftStepCeiling;
+                        }
+                        state->presenter_next_submit -= step;
+                    }
+                    // A phase the tray asked for while the session is running.
+                    // Applied as a jump onto a real vsync boundary, never as a
+                    // target the correction is left to chase: dragging the grid
+                    // towards a phase it does not rest at is what the sampling
+                    // window used to do, and it cost half the delivered frames.
+                    //
+                    // Always forward to the next boundary, so the schedule can
+                    // never be moved into the past, and the grid streak is
+                    // cleared so the band and the correction treat the jump as
+                    // a fresh start rather than an error to fight.
+                    if (requested_phase != state->presenter_requested_phase) {
+                        state->presenter_requested_phase = requested_phase;
+                        if (requested_phase > std::chrono::nanoseconds::zero() &&
+                            requested_phase < period && state->steamvr_delivery) {
+                            if (const auto anchor =
+                                    state->steamvr_delivery->vsync_anchor()) {
+                                const auto ahead =
+                                    state->presenter_next_submit - anchor->at;
+                                const auto whole = ahead / period;
+                                state->presenter_next_submit = anchor->at +
+                                    (whole + 1) * period + requested_phase;
+                                state->presenter_vsync_offset = requested_phase;
+                                state->presenter_vsync_offset_valid = true;
+                                state->presenter_on_grid_streak = 0;
+                                xrfg::bridge_flight_logger().event(
+                                    xrfg::BridgeFlightOperation::
+                                        presenter_vsync_lock,
+                                    904,
+                                    static_cast<std::uint64_t>(
+                                        requested_phase.count()),
+                                    static_cast<std::uint64_t>(period.count()),
+                                    0);
+                            }
+                        }
+                    }
                     // Hold the grid against the display's own clock.
                     //
                     // Everything else in this function infers where the scanout
