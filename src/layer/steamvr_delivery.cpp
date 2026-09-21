@@ -109,18 +109,18 @@ struct SteamVrDelivery::Impl {
     AttachRoute route{AttachRoute::none};
     bool owns_context{};
 
-    std::uint32_t pid{};
-    bool baseline{};
-    std::uint32_t last_presents{};
-    std::uint32_t last_dropped{};
-    std::uint32_t last_reprojected{};
-    std::int64_t last_sample_ns{};
-
     float delivered{};
     std::int64_t delivered_at_ns{-1};
 
     std::uint32_t last_frame_index{};
     bool reported_frames{};
+
+    // Distinct compositor frames counted since the window opened, and the
+    // repeats among them. The displayed rate is derived from these rather than
+    // from the cumulative counters - see the note on sample().
+    std::uint32_t window_frames{};
+    std::uint32_t window_repeats{};
+    std::int64_t window_started_ns{-1};
 
     void attach() noexcept {
         attempted = true;
@@ -202,67 +202,51 @@ struct SteamVrDelivery::Impl {
         error = vr::VRInitError_None;
         system = static_cast<vr::IVRSystem*>(
             generic(vr::IVRSystem_Version, &error));
-        pid = GetCurrentProcessId();
         usable = true;
         bridge_flight_logger().event(
             BridgeFlightOperation::steamvr_delivery_attach,
             0,
             static_cast<std::uint64_t>(route),
-            pid,
+            GetCurrentProcessId(),
             system != nullptr ? 1 : 0);
     }
 
-    void sample(std::int64_t now) noexcept {
-        const auto entered = std::chrono::steady_clock::now();
-        vr::Compositor_CumulativeStats stats{};
-        compositor->GetCumulativeStats(&stats, sizeof(stats));
-        const auto cost = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - entered);
-
-        // In-process these counters must describe us. If they name another
-        // process the compositor is serving someone else and the number would
-        // be a different application's frame rate.
-        if (stats.m_nPid != pid) {
-            baseline = false;
-            delivered_at_ns = -1;
+    // Closes the delivery window from frames counted by last_presentation.
+    //
+    // This used to be presents - dropped - reprojected, read from
+    // GetCumulativeStats, and that is wrong wherever the compositor reprojects
+    // as a matter of course. MSFS 2024 runs with prediction two frames ahead
+    // (reprojection flags 0x024), so nearly every frame is marked reprojected
+    // and mispresented by construction - 92% of them - while 91% are still
+    // presented exactly once and the headset is fine. The subtraction collapsed
+    // to zero and the overlay read 0 through a healthy session.
+    //
+    // Counting distinct frames does not care how the compositor labels its
+    // timewarp. Measured against the same captures: Callisto 90.0/s either way,
+    // MSFS 84.7/s against the old formula's 0.9.
+    void close_window(std::int64_t now) noexcept {
+        if (window_started_ns < 0) {
+            window_started_ns = now;
             return;
         }
-        if (!baseline) {
-            baseline = true;
-        } else if (stats.m_nNumFramePresents >= last_presents &&
-                   stats.m_nNumDroppedFrames >= last_dropped &&
-                   stats.m_nNumReprojectedFrames >= last_reprojected) {
-            const auto elapsed = now - last_sample_ns;
-            if (elapsed >= kWindowNanoseconds) {
-                // presents counts every scanout including the repeated ones, so
-                // what is left once both kinds of repeat are removed is the
-                // distinct images the headset received.
-                const std::int64_t distinct =
-                    static_cast<std::int64_t>(
-                        stats.m_nNumFramePresents - last_presents) -
-                    static_cast<std::int64_t>(
-                        stats.m_nNumDroppedFrames - last_dropped) -
-                    static_cast<std::int64_t>(
-                        stats.m_nNumReprojectedFrames - last_reprojected);
-                delivered = distinct > 0
-                    ? static_cast<float>(distinct) *
-                        (1e9f / static_cast<float>(elapsed))
-                    : 0.0F;
-                delivered_at_ns = now;
-                bridge_flight_logger().event(
-                    BridgeFlightOperation::steamvr_delivery,
-                    0,
-                    static_cast<std::uint64_t>(delivered * 1000.0F),
-                    stats.m_nNumReprojectedFrames - last_reprojected,
-                    static_cast<std::uint64_t>(cost.count()));
-            } else {
-                return; // Window still open; keep the previous baseline.
-            }
+        const auto elapsed = now - window_started_ns;
+        if (elapsed < kWindowNanoseconds) {
+            return;
         }
-        last_presents = stats.m_nNumFramePresents;
-        last_dropped = stats.m_nNumDroppedFrames;
-        last_reprojected = stats.m_nNumReprojectedFrames;
-        last_sample_ns = now;
+        if (window_frames != 0) {
+            delivered = static_cast<float>(window_frames) *
+                (1e9f / static_cast<float>(elapsed));
+            delivered_at_ns = now;
+            bridge_flight_logger().event(
+                BridgeFlightOperation::steamvr_delivery,
+                0,
+                static_cast<std::uint64_t>(delivered * 1000.0F),
+                window_repeats,
+                window_frames);
+        }
+        window_frames = 0;
+        window_repeats = 0;
+        window_started_ns = now;
     }
 };
 
@@ -301,7 +285,7 @@ std::optional<float> SteamVrDelivery::delivered_fps(std::int64_t now) noexcept {
         if (!impl_->usable) {
             return std::nullopt;
         }
-        impl_->sample(now);
+        impl_->close_window(now);
         if (impl_->delivered_at_ns < 0 ||
             now - impl_->delivered_at_ns > kStaleNanoseconds) {
             return std::nullopt;
@@ -395,6 +379,13 @@ SteamVrDelivery::last_presentation() noexcept {
             presentation.skipped = impl_->reported_frames
                 ? timing.m_nFrameIndex - impl_->last_frame_index - 1
                 : 0;
+            // Frames the compositor produced since the last look: this one plus
+            // any that settled between calls. This is what the displayed rate
+            // is counted from.
+            impl_->window_frames += 1 + presentation.skipped;
+            if (presentation.presents > 1) {
+                impl_->window_repeats += presentation.presents - 1;
+            }
             impl_->last_frame_index = timing.m_nFrameIndex;
             impl_->reported_frames = true;
             return presentation;
