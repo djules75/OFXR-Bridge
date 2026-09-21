@@ -49,8 +49,22 @@ struct LauncherSettings {
     const std::filesystem::path& layer_dll,
     std::uint32_t implementation_version);
 
+// Diagnostics knobs the tray has no UI for. The runtime INI is their source of
+// truth: arming used to regenerate the whole file from LauncherSettings with
+// these two hardcoded, so a hand-edited value survived until the next arm and
+// no further. write_runtime_configuration reads them back out of the existing
+// file and passes them here.
+//
+// 32 MB is the default because a capture that size covers the usual case and
+// costs nothing to leave enabled. At the usual record density it wraps at about
+// ninety seconds, keeping only the tail - so a long session that needs its
+// early records raises this by hand, which now survives arming.
+constexpr unsigned kDefaultMaxFileMb = 32;
+
 [[nodiscard]] std::string build_runtime_ini(
-    const LauncherSettings& settings);
+    const LauncherSettings& settings,
+    unsigned max_file_mb = kDefaultMaxFileMb,
+    bool flush_each_event = false);
 
 [[nodiscard]] std::filesystem::path runtime_version_directory(
     const std::filesystem::path& local_directory,

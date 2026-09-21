@@ -207,7 +207,20 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     std::wstring* error,
     const std::filesystem::path& arm_manifest = {}) {
     const auto& manifest = arm_manifest.empty() ? state.armed_manifest : arm_manifest;
-    std::string configuration = xrfg::standalone::build_runtime_ini(state.settings);
+    // Carry forward the two diagnostics knobs the tray has no UI for. Arming
+    // rewrites this file whole, so hardcoding them here is what made a
+    // hand-edited max_file_mb survive exactly until the next arm.
+    const auto destination =
+        runtime_directory(state.local_directory) / L"ofxr_bridge.ini";
+    const unsigned max_file_mb = GetPrivateProfileIntW(
+        L"diagnostics",
+        L"max_file_mb",
+        static_cast<INT>(xrfg::standalone::kDefaultMaxFileMb),
+        destination.c_str());
+    const bool flush_each_event = GetPrivateProfileIntW(
+        L"diagnostics", L"flush_each_event", 0, destination.c_str()) != 0;
+    std::string configuration = xrfg::standalone::build_runtime_ini(
+        state.settings, max_file_mb, flush_each_event);
     if (!manifest.empty()) {
         const auto control = xrfg::implicit_layer::arm_signal_name(manifest);
         std::string ascii_control;
@@ -215,10 +228,7 @@ void log_lifecycle(const std::filesystem::path& local_directory,
         configuration.insert(std::string("[ofxr]\r\n").size(),
             "control_event=" + ascii_control + "\r\n");
     }
-    return write_text_atomic(
-        runtime_directory(state.local_directory) / L"ofxr_bridge.ini",
-        configuration,
-        error);
+    return write_text_atomic(destination, configuration, error);
 }
 
 [[nodiscard]] bool prepare_runtime_layer(

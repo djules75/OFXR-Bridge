@@ -209,7 +209,9 @@ std::string build_implicit_layer_manifest(
 }
 
 std::string build_runtime_ini(
-    const LauncherSettings& settings) {
+    const LauncherSettings& settings,
+    unsigned max_file_mb,
+    bool flush_each_event) {
     return "[ofxr]\r\nbackend=" + backend_ini_value(settings.backend) +
            "\r\nmotion_vectors=dlss" +
            "\r\nnvidia_preset=" +
@@ -220,7 +222,8 @@ std::string build_runtime_ini(
            (settings.nvidia_bidirectional ? "1" : "0") +
            "\r\n\r\n[diagnostics]\r\nlogging_enabled=" +
            (settings.diagnostics ? "1" : "0") +
-           "\r\nmax_file_mb=32\r\nflush_each_event=0\r\n"
+           "\r\nmax_file_mb=" + std::to_string(max_file_mb) +
+           "\r\nflush_each_event=" + (flush_each_event ? "1" : "0") + "\r\n"
            "\r\n[overlay]\r\nposition=" + overlay_position_name(settings.overlay_position) + "\r\n";
 }
 

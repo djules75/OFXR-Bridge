@@ -45,6 +45,22 @@ int main() {
         return 1;
     }
 
+    // The two diagnostics knobs the tray has no UI for. They were hardcoded
+    // here, so arming rewrote the file whole and a hand-edited max_file_mb
+    // survived only until the next arm. The tray now reads them back out of the
+    // existing runtime INI and passes them through.
+    if (!contains(default_runtime_ini, "max_file_mb=32") ||
+        !contains(default_runtime_ini, "flush_each_event=0")) {
+        std::cerr << "diagnostics defaults failed\n";
+        return 1;
+    }
+    const std::string carried = build_runtime_ini(release_defaults, 512, true);
+    if (!contains(carried, "max_file_mb=512") ||
+        !contains(carried, "flush_each_event=1")) {
+        std::cerr << "diagnostics overrides not carried into the runtime ini\n";
+        return 1;
+    }
+
     LauncherSettings settings;
     settings.backend = FlowBackend::nvidia;
     settings.nvidia_preset = NvidiaPerformancePreset::slow;
