@@ -61,6 +61,26 @@ public:
         // were never examined - the attribution has holes rather than being
         // wrong.
         std::uint32_t skipped{};
+        // The compositor's own account of what it did with this frame:
+        // 0x001 reprojected for a CPU reason, 0x002 for a GPU reason, 0x004
+        // async, 0x008 motion, and 0xF0 how many frames ahead it is predicting.
+        //
+        // Not a rejection reason - the API has none - but it is the only field
+        // in which the compositor says why it compensated rather than showing
+        // what it was handed. Read from the same struct everything else here
+        // comes from, and discarded until now.
+        std::uint32_t reprojection_flags{};
+        // The OR of the flags across every compositor frame since the last
+        // report, so a reason that appears on a frame this caller did not land
+        // on is still seen. Sampling the newest settled frame alone misses
+        // about half of them at this cadence.
+        std::uint32_t reprojection_flags_window{};
+        // What the compositor attributes to rendering this frame, in
+        // microseconds: the application's total and the compositor's own. If it
+        // claims a GPU reason while the machine has headroom, these say what it
+        // is counting.
+        std::uint32_t total_render_gpu_us{};
+        std::uint32_t compositor_render_gpu_us{};
     };
     [[nodiscard]] std::optional<FramePresentation> last_presentation() noexcept;
 

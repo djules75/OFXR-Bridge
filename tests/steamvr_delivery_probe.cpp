@@ -210,7 +210,11 @@ struct FrameRate {
     std::uint32_t last_index{};
     double last_time{};
     std::uint32_t seen{};
-    std::uint32_t lost{};
+    // Frames eligible to be judged, and how far each was mispresented beyond
+    // the depth the compositor said it was predicting.
+    static constexpr std::uint32_t kExcessBuckets = 16;
+    std::uint32_t counted{};
+    std::array<std::uint32_t, kExcessBuckets> excess_histogram{};
     // Scanouts the previous distinct frame occupied. One means this frame is
     // as early as it could be, so a mispresent here is a real displacement.
     std::uint32_t previous_presents{1};
@@ -220,7 +224,8 @@ struct FrameRate {
         if (!started || timing.m_nFrameIndex < last_index) {
             first_index = last_index = timing.m_nFrameIndex;
             first_time = last_time = timing.m_flSystemTimeInSeconds;
-            seen = lost = 0;
+            seen = counted = 0;
+            excess_histogram.fill(0);
             previous_presents = timing.m_nNumFramePresents;
             started = true;
             return;
@@ -246,9 +251,13 @@ struct FrameRate {
         ++seen;
         const std::uint32_t predicted =
             (timing.m_nReprojectionFlags & vr::VRCompositor_PredictionMask) >> 4;
-        if (gap <= 1 && previous_presents <= 1 &&
-            timing.m_nNumMisPresented > predicted) {
-            ++lost;
+        if (gap <= 1 && previous_presents <= 1) {
+            const std::uint32_t excess = timing.m_nNumMisPresented > predicted
+                ? timing.m_nNumMisPresented - predicted
+                : 0;
+            ++excess_histogram[excess < kExcessBuckets ? excess
+                                                       : kExcessBuckets - 1];
+            ++counted;
         }
         previous_presents = timing.m_nNumFramePresents;
     }
@@ -270,9 +279,37 @@ struct FrameRate {
         if (span <= 0.05 || seen == 0) {
             return -1.0;
         }
+        // Only excursions above the window's own baseline are losses. A
+        // constant mispresent is where the schedule sits in the period, not a
+        // dropped frame: a full-rate grid one vsync off its prediction reports
+        // mispresented 1 against predicted 0 on every frame while delivering
+        // all of them, and the bare threshold read that as total loss.
         const double frames = static_cast<double>(seen) / span;
-        return frames *
-            (1.0 - static_cast<double>(lost) / static_cast<double>(seen));
+        return frames * (1.0 - lost_fraction());
+    }
+    [[nodiscard]] std::uint32_t median_excess() const {
+        if (counted == 0) {
+            return 0;
+        }
+        const std::uint32_t half = counted / 2;
+        std::uint32_t running = 0;
+        for (std::uint32_t i = 0; i < kExcessBuckets; ++i) {
+            running += excess_histogram[i];
+            if (running > half) {
+                return i;
+            }
+        }
+        return 0;
+    }
+    [[nodiscard]] double lost_fraction() const {
+        if (counted == 0) {
+            return 0.0;
+        }
+        std::uint32_t lost = 0;
+        for (std::uint32_t i = median_excess() + 1; i < kExcessBuckets; ++i) {
+            lost += excess_histogram[i];
+        }
+        return static_cast<double>(lost) / static_cast<double>(counted);
     }
     // Index units per distinct frame. 1.0 means the compositor is producing a
     // frame per vsync; 2.0 means one every other vsync, which is what the old
@@ -283,9 +320,7 @@ struct FrameRate {
                                static_cast<double>(seen);
     }
     [[nodiscard]] double lost_share() const {
-        return seen == 0 ? 0.0
-                         : 100.0 * static_cast<double>(lost) /
-                               static_cast<double>(seen);
+        return 100.0 * lost_fraction();
     }
     void restart() { started = false; }
 };

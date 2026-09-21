@@ -107,11 +107,24 @@ enum class BridgeFlightOperation : std::uint32_t {
     // zero means the grid is being dragged rather than held.
     presenter_vsync_lock,
     // Per submission: did the compositor put a settled frame on the vsync it
-    // was predicted for. result= mispresented, a= our submission serial,
-    // b= the compositor's frame index, c= presents in the low byte and frames
-    // skipped since the last record above it. This is the attribution no
-    // submission count can give. Read a frame that has actually been presented
-    // - frames-ago zero is still in flight and reports zero for everything.
+    // was predicted for, and what did it say it was doing. result= mispresented,
+    // a= our submission serial. This is the attribution no submission count can
+    // give. Read a frame that has actually been presented - frames-ago zero is
+    // still in flight and reports zero for everything.
+    //
+    //   b  bits  0-31  the compositor's frame index
+    //         bits 32-47  that frame's m_nReprojectionFlags
+    //         bits 48-63  the OR of the flags across the whole window
+    //   c  bits  0-7   presents
+    //         bits  8-15  frames skipped since the record above it
+    //         bits 16-39  m_flTotalRenderGpuMs in microseconds
+    //         bits 40-63  m_flCompositorRenderGpuMs in microseconds
+    //
+    // Flags are 0x001 reprojected for a CPU reason, 0x002 for a GPU reason,
+    // 0x004 async, 0x008 motion, 0xF0 frames predicted ahead. The windowed OR
+    // is there because this is read once per submission while the window holds
+    // several frames, so a reason raised on a frame we did not land on would
+    // otherwise go unseen.
     presenter_frame_presented,
 };
 

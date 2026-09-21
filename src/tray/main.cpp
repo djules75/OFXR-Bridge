@@ -202,6 +202,45 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     } catch (...) { /* Cleanup must not depend on diagnostic I/O. */ }
 }
 
+// The newest ofxr_bridge.ini under any other version's cache folder.
+//
+// The two diagnostics knobs are carried forward from the file arming is about
+// to overwrite, which keeps a hand edit across an arm - but a version bump
+// creates an empty folder, so the lookup finds nothing and silently falls back
+// to the defaults. A capture setting deliberately raised for an investigation
+// was then reset by the next build, and the resulting logs were truncated
+// without anything saying so.
+[[nodiscard]] std::filesystem::path previous_runtime_configuration(
+    const std::filesystem::path& local_directory,
+    const std::filesystem::path& destination) {
+    std::error_code code;
+    const auto root = xrfg::standalone::runtime_version_directory(
+        local_directory,
+        kImplementationVersion).parent_path();
+    std::filesystem::path newest;
+    std::filesystem::file_time_type newest_at{};
+    for (const auto& entry :
+         std::filesystem::directory_iterator(root, code)) {
+        if (code || !entry.is_directory(code)) {
+            continue;
+        }
+        const auto candidate = entry.path() / L"ofxr_bridge.ini";
+        if (candidate == destination ||
+            !std::filesystem::exists(candidate, code)) {
+            continue;
+        }
+        const auto at = std::filesystem::last_write_time(candidate, code);
+        if (code) {
+            continue;
+        }
+        if (newest.empty() || at > newest_at) {
+            newest = candidate;
+            newest_at = at;
+        }
+    }
+    return newest;
+}
+
 [[nodiscard]] bool write_runtime_configuration(
     const AppState& state,
     std::wstring* error,
@@ -212,13 +251,22 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     // hand-edited max_file_mb survive exactly until the next arm.
     const auto destination =
         runtime_directory(state.local_directory) / L"ofxr_bridge.ini";
+    // This version's file if it has one, otherwise the newest any other version
+    // left behind, so the knobs survive a version bump as well as an arm.
+    std::error_code exists_code;
+    const auto source = std::filesystem::exists(destination, exists_code)
+        ? destination
+        : previous_runtime_configuration(state.local_directory, destination);
     const unsigned max_file_mb = GetPrivateProfileIntW(
         L"diagnostics",
         L"max_file_mb",
         static_cast<INT>(xrfg::standalone::kDefaultMaxFileMb),
-        destination.c_str());
+        source.empty() ? destination.c_str() : source.c_str());
     const bool flush_each_event = GetPrivateProfileIntW(
-        L"diagnostics", L"flush_each_event", 0, destination.c_str()) != 0;
+        L"diagnostics",
+        L"flush_each_event",
+        0,
+        source.empty() ? destination.c_str() : source.c_str()) != 0;
     std::string configuration = xrfg::standalone::build_runtime_ini(
         state.settings, max_file_mb, flush_each_event);
     if (!manifest.empty()) {

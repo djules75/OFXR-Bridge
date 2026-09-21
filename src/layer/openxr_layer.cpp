@@ -465,14 +465,12 @@ struct SessionState {
     // presenter_mutex.
     std::chrono::nanoseconds presenter_vsync_offset{};
     bool presenter_vsync_offset_valid{};
-    std::uint32_t presenter_vsync_tick{};
-    // Phases seen while on-grid, before an offset is settled on. The first
-    // build took the offset from a single anchor and landed 1.5 ms away from
-    // where the schedule actually rests, so the lock spent a whole session
-    // saturated against an error it could never close. A median over a window
-    // is what that sample was meant to approximate.
+    // Phases seen while on-grid, before an offset is settled on. A single
+    // anchor landed 1.5 ms from where the schedule actually rests and the lock
+    // spent a session saturated against an error it could never close.
     std::array<std::int64_t, 64> presenter_vsync_phase_samples{};
     std::uint32_t presenter_vsync_sample_count{};
+    std::uint32_t presenter_vsync_tick{};
     // Serializes each generated synthetic/real frame pair atomically with
     // respect to application frame calls. A successful application wait owns
     // the next admission until its matching begin has been attempted, so a
@@ -3894,6 +3892,21 @@ void fail_pending_presenter_submissions_locked(
         // where the grid belongs - moving it to a phase nothing has validated
         // is the one way this can be worse than doing nothing - but one sample
         // is not where the schedule rests, it is where it happened to be.
+        //
+        // Choosing it was tried and cost more than it bought. A fixed quarter
+        // period collided with the pair bias, whose ceiling is also a quarter
+        // period, so at full bias the real frame sat at phase 0.00 - the vsync
+        // boundary - and which compositor frame it belonged to then followed the
+        // prediction depth: synthetic 28.8% presented against real 86.9% at
+        // depth 0, and 92.3% against 36.8% at depth 1, swapping. Moving it to
+        // half a period fixed that and took one title to 86-90 delivered frames
+        // a second, and cost another a third of its delivery - 1.75 frames a
+        // pair down to 1.3. The inherited phase has neither problem: with the
+        // bias between zero and its ceiling the real frame lands at 5.3 to 8.1
+        // ms of an 11.111 ms period, clear of a boundary at any bias.
+        //
+        // The phase a title's own submission pattern settles at is not a
+        // constant to be picked. Leave it where it rests.
         auto& samples = state->presenter_vsync_phase_samples;
         auto& count = state->presenter_vsync_sample_count;
         if (count < samples.size()) {
@@ -4530,10 +4543,6 @@ void continuous_presenter_main(
                         // compressed by the block, not by the bias, so the
                         // block is dealt with first and the gap only governs
                         // once it is suppressed.
-                        const auto gap_floor = period * 9 / 10;
-                        const bool gap_tight =
-                            state->presenter_pair_gap_mean.count() != 0 &&
-                            state->presenter_pair_gap_mean < gap_floor;
                         // The interval before the synthetic, short, with no
                         // block to explain it. That is the arithmetic case:
                         //
@@ -4567,6 +4576,95 @@ void continuous_presenter_main(
                         // than at 0.9 of one: a lead of 10.87 is already losing
                         // scanouts and the old threshold of 10.0 saw nothing
                         // wrong with it.
+                        // The floor is one period exactly, not five percent
+                        // above it, because the two intervals are a zero-sum
+                        // pair:
+                        //
+                        //   lead  = period + bias - (realCall - synCall)
+                        //   trail = period - bias + (realCall - synCall)
+                        //
+                        // so a lead above a period *costs* the trail the same
+                        // amount. Asking for 21/20 of a period when the two call
+                        // costs are equal needs a bias of at least 0.56 ms, and
+                        // any positive bias there puts the trail under a period -
+                        // which is the other failure entirely, the real frame
+                        // following the synthetic inside one scanout. The
+                        // controller cannot satisfy both, so it climbs forever
+                        // and parks at the ceiling: measured pinned at 2.78 ms
+                        // through a whole collapse window, with the trail at
+                        // 8.33 ms and every other synthetic lost, alternating
+                        // frame by frame with a median run length of one.
+                        //
+                        // The value that satisfies both is bias = realCall minus
+                        // synCall, which is zero when they are equal. A floor at
+                        // exactly one period makes zero reachable.
+                        // Centred on one period, and wide.
+                        //
+                        // The two intervals are not independent: the presenter
+                        // advances by period - bias after a synthetic and
+                        // period + bias after a real frame, and the call costs
+                        // cancel between them, so
+                        //
+                        //   lead + trail = two periods, always
+                        //
+                        // A band above one period therefore *guarantees* a trail
+                        // below it. The previous 21/20 to 23/20 put the trail
+                        // between 9.44 and 10.55 ms at every point in its range,
+                        // so the real frame always followed the synthetic inside
+                        // one scanout and the compositor always kept the newer
+                        // of the two. Measured in a stable menu scene with the
+                        // two call costs equal: lead 12.21 ms, trail 10.01,
+                        // synthetic reaching the headset 1% of the time and the
+                        // real frame 99%. The controller was not failing to
+                        // correct - it was holding the wrong value, because the
+                        // wrong value was inside its band.
+                        //
+                        // One period is the only point where both intervals
+                        // clear a period, so that is the centre. The width is
+                        // the other half of it: a sixteenth of a period each
+                        // side, twice what a narrower attempt used. That one
+                        // tracked realCall swinging 0.77 to 3.93 ms within
+                        // seconds and hunted, and measured worse than not
+                        // tracking at all - 48-75 delivered frames a second
+                        // against 86-90. Climb fast, hold across a dead band,
+                        // decay slowly; the band has to be centred on the
+                        // feasible point and wide enough to ignore the noise.
+                        // Order matters: while the block is present the gap
+                        // is compressed by the block, not by the bias, so the
+                        // block is dealt with first and the gap only governs
+                        // once it is suppressed.
+                        const auto gap_floor = period * 9 / 10;
+                        const bool gap_tight =
+                            state->presenter_pair_gap_mean.count() != 0 &&
+                            state->presenter_pair_gap_mean < gap_floor;
+                        // A wide hold above one period.
+                        //
+                        // This is not the value the arithmetic prefers. The two
+                        // intervals sum to two periods, so a band above one
+                        // period holds the trail below it, and the only point
+                        // where both clear a period is the single value where
+                        // they are equal. Three attempts were made to reach it -
+                        // a floor at exactly one period, a band of plus or minus
+                        // a thirty-second, a band centred on one period, and
+                        // finally computing the bias directly from realCall
+                        // minus synCall - and every one of them measured worse
+                        // in the scene that matters than this does.
+                        //
+                        // The reason they fail is that realCall is not
+                        // independent of the bias: handing the real frame over
+                        // early makes the runtime pace it back out, so realCall
+                        // is roughly bias plus the 0.7 ms a finished copy costs,
+                        // and any controller reading the difference is reading
+                        // its own output. Removing the bias entirely on that
+                        // reasoning did not work either - it cost the scene that
+                        // had been reaching 90.
+                        //
+                        // So this is kept because it is measured best, not
+                        // because it is right: 86-90 delivered frames a second
+                        // for forty seconds. Do not narrow it, centre it, or
+                        // replace it with a computation without a capture
+                        // showing the replacement is better in a heavy scene as
+                        // well as a menu.
                         const auto lead_floor = period * 21 / 20;
                         const auto lead_ceiling = period * 23 / 20;
                         const auto lead_mean =
@@ -4586,31 +4684,14 @@ void continuous_presenter_main(
                                     ? ceiling
                                     : state->presenter_pair_bias + climb;
                         } else if (lead_tight) {
-                            // The two intervals sum to exactly two periods, so
-                            // lengthening this one shortens the other by as much
-                            // and the schedule cannot drift. Climbs at the floor
-                            // rate: the correction wanted is realCall minus
-                            // synCall, sub-millisecond once the deferred copy
-                            // goes out early, against a period/4 ceiling.
                             const auto step = period / 128;
                             state->presenter_pair_bias =
                                 state->presenter_pair_bias + step > ceiling
                                     ? ceiling
                                     : state->presenter_pair_bias + step;
                         } else if (lead_in_band) {
-                            // Hold. The whole point of the band: with the lead
-                            // where it should be the bias has nothing to do, and
-                            // a controller that is always either climbing or
-                            // decaying walks out of the band on its own. This is
-                            // what was missing when the quick decay took the
-                            // bias to zero and the lead with it.
+                            // Hold.
                         } else if (lead_long) {
-                            // Quicker than the ordinary decay, which is slow on
-                            // purpose so a bias earned during a heavy stretch is
-                            // not given back on one quiet report. A lead past the
-                            // ceiling is positive evidence rather than the mere
-                            // absence of a block, and at period/256 it takes
-                            // about nine seconds to unwind from the top.
                             const auto quick = period / 64;
                             state->presenter_pair_bias =
                                 state->presenter_pair_bias > quick
@@ -4967,8 +5048,28 @@ void continuous_presenter_main(
                     xrfg::BridgeFlightOperation::presenter_frame_presented,
                     presented->mispresented,
                     request ? request->sequence : 0,
-                    presented->frame_index,
-                    (static_cast<std::uint64_t>(presented->skipped) << 8) |
+                    // The compositor's own account, packed above the frame
+                    // index: this frame's flags in bits 32-47 and the OR across
+                    // the window in 48-63. The index is a 32-bit counter, so
+                    // the room is there.
+                    static_cast<std::uint64_t>(presented->frame_index) |
+                        (static_cast<std::uint64_t>(
+                             presented->reprojection_flags & 0xFFFFU)
+                         << 32) |
+                        (static_cast<std::uint64_t>(
+                             presented->reprojection_flags_window & 0xFFFFU)
+                         << 48),
+                    // Skipped in bits 8-15 and presents in 0-7 as before, with
+                    // what the compositor attributes to this frame's rendering
+                    // above them: application GPU microseconds in 16-39 and its
+                    // own in 40-63.
+                    (static_cast<std::uint64_t>(
+                         presented->compositor_render_gpu_us & 0xFFFFFFU)
+                     << 40) |
+                        (static_cast<std::uint64_t>(
+                             presented->total_render_gpu_us & 0xFFFFFFU)
+                         << 16) |
+                        (static_cast<std::uint64_t>(presented->skipped) << 8) |
                         presented->presents);
             }
         }

@@ -89,6 +89,9 @@ enum class AttachRoute : std::uint64_t {
 };
 
 constexpr std::int64_t kWindowNanoseconds = 1'000'000'000;
+// Mispresented-above-predicted values are small; anything past this is counted
+// with the top bucket and is a loss under any baseline.
+constexpr std::uint32_t kExcessBuckets = 16;
 // Past this the last window is too old to describe what is on screen now, so
 // report nothing rather than something stale.
 constexpr std::int64_t kStaleNanoseconds = 5'000'000'000;
@@ -149,7 +152,11 @@ struct SteamVrDelivery::Impl {
     std::uint32_t rate_last_index{};
     double rate_last_time{};
     std::uint32_t rate_seen{};
-    std::uint32_t rate_lost{};
+    // Frames eligible to be judged - those the index gap and the previous
+    // frame's scanout count did not already exempt - and how far each one was
+    // mispresented beyond the depth the compositor said it was predicting.
+    std::uint32_t rate_counted{};
+    std::array<std::uint32_t, kExcessBuckets> rate_excess_histogram{};
     // Scanouts the previous distinct frame occupied. One means this frame is as
     // early as it could be, so a mispresent here is a real displacement.
     std::uint32_t rate_previous_presents{1};
@@ -159,7 +166,8 @@ struct SteamVrDelivery::Impl {
         if (!rate_started || timing.m_nFrameIndex < rate_last_index) {
             rate_first_index = rate_last_index = timing.m_nFrameIndex;
             rate_first_time = rate_last_time = timing.m_flSystemTimeInSeconds;
-            rate_seen = rate_lost = 0;
+            rate_seen = rate_counted = 0;
+            rate_excess_histogram.fill(0);
             rate_previous_presents = timing.m_nNumFramePresents;
             rate_started = true;
             return;
@@ -185,9 +193,15 @@ struct SteamVrDelivery::Impl {
         ++rate_seen;
         const std::uint32_t predicted =
             (timing.m_nReprojectionFlags & vr::VRCompositor_PredictionMask) >> 4;
-        if (gap <= 1 && rate_previous_presents <= 1 &&
-            timing.m_nNumMisPresented > predicted) {
-            ++rate_lost;
+        if (gap <= 1 && rate_previous_presents <= 1) {
+            const std::uint32_t excess =
+                timing.m_nNumMisPresented > predicted
+                    ? timing.m_nNumMisPresented - predicted
+                    : 0;
+            ++rate_excess_histogram[excess < kExcessBuckets
+                                        ? excess
+                                        : kExcessBuckets - 1];
+            ++rate_counted;
         }
         rate_previous_presents = timing.m_nNumFramePresents;
     }
@@ -326,9 +340,44 @@ struct SteamVrDelivery::Impl {
         // Callisto and MSFS both advanced the index by exactly one per record,
         // so last - first equalled the count there and this stayed hidden
         // through two rounds of validation against fpsVR.
+        // Only excursions above the window's own baseline are losses.
+        //
+        // The rule was mispresented above the prediction depth, and it read a
+        // constant offset as total loss. Where the grid sits inside the display
+        // period decides which vsync a submission is predicted for, so a
+        // schedule that lands one vsync off its prediction reports
+        // mispresented 1 with predicted 0 on *every* frame while delivering all
+        // of them - and the overlay showed zero exactly when delivery was
+        // perfect. The gap and presents exemptions cannot catch it: at full rate
+        // both are 1.
+        //
+        // The window's median excess is that offset, whatever it happens to be,
+        // so a frame is lost only when it exceeds it. Against every shape on
+        // record: Callisto healthy excess 0 throughout, median 0, none lost;
+        // Callisto dropping 49% above a median of 0, all counted; MSFS healthy
+        // mispresented 2 against predicted 2, excess 0; MSFS holding 45 exempt
+        // on the index gap; and a full-rate grid one vsync off its prediction,
+        // excess 1 throughout, median 1, none lost.
+        std::uint32_t median_excess = 0;
+        if (rate_counted != 0) {
+            const std::uint32_t half = rate_counted / 2;
+            std::uint32_t running = 0;
+            for (std::uint32_t i = 0; i < kExcessBuckets; ++i) {
+                running += rate_excess_histogram[i];
+                if (running > half) {
+                    median_excess = i;
+                    break;
+                }
+            }
+        }
+        std::uint32_t lost = 0;
+        for (std::uint32_t i = median_excess + 1; i < kExcessBuckets; ++i) {
+            lost += rate_excess_histogram[i];
+        }
         const double frames = static_cast<double>(rate_seen) / span;
-        const double lost_share =
-            static_cast<double>(rate_lost) / static_cast<double>(rate_seen);
+        const double lost_share = rate_counted == 0
+            ? 0.0
+            : static_cast<double>(lost) / static_cast<double>(rate_counted);
         delivered = static_cast<float>(frames * (1.0 - lost_share));
         delivered_at_ns = now;
         bridge_flight_logger().event(
@@ -454,6 +503,17 @@ SteamVrDelivery::last_presentation() noexcept {
             return std::nullopt;
         }
         // Ascending, oldest to newest.
+        // Every frame in the window, not just the one reported below. The
+        // caller looks once per submission and the window holds more than one
+        // frame, so a reason raised on a frame it does not land on would
+        // otherwise never be seen.
+        std::uint32_t flags_window = 0;
+        for (std::uint32_t i = 0; i < filled; ++i) {
+            if (timings[i].m_nNumFramePresents != 0) {
+                flags_window |= timings[i].m_nReprojectionFlags;
+            }
+        }
+
         for (std::uint32_t offset = filled; offset-- > 0;) {
             const auto& timing = timings[offset];
             if (timing.m_nNumFramePresents == 0) {
@@ -471,6 +531,12 @@ SteamVrDelivery::last_presentation() noexcept {
             presentation.skipped = impl_->reported_frames
                 ? timing.m_nFrameIndex - impl_->last_frame_index - 1
                 : 0;
+            presentation.reprojection_flags = timing.m_nReprojectionFlags;
+            presentation.reprojection_flags_window = flags_window;
+            presentation.total_render_gpu_us = static_cast<std::uint32_t>(
+                timing.m_flTotalRenderGpuMs * 1000.0F);
+            presentation.compositor_render_gpu_us = static_cast<std::uint32_t>(
+                timing.m_flCompositorRenderGpuMs * 1000.0F);
             impl_->last_frame_index = timing.m_nFrameIndex;
             impl_->reported_frames = true;
             return presentation;
