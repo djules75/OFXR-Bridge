@@ -2301,6 +2301,11 @@ struct D3D12FrameSynthesizer::Impl {
 
         // last_submitted_fence_value is the value a deferred copy will signal,
         // so waiting for it without submitting that copy can only time out.
+        // Waiting for the synthetic alone instead was built as V160 and again
+        // here: it leaves the previous copy in flight at the next capture, the
+        // real frame's hand-over then blocks on it (realCall 0.677 -> 1.792 ms)
+        // and both halves lose scanouts. This wait is what gives the copy its
+        // time; do not take it away without giving it back elsewhere.
         static_cast<void>(flush_pending_copy());
 
         const HRESULT initial_status =
