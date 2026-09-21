@@ -99,6 +99,11 @@ enum class BridgeFlightOperation : std::uint32_t {
     // every frame and presents minus reprojected collapses to zero through a
     // healthy session.
     steamvr_delivery,
+    // Six times a second while a pair is being submitted: result 300, a= the
+    // pair bias in ns, b= the synthetic's downstream call mean, c= the arrival
+    // gap mean. The bias is judged by b falling toward the real frame's own
+    // call cost - not by c, which shrinks by construction when the bias works.
+    //
     // The vsync phase lock, once every few submissions while the rate is
     // right. result= the signed error against the held offset in ns, a= the
     // correction applied in ns (it always opposes the error, so its sign is

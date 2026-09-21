@@ -598,6 +598,24 @@ struct SessionState {
     // elsewhere. Diagnostic: nothing schedules on these.
     std::chrono::nanoseconds presenter_synthetic_call_mean{};
     std::chrono::nanoseconds presenter_real_call_mean{};
+    // Uneven pair spacing, restored in V196 after being removed in V187.
+    //
+    // What it buys is production time, not margin: shortening the interval
+    // after the synthetic lengthens the one before the *next* synthetic, so
+    // each step gives that synthetic more age before its slot arrives. Without
+    // it, a title whose synthesis does not finish inside a period hands the
+    // runtime a synthetic with unfinished pixels, SteamVR blocks inside
+    // xrEndFrame waiting for them, and that block lands between the two
+    // hand-overs and costs the *real* frame.
+    //
+    // V187 deleted it on a capture where it was pinned at its ceiling with
+    // nothing to buy - 2.78 ms of bias against a 0.67 ms synthetic call - and
+    // delivery measured 61.8 frames a second against 82.3 without it. That was
+    // evidence about the decay rate, not the mechanism: at period/2048 an
+    // unwind from the ceiling takes about eighty-five seconds against a climb
+    // of two milliseconds a second, so once it climbed it never came back.
+    std::chrono::nanoseconds presenter_pair_bias{};
+    std::uint32_t presenter_bias_tick{};
     std::uint32_t presenter_call_report_tick{};
     // The interval between the two hand-overs of a pair, measured where it
     // matters - between the calls, so it already carries whatever the runtime
@@ -3803,6 +3821,12 @@ void fail_pending_presenter_submissions_locked(
         state->presenter_vsync_offset_valid = true;
         return 0;
     }
+    // Correcting needs a grid that is already keeping rate - one skipping slots
+    // has no stable phase to hold - but the sampling above does not, which is
+    // why the gate is here and not at the call site.
+    if (state->presenter_on_grid_streak < kPhaseCorrectionGridStreak) {
+        return 0;
+    }
     // Signed distance to the held offset, taken the short way round so a grid
     // just past the offset is pulled back rather than dragged a whole period
     // forward. Getting this wrong is what section 13 of the low-headroom notes
@@ -3938,7 +3962,12 @@ void pace_presenter_submission(
                 // Both were clean grids: Callisto parked at the ceiling for
                 // 47 s with no skips at all, and The Witcher 3 walked to the
                 // floor with 0.0-0.4 skips a second.
-                const auto band_ceiling = period * 3 / 4;
+                // Carries the bias: the pair is unevenly spaced, so the hold
+                // before a synthetic is longer by exactly that much, and
+                // against a bare three quarters the band reads it as a grid
+                // that has walked to the end and pulls against it.
+                const auto band_ceiling =
+                    period * 3 / 4 + state->presenter_pair_bias;
                 if (state->presenter_on_grid_streak <
                     kPhaseCorrectionGridStreak) {
                     // Rate is wrong; leave the schedule alone.
@@ -4359,20 +4388,77 @@ void continuous_presenter_main(
                     // xrfg_steamvr_delivery_probe reads it from the compositor
                     // on SteamVR.
                     constexpr std::uint32_t kCallReportFrames = 15;
-                    if (++state->presenter_call_report_tick >= kCallReportFrames) {
-                        state->presenter_call_report_tick = 0;
+                    if (++state->presenter_bias_tick >= kCallReportFrames) {
+                        state->presenter_bias_tick = 0;
+                        // The block the bias exists to buy out: the synthetic's
+                        // downstream call costs more than the real frame's
+                        // exactly when the runtime is waiting on pixels that
+                        // are not finished.
+                        constexpr auto kBlockThreshold =
+                            std::chrono::microseconds(500);
+                        constexpr auto kSuppressedThreshold =
+                            std::chrono::microseconds(200);
+                        const auto excess =
+                            state->presenter_synthetic_call_mean -
+                            state->presenter_real_call_mean;
+                        auto climb = excess / 4;
+                        const auto climb_floor = period / 128;
+                        const auto climb_cap = period / 32;
+                        if (climb < climb_floor) climb = climb_floor;
+                        if (climb > climb_cap) climb = climb_cap;
+                        // Fast enough to release. The original period/2048 took
+                        // about eighty-five seconds to unwind from the ceiling
+                        // against a climb of two milliseconds a second, so a
+                        // bias earned during one heavy stretch was still being
+                        // paid for a minute and a half later with no block left
+                        // to buy out - which is the whole of why V187 measured
+                        // this mechanism as harmful and removed it. period/256
+                        // unwinds in about ten seconds, still eight times
+                        // slower than the climb, so the asymmetry that stopped
+                        // V175 hunting is kept without becoming a latch.
+                        const auto decay = period / 256;
+                        const auto ceiling = period / 4;
+                        const bool steamvr = state->dispatch &&
+                            state->dispatch->steamvr_runtime;
+                        // Order matters: while the block is present the gap is
+                        // compressed by the block, not by the bias, so the
+                        // block is dealt with first and the gap only governs
+                        // once it is suppressed.
+                        const auto gap_floor = period * 9 / 10;
+                        const bool gap_tight =
+                            state->presenter_pair_gap_mean.count() != 0 &&
+                            state->presenter_pair_gap_mean < gap_floor;
+                        if (steamvr && excess > kBlockThreshold) {
+                            state->presenter_pair_bias =
+                                state->presenter_pair_bias + climb > ceiling
+                                    ? ceiling
+                                    : state->presenter_pair_bias + climb;
+                        } else if (gap_tight || !steamvr ||
+                                   excess < kSuppressedThreshold) {
+                            state->presenter_pair_bias =
+                                state->presenter_pair_bias > decay
+                                    ? state->presenter_pair_bias - decay
+                                    : std::chrono::nanoseconds::zero();
+                        }
                         xrfg::bridge_flight_logger().event(
                             xrfg::BridgeFlightOperation::presenter_transition,
                             300,
                             static_cast<std::uint64_t>(
-                                state->presenter_real_call_mean.count()),
+                                state->presenter_pair_bias.count()),
                             static_cast<std::uint64_t>(
                                 state->presenter_synthetic_call_mean.count()),
                             static_cast<std::uint64_t>(
                                 state->presenter_pair_gap_mean.count()));
                     }
-                    // One period per submission, both halves of the pair alike.
-                    const auto advance = period;
+                    // Shorten the interval after the synthetic and lengthen
+                    // the one before it. The two sum to exactly two periods, so
+                    // the schedule does not drift, and each step gives the next
+                    // pair's synthetic more age before its slot arrives.
+                    const auto pair_bias = state->presenter_pair_bias;
+                    const auto advance = request
+                        ? (fresh_synthetic ? period - pair_bias
+                                           : period + pair_bias)
+                        : period;
                     state->presenter_next_submit += advance;
                     // Hold the grid against the display's own clock.
                     //
@@ -4395,10 +4481,35 @@ void continuous_presenter_main(
                     // Bounded and gradual for the same reason, and it runs only
                     // once the rate is right: a grid that is skipping slots has
                     // no stable phase to hold.
-                    if (state->steamvr_delivery &&
-                        state->presenter_on_grid_streak >=
-                            kPhaseCorrectionGridStreak) {
-                        constexpr std::uint32_t kVsyncLockFrames = 4;
+                    //
+                    // Sampled after the synthetic only, never after the real
+                    // frame. The deadlines are evenly spaced but the two halves
+                    // do not arrive evenly - the runtime's own call costs differ
+                    // between them, and that difference falls between the two
+                    // submissions. Measured on Hogwarts Legacy through UEVR:
+                    // 9.5 ms from synthetic to real and 13.1 ms back, steady.
+                    //
+                    // Sampling both halves therefore mixes two populations
+                    // about 1.8 ms apart, and taking every fourth submission
+                    // aliases against a two-cycle alternation, so which
+                    // population is read depends on where the count happens to
+                    // land. The lock reads that as drift and corrects against
+                    // it: mean error 2.77 ms with swings across the full
+                    // +/- half period, against 0.018 ms on a title whose halves
+                    // arrive nearly together. It was not holding a phase, it
+                    // was chasing an alternation.
+                    //
+                    // One half is enough. The grid advances by a whole period
+                    // between consecutive synthetics, so their phase is the
+                    // schedule's phase, with nothing to alias against.
+                    // The on-grid gate is applied to the correction inside,
+                    // not to sampling. Observing the phase moves nothing, and
+                    // gating it means the offset can never be learned on a
+                    // title whose grid is rarely on-grid for long: measured on
+                    // Hogwarts through UEVR, 54 samples in 32 seconds against
+                    // the 64 needed, so the lock never settled at all.
+                    if (state->steamvr_delivery && fresh_synthetic) {
+                        constexpr std::uint32_t kVsyncLockFrames = 2;
                         if (++state->presenter_vsync_tick >= kVsyncLockFrames) {
                             state->presenter_vsync_tick = 0;
                             vsync_lock_correction = apply_vsync_phase_lock(
