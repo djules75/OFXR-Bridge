@@ -228,26 +228,59 @@ struct FrameRate {
         if (timing.m_nFrameIndex <= last_index) {
             return;
         }
+        // Vsyncs this frame is past the previous one. One means the compositor
+        // composited on every vsync; more means it did not, and the scanouts it
+        // skipped are already excluded by counting records rather than index
+        // units. Charging the mispresent on top of that counts the same loss
+        // twice, and where every frame skips - MSFS holding 45 on a 90 Hz
+        // display - it takes the rate to zero.
+        //
+        // This is the general form of the presents >= 2 rule it replaces. That
+        // one assumed a repeat always shows as a frame occupying two scanouts,
+        // which is how the first MSFS capture read; a repeat can equally show
+        // as an index gap of two with a single present, and then the old rule
+        // exempted nothing at all.
+        const std::uint32_t gap = timing.m_nFrameIndex - last_index;
         last_index = timing.m_nFrameIndex;
         last_time = timing.m_flSystemTimeInSeconds;
         ++seen;
         const std::uint32_t predicted =
             (timing.m_nReprojectionFlags & vr::VRCompositor_PredictionMask) >> 4;
-        if (previous_presents <= 1 && timing.m_nNumMisPresented > predicted) {
+        if (gap <= 1 && previous_presents <= 1 &&
+            timing.m_nNumMisPresented > predicted) {
             ++lost;
         }
         previous_presents = timing.m_nNumFramePresents;
     }
-    // Scanouts per second, less the share of them that carried nothing new.
+    // Distinct frames per second, less the share of them that carried nothing
+    // new.
+    //
+    // Counted, not derived from the index. m_nFrameIndex counts *vsyncs* while
+    // the compositor writes one record per frame it actually composited, so
+    // where it produces 45 frames on a 90 Hz display consecutive records are
+    // N, N+2, N+4 and the index gap is twice the frame count. Measured on
+    // Hogwarts Legacy: 31 records spanning 62 index units over 0.689 s, which
+    // the index arithmetic read as 90 while the headset was receiving 45.
+    //
+    // Callisto and MSFS both advanced the index by exactly one per record, so
+    // last - first happened to equal the count there and the error stayed
+    // hidden through two rounds of validation against fpsVR.
     [[nodiscard]] double per_second() const {
         const double span = last_time - first_time;
         if (span <= 0.05 || seen == 0) {
             return -1.0;
         }
-        const double scanouts =
-            static_cast<double>(last_index - first_index) / span;
-        return scanouts *
+        const double frames = static_cast<double>(seen) / span;
+        return frames *
             (1.0 - static_cast<double>(lost) / static_cast<double>(seen));
+    }
+    // Index units per distinct frame. 1.0 means the compositor is producing a
+    // frame per vsync; 2.0 means one every other vsync, which is what the old
+    // index arithmetic misread as a full rate.
+    [[nodiscard]] double index_step() const {
+        return seen == 0 ? 0.0
+                         : static_cast<double>(last_index - first_index) /
+                               static_cast<double>(seen);
     }
     [[nodiscard]] double lost_share() const {
         return seen == 0 ? 0.0
@@ -459,7 +492,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    emit("      clock   sec    pid  presents  dropped  reproj  delivered   lost%\n");
+    emit("      clock   sec    pid  presents  dropped  reproj  delivered   lost%%   step\n");
     FrameRate rate;
     std::uint32_t total_presents = 0;
     std::uint32_t total_lost = 0;
@@ -485,9 +518,9 @@ int main(int argc, char** argv) {
         // the two kinds of repeat are removed. This is the number to compare
         // against fpsVR, and against the layer's submitted_fps.
         const double delivered = rate.per_second();
-        emit("  %s  %4d  %5u  %8u  %7u  %6u  %9.1f  %5.1f\n",
+        emit("  %s  %4d  %5u  %8u  %7u  %6u  %9.1f  %5.1f  %5.2f\n",
             wall_clock().c_str(), second, current.pid, presents, dropped,
-            reprojected, delivered, rate.lost_share());
+            reprojected, delivered, rate.lost_share(), rate.index_step());
         rate.restart();
         total_presents += presents;
         total_lost += dropped + reprojected;

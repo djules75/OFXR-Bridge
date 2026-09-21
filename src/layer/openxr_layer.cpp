@@ -2840,7 +2840,22 @@ XrResult layer_wait_frame_impl(
         // or enqueue its next game/NGX workload. The submit path now performs
         // only a nonblocking check and drops generation while the same fence
         // remains pending, so a timeout cannot grow the queue.
-        static_cast<void>(wait_for_previous_session_synthesis(state));
+        //
+        // That reason is about contention on the queue the application itself
+        // records to, so it stops applying once synthesis has its own. Frame
+        // start is the earliest moment the wait *could* happen and nothing
+        // overlaps it there, so its whole cost lands on the application's
+        // budget: measured p90 12.08 ms against the 6.8 ms of slack a title
+        // rendering at 65/s has inside a 45/s clamp, which is what drops it to
+        // 28-37/s in patches. A session with a private queue waits immediately
+        // before the capture instead, where the application's own render pass
+        // has already covered most of the fence. The wait itself is unchanged
+        // and still runs to completion, so the submit path still finds the
+        // fence signalled - skipping or bounding it is what tears continuity
+        // down and neither is what this does.
+        if (!state->d3d12_synthesis_queue) {
+            static_cast<void>(wait_for_previous_session_synthesis(state));
+        }
         state->application_wait_pending_begin = true;
         std::scoped_lock lock(state->mutex);
         // Every runtime, not only SteamVR: the synthetic interpolation fraction
@@ -3456,6 +3471,15 @@ XrResult layer_release_swapchain_image_impl(
                 d3d11_interop = state->frame_generation->d3d11_interop;
             }
         }
+    }
+
+    // Before gpu_mutex, never inside it: this blocks for up to a display
+    // period, and prepare_frame_generation holds the same mutex across the
+    // whole submit path. Idempotent across the several releases one frame can
+    // make - after the first the fence is signalled and the wait returns on its
+    // initial status check.
+    if (candidate_index && history && state->session->d3d12_synthesis_queue) {
+        static_cast<void>(wait_for_previous_session_synthesis(state->session));
     }
 
     std::unique_lock<std::mutex> gpu_lock;

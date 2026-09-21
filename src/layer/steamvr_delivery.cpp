@@ -167,12 +167,25 @@ struct SteamVrDelivery::Impl {
         if (timing.m_nFrameIndex <= rate_last_index) {
             return;
         }
+        // Vsyncs this frame is past the previous one. One means the compositor
+        // composited on every vsync; more means it did not, and the scanouts it
+        // skipped are already excluded by counting records rather than index
+        // units. Charging the mispresent on top counts the same loss twice, and
+        // where every frame skips - MSFS holding 45 on a 90 Hz display - it
+        // takes the rate to zero.
+        //
+        // This is the general form of the presents >= 2 rule beside it, which
+        // assumed a repeat always shows as one frame occupying two scanouts.
+        // That is how the first MSFS capture read, but a repeat shows equally
+        // as an index gap of two with a single present, and then the presents
+        // rule exempts nothing at all.
+        const std::uint32_t gap = timing.m_nFrameIndex - rate_last_index;
         rate_last_index = timing.m_nFrameIndex;
         rate_last_time = timing.m_flSystemTimeInSeconds;
         ++rate_seen;
         const std::uint32_t predicted =
             (timing.m_nReprojectionFlags & vr::VRCompositor_PredictionMask) >> 4;
-        if (rate_previous_presents <= 1 &&
+        if (gap <= 1 && rate_previous_presents <= 1 &&
             timing.m_nNumMisPresented > predicted) {
             ++rate_lost;
         }
@@ -302,11 +315,21 @@ struct SteamVrDelivery::Impl {
         if (span < 0.05) {
             return;
         }
-        const double scanouts =
-            static_cast<double>(rate_last_index - rate_first_index) / span;
+        // Counted, not derived from the index. m_nFrameIndex counts *vsyncs*
+        // while the compositor writes one record per frame it actually
+        // composited, so at 45 frames on a 90 Hz display consecutive records
+        // are N, N+2, N+4 and the index gap is twice the frame count. Measured
+        // on Hogwarts Legacy: 31 records spanning 62 index units over 0.689 s,
+        // which the index arithmetic read as 90 while the headset received 45
+        // and presenter_frame_presented fired 45.1 times a second.
+        //
+        // Callisto and MSFS both advanced the index by exactly one per record,
+        // so last - first equalled the count there and this stayed hidden
+        // through two rounds of validation against fpsVR.
+        const double frames = static_cast<double>(rate_seen) / span;
         const double lost_share =
             static_cast<double>(rate_lost) / static_cast<double>(rate_seen);
-        delivered = static_cast<float>(scanouts * (1.0 - lost_share));
+        delivered = static_cast<float>(frames * (1.0 - lost_share));
         delivered_at_ns = now;
         bridge_flight_logger().event(
             BridgeFlightOperation::steamvr_delivery,
