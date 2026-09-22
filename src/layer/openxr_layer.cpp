@@ -3902,6 +3902,16 @@ requested_pair_bias() noexcept {
         microseconds > 0 && microseconds < 100'000 ? microseconds : 0);
 }
 
+// Whether the schedule's phase is being set from the compositor's own frame
+// clock. When it is, this is the only thing allowed to move the schedule: the
+// drift servo and the slot corrector both stand down, because two controllers
+// on one variable is the failure this layer keeps rediscovering.
+[[nodiscard]] bool measured_pace_active(
+    const std::shared_ptr<SessionState>& state) noexcept {
+    return state->steamvr_delivery && state->dispatch &&
+        state->dispatch->steamvr_runtime;
+}
+
 // Caller holds presenter_mutex.
 [[nodiscard]] std::int64_t apply_vsync_phase_lock(
     const std::shared_ptr<SessionState>& state,
@@ -4149,22 +4159,56 @@ void pace_presenter_submission(
         // now and let the next frame land properly.
         //
         // SteamVR only. Every other runtime keeps the grid untouched.
-        if (state->steamvr_delivery && state->dispatch &&
-            state->dispatch->steamvr_runtime) {
+        if (measured_pace_active(state)) {
             constexpr auto kSubmitTargetRemaining =
                 std::chrono::nanoseconds(1'500'000);
-            if (const auto left = state->steamvr_delivery->frame_time_remaining()) {
-                const auto measured = *left - kSubmitTargetRemaining;
+            if (const auto left =
+                    state->steamvr_delivery->frame_time_remaining()) {
+                // Correct the schedule's phase from the compositor's clock;
+                // do not derive the whole sleep from it.
+                //
+                // Deriving the sleep was tried and the rate came out wrong.
+                // predictedDisplayTime advances by exactly the display period,
+                // 11.1111 ms, while submissions paced straight off the reading
+                // advanced by 11.037 - a permanent 74 microseconds a frame, the
+                // same in a window delivering 97% and one delivering 77%. The
+                // submission drifts a whole scanout away from its own label
+                // every 1.7 seconds, and the compositor then reports it
+                // presented on a vsync other than the one it was predicted for.
+                //
+                // The likely cause is in the API's own warning: the value "may
+                // roll over to the next frame before ever reaching 0.0", so a
+                // target near the running start sits on a discontinuity.
+                //
+                // Advancing by the runtime's own period instead makes the
+                // spacing exact by construction and keeps the submission on the
+                // same sequence as its label; the reading is then only used to
+                // place the phase, bounded, the way drift is cancelled.
+                const auto scanout = std::chrono::nanoseconds(
+                    static_cast<std::int64_t>(state->presenter_display_period));
+                auto error = *left - kSubmitTargetRemaining;
+                if (scanout > std::chrono::nanoseconds::zero()) {
+                    while (error > scanout / 2) {
+                        error -= scanout;
+                    }
+                    while (error < -(scanout / 2)) {
+                        error += scanout;
+                    }
+                }
+                constexpr auto kMeasuredStepCeiling =
+                    std::chrono::nanoseconds(50'000);
+                const auto step = std::clamp(
+                    error / 8, -kMeasuredStepCeiling, kMeasuredStepCeiling);
+                {
+                    std::scoped_lock lock(state->presenter_mutex);
+                    state->presenter_next_submit += step;
+                }
                 xrfg::bridge_flight_logger().event(
                     xrfg::BridgeFlightOperation::presenter_pace,
                     3,
                     static_cast<std::uint64_t>(left->count()),
-                    static_cast<std::uint64_t>(
-                        measured > std::chrono::nanoseconds::zero()
-                            ? measured.count() : 0),
+                    static_cast<std::uint64_t>(step.count() + 1'000'000),
                     static_cast<std::uint64_t>(remaining.count()));
-                remaining = measured > std::chrono::nanoseconds::zero()
-                    ? measured : std::chrono::nanoseconds::zero();
             }
         }
         // Slept without the lock: the application thread enqueues against this
@@ -4287,7 +4331,7 @@ void continuous_presenter_main(
                 const std::int64_t slots = usable_signal
                     ? (advance + locked_period / 2) / locked_period
                     : 1;
-                if (slots != 1) {
+                if (slots != 1 && !measured_pace_active(state)) {
                     const auto period_ns =
                         std::chrono::nanoseconds(locked_period);
                     // A repeated slot means the grid is early and must be
@@ -4980,7 +5024,8 @@ void continuous_presenter_main(
                     // thirtieth of the window. Nothing here needs to move fast,
                     // and a correction that can move fast is one that can walk
                     // the grid somewhere worse.
-                    if (state->presenter_vsync_offset_valid) {
+                    if (state->presenter_vsync_offset_valid &&
+                        !measured_pace_active(state)) {
                         constexpr std::int64_t kDriftGain = 32;
                         constexpr auto kDriftStepCeiling =
                             std::chrono::nanoseconds(10'000);
