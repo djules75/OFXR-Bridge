@@ -469,16 +469,11 @@ struct SessionState {
     // signed and taken the short way round. Written and read only by the
     // presenter thread, between measuring it and applying it a few lines later.
     std::chrono::nanoseconds presenter_landed_error{};
-    // The pair spacing the tray last asked for, if any. Presenter thread only.
-    std::optional<std::chrono::nanoseconds> presenter_forced_bias{};
     // How much of the compositor's frame to leave in hand when a submission
     // lands, and the evidence for walking it down. Presenter thread only.
     std::chrono::nanoseconds presenter_submit_margin{2'500'000};
     std::uint32_t presenter_margin_window{};
     std::uint32_t presenter_margin_lost{};
-    // The phase the tray last asked for, and when it was last read.
-    std::chrono::nanoseconds presenter_requested_phase{};
-    std::chrono::steady_clock::time_point presenter_phase_read_at{};
     std::uint32_t presenter_vsync_tick{};
     // Serializes each generated synthetic/real frame pair atomically with
     // respect to application frame calls. A successful application wait owns
@@ -3875,38 +3870,6 @@ void fail_pending_presenter_submissions_locked(
 //
 // Off the frame path: a quarter second apart, on the presenter thread, and
 // never while the presenter mutex is held.
-// The pair spacing the tray asks for, or nothing for "leave the controller in
-// charge". Zero is a real answer here: it is the only spacing where both
-// intervals of a pair are exactly one period, which is what two consecutive
-// scanouts want, so the absent case has to be signalled separately.
-//
-// Worth re-asking now. Both earlier verdicts against a small bias - removing it
-// entirely, and clamping its ceiling - were measured on a schedule that could
-// not hold its phase, so neither says anything about one that can.
-[[nodiscard]] std::optional<std::chrono::nanoseconds>
-requested_pair_bias() noexcept {
-    static const auto path = current_layer_directory() / L"ofxr_bridge.ini";
-    WritePrivateProfileStringW(nullptr, nullptr, nullptr, path.c_str());
-    const auto microseconds = GetPrivateProfileIntW(
-        L"ofxr", L"grid_bias_us", -1, path.c_str());
-    if (microseconds < 0 || microseconds >= 100'000) {
-        return std::nullopt;
-    }
-    return std::chrono::microseconds(microseconds);
-}
-
-[[nodiscard]] std::chrono::nanoseconds requested_grid_phase() noexcept {
-    static const auto path = current_layer_directory() / L"ofxr_bridge.ini";
-    // The profile functions cache the file they last read, and the tray
-    // replaces this INI wholesale instead of writing through them, so without
-    // this the layer serves a stale copy for the life of the session.
-    WritePrivateProfileStringW(nullptr, nullptr, nullptr, path.c_str());
-    const auto microseconds = GetPrivateProfileIntW(
-        L"ofxr", L"grid_phase_us", 0, path.c_str());
-    return std::chrono::microseconds(
-        microseconds > 0 && microseconds < 100'000 ? microseconds : 0);
-}
-
 // Whether the schedule's phase is being set from the compositor's own frame
 // clock. When it is, this is the only thing allowed to move the schedule: the
 // drift servo and the slot corrector both stand down, because two controllers
@@ -4611,18 +4574,6 @@ void continuous_presenter_main(
                 // rather than chase if a stall has put the schedule in the
                 // past - catching up would submit a burst, which is the very
                 // thing the pace exists to prevent.
-                // Four times a second, and never under the lock: the
-                // application thread blocks on that mutex, and this reads a
-                // file. Both fields belong to this thread alone.
-                auto requested_phase = state->presenter_requested_phase;
-                const auto read_at = std::chrono::steady_clock::now();
-                if (read_at - state->presenter_phase_read_at >=
-                    std::chrono::milliseconds(250)) {
-                    state->presenter_phase_read_at = read_at;
-                    requested_phase = requested_grid_phase();
-                    state->presenter_forced_bias = requested_pair_bias();
-                }
-
                 std::scoped_lock lock(state->presenter_mutex);
                 const auto now = std::chrono::steady_clock::now();
                 const auto period = std::chrono::nanoseconds(
@@ -4681,20 +4632,6 @@ void continuous_presenter_main(
                             state->presenter_vsync_offset = seed_phase;
                             state->presenter_vsync_offset_valid = true;
 
-                            // A placed phase, when one is configured, takes
-                            // precedence over the inherited one. Same
-                            // arithmetic as the live adjustment below, applied
-                            // once here so the very first pair is already on
-                            // the configured grid.
-                            if (requested_phase > std::chrono::nanoseconds::zero() &&
-                                requested_phase < period) {
-                                const auto ahead =
-                                    state->presenter_next_submit - anchor->at;
-                                const auto whole = ahead / period;
-                                state->presenter_next_submit = anchor->at +
-                                    (whole + 1) * period + requested_phase;
-                                state->presenter_vsync_offset = requested_phase;
-                            }
                         }
                     }
                 } else {
@@ -4801,22 +4738,6 @@ void continuous_presenter_main(
                     constexpr std::uint32_t kCallReportFrames = 15;
                     if (++state->presenter_bias_tick >= kCallReportFrames) {
                         state->presenter_bias_tick = 0;
-                        if (state->presenter_forced_bias) {
-                            // Configured by hand: hold it and leave the
-                            // controller out of it entirely, so the value that
-                            // was dialled is the value the pair is spaced by.
-                            state->presenter_pair_bias =
-                                *state->presenter_forced_bias;
-                            xrfg::bridge_flight_logger().event(
-                                xrfg::BridgeFlightOperation::presenter_transition,
-                                301,
-                                static_cast<std::uint64_t>(
-                                    state->presenter_pair_bias.count()),
-                                static_cast<std::uint64_t>(
-                                    state->presenter_synthetic_call_mean.count()),
-                                static_cast<std::uint64_t>(
-                                    state->presenter_pair_lead_gap_mean.count()));
-                        } else {
                         // The block the bias exists to buy out: the synthetic's
                         // downstream call costs more than the real frame's
                         // exactly when the runtime is waiting on pixels that
@@ -5021,7 +4942,6 @@ void continuous_presenter_main(
                                 state->presenter_synthetic_call_mean.count()),
                             static_cast<std::uint64_t>(
                                 state->presenter_pair_lead_gap_mean.count()));
-                        }
                     }
                     // Shorten the interval after the synthetic and lengthen
                     // the one before it. The two sum to exactly two periods, so
@@ -5064,41 +4984,6 @@ void continuous_presenter_main(
                             step = -kDriftStepCeiling;
                         }
                         state->presenter_next_submit -= step;
-                    }
-                    // A phase the tray asked for while the session is running.
-                    // Applied as a jump onto a real vsync boundary, never as a
-                    // target the correction is left to chase: dragging the grid
-                    // towards a phase it does not rest at is what the sampling
-                    // window used to do, and it cost half the delivered frames.
-                    //
-                    // Always forward to the next boundary, so the schedule can
-                    // never be moved into the past, and the grid streak is
-                    // cleared so the band and the correction treat the jump as
-                    // a fresh start rather than an error to fight.
-                    if (requested_phase != state->presenter_requested_phase) {
-                        state->presenter_requested_phase = requested_phase;
-                        if (requested_phase > std::chrono::nanoseconds::zero() &&
-                            requested_phase < period && state->steamvr_delivery) {
-                            if (const auto anchor =
-                                    state->steamvr_delivery->vsync_anchor()) {
-                                const auto ahead =
-                                    state->presenter_next_submit - anchor->at;
-                                const auto whole = ahead / period;
-                                state->presenter_next_submit = anchor->at +
-                                    (whole + 1) * period + requested_phase;
-                                state->presenter_vsync_offset = requested_phase;
-                                state->presenter_vsync_offset_valid = true;
-                                state->presenter_on_grid_streak = 0;
-                                xrfg::bridge_flight_logger().event(
-                                    xrfg::BridgeFlightOperation::
-                                        presenter_vsync_lock,
-                                    904,
-                                    static_cast<std::uint64_t>(
-                                        requested_phase.count()),
-                                    static_cast<std::uint64_t>(period.count()),
-                                    0);
-                            }
-                        }
                     }
                     // Hold the grid against the display's own clock.
                     //

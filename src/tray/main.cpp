@@ -51,7 +51,6 @@ enum MenuCommand : UINT {
     overlay_upper_right = 123,
     overlay_lower_left = 124,
     overlay_lower_right = 125,
-    grid_phase = 128,
     open_logs = 130,
     donate = 139,
     show_about = 140,
@@ -60,14 +59,6 @@ enum MenuCommand : UINT {
 
 struct AppState {
     HWND window{};
-    // The grid-phase window, created on first use and hidden rather
-    // than destroyed so the slider keeps its position.
-    HWND phase_window{};
-    HWND phase_slider{};
-    HWND phase_label{};
-    HWND bias_slider{};
-    HWND bias_label{};
-
     NOTIFYICONDATAW icon{};
     xrfg::standalone::LauncherSettings settings;
     std::filesystem::path executable_directory;
@@ -696,7 +687,6 @@ void show_context_menu(AppState& state) {
         }
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(overlay_menu), L"FPS overlay");
     }
-    AppendMenuW(menu, MF_STRING, grid_phase, L"Grid phase…");
     AppendMenuW(menu, MF_STRING, open_logs, L"Open bridge logs");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, donate, L"Donate");
@@ -710,9 +700,6 @@ void show_context_menu(AppState& state) {
     PostMessageW(state.window, WM_NULL, 0, 0);
     DestroyMenu(menu);
 }
-
-// Defined with the grid-phase window, below the tray's own procedure.
-void show_phase_window(AppState& state);
 
 void handle_command(AppState& state, UINT command) {
     switch (command) {
@@ -787,9 +774,6 @@ void handle_command(AppState& state, UINT command) {
         state.settings.diagnostics = !state.settings.diagnostics;
         update_runtime_options(state);
         break;
-    case grid_phase:
-        show_phase_window(state);
-        break;
     case open_logs: {
         const auto directory = runtime_directory(state.local_directory);
         std::error_code ignored;
@@ -855,159 +839,6 @@ void handle_command(AppState& state, UINT command) {
     default:
         break;
     }
-}
-
-constexpr wchar_t kPhaseWindowClass[] = L"OFXRBridgeGridPhase";
-// One tick per hundred microseconds over a little more than one display period
-// at 90 Hz. Position zero means "inherit", which is what the layer does with a
-// phase of zero, so the far-left end of the travel is the unplaced behaviour.
-constexpr int kPhaseTicks = 120;
-// Position zero is automatic; 1 to 31 are 0.0 to 3.0 ms in tenths. Zero has to
-// be reachable as a real value - it is the only spacing where both intervals of
-// a pair are exactly one period - so it cannot double as "unset".
-constexpr int kBiasTicks = 31;
-
-void update_phase_label(AppState& state) {
-    if (state.phase_label == nullptr) return;
-    wchar_t text[96]{};
-    if (state.settings.grid_phase_us <= 0) {
-        wcscpy_s(text, L"Inherited from startup (not placed)");
-    } else {
-        swprintf_s(text, L"%.1f ms after a vsync",
-            static_cast<double>(state.settings.grid_phase_us) / 1000.0);
-    }
-    SetWindowTextW(state.phase_label, text);
-    if (state.bias_label == nullptr) return;
-    wchar_t bias[96]{};
-    if (state.settings.grid_bias_us < 0) {
-        wcscpy_s(bias, L"Pair spacing: automatic");
-    } else {
-        swprintf_s(bias, L"Pair spacing: %.1f ms off one period",
-            static_cast<double>(state.settings.grid_bias_us) / 1000.0);
-    }
-    SetWindowTextW(state.bias_label, bias);
-}
-
-LRESULT CALLBACK phase_procedure(
-    HWND window,
-    UINT message,
-    WPARAM wparam,
-    LPARAM lparam) {
-    auto* state = reinterpret_cast<AppState*>(
-        GetWindowLongPtrW(window, GWLP_USERDATA));
-    if (message == WM_NCCREATE) {
-        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lparam);
-        state = static_cast<AppState*>(create->lpCreateParams);
-        SetWindowLongPtrW(
-            window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-    }
-    if (state == nullptr) {
-        return DefWindowProcW(window, message, wparam, lparam);
-    }
-    switch (message) {
-    case WM_HSCROLL: {
-        if (reinterpret_cast<HWND>(lparam) == state->bias_slider) {
-            const auto tick = static_cast<int>(
-                SendMessageW(state->bias_slider, TBM_GETPOS, 0, 0));
-            state->settings.grid_bias_us = tick == 0 ? -1 : (tick - 1) * 100;
-            update_phase_label(*state);
-            update_runtime_options(*state, true);
-            return 0;
-        }
-        const auto position = static_cast<int>(
-            SendMessageW(state->phase_slider, TBM_GETPOS, 0, 0));
-        state->settings.grid_phase_us = position * 100;
-        update_phase_label(*state);
-        // Writes the runtime INI the armed layer polls, so the running game
-        // picks it up within a quarter second.
-        update_runtime_options(*state, true);
-        return 0;
-    }
-    case WM_CLOSE:
-        ShowWindow(window, SW_HIDE);
-        return 0;
-    }
-    return DefWindowProcW(window, message, wparam, lparam);
-}
-
-void show_phase_window(AppState& state) {
-    if (state.phase_window == nullptr) {
-        const HINSTANCE instance = GetModuleHandleW(nullptr);
-        WNDCLASSEXW phase_class{};
-        phase_class.cbSize = sizeof(phase_class);
-        phase_class.lpfnWndProc = phase_procedure;
-        phase_class.hInstance = instance;
-        phase_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        phase_class.hbrBackground =
-            reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
-        phase_class.lpszClassName = kPhaseWindowClass;
-        static_cast<void>(RegisterClassExW(&phase_class));
-
-        INITCOMMONCONTROLSEX controls{};
-        controls.dwSize = sizeof(controls);
-        controls.dwICC = ICC_BAR_CLASSES;
-        static_cast<void>(InitCommonControlsEx(&controls));
-
-        state.phase_window = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-            kPhaseWindowClass,
-            L"OFXR Bridge - grid phase",
-            WS_CAPTION | WS_SYSMENU,
-            CW_USEDEFAULT, CW_USEDEFAULT, 420, 250,
-            nullptr, nullptr, instance, &state);
-        if (state.phase_window == nullptr) return;
-
-        state.phase_label = CreateWindowExW(
-            0, L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE,
-            16, 12, 380, 20,
-            state.phase_window, nullptr, instance, nullptr);
-        state.phase_slider = CreateWindowExW(
-            0, TRACKBAR_CLASSW, L"",
-            WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_AUTOTICKS,
-            12, 36, 388, 36,
-            state.phase_window, nullptr, instance, nullptr);
-        static_cast<void>(CreateWindowExW(
-            0, L"STATIC",
-            L"Left end inherits the startup phase. Hold each position several "
-            L"seconds before judging it.",
-            WS_CHILD | WS_VISIBLE,
-            16, 78, 384, 32,
-            state.phase_window, nullptr, instance, nullptr));
-
-        SendMessageW(state.phase_slider, TBM_SETRANGE, TRUE,
-            static_cast<LPARAM>(MAKELONG(0, kPhaseTicks)));
-        SendMessageW(state.phase_slider, TBM_SETTICFREQ, 10, 0);
-
-        state.bias_label = CreateWindowExW(
-            0, L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE,
-            16, 118, 380, 20,
-            state.phase_window, nullptr, instance, nullptr);
-        state.bias_slider = CreateWindowExW(
-            0, TRACKBAR_CLASSW, L"",
-            WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_AUTOTICKS,
-            12, 142, 388, 36,
-            state.phase_window, nullptr, instance, nullptr);
-        static_cast<void>(CreateWindowExW(
-            0, L"STATIC",
-            L"Left end is automatic. The next notch is zero, where both halves "
-            L"of a pair are one period apart.",
-            WS_CHILD | WS_VISIBLE,
-            16, 184, 384, 32,
-            state.phase_window, nullptr, instance, nullptr));
-        SendMessageW(state.bias_slider, TBM_SETRANGE, TRUE,
-            static_cast<LPARAM>(MAKELONG(0, kBiasTicks)));
-        SendMessageW(state.bias_slider, TBM_SETTICFREQ, 5, 0);
-    }
-    SendMessageW(state.bias_slider, TBM_SETPOS, TRUE,
-        state.settings.grid_bias_us < 0
-            ? 0 : state.settings.grid_bias_us / 100 + 1);
-    SendMessageW(state.phase_slider, TBM_SETPOS, TRUE,
-        state.settings.grid_phase_us / 100);
-    update_phase_label(state);
-    ShowWindow(state.phase_window, SW_SHOW);
-    SetForegroundWindow(state.phase_window);
 }
 
 LRESULT CALLBACK window_procedure(
