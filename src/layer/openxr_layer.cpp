@@ -4066,7 +4066,30 @@ void pace_presenter_submission(
                 // that has walked to the end and pulls against it.
                 const auto band_ceiling =
                     period * 3 / 4 + state->presenter_pair_bias;
-                if (state->presenter_on_grid_streak <
+                if (state->presenter_vsync_offset_valid) {
+                    // The phase lock owns the schedule once it has an anchor.
+                    //
+                    // This band predates it and approximates the same job by
+                    // inference - it has no reference for where the scanout is,
+                    // so it watches the hold and shoves the grid a sixteenth of
+                    // a period when the hold leaves a band. Run alongside the
+                    // lock, the two write one variable and this one wins: a
+                    // capture with the lock active recorded 1334 of these
+                    // corrections, 0.694 ms each, about 926 ms of commanded
+                    // displacement, against the lock's ceiling of ten
+                    // microseconds a frame - some 196 ms over the same session.
+                    // Roughly five to one.
+                    //
+                    // Measured, the grid oscillated between 7.1 and 8.6 ms of
+                    // the scanout interval on a two to three second rhythm, and
+                    // delivery followed it exactly: 54-100% of submitted frames
+                    // scanned out at the low phase, 0-12% at the high one. No
+                    // phase could be made to hold, because this kept moving it.
+                    //
+                    // So it yields where there is a lock, and keeps its old
+                    // behaviour where there is not - no anchor, or a runtime
+                    // that reports no vsync times.
+                } else if (state->presenter_on_grid_streak <
                     kPhaseCorrectionGridStreak) {
                     // Rate is wrong; leave the schedule alone.
                 } else if (remaining > band_ceiling) {
