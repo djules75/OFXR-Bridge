@@ -4160,8 +4160,30 @@ void pace_presenter_submission(
         //
         // SteamVR only. Every other runtime keeps the grid untouched.
         if (measured_pace_active(state)) {
+            // How much of the compositor's frame to leave in hand when the
+            // submission lands.
+            //
+            // Margin against the application's jitter, not against the
+            // deadline. The application holds half rate exactly - 22.20 ms in
+            // every window measured - but the *spread* of its arrivals tracks
+            // the losses: 0.76 to 0.85 ms while 96-100% of frames were scanned
+            // out, 1.30 to 2.10 ms in the stretches that dipped to 87-94%. Its
+            // GPU cost does not track them at all, 10.77 ms in a dip against
+            // 10.75 in the best window.
+            //
+            // A late arrival delays the submission, which spends margin. At
+            // 1.5 ms of target - and about 1.07 ms actually reached, the rest
+            // going to work between the sleep and the submission - a 2 ms
+            // wobble puts the frame past the compositor's deadline, where it is
+            // shown on a vsync other than the one it was predicted for. Which
+            // is the whole of what a dip looks like in the records.
+            //
+            // 2.5 ms covers the measured spread and still lands inside the band
+            // that delivers: submitting with under 3 ms left put 2422 of 2425
+            // frames on the display, and the cost of being early is gentle
+            // where the cost of being late is a cliff.
             constexpr auto kSubmitTargetRemaining =
-                std::chrono::nanoseconds(1'500'000);
+                std::chrono::nanoseconds(2'500'000);
             if (const auto left =
                     state->steamvr_delivery->frame_time_remaining()) {
                 // Correct the schedule's phase from the compositor's clock;
