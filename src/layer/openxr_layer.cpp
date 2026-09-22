@@ -471,6 +471,11 @@ struct SessionState {
     std::chrono::nanoseconds presenter_landed_error{};
     // The pair spacing the tray last asked for, if any. Presenter thread only.
     std::optional<std::chrono::nanoseconds> presenter_forced_bias{};
+    // How much of the compositor's frame to leave in hand when a submission
+    // lands, and the evidence for walking it down. Presenter thread only.
+    std::chrono::nanoseconds presenter_submit_margin{2'500'000};
+    std::uint32_t presenter_margin_window{};
+    std::uint32_t presenter_margin_lost{};
     // The phase the tray last asked for, and when it was last read.
     std::chrono::nanoseconds presenter_requested_phase{};
     std::chrono::steady_clock::time_point presenter_phase_read_at{};
@@ -4182,8 +4187,9 @@ void pace_presenter_submission(
             // that delivers: submitting with under 3 ms left put 2422 of 2425
             // frames on the display, and the cost of being early is gentle
             // where the cost of being late is a cliff.
-            constexpr auto kSubmitTargetRemaining =
-                std::chrono::nanoseconds(2'500'000);
+            // Starts at 2.5 ms and can only fall; see the fallback below.
+            const auto submit_target_remaining =
+                state->presenter_submit_margin;
             if (const auto left =
                     state->steamvr_delivery->frame_time_remaining()) {
                 // Correct the schedule's phase from the compositor's clock;
@@ -4208,7 +4214,7 @@ void pace_presenter_submission(
                 // place the phase, bounded, the way drift is cancelled.
                 const auto scanout = std::chrono::nanoseconds(
                     static_cast<std::int64_t>(state->presenter_display_period));
-                auto error = *left - kSubmitTargetRemaining;
+                auto error = *left - submit_target_remaining;
                 if (scanout > std::chrono::nanoseconds::zero()) {
                     while (error > scanout / 2) {
                         error -= scanout;
@@ -5451,6 +5457,66 @@ void continuous_presenter_main(
                     presented->ready_vsyncs,
                     presented->vsyncs_to_first_view,
                     presented->presents);
+                // Give the margin back where this machine cannot afford it.
+                //
+                // 2.5 ms was measured on one machine, and its upper bound is
+                // the compositor's running start - which moves with resolution,
+                // GPU and runtime version. Past that bound a submission is
+                // taken for the frame already being assembled instead of the
+                // next one, and about half of those are never scanned out. The
+                // layer would submit ninety frames a second, the headset would
+                // show forty-five, and from the outside that is exactly the
+                // fault this whole path exists to remove.
+                //
+                // Judged on delivery itself. The obvious signal - the
+                // compositor's own count of scanouts a frame was ready ahead of
+                // - cannot be used: it reads 1 on 3% of frames in one title,
+                // where those frames deliver 30%, and on 52% in another, where
+                // they deliver 99%, because there the two halves of a pair sit
+                // either side of the running start as a matter of course.
+                //
+                // Five seconds and a threshold of 70%, which separates the two
+                // cases by a wide margin. A margin past the running start holds
+                // near 50% indefinitely. The worst burst measured from an
+                // application's own wobble is 2.5 s, which inside a five second
+                // window cannot pull it below about 75%.
+                //
+                // One way, because the penalty is not symmetric: too little
+                // margin measured 96.2% against 97.7%, while being past the
+                // running start costs about forty-five points.
+                if (state->presenter_display_period > 0) {
+                    ++state->presenter_margin_window;
+                    if (presented->presents != 1) {
+                        ++state->presenter_margin_lost;
+                    }
+                    constexpr std::uint32_t kMarginWindowFrames = 450;
+                    if (state->presenter_margin_window >= kMarginWindowFrames) {
+                        constexpr auto kMarginStep =
+                            std::chrono::nanoseconds(500'000);
+                        // Below this there is no room for the work between the
+                        // pace waking and the submission arriving, which costs
+                        // about 0.43 ms on its own.
+                        constexpr auto kMarginFloor =
+                            std::chrono::nanoseconds(1'000'000);
+                        if (state->presenter_margin_lost * 10 >
+                                state->presenter_margin_window * 3 &&
+                            state->presenter_submit_margin > kMarginFloor) {
+                            state->presenter_submit_margin = std::max(
+                                kMarginFloor,
+                                state->presenter_submit_margin - kMarginStep);
+                            xrfg::bridge_flight_logger().event(
+                                xrfg::BridgeFlightOperation::
+                                    presenter_vsync_lock,
+                                909,
+                                static_cast<std::uint64_t>(
+                                    state->presenter_submit_margin.count()),
+                                state->presenter_margin_lost,
+                                state->presenter_margin_window);
+                        }
+                        state->presenter_margin_window = 0;
+                        state->presenter_margin_lost = 0;
+                    }
+                }
             }
         }
         {
