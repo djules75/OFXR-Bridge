@@ -4579,33 +4579,29 @@ void continuous_presenter_main(
                     // scanout is consumed in about a quarter of a second, and
                     // anything under the dead band is left to the pace - that
                     // is the drift job, and it is already sized for it.
-                    // D3D11 sessions only, and that gate is empirical rather
-                    // than principled.
+                    // Every SteamVR session, both graphics APIs.
                     //
-                    // The correction does not converge: the reading barely
-                    // moves with when it is taken, so the error stays around
-                    // +0.6 to +0.8 ms and this fires on 60-76% of real frames
-                    // instead of acquiring once and falling silent. It is
-                    // therefore a standing disturbance of roughly 0.2 ms a
-                    // pair, applied to the interval between the real frame's
-                    // hand-over and the synthetic's slot - which is the same
-                    // interval the pair-bias controller above regulates.
+                    // This ran D3D11-only for one build, after a D3D12 UEVR
+                    // title drove the pair bias to its period/4 ceiling with
+                    // mispresents going from 0.1% to 60% and delivery from 90
+                    // to 46 over a minute. The correction was blamed, because
+                    // it was firing on 60-76% of real frames with a standing
+                    // error of +0.6 to +0.8 ms instead of acquiring once and
+                    // falling silent.
                     //
-                    // Two controllers, one schedule. Measured: in a D3D11
-                    // title the bias absorbed it and stayed under 1.53 ms with
-                    // delivery whole; in a D3D12 UEVR title the bias wound to
-                    // its period/4 ceiling, mispresents went from 0.1% to 60%
-                    // and delivery fell from 90 to 46 over a minute, where the
-                    // same scene on V260 held. Both ran the same acquisition
-                    // with the same non-converging error, so the difference is
-                    // in how the bias loop answers it, not in the correction.
+                    // That standing error was the wrapped remnant of a whole
+                    // scanout - see the reading's two clusters below. The same
+                    // capture reads +11.96 ms of true error where the
+                    // controller saw +0.85. So the correction was not a
+                    // disturbance the bias loop had to absorb; it was never
+                    // converging, because it was aiming at a target the
+                    // arithmetic had hidden from it.
                     //
-                    // So this is a gate on the evidence, not on a mechanism.
-                    // Removing it needs either a correction that terminates or
-                    // a bias loop that cannot be driven by it - not another
-                    // guess at which title behaves how.
-                    if (measured_pace_active(state) &&
-                        state->d3d11_device != nullptr && !fresh_synthetic &&
+                    // With the fold removed it converges and goes quiet, so
+                    // there is nothing left for the bias loop to answer. If
+                    // that title winds to its ceiling again, the interaction
+                    // is real and separate, and this gate comes back.
+                    if (measured_pace_active(state) && !fresh_synthetic &&
                         remaining != 0) {
                         constexpr auto kAcquireDeadBand =
                             std::chrono::nanoseconds(250'000);
