@@ -2883,7 +2883,13 @@ XrResult layer_wait_frame_impl(
             static_cast<std::uint64_t>(virtual_period));
     } else {
         const auto application_wait_started = std::chrono::steady_clock::now();
-        result = state->dispatch->wait_frame(session, wait_info, frame_state);
+        // Gated for the same reason begin, end and the swapchain calls are:
+        // on a D3D11 session this is the runtime working on the application's
+        // single immediate context, and a second thread inside it at the same
+        // time is what kills the driver. See RuntimeEntry.
+        result = with_runtime_entry(state, [&] {
+            return state->dispatch->wait_frame(session, wait_info, frame_state);
+        });
         const auto application_wait_elapsed =
             std::chrono::steady_clock::now() - application_wait_started;
         if (XR_SUCCEEDED(result) && frame_state != nullptr) {
@@ -4268,10 +4274,10 @@ void continuous_presenter_main(
         const auto wait_token = xrfg::bridge_flight_logger().begin(
             xrfg::BridgeFlightOperation::internal_wait_frame,
             handle_value(state->handle));
-        const XrResult wait_result = state->dispatch->wait_frame(
-            state->handle,
-            &wait_info,
-            &frame_state);
+        const XrResult wait_result = with_runtime_entry(state, [&] {
+            return state->dispatch->wait_frame(
+                state->handle, &wait_info, &frame_state);
+        });
         xrfg::bridge_flight_logger().end(
             wait_token,
             xrfg::BridgeFlightOperation::internal_wait_frame,
@@ -4536,6 +4542,126 @@ void continuous_presenter_main(
                             error += scanout;
                         }
                         state->presenter_landed_error = error;
+                    }
+                    // Acquire the phase the pace is aiming at, rather than
+                    // creeping towards it forever.
+                    //
+                    // The pace computes the same error every frame from the
+                    // same reading, and is then clamped to 50 microseconds a
+                    // frame - a bound sized for cancelling the drift between
+                    // the nominal period and the real one, which is tens of
+                    // microseconds and never ends. Acquiring the phase is a
+                    // different job: up to half a scanout, once. At 50 us a
+                    // frame that needs 110 frames of uninterrupted correction
+                    // and never gets them, because the same budget is
+                    // absorbing the drift at the same time. Measured, the step
+                    // sat on its clamp for 100% of frames in every second of a
+                    // capture while the phase never moved, and the grid kept
+                    // whatever phase it happened to be seeded with for the
+                    // whole session. Across eighteen captured sessions that
+                    // seed was spread evenly across the scanout and delivery
+                    // ran from 58 to 86 frames a second with nothing else
+                    // different - same build, same title, same machine.
+                    //
+                    // Measured here rather than in the pace for two reasons.
+                    // The reading is taken as the submission goes out instead
+                    // of before the hold, so it is the phase that actually
+                    // happened; and the half of the pair is known here, which
+                    // it is not when the pace runs. Only the real frame drives
+                    // this, for the same reason the offset above measures only
+                    // the real frame: the synthetic is deliberately spaced
+                    // away by the pair bias, so correcting both towards one
+                    // target asks the schedule to close a gap that is there on
+                    // purpose, and would leave the two halves fighting at a
+                    // sixteenth of the bias every frame.
+                    //
+                    // A quarter of the error per pair, so a worst-case half
+                    // scanout is consumed in about a quarter of a second, and
+                    // anything under the dead band is left to the pace - that
+                    // is the drift job, and it is already sized for it.
+                    // D3D11 sessions only, and that gate is empirical rather
+                    // than principled.
+                    //
+                    // The correction does not converge: the reading barely
+                    // moves with when it is taken, so the error stays around
+                    // +0.6 to +0.8 ms and this fires on 60-76% of real frames
+                    // instead of acquiring once and falling silent. It is
+                    // therefore a standing disturbance of roughly 0.2 ms a
+                    // pair, applied to the interval between the real frame's
+                    // hand-over and the synthetic's slot - which is the same
+                    // interval the pair-bias controller above regulates.
+                    //
+                    // Two controllers, one schedule. Measured: in a D3D11
+                    // title the bias absorbed it and stayed under 1.53 ms with
+                    // delivery whole; in a D3D12 UEVR title the bias wound to
+                    // its period/4 ceiling, mispresents went from 0.1% to 60%
+                    // and delivery fell from 90 to 46 over a minute, where the
+                    // same scene on V260 held. Both ran the same acquisition
+                    // with the same non-converging error, so the difference is
+                    // in how the bias loop answers it, not in the correction.
+                    //
+                    // So this is a gate on the evidence, not on a mechanism.
+                    // Removing it needs either a correction that terminates or
+                    // a bias loop that cannot be driven by it - not another
+                    // guess at which title behaves how.
+                    if (measured_pace_active(state) &&
+                        state->d3d11_device != nullptr && !fresh_synthetic &&
+                        remaining != 0) {
+                        constexpr auto kAcquireDeadBand =
+                            std::chrono::nanoseconds(250'000);
+                        const auto left_at_submit =
+                            std::chrono::microseconds(
+                                static_cast<std::int64_t>(remaining) - 1000);
+                        auto error = std::chrono::duration_cast<
+                            std::chrono::nanoseconds>(left_at_submit) -
+                            state->presenter_submit_margin;
+                        // Not wrapped into one scanout. The target is absolute,
+                        // so folding the reading hides the failure it exists to
+                        // catch.
+                        //
+                        // The reading is bimodal, and the two modes are about
+                        // one scanout apart. Measured on a real frame across a
+                        // capture where delivery halved mid-session: 972
+                        // submissions at 2.31 ms remaining delivered 87.9 a
+                        // second, and 2195 at 13.11 ms delivered 60.3. The
+                        // difference is whether the frame has one interval of
+                        // lead or two - the same cliff the target constant was
+                        // chosen from. But 11.15 ms of error, folded into plus
+                        // or minus half a scanout, reads as +0.03 ms. The two
+                        // states are arithmetically identical to a wrapped
+                        // controller, so it reports itself converged while the
+                        // headset receives half the frames, and nothing else
+                        // in the layer can see the difference either.
+                        //
+                        // The same shape is in a D3D12 title's capture -
+                        // clusters at 2-4 ms and 13-15 ms, a true error of
+                        // +11.96 ms reading as +0.85 - so this is in the
+                        // arithmetic, not in one application's behaviour.
+                        //
+                        // Descent cannot overshoot: the step is a quarter of
+                        // the error, so the reading approaches the target from
+                        // above and never crosses zero into the rollover the
+                        // API warns about. The bound is a safety rail for an
+                        // absurd reading, not part of the control law.
+                        const auto acquire_step_ceiling = scanout / 2;
+                        if (error > kAcquireDeadBand ||
+                            error < -kAcquireDeadBand) {
+                            const auto step = std::clamp(
+                                error / 4,
+                                -acquire_step_ceiling,
+                                acquire_step_ceiling);
+                            std::scoped_lock lock(state->presenter_mutex);
+                            state->presenter_next_submit += step;
+                            xrfg::bridge_flight_logger().event(
+                                xrfg::BridgeFlightOperation::
+                                    presenter_vsync_lock,
+                                906,
+                                static_cast<std::uint64_t>(
+                                    error.count() + scanout.count()),
+                                static_cast<std::uint64_t>(
+                                    step.count() + scanout.count()),
+                                remaining);
+                        }
                     }
                 }
             }
@@ -4947,6 +5073,19 @@ void continuous_presenter_main(
                     // the one before it. The two sum to exactly two periods, so
                     // the schedule does not drift, and each step gives the next
                     // pair's synthetic more age before its slot arrives.
+                    //
+                    // Not conditional on the measured pace, though the pace
+                    // places each submission inside the compositor's own frame
+                    // and the bias moves one half of the pair off that point.
+                    // Zeroing it there was tried and cost the whole session:
+                    // in modded SkyrimVR through OpenComposite the real frame's
+                    // xrEndFrame began blocking the runtime's full one-second
+                    // timeout - 28 times in ninety seconds, every one of them
+                    // on the real frame and none on the synthetic - against a
+                    // worst case of 27 ms with the bias left in. The
+                    // application fell to one frame a second and stayed there.
+                    // Whatever the bias is doing for the pair, the pace does
+                    // not subsume it.
                     const auto pair_bias = state->presenter_pair_bias;
                     const auto advance = request
                         ? (fresh_synthetic ? period - pair_bias
@@ -6859,10 +6998,10 @@ struct InternalCycleResult {
         xrfg::BridgeFlightOperation::internal_wait_frame,
         handle_value(state->handle));
     const auto wait_started = std::chrono::steady_clock::now();
-    const XrResult wait_result = state->dispatch->wait_frame(
-        state->handle,
-        &wait_info,
-        &frame_state);
+    const XrResult wait_result = with_runtime_entry(state, [&] {
+        return state->dispatch->wait_frame(
+            state->handle, &wait_info, &frame_state);
+    });
     output.wait_elapsed = std::chrono::steady_clock::now() - wait_started;
     output.predicted_display_period = frame_state.predictedDisplayPeriod;
     xrfg::bridge_flight_logger().end(
