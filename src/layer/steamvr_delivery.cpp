@@ -96,6 +96,42 @@ constexpr std::uint32_t kExcessBuckets = 16;
 // report nothing rather than something stale.
 constexpr std::int64_t kStaleNanoseconds = 5'000'000'000;
 
+// One OpenVR connection for the whole process, opened at most once and
+// deliberately never shut down.
+//
+// It used to be per session, and tearing it down is what killed Assetto Corsa.
+// That title recreates its OpenXR session during start-up - three times, on
+// every runtime - and SteamVR ships its OpenXR runtime and its OpenVR client
+// in one binary, vrclient_x64.dll. Opening a background OpenVR connection into
+// that binary and then closing it leaves the next xrCreateSession through it
+// dereferencing null, inside the runtime, with the layer merely forwarding the
+// call. Captured with symbols: the fault is in vrclient_x64 and the only frame
+// of ours below it is the downstream create.
+//
+// Every session create before our connection attaches succeeds and the first
+// one after it dies, and when the attach happened three seconds later in one
+// run the crash moved three seconds later with it. The title ran on V185,
+// which is the last build with no connection at all.
+//
+// So the connection outlives every session. Not shutting it down is the point,
+// not an oversight: VR_ShutdownInternal is what does the damage, and a
+// background connection costs nothing to leave open for a process that is
+// about to exit anyway.
+struct ProcessConnection {
+    std::mutex mutex;
+    bool attempted{};
+    bool usable{};
+    HMODULE module{};
+    vr::IVRCompositor* compositor{};
+    vr::IVRSystem* system{};
+    AttachRoute route{AttachRoute::none};
+};
+
+[[nodiscard]] ProcessConnection& process_connection() noexcept {
+    static ProcessConnection connection;
+    return connection;
+}
+
 } // namespace
 
 struct SteamVrDelivery::Impl {
@@ -211,6 +247,26 @@ struct SteamVrDelivery::Impl {
         if (!steamvr) {
             return;
         }
+        ProcessConnection& shared = process_connection();
+        std::scoped_lock connection_lock(shared.mutex);
+        if (shared.attempted) {
+            // Second and later sessions borrow what the first one opened.
+            compositor = shared.compositor;
+            system = shared.system;
+            route = shared.route;
+            usable = shared.usable;
+            return;
+        }
+        // Latched on success only, at the tail. A failure here is usually
+        // SteamVR not being up yet rather than anything permanent, and
+        // applications create sessions early - Assetto Corsa makes three
+        // before it settles. Latching on the first attempt would give the
+        // whole process no delivery interface for the rest of its life on a
+        // transient miss, and that failure is silent: no delivery means
+        // measured pacing never engages, so SteamVR quietly reverts to the
+        // behaviour this path exists to replace with nothing in the overlay to
+        // say so. The per-session latch below still stops one session
+        // retrying on every frame.
         const std::string runtime = runtime_path_from_vrpath();
         if (runtime.empty()) {
             bridge_flight_logger().event(
@@ -287,6 +343,12 @@ struct SteamVrDelivery::Impl {
         system = static_cast<vr::IVRSystem*>(
             generic(vr::IVRSystem_Version, &error));
         usable = true;
+        shared.module = module;
+        shared.compositor = compositor;
+        shared.system = system;
+        shared.route = route;
+        shared.usable = true;
+        shared.attempted = true;
         bridge_flight_logger().event(
             BridgeFlightOperation::steamvr_delivery_attach,
             0,
@@ -403,14 +465,11 @@ SteamVrDelivery::~SteamVrDelivery() {
     if (!impl_) {
         return;
     }
-    // Only tear down a context we created. Borrowing the runtime's own and
-    // then shutting it down would take the session with it.
-    if (impl_->owns_context && impl_->shutdown != nullptr) {
-        impl_->shutdown();
-    }
-    if (impl_->module != nullptr) {
-        FreeLibrary(impl_->module);
-    }
+    // The connection is process-wide and is never torn down here; see
+    // ProcessConnection. Shutting it down between sessions is what crashed
+    // SteamVR's own runtime on the next xrCreateSession, and unloading the
+    // module would do the same by another route. Only the per-session
+    // accounting dies with this object.
 }
 
 std::optional<float> SteamVrDelivery::delivered_fps(std::int64_t now) noexcept {
