@@ -81,8 +81,31 @@ public:
         // is counting.
         std::uint32_t total_render_gpu_us{};
         std::uint32_t compositor_render_gpu_us{};
+        // Margin in the units the compositor actually works in: whole scanouts.
+        //
+        // The millisecond fields beside these are all offsets from *this
+        // frame's* SystemTimeInSeconds, so when a submission is attributed to a
+        // different frame the origin moves with it and a margin computed from
+        // them reads as a jump rather than a slide. These are counts, and a
+        // count means the same thing on every machine.
+        //
+        // ready_vsyncs is how many scanouts ahead the frame was available;
+        // vsyncs_to_first_view how many passed before it was first shown.
+        std::uint32_t ready_vsyncs{};
+        std::uint32_t vsyncs_to_first_view{};
     };
     [[nodiscard]] std::optional<FramePresentation> last_presentation() noexcept;
+
+    // How long the compositor says is left in the frame it is currently
+    // assembling. Sampled at the moment of submission it is that submission's
+    // own margin, with no per-frame origin to get wrong. Empty when the
+    // compositor is unavailable.
+    //
+    // "Due to running start, this value may roll over to the next frame before
+    // ever reaching 0.0" - so a small value is close to the deadline, and a
+    // large one may be either early or just past it.
+    [[nodiscard]] std::optional<std::chrono::nanoseconds>
+    frame_time_remaining() noexcept;
 
 private:
     struct Impl;

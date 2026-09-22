@@ -469,6 +469,8 @@ struct SessionState {
     // signed and taken the short way round. Written and read only by the
     // presenter thread, between measuring it and applying it a few lines later.
     std::chrono::nanoseconds presenter_landed_error{};
+    // The pair spacing the tray last asked for, if any. Presenter thread only.
+    std::optional<std::chrono::nanoseconds> presenter_forced_bias{};
     // The phase the tray last asked for, and when it was last read.
     std::chrono::nanoseconds presenter_requested_phase{};
     std::chrono::steady_clock::time_point presenter_phase_read_at{};
@@ -3868,6 +3870,26 @@ void fail_pending_presenter_submissions_locked(
 //
 // Off the frame path: a quarter second apart, on the presenter thread, and
 // never while the presenter mutex is held.
+// The pair spacing the tray asks for, or nothing for "leave the controller in
+// charge". Zero is a real answer here: it is the only spacing where both
+// intervals of a pair are exactly one period, which is what two consecutive
+// scanouts want, so the absent case has to be signalled separately.
+//
+// Worth re-asking now. Both earlier verdicts against a small bias - removing it
+// entirely, and clamping its ceiling - were measured on a schedule that could
+// not hold its phase, so neither says anything about one that can.
+[[nodiscard]] std::optional<std::chrono::nanoseconds>
+requested_pair_bias() noexcept {
+    static const auto path = current_layer_directory() / L"ofxr_bridge.ini";
+    WritePrivateProfileStringW(nullptr, nullptr, nullptr, path.c_str());
+    const auto microseconds = GetPrivateProfileIntW(
+        L"ofxr", L"grid_bias_us", -1, path.c_str());
+    if (microseconds < 0 || microseconds >= 100'000) {
+        return std::nullopt;
+    }
+    return std::chrono::microseconds(microseconds);
+}
+
 [[nodiscard]] std::chrono::nanoseconds requested_grid_phase() noexcept {
     static const auto path = current_layer_directory() / L"ofxr_bridge.ini";
     // The profile functions cache the file they last read, and the tray
@@ -4099,6 +4121,50 @@ void pace_presenter_submission(
                     state->presenter_next_submit += period / 16;
                     pace_band_correction = 1;
                 }
+            }
+        }
+        // Pace against the compositor's own frame clock where it can be asked,
+        // rather than against a steady_clock grid.
+        //
+        // GetFrameTimeRemaining reports how long is left in the frame the
+        // compositor is currently assembling, and it falls one for one with
+        // wall time - so waiting `remaining - target` puts the submission at a
+        // chosen point in that frame exactly, with no phase to choose, inherit
+        // or hold, and nothing running on this machine's clock to drift against.
+        //
+        // The target is a constant and not a per-machine one, because it is
+        // expressed in the compositor's clock. Measured on 3961 paired samples:
+        // submitting with under 3 ms left put the frame two scanouts ahead of
+        // its view, and 2422 of those 2425 frames were scanned out. Submitting
+        // with more left put it one scanout ahead, and only half survived - the
+        // frame is taken for the frame already being assembled instead of the
+        // next one, so it has a single interval of lead instead of two.
+        //
+        // 1.5 ms sits in the middle of that band with room on both sides for
+        // the pair's own spread and for the 0.14 ms the reading moves frame to
+        // frame.
+        //
+        // Nothing to converge on: the reading is exact, so this is arithmetic
+        // rather than a controller. If the moment has already passed, submit
+        // now and let the next frame land properly.
+        //
+        // SteamVR only. Every other runtime keeps the grid untouched.
+        if (state->steamvr_delivery && state->dispatch &&
+            state->dispatch->steamvr_runtime) {
+            constexpr auto kSubmitTargetRemaining =
+                std::chrono::nanoseconds(1'500'000);
+            if (const auto left = state->steamvr_delivery->frame_time_remaining()) {
+                const auto measured = *left - kSubmitTargetRemaining;
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::presenter_pace,
+                    3,
+                    static_cast<std::uint64_t>(left->count()),
+                    static_cast<std::uint64_t>(
+                        measured > std::chrono::nanoseconds::zero()
+                            ? measured.count() : 0),
+                    static_cast<std::uint64_t>(remaining.count()));
+                remaining = measured > std::chrono::nanoseconds::zero()
+                    ? measured : std::chrono::nanoseconds::zero();
             }
         }
         // Slept without the lock: the application thread enqueues against this
@@ -4401,13 +4467,27 @@ void continuous_presenter_main(
                     if (landed < std::chrono::nanoseconds::zero()) {
                         landed += scanout;
                     }
+                    // What the compositor says is left in the frame it is
+                    // assembling, read at the moment this submission goes out.
+                    // Packed above the half-of-the-pair flag, biased by a
+                    // millisecond because it can be slightly negative.
+                    std::uint64_t remaining = 0;
+                    if (const auto left =
+                            state->steamvr_delivery->frame_time_remaining()) {
+                        const auto microseconds =
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                *left).count() + 1000;
+                        if (microseconds > 0 && microseconds < 0xFFFFFF) {
+                            remaining = static_cast<std::uint64_t>(microseconds);
+                        }
+                    }
                     xrfg::bridge_flight_logger().event(
                         xrfg::BridgeFlightOperation::presenter_vsync_lock,
                         905,
                         static_cast<std::uint64_t>(landed.count()),
                         static_cast<std::uint64_t>(
                             state->presenter_vsync_offset.count()),
-                        fresh_synthetic ? 2u : 1u);
+                        (fresh_synthetic ? 2u : 1u) | (remaining << 8));
                     // Only the real frame is measured against the offset. The
                     // synthetic is deliberately spaced away from it by the pair
                     // bias, so holding both to one phase would be asking the
@@ -4468,6 +4548,7 @@ void continuous_presenter_main(
                     std::chrono::milliseconds(250)) {
                     state->presenter_phase_read_at = read_at;
                     requested_phase = requested_grid_phase();
+                    state->presenter_forced_bias = requested_pair_bias();
                 }
 
                 std::scoped_lock lock(state->presenter_mutex);
@@ -4648,6 +4729,22 @@ void continuous_presenter_main(
                     constexpr std::uint32_t kCallReportFrames = 15;
                     if (++state->presenter_bias_tick >= kCallReportFrames) {
                         state->presenter_bias_tick = 0;
+                        if (state->presenter_forced_bias) {
+                            // Configured by hand: hold it and leave the
+                            // controller out of it entirely, so the value that
+                            // was dialled is the value the pair is spaced by.
+                            state->presenter_pair_bias =
+                                *state->presenter_forced_bias;
+                            xrfg::bridge_flight_logger().event(
+                                xrfg::BridgeFlightOperation::presenter_transition,
+                                301,
+                                static_cast<std::uint64_t>(
+                                    state->presenter_pair_bias.count()),
+                                static_cast<std::uint64_t>(
+                                    state->presenter_synthetic_call_mean.count()),
+                                static_cast<std::uint64_t>(
+                                    state->presenter_pair_lead_gap_mean.count()));
+                        } else {
                         // The block the bias exists to buy out: the synthetic's
                         // downstream call costs more than the real frame's
                         // exactly when the runtime is waiting on pixels that
@@ -4852,6 +4949,7 @@ void continuous_presenter_main(
                                 state->presenter_synthetic_call_mean.count()),
                             static_cast<std::uint64_t>(
                                 state->presenter_pair_lead_gap_mean.count()));
+                        }
                     }
                     // Shorten the interval after the synthetic and lengthen
                     // the one before it. The two sum to exactly two periods, so
@@ -5276,6 +5374,16 @@ void continuous_presenter_main(
                          << 16) |
                         (static_cast<std::uint64_t>(presented->skipped) << 8) |
                         presented->presents);
+                // Margin in whole scanouts, which is the unit the compositor
+                // decides in. Diagnostic only: nothing reads these yet, and the
+                // question they exist to answer is whether the count holds
+                // steady while delivery is whole and changes at the edges.
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::presenter_vsync_lock,
+                    908,
+                    presented->ready_vsyncs,
+                    presented->vsyncs_to_first_view,
+                    presented->presents);
             }
         }
         {

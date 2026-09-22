@@ -476,6 +476,30 @@ SteamVrDelivery::vsync_anchor() noexcept {
     }
 }
 
+std::optional<std::chrono::nanoseconds>
+SteamVrDelivery::frame_time_remaining() noexcept {
+    try {
+        if (!impl_) {
+            return std::nullopt;
+        }
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->attempted) {
+            impl_->attach();
+        }
+        if (!impl_->usable || impl_->compositor == nullptr) {
+            return std::nullopt;
+        }
+        const float seconds = impl_->compositor->GetFrameTimeRemaining();
+        if (!(seconds > -1.0F) || seconds > 1.0F) {
+            return std::nullopt;
+        }
+        return std::chrono::nanoseconds(
+            static_cast<std::int64_t>(static_cast<double>(seconds) * 1e9));
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 std::optional<SteamVrDelivery::FramePresentation>
 SteamVrDelivery::last_presentation() noexcept {
     try {
@@ -537,6 +561,8 @@ SteamVrDelivery::last_presentation() noexcept {
                 timing.m_flTotalRenderGpuMs * 1000.0F);
             presentation.compositor_render_gpu_us = static_cast<std::uint32_t>(
                 timing.m_flCompositorRenderGpuMs * 1000.0F);
+            presentation.ready_vsyncs = timing.m_nNumVSyncsReadyForUse;
+            presentation.vsyncs_to_first_view = timing.m_nNumVSyncsToFirstView;
             impl_->last_frame_index = timing.m_nFrameIndex;
             impl_->reported_frames = true;
             return presentation;

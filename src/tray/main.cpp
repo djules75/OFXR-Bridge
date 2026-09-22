@@ -65,6 +65,8 @@ struct AppState {
     HWND phase_window{};
     HWND phase_slider{};
     HWND phase_label{};
+    HWND bias_slider{};
+    HWND bias_label{};
 
     NOTIFYICONDATAW icon{};
     xrfg::standalone::LauncherSettings settings;
@@ -860,6 +862,10 @@ constexpr wchar_t kPhaseWindowClass[] = L"OFXRBridgeGridPhase";
 // at 90 Hz. Position zero means "inherit", which is what the layer does with a
 // phase of zero, so the far-left end of the travel is the unplaced behaviour.
 constexpr int kPhaseTicks = 120;
+// Position zero is automatic; 1 to 31 are 0.0 to 3.0 ms in tenths. Zero has to
+// be reachable as a real value - it is the only spacing where both intervals of
+// a pair are exactly one period - so it cannot double as "unset".
+constexpr int kBiasTicks = 31;
 
 void update_phase_label(AppState& state) {
     if (state.phase_label == nullptr) return;
@@ -871,6 +877,15 @@ void update_phase_label(AppState& state) {
             static_cast<double>(state.settings.grid_phase_us) / 1000.0);
     }
     SetWindowTextW(state.phase_label, text);
+    if (state.bias_label == nullptr) return;
+    wchar_t bias[96]{};
+    if (state.settings.grid_bias_us < 0) {
+        wcscpy_s(bias, L"Pair spacing: automatic");
+    } else {
+        swprintf_s(bias, L"Pair spacing: %.1f ms off one period",
+            static_cast<double>(state.settings.grid_bias_us) / 1000.0);
+    }
+    SetWindowTextW(state.bias_label, bias);
 }
 
 LRESULT CALLBACK phase_procedure(
@@ -891,6 +906,14 @@ LRESULT CALLBACK phase_procedure(
     }
     switch (message) {
     case WM_HSCROLL: {
+        if (reinterpret_cast<HWND>(lparam) == state->bias_slider) {
+            const auto tick = static_cast<int>(
+                SendMessageW(state->bias_slider, TBM_GETPOS, 0, 0));
+            state->settings.grid_bias_us = tick == 0 ? -1 : (tick - 1) * 100;
+            update_phase_label(*state);
+            update_runtime_options(*state, true);
+            return 0;
+        }
         const auto position = static_cast<int>(
             SendMessageW(state->phase_slider, TBM_GETPOS, 0, 0));
         state->settings.grid_phase_us = position * 100;
@@ -930,7 +953,7 @@ void show_phase_window(AppState& state) {
             kPhaseWindowClass,
             L"OFXR Bridge - grid phase",
             WS_CAPTION | WS_SYSMENU,
-            CW_USEDEFAULT, CW_USEDEFAULT, 420, 150,
+            CW_USEDEFAULT, CW_USEDEFAULT, 420, 250,
             nullptr, nullptr, instance, &state);
         if (state.phase_window == nullptr) return;
 
@@ -955,7 +978,31 @@ void show_phase_window(AppState& state) {
         SendMessageW(state.phase_slider, TBM_SETRANGE, TRUE,
             static_cast<LPARAM>(MAKELONG(0, kPhaseTicks)));
         SendMessageW(state.phase_slider, TBM_SETTICFREQ, 10, 0);
+
+        state.bias_label = CreateWindowExW(
+            0, L"STATIC", L"",
+            WS_CHILD | WS_VISIBLE,
+            16, 118, 380, 20,
+            state.phase_window, nullptr, instance, nullptr);
+        state.bias_slider = CreateWindowExW(
+            0, TRACKBAR_CLASSW, L"",
+            WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_AUTOTICKS,
+            12, 142, 388, 36,
+            state.phase_window, nullptr, instance, nullptr);
+        static_cast<void>(CreateWindowExW(
+            0, L"STATIC",
+            L"Left end is automatic. The next notch is zero, where both halves "
+            L"of a pair are one period apart.",
+            WS_CHILD | WS_VISIBLE,
+            16, 184, 384, 32,
+            state.phase_window, nullptr, instance, nullptr));
+        SendMessageW(state.bias_slider, TBM_SETRANGE, TRUE,
+            static_cast<LPARAM>(MAKELONG(0, kBiasTicks)));
+        SendMessageW(state.bias_slider, TBM_SETTICFREQ, 5, 0);
     }
+    SendMessageW(state.bias_slider, TBM_SETPOS, TRUE,
+        state.settings.grid_bias_us < 0
+            ? 0 : state.settings.grid_bias_us / 100 + 1);
     SendMessageW(state.phase_slider, TBM_SETPOS, TRUE,
         state.settings.grid_phase_us / 100);
     update_phase_label(state);
