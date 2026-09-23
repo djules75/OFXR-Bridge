@@ -3859,33 +3859,28 @@ void fail_pending_presenter_submissions_locked(
 // work actually being done rather than an empty window. It must not run
 // under presenter_content_mutex - waiting for presenter progress while
 // holding that lock has deadlocked this layer twice.
-// Holds presenter_next_submit at a fixed offset from a real vsync.
-//
-// Returns the correction applied, in nanoseconds, and writes the error it saw
-// before correcting. Zero means it did nothing: no connection, no anchor - the
-// runtime is explicitly allowed to have no vsync times - or the grid was
-// already where it should be. Every one of those leaves the existing servo in
-// sole charge, which is why it can be removed at any point without a fallback.
-//
-// The grid phase the tray asks for, in nanoseconds, or zero for "inherit
-// whatever the schedule was seeded at". Read from the same INI the overlay
-// position is read from and on the same cadence, because the phase that works
-// is a margin against the compositor's deadline and the pair's spacing - it
-// has to be found by measurement before it can be computed, and moving it
-// without restarting the game is what makes finding it practical.
-//
-// Off the frame path: a quarter second apart, on the presenter thread, and
-// never while the presenter mutex is held.
 // Whether the schedule's phase is being set from the compositor's own frame
 // clock. When it is, this is the only thing allowed to move the schedule: the
-// drift servo and the slot corrector both stand down, because two controllers
-// on one variable is the failure this layer keeps rediscovering.
+// drift servo, the slot corrector and the vsync phase lock all stand down,
+// because two controllers on one variable is the failure this layer keeps
+// rediscovering.
 [[nodiscard]] bool measured_pace_active(
     const std::shared_ptr<SessionState>& state) noexcept {
     return state->steamvr_delivery && state->dispatch &&
         state->dispatch->steamvr_runtime;
 }
 
+// Holds presenter_next_submit at a fixed offset from a real vsync, for runtimes
+// where nothing else knows where the scanout is.
+//
+// Returns the correction applied, in nanoseconds, and writes the error it saw
+// before correcting. Zero means it did nothing: no connection, no anchor - the
+// runtime is explicitly allowed to have no vsync times - the grid was already
+// where it should be, or the measured pace owns the schedule.
+//
+// Off the frame path: a quarter second apart, on the presenter thread, and
+// never while the presenter mutex is held.
+//
 // Caller holds presenter_mutex.
 [[nodiscard]] std::int64_t apply_vsync_phase_lock(
     const std::shared_ptr<SessionState>& state,
@@ -3943,6 +3938,32 @@ void fail_pending_presenter_submissions_locked(
     }
     if (error_out != nullptr) {
         *error_out = error.count();
+    }
+    // Observe, but do not act, where the measured pace owns the schedule.
+    //
+    // This lock predates both the measured pace and the acquisition step, and
+    // it holds the schedule at `presenter_vsync_offset` - the phase the grid
+    // happened to rest at when it was seeded. That was the whole design when it
+    // was the only phase mechanism. It stopped being one the moment a
+    // controller arrived whose job is to move the grid *off* its seed, towards
+    // the compositor's own deadline: the two then pull to targets that have no
+    // reason to agree, and the seed is not chosen, so the disagreement is
+    // whatever the session happened to start at.
+    //
+    // Measured on Hogwarts through UEVR: 774 evaluations across 45 seconds of
+    // generation, *every one* of them pinned at this function's clamp with a
+    // standing error of +3.5 ms that never closed, against an offset fixed at
+    // 4.215 ms while the acquisition was pulling towards roughly 8.4. The
+    // acquisition corrected on 97-100% of real frames and never went quiet,
+    // GetFrameTimeRemaining sat at 3.3 ms against its 2.5 ms target for the
+    // whole run, and delivery held 78-87 where single seconds reached 90.
+    //
+    // So the offset keeps being sampled and recorded - it is the reference the
+    // `905` record is read against, and a capture should still show what this
+    // would have done - but the schedule is left to the one controller aimed at
+    // a target the compositor actually stated.
+    if (measured_pace_active(state)) {
+        return 0;
     }
     // A fraction of the error, bounded. Drift is a slow accumulation, so the
     // correction that cancels it can be slow too, and a small step cannot move
@@ -4073,17 +4094,19 @@ void pace_presenter_submission(
                 const auto band_ceiling =
                     period * 3 / 4 + state->presenter_pair_bias;
                 if (state->presenter_vsync_offset_valid) {
-                    // The phase lock owns the schedule once it has an anchor.
+                    // The measured pace owns the schedule wherever there is a
+                    // compositor to ask. A valid offset means exactly that: it
+                    // is only ever set where an OpenVR anchor was available.
                     //
-                    // This band predates it and approximates the same job by
-                    // inference - it has no reference for where the scanout is,
-                    // so it watches the hold and shoves the grid a sixteenth of
-                    // a period when the hold leaves a band. Run alongside the
-                    // lock, the two write one variable and this one wins: a
-                    // capture with the lock active recorded 1334 of these
-                    // corrections, 0.694 ms each, about 926 ms of commanded
-                    // displacement, against the lock's ceiling of ten
-                    // microseconds a frame - some 196 ms over the same session.
+                    // This band predates every measured mechanism here and
+                    // approximates their job by inference - it has no reference
+                    // for where the scanout is, so it watches the hold and
+                    // shoves the grid a sixteenth of a period when the hold
+                    // leaves a band. Run alongside one, the two write one
+                    // variable and this one wins: a capture recorded 1334 of
+                    // these corrections, 0.694 ms each, about 926 ms of
+                    // commanded displacement, against some 196 ms from the
+                    // controller it was competing with over the same session.
                     // Roughly five to one.
                     //
                     // Measured, the grid oscillated between 7.1 and 8.6 ms of
@@ -4092,9 +4115,9 @@ void pace_presenter_submission(
                     // scanned out at the low phase, 0-12% at the high one. No
                     // phase could be made to hold, because this kept moving it.
                     //
-                    // So it yields where there is a lock, and keeps its old
-                    // behaviour where there is not - no anchor, or a runtime
-                    // that reports no vsync times.
+                    // So it yields where the schedule is placed from a reading,
+                    // and keeps its old behaviour where it is not - no anchor,
+                    // or a runtime that reports no vsync times.
                 } else if (state->presenter_on_grid_streak <
                     kPhaseCorrectionGridStreak) {
                     // Rate is wrong; leave the schedule alone.
