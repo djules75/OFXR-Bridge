@@ -4184,26 +4184,41 @@ void pace_presenter_submission(
                 state->presenter_submit_margin;
             if (const auto left =
                     state->steamvr_delivery->frame_time_remaining()) {
-                // Correct the schedule's phase from the compositor's clock;
-                // do not derive the whole sleep from it.
+                // Read here, but do not move the schedule from here. The
+                // acquisition step beside the `905` record owns the phase.
                 //
-                // Deriving the sleep was tried and the rate came out wrong.
-                // predictedDisplayTime advances by exactly the display period,
-                // 11.1111 ms, while submissions paced straight off the reading
-                // advanced by 11.037 - a permanent 74 microseconds a frame, the
-                // same in a window delivering 97% and one delivering 77%. The
-                // submission drifts a whole scanout away from its own label
-                // every 1.7 seconds, and the compositor then reports it
-                // presented on a vsync other than the one it was predicted for.
+                // This reading is taken *before* the hold and the submission
+                // happens a hold later - about 9.9 ms of an 11.11 ms scanout -
+                // while `submit_target_remaining` describes where the
+                // compositor should be *at the submission*. The two are very
+                // nearly a whole scanout apart, so the mismatch does not show
+                // up as an obvious ten milliseconds: it wraps, and comes back
+                // as a plausible half-millisecond error of the wrong sign.
                 //
-                // The likely cause is in the API's own warning: the value "may
-                // roll over to the next frame before ever reaching 0.0", so a
-                // target near the running start sits on a discontinuity.
+                // Measured on Hogwarts through UEVR, per submission:
                 //
-                // Advancing by the runtime's own period instead makes the
-                // spacing exact by construction and keeps the submission on the
-                // same sequence as its label; the reading is then only used to
-                // place the phase, bounded, the way drift is cancelled.
+                //   left at this reading   13.08 ms   (past the 11.11 scanout)
+                //   left at the submission  2.89 ms
+                //   hold                    9.88 ms
+                //
+                // 13.08 - 2.5 wraps to -0.53 ms, so the step ran against its
+                // negative clamp on 68.6% of 6753 submissions, mean -42.2 us,
+                // pulling the grid earlier by about 4 ms a second without pause.
+                // The acquisition spent its entire budget cancelling exactly
+                // that: in the healthy window the two summed to -20.0 and +20.0
+                // ms per five seconds and netted 0.00. Delivery then rested
+                // wherever the two balanced rather than at the target, held
+                // 89-90 while the balance held, and fell to 74 as the
+                // application's arrival spread widened and moved it.
+                //
+                // So the reading and the record stay - the record is how a
+                // capture shows what this would have commanded - and the
+                // schedule is left to the one controller that reads the
+                // compositor at the moment the frame actually goes out.
+                //
+                // The step is recorded under result=4 rather than 3: same
+                // fields, and the different code says it was computed and not
+                // applied.
                 const auto scanout = std::chrono::nanoseconds(
                     static_cast<std::int64_t>(state->presenter_display_period));
                 auto error = *left - submit_target_remaining;
@@ -4219,13 +4234,9 @@ void pace_presenter_submission(
                     std::chrono::nanoseconds(50'000);
                 const auto step = std::clamp(
                     error / 8, -kMeasuredStepCeiling, kMeasuredStepCeiling);
-                {
-                    std::scoped_lock lock(state->presenter_mutex);
-                    state->presenter_next_submit += step;
-                }
                 xrfg::bridge_flight_logger().event(
                     xrfg::BridgeFlightOperation::presenter_pace,
-                    3,
+                    4,
                     static_cast<std::uint64_t>(left->count()),
                     static_cast<std::uint64_t>(step.count() + 1'000'000),
                     static_cast<std::uint64_t>(remaining.count()));
