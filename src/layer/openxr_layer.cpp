@@ -4920,66 +4920,10 @@ void continuous_presenter_main(
                         // bias driven to zero: the lead fell to 10.87 ms, two
                         // thirds of all leads went under one period and the real
                         // frame's share of scanouts fell from 92.4% to 64.8%.
-                        //
-                        // Both of those were the controller with a climb and two
+                        // Both of those were a controller with a climb and two
                         // decays and nothing in between, so the bias could only
-                        // ever be moving. The floor sits above one period rather
-                        // than at 0.9 of one: a lead of 10.87 is already losing
-                        // scanouts and the old threshold of 10.0 saw nothing
-                        // wrong with it.
-                        // The floor is one period exactly, not five percent
-                        // above it, because the two intervals are a zero-sum
-                        // pair:
+                        // ever be moving - which is what the hold below is for.
                         //
-                        //   lead  = period + bias - (realCall - synCall)
-                        //   trail = period - bias + (realCall - synCall)
-                        //
-                        // so a lead above a period *costs* the trail the same
-                        // amount. Asking for 21/20 of a period when the two call
-                        // costs are equal needs a bias of at least 0.56 ms, and
-                        // any positive bias there puts the trail under a period -
-                        // which is the other failure entirely, the real frame
-                        // following the synthetic inside one scanout. The
-                        // controller cannot satisfy both, so it climbs forever
-                        // and parks at the ceiling: measured pinned at 2.78 ms
-                        // through a whole collapse window, with the trail at
-                        // 8.33 ms and every other synthetic lost, alternating
-                        // frame by frame with a median run length of one.
-                        //
-                        // The value that satisfies both is bias = realCall minus
-                        // synCall, which is zero when they are equal. A floor at
-                        // exactly one period makes zero reachable.
-                        // Centred on one period, and wide.
-                        //
-                        // The two intervals are not independent: the presenter
-                        // advances by period - bias after a synthetic and
-                        // period + bias after a real frame, and the call costs
-                        // cancel between them, so
-                        //
-                        //   lead + trail = two periods, always
-                        //
-                        // A band above one period therefore *guarantees* a trail
-                        // below it. The previous 21/20 to 23/20 put the trail
-                        // between 9.44 and 10.55 ms at every point in its range,
-                        // so the real frame always followed the synthetic inside
-                        // one scanout and the compositor always kept the newer
-                        // of the two. Measured in a stable menu scene with the
-                        // two call costs equal: lead 12.21 ms, trail 10.01,
-                        // synthetic reaching the headset 1% of the time and the
-                        // real frame 99%. The controller was not failing to
-                        // correct - it was holding the wrong value, because the
-                        // wrong value was inside its band.
-                        //
-                        // One period is the only point where both intervals
-                        // clear a period, so that is the centre. The width is
-                        // the other half of it: a sixteenth of a period each
-                        // side, twice what a narrower attempt used. That one
-                        // tracked realCall swinging 0.77 to 3.93 ms within
-                        // seconds and hunted, and measured worse than not
-                        // tracking at all - 48-75 delivered frames a second
-                        // against 86-90. Climb fast, hold across a dead band,
-                        // decay slowly; the band has to be centred on the
-                        // feasible point and wide enough to ignore the noise.
                         // Order matters: while the block is present the gap
                         // is compressed by the block, not by the bias, so the
                         // block is dealt with first and the gap only governs
@@ -4988,36 +4932,50 @@ void continuous_presenter_main(
                         const bool gap_tight =
                             state->presenter_pair_gap_mean.count() != 0 &&
                             state->presenter_pair_gap_mean < gap_floor;
-                        // A wide hold above one period.
+                        // A wide hold centred on one period.
                         //
-                        // This is not the value the arithmetic prefers. The two
-                        // intervals sum to two periods, so a band above one
-                        // period holds the trail below it, and the only point
-                        // where both clear a period is the single value where
-                        // they are equal. Three attempts were made to reach it -
-                        // a floor at exactly one period, a band of plus or minus
-                        // a thirty-second, a band centred on one period, and
-                        // finally computing the bias directly from realCall
-                        // minus synCall - and every one of them measured worse
-                        // in the scene that matters than this does.
+                        // The two intervals are a zero-sum pair. The presenter
+                        // advances by period - bias after a synthetic and
+                        // period + bias after a real frame, and the runtime's
+                        // own call costs cancel between them, so
                         //
-                        // The reason they fail is that realCall is not
-                        // independent of the bias: handing the real frame over
-                        // early makes the runtime pace it back out, so realCall
-                        // is roughly bias plus the 0.7 ms a finished copy costs,
-                        // and any controller reading the difference is reading
-                        // its own output. Removing the bias entirely on that
-                        // reasoning did not work either - it cost the scene that
-                        // had been reaching 90.
+                        //   lead  = period + bias - (realCall - synCall)
+                        //   trail = period - bias + (realCall - synCall)
+                        //   lead + trail = two periods, always
                         //
-                        // So this is kept because it is measured best, not
-                        // because it is right: 86-90 delivered frames a second
-                        // for forty seconds. Do not narrow it, centre it, or
-                        // replace it with a computation without a capture
-                        // showing the replacement is better in a heavy scene as
-                        // well as a menu.
-                        const auto lead_floor = period * 21 / 20;
-                        const auto lead_ceiling = period * 23 / 20;
+                        // A band held *above* one period therefore guarantees a
+                        // trail below one, which is the real frame following the
+                        // synthetic inside a single scanout - the compositor
+                        // keeps the newer and the synthetic is thrown away. One
+                        // period is the only point where both intervals clear a
+                        // period at once, so that is the centre, and it is the
+                        // only centre at which a bias of zero is reachable.
+                        //
+                        // A sixteenth of a period each side. The width is not
+                        // free: a narrower band tracked realCall swinging 0.77
+                        // to 3.93 ms within seconds and hunted. Climb fast, hold
+                        // across a dead band, decay slowly.
+                        //
+                        // A band above one period was carried from the
+                        // controller's first version until now, on a comparison
+                        // that measured 21/20-23/20 at 86-90 delivered frames a
+                        // second against 48-75 for a centred band. That
+                        // comparison predates the measured pace and the phase
+                        // acquisition step entirely: the grid of the day could
+                        // not acquire a phase at all, and across eighteen
+                        // sessions its seed alone moved delivery between 58 and
+                        // 86 a second on one build, title and machine. The
+                        // difference it reported is smaller than the confound it
+                        // was measured through, so it does not decide anything.
+                        //
+                        // It is still the case that realCall is not independent
+                        // of the bias - handing the real frame over early makes
+                        // the runtime pace it back out - so any controller that
+                        // computes the bias directly from realCall minus synCall
+                        // is reading its own output. That is why this holds a
+                        // band rather than solving for a value.
+                        const auto lead_floor = period * 15 / 16;
+                        const auto lead_ceiling = period * 17 / 16;
                         const auto lead_mean =
                             state->presenter_pair_lead_gap_mean;
                         const bool lead_known =
