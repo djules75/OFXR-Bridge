@@ -20,6 +20,10 @@ namespace xrfg {
 // accessor returns nothing for the life of the session, leaving each caller
 // with whatever it did before. Nothing here can fail a frame.
 //
+// Nothing attaches until mark_established() says the session is real. The
+// connection cannot be closed once open, so the only way to keep it out of a
+// session that is about to be thrown away is not to open it there.
+//
 // Thread-safe: the overlay reads it from the application thread and the
 // presenter from its own.
 class SteamVrDelivery {
@@ -29,9 +33,30 @@ public:
     SteamVrDelivery(const SteamVrDelivery&) = delete;
     SteamVrDelivery& operator=(const SteamVrDelivery&) = delete;
 
+    // This session is one that is going to run, so the connection may be
+    // opened. Idempotent, and there is no way back: a session cannot become
+    // provisional again.
+    //
+    // Applications are free to build an OpenXR session, use it and destroy it
+    // without ever showing anything, and some do it on every launch. R.E.A.L.
+    // VR stands one up to read the runtime's identity, FOV and feature level,
+    // submits a single frame and destroys the whole instance 0.8 s later. The
+    // connection opened during that frame outlives the instance it was made
+    // under - it has to, because closing it is what crashes the next session -
+    // and the application's *next* xrCreateInstance then never returns, inside
+    // SteamVR, with this layer only forwarding the call. Armed at launch the
+    // title could not start at all; armed after it, where the layer joins
+    // after the probe, the same build ran fine.
+    //
+    // So the connection waits for proof that the session will be shown. The
+    // callers below hold off until it arrives, which costs measured pacing the
+    // first moments of a session - where it already fails open - and costs a
+    // session that is never shown nothing at all, which is the point.
+    void mark_established() noexcept;
+
     // Distinct images the headset received per second, over a rolling window of
     // about a second. Empty until the first window closes. Attaches lazily on
-    // the first call of any accessor, once.
+    // the first call of any accessor after mark_established(), once.
     [[nodiscard]] std::optional<float> delivered_fps(std::int64_t now_ns) noexcept;
 
     // When the display last scanned out, converted into the layer's own clock,

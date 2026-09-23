@@ -117,6 +117,17 @@ constexpr std::int64_t kStaleNanoseconds = 5'000'000'000;
 // not an oversight: VR_ShutdownInternal is what does the damage, and a
 // background connection costs nothing to leave open for a process that is
 // about to exit anyway.
+//
+// The cost is paid at the other lifecycle boundary. Outliving the session also
+// means outliving the *instance*, and an application that destroys its
+// XrInstance and builds another one then hangs in xrCreateInstance - in
+// SteamVR, with the layer forwarding the call, the same vrclient_x64.dll and
+// the same connection, one boundary over. Measured on R.E.A.L. VR, which
+// probes with a throwaway instance on every launch: five runs armed at launch,
+// five hangs on the second create, and no hang in any run where the connection
+// had not been opened. That is what SteamVrDelivery::mark_established() is
+// for - the connection still never closes, it just never opens under a session
+// that was only ever a probe.
 struct ProcessConnection {
     std::mutex mutex;
     bool attempted{};
@@ -241,6 +252,10 @@ struct SteamVrDelivery::Impl {
         }
         rate_previous_presents = timing.m_nNumFramePresents;
     }
+
+    // Until the session proves it will be shown, no accessor may attach. See
+    // SteamVrDelivery::mark_established().
+    bool established{};
 
     void attach() noexcept {
         attempted = true;
@@ -472,12 +487,26 @@ SteamVrDelivery::~SteamVrDelivery() {
     // accounting dies with this object.
 }
 
+void SteamVrDelivery::mark_established() noexcept {
+    try {
+        if (!impl_) {
+            return;
+        }
+        std::scoped_lock lock(impl_->mutex);
+        impl_->established = true;
+    } catch (...) {
+    }
+}
+
 std::optional<float> SteamVrDelivery::delivered_fps(std::int64_t now) noexcept {
     try {
         if (!impl_) {
             return std::nullopt;
         }
         std::scoped_lock lock(impl_->mutex);
+        if (!impl_->established) {
+            return std::nullopt;
+        }
         if (!impl_->attempted) {
             impl_->attach();
         }
@@ -503,6 +532,9 @@ SteamVrDelivery::vsync_anchor() noexcept {
             return std::nullopt;
         }
         std::scoped_lock lock(impl_->mutex);
+        if (!impl_->established) {
+            return std::nullopt;
+        }
         if (!impl_->attempted) {
             impl_->attach();
         }
@@ -542,6 +574,9 @@ SteamVrDelivery::frame_time_remaining() noexcept {
             return std::nullopt;
         }
         std::scoped_lock lock(impl_->mutex);
+        if (!impl_->established) {
+            return std::nullopt;
+        }
         if (!impl_->attempted) {
             impl_->attach();
         }
@@ -566,6 +601,9 @@ SteamVrDelivery::last_presentation() noexcept {
             return std::nullopt;
         }
         std::scoped_lock lock(impl_->mutex);
+        if (!impl_->established) {
+            return std::nullopt;
+        }
         if (!impl_->attempted) {
             impl_->attach();
         }

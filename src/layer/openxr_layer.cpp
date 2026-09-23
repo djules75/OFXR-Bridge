@@ -246,6 +246,15 @@ constexpr auto kStructuralQuarantineDuration = std::chrono::seconds(1);
 // This prevents the next game/NGX frame from being queued behind unfinished
 // synthesis while keeping a genuinely unhealthy GPU wait bounded.
 constexpr std::uint32_t kFrameStartSynthesisWaitMilliseconds = 1000;
+// Application frames after which a session counts as established even though
+// no XR_SESSION_STATE_VISIBLE was ever seen, so the delivery connection may
+// open. The state transition is the real signal; this only covers a runtime
+// that gives the layer no xrPollEvent to read it from, where waiting for a
+// state that can never arrive would silently leave the process with no
+// delivery interface and no measured pacing for its whole life. A hundred
+// frames is about a second at 90 Hz, and the probe sessions this gate exists
+// to exclude submit one.
+constexpr std::uint32_t kEstablishedApplicationFrames = 100;
 
 template <typename Handle>
 [[nodiscard]] std::uint64_t handle_value(Handle handle) noexcept {
@@ -458,6 +467,9 @@ struct SessionState {
     // Owned here rather than by the overlay because the presenter reads the
     // vsync anchor from the same connection. Null off SteamVR.
     std::unique_ptr<xrfg::SteamVrDelivery> steamvr_delivery;
+    // Application frames submitted on this session, counted only until the
+    // delivery connection is released. Guarded by frame_call_mutex.
+    std::uint32_t application_frames_submitted{};
     // The offset from a real vsync that the schedule is held at. Learned from
     // wherever the existing servo had settled when the first anchor arrived,
     // never chosen: the lock's job is to stop the grid drifting away from the
@@ -7378,6 +7390,13 @@ XrResult layer_end_frame_impl(
         pipelined_presenter_mode || frame_had_overlapping_wait;
     state->application_frame_in_progress = false;
     state->application_frame_has_overlapping_wait = false;
+    if (state->steamvr_delivery &&
+        state->application_frames_submitted < kEstablishedApplicationFrames) {
+        if (++state->application_frames_submitted >=
+            kEstablishedApplicationFrames) {
+            state->steamvr_delivery->mark_established();
+        }
+    }
     if (!frame_had_overlapping_wait && !pipelined_presenter_mode) {
         state->pipelined_wait_streak = 0;
     }
@@ -8264,6 +8283,20 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_poll_event(
                 handle_value(state_changed->session),
                 static_cast<std::uint64_t>(state_changed->time),
                 0);
+            // Reaching VISIBLE is the runtime saying this session is being
+            // shown, which is the proof the delivery connection waits for. A
+            // session that is only ever built to be measured and destroyed
+            // stops at READY and never opens one. Named rather than compared:
+            // STOPPING and EXITING sort above VISIBLE and mean the opposite.
+            if (state_changed->state == XR_SESSION_STATE_VISIBLE ||
+                state_changed->state == XR_SESSION_STATE_FOCUSED) {
+                if (const auto session_state =
+                        find_session(state_changed->session)) {
+                    if (session_state->steamvr_delivery) {
+                        session_state->steamvr_delivery->mark_established();
+                    }
+                }
+            }
         }
         return result;
     });
