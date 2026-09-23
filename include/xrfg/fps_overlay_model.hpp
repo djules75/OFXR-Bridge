@@ -18,9 +18,23 @@ struct FpsSnapshot {
 
 // Caller serializes access. Fixed storage, monotonic wall-clock measurements;
 // successful downstream submissions are NOT evidence of physical scanout.
+//
+// Counts *distinct images*, not submissions. The presenter hands the runtime
+// one frame per display period whether or not the application produced one,
+// resubmitting what it already holds to keep the cadence. Those repeats carry
+// nothing new, and counting them made the overlay report the headset's refresh
+// rate rather than the frame rate: measured on The Witcher 3 through VDXR at
+// 144 Hz, 144.0 submissions a second of which 65.8 were repeats, against 78.1
+// distinct images actually reaching the eye. The reporter saw 144 and a
+// picture that visibly was not.
+//
+// On SteamVR the figure is replaced by the compositor's own delivered count
+// before it is displayed, which is why this only ever showed on runtimes where
+// no such source exists.
 class FpsCounter {
 public:
-    void submitted(std::int64_t now_ns, bool synthetic) noexcept;
+    // `new_content` is false for a repeat.
+    void submitted(std::int64_t now_ns, bool synthetic, bool new_content = true) noexcept;
     [[nodiscard]] FpsSnapshot snapshot(std::int64_t now_ns) const noexcept;
     void reset() noexcept { *this = {}; }
 private:

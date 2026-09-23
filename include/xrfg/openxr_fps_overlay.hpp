@@ -26,7 +26,12 @@ public:
     // Called on the application's end-frame thread, not the presenter thread.
     // Uploads at most 4 Hz; no explicit GPU fence wait, image-wait timeout zero.
     void application_frame(const XrFrameEndInfo* info) noexcept;
-    [[nodiscard]] XrResult end_frame(const XrFrameEndInfo* info, bool synthetic);
+    // `new_content` is false for a repeat - the presenter handing the runtime
+    // a frame it already submitted, to keep the cadence when the application
+    // produced nothing. The quad still goes on, but it is not a frame and the
+    // counter must not treat it as one.
+    [[nodiscard]] XrResult end_frame(
+        const XrFrameEndInfo* info, bool synthetic, bool new_content = true);
     void reset_metrics() noexcept;
     // Terminal for this session. Keep resources alive until normal teardown;
     // stop adding the quad or uploading textures immediately.

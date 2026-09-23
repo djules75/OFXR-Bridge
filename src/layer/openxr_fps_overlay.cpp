@@ -380,7 +380,8 @@ std::optional<OverlayPlacement> OpenXrFpsOverlay::marker_placement() const noexc
     return impl_->placement;
 }
 
-XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic) {
+XrResult OpenXrFpsOverlay::end_frame(
+    const XrFrameEndInfo* info, bool synthetic, bool new_content) {
     std::scoped_lock lock(impl_->mutex);
     std::array<const XrCompositionLayerBaseHeader*, 128> layers{};
     XrFrameEndInfo composed{};
@@ -396,7 +397,8 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic)
         submitted = &composed;
     }
     const auto result = impl_->downstream_end(impl_->session, submitted);
-    if (result == XR_SUCCESS && nonempty) impl_->counter.submitted(now_ns(), synthetic);
+    if (result == XR_SUCCESS && nonempty)
+        impl_->counter.submitted(now_ns(), synthetic, new_content);
     return result;
 }
 

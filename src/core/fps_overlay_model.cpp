@@ -33,9 +33,11 @@ FpsCounter::Bucket& FpsCounter::bucket(std::int64_t now) noexcept {
     return entry;
 }
 
-void FpsCounter::submitted(std::int64_t now, bool synthetic) noexcept {
+void FpsCounter::submitted(std::int64_t now, bool synthetic, bool new_content) noexcept {
     auto& entry = bucket(now);
-    ++entry.output;
+    // A repeat is a submission and not a frame. See the header for what
+    // counting them cost.
+    if (new_content) ++entry.output;
     if (synthetic) last_synthetic_ns_ = now;
 }
 

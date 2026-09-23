@@ -4697,7 +4697,12 @@ void continuous_presenter_main(
             }
             end_result = with_runtime_entry(state, [&] {
                 return state->fps_overlay
-                    ? state->fps_overlay->end_frame(&submitted, fresh_synthetic)
+                    // No request is the presenter repeating what it already
+                    // holds, to keep the cadence when the application produced
+                    // nothing. It is a submission and not a frame, so the
+                    // overlay must not count it.
+                    ? state->fps_overlay->end_frame(
+                          &submitted, fresh_synthetic, request != nullptr)
                     : state->dispatch->end_frame(state->handle, &submitted);
             });
             // The synthetic has reached the runtime, so its current copy can

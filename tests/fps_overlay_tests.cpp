@@ -28,6 +28,26 @@ int main(int argc, char** argv) {
         counter.reset();
         counter.submitted(4'000'000'000, false);
         require(!counter.snapshot(4'050'000'000).active, "prime/repeat must not be green");
+        // A repeat is a submission and not a frame. The presenter emits one per
+        // display period the application did not fill, so counting them made the
+        // overlay report the headset's refresh rate: 144 on a title delivering
+        // 78. Feed a second of 39 pairs padded to 144 submissions and require
+        // the count to be the 78 distinct images, not the 144 handed over.
+        counter.reset();
+        for (int i = 0; i < 144; ++i) {
+            const auto t = 5'000'000'000 + static_cast<std::int64_t>(i) * 1'000'000'000 / 144;
+            if (i % 2 == 0 && i / 2 < 39) {
+                counter.submitted(t, true);
+            } else if (i % 2 == 1 && i / 2 < 39) {
+                counter.submitted(t, false);
+            } else {
+                counter.submitted(t, false, false);
+            }
+        }
+        const auto padded = counter.snapshot(5'999'999'999);
+        require(std::abs(padded.submitted_fps - 78) < 0.5f,
+                "repeats must not be counted as frames");
+        require(padded.active, "synthetics still mark the overlay active");
         for (auto position : {FpsOverlayPosition::off, FpsOverlayPosition::upper_left,
             FpsOverlayPosition::upper_right, FpsOverlayPosition::lower_left, FpsOverlayPosition::lower_right}) {
             require(parse_overlay_position(overlay_position_name(position)) == position, "position round trip");
