@@ -2074,7 +2074,8 @@ void test_synthesis_on_a_dedicated_queue(D3D12WarpFixture& fixture) {
         "consumer join did not report the same queue as already ordered");
 
     require(
-        operation_succeeded(synthesizer.flush_current_copy(fixture.queue())),
+        operation_succeeded(synthesizer.flush_current_copy(
+            fixture.queue(), pair_ticket.fence_value)),
         "flushing the held-back copy across queues failed");
     require(
         operation_succeeded(synthesizer.wait_for_idle()),
@@ -3800,17 +3801,35 @@ void test_submission_backpressure_and_recovery(
         operation_succeeded(history->capture(1, &capture_b)) &&
             operation_succeeded(history->commit(capture_b)),
         "backpressure capture B failed");
-    xrfg::D3D12FrameSynthesisTicket pair_ab{};
+    // Backpressure is per-resource, not global. A pair that reuses the
+    // destination the prime is still writing - current index 0 here, the
+    // prime's - must be refused, and refused without blocking: the caller
+    // fails open on ERROR_BUSY and cannot afford a stall to learn that.
+    xrfg::D3D12FrameSynthesisTicket collided{};
     const auto immediate_started = std::chrono::steady_clock::now();
     const HRESULT immediate_result = synthesizer.submit_pair(
-        capture_b, views, views, 0, 1, &pair_ab);
+        capture_b, views, views, 1, 0, &collided);
     const auto immediate_elapsed =
         std::chrono::steady_clock::now() - immediate_started;
     require(
         immediate_result == HRESULT_FROM_WIN32(ERROR_BUSY) &&
-            pair_ab.fence_value == 0 &&
+            collided.fence_value == 0 &&
             immediate_elapsed < std::chrono::milliseconds(50),
-        "end-of-frame submission did not reject queued bridge work immediately");
+        "a pair reusing the prime's destination was not refused immediately");
+
+    // A pair whose resources do not collide is admitted while the prime is
+    // still outstanding, and its work queues behind the prime's on the GPU.
+    // The synthesiser holds three work slots and alternating destinations so
+    // that this is legal; there is deliberately no global gate that would
+    // collapse it to one submission in flight.
+    xrfg::D3D12FrameSynthesisTicket pair_ab{};
+    require(
+        operation_succeeded(synthesizer.submit_pair(
+            capture_b, views, views, 0, 1, &pair_ab)) &&
+            pair_ab.previous_serial == capture_a.serial &&
+            pair_ab.current_serial == capture_b.serial &&
+            pair_ab.fence_value > prime.fence_value,
+        "a non-colliding pair was refused while earlier work was outstanding");
 
     const auto blocked_started = std::chrono::steady_clock::now();
     const HRESULT blocked_result =
@@ -3818,9 +3837,8 @@ void test_submission_backpressure_and_recovery(
     const auto blocked_elapsed = std::chrono::steady_clock::now() - blocked_started;
     require(
         blocked_result == HRESULT_FROM_WIN32(ERROR_BUSY) &&
-            pair_ab.fence_value == 0 &&
             blocked_elapsed >= std::chrono::milliseconds(80),
-        "frame-start gate did not wait for unfinished bridge work");
+        "the drain wait did not block on unfinished bridge work");
 
     require_hresult(
         gate->Signal(1),
@@ -3828,14 +3846,7 @@ void test_submission_backpressure_and_recovery(
     fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
     require(
         operation_succeeded(synthesizer.wait_for_previous_submission(100)),
-        "frame-start gate did not recover after the queue advanced");
-    require(
-        operation_succeeded(synthesizer.submit_pair(
-            capture_b, views, views, 0, 1, &pair_ab)) &&
-            pair_ab.previous_serial == capture_a.serial &&
-            pair_ab.current_serial == capture_b.serial &&
-            pair_ab.fence_value > prime.fence_value,
-        "submission did not recover after backpressure cleared");
+        "the drain wait did not recover after the queue advanced");
     const HRESULT drain_result = synthesizer.wait_for_idle();
     require(
         operation_succeeded(drain_result),

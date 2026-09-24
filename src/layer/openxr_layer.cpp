@@ -241,11 +241,6 @@ constexpr XrDuration kGenerationCooldownDuration = 1'000'000'000;
 // Eight is a quarter of a second at 90 Hz.
 constexpr std::uint32_t kPhaseCorrectionGridStreak = 8;
 constexpr auto kStructuralQuarantineDuration = std::chrono::seconds(1);
-// The runtime's own xrWaitFrame pacing happens first. Only a bridge transaction
-// still pending after that natural idle window may hold the application here.
-// This prevents the next game/NGX frame from being queued behind unfinished
-// synthesis while keeping a genuinely unhealthy GPU wait bounded.
-constexpr std::uint32_t kFrameStartSynthesisWaitMilliseconds = 1000;
 // Application frames after which a session counts as established even though
 // no XR_SESSION_STATE_VISIBLE was ever seen, so the delivery connection may
 // open. The state transition is the real signal; this only covers a runtime
@@ -1052,45 +1047,14 @@ template <typename Function>
     return matches;
 }
 
-[[nodiscard]] HRESULT wait_for_previous_session_synthesis(
-    const std::shared_ptr<SessionState>& session) noexcept {
-    try {
-        HRESULT aggregate = S_OK;
-        for (const auto& swapchain : find_swapchains(session)) {
-            std::shared_ptr<FrameGenerationSwapchainState> generation;
-            {
-                std::scoped_lock lock(swapchain->mutex);
-                generation = swapchain->frame_generation;
-            }
-            if (!generation || !generation->synthesizer) {
-                continue;
-            }
-            const HRESULT result =
-                generation->synthesizer->wait_for_previous_submission(
-                    kFrameStartSynthesisWaitMilliseconds);
-            if (FAILED(result)) {
-                aggregate = result;
-                if (result != HRESULT_FROM_WIN32(ERROR_BUSY)) {
-                    break;
-                }
-            }
-        }
-        return aggregate;
-    } catch (...) {
-        return E_FAIL;
-    }
-}
-
 // Submit the held-back current copy without waiting for anything.
 //
 // The copy is the real frame's own content, deferred to keep it off the
 // synthetic's critical path, and it is not signalled until something submits
-// it. wait_for_previous_submission does that before it waits, so while the wait
-// ran at frame start the copy went out early as a side effect. Moving the wait
-// to the capture took the flush with it, about fifteen milliseconds later in
-// the frame, and the real frame's hand-over then landed on pixels still in
-// flight: its xrEndFrame went from the 0.69-0.75 ms of a copy that is already
-// done to 2.5 ms of blocking.
+// it. It has to go out at frame start, with the whole frame ahead of it:
+// submitted about fifteen milliseconds later instead, the real frame's
+// hand-over landed on pixels still in flight and its xrEndFrame went from the
+// 0.69-0.75 ms of a copy that is already done to 2.5 ms of blocking.
 //
 // That block is subtracted from the interval before the synthetic, and that
 // interval is what decides whether the synthetic gets a scanout at all. Per
@@ -1101,9 +1065,7 @@ template <typename Function>
 // realCall 2.510 -> 1.324 ms, the interval 9.648 -> 10.432 ms, and the share of
 // synthetics reaching the headset from 15.0% to 62.6%.
 //
-// So the flush is decoupled from the wait rather than carried by it. This
-// submits and returns; it never blocks, so none of the reasons the wait moved
-// apply to it.
+// This submits and returns; it never blocks.
 [[nodiscard]] HRESULT flush_session_pending_copies(
     const std::shared_ptr<SessionState>& session) noexcept {
     try {
@@ -1118,7 +1080,10 @@ template <typename Function>
                 continue;
             }
             const HRESULT result =
-                generation->synthesizer->flush_current_copy(nullptr);
+                // No consumer queue: this only submits the copy so it has
+                // the whole frame to complete in. The join that names a
+                // value happens later, at the presenter.
+                generation->synthesizer->flush_current_copy(nullptr, 0);
             if (FAILED(result)) {
                 aggregate = result;
             }
@@ -2921,33 +2886,11 @@ XrResult layer_wait_frame_impl(
         }
     }
     if (XR_SUCCEEDED(result) && frame_state != nullptr) {
-        // V090 replaces V089's late submit-time wait with a frame-start gate.
-        // This is after runtime pacing but before the application can record
-        // or enqueue its next game/NGX workload. The submit path now performs
-        // only a nonblocking check and drops generation while the same fence
-        // remains pending, so a timeout cannot grow the queue.
-        //
-        // That reason is about contention on the queue the application itself
-        // records to, so it stops applying once synthesis has its own. Frame
-        // start is the earliest moment the wait *could* happen and nothing
-        // overlaps it there, so its whole cost lands on the application's
-        // budget: measured p90 12.08 ms against the 6.8 ms of slack a title
-        // rendering at 65/s has inside a 45/s clamp, which is what drops it to
-        // 28-37/s in patches. A session with a private queue waits immediately
-        // before the capture instead, where the application's own render pass
-        // has already covered most of the fence. The wait itself is unchanged
-        // and still runs to completion, so the submit path still finds the
-        // fence signalled - skipping or bounding it is what tears continuity
-        // down and neither is what this does.
-        if (!state->d3d12_synthesis_queue) {
-            static_cast<void>(wait_for_previous_session_synthesis(state));
-        } else {
-            // The wait moved to the capture, but the flush it used to carry has
-            // to stay here: the real frame's copy needs the whole frame to
-            // complete in, or its hand-over blocks and the interval before the
-            // synthetic collapses inside one scanout. Submits and returns.
-            static_cast<void>(flush_session_pending_copies(state));
-        }
+        // The real frame's held-back copy goes out here, at frame start, so
+        // it has the whole frame to complete in. Submitted later instead, its
+        // hand-over lands on pixels still in flight and the interval before
+        // the synthetic collapses inside one scanout. Submits and returns.
+        static_cast<void>(flush_session_pending_copies(state));
         state->application_wait_pending_begin = true;
         std::scoped_lock lock(state->mutex);
         // Every runtime, not only SteamVR: the synthetic interpolation fraction
@@ -3565,15 +3508,6 @@ XrResult layer_release_swapchain_image_impl(
         }
     }
 
-    // Before gpu_mutex, never inside it: this blocks for up to a display
-    // period, and prepare_frame_generation holds the same mutex across the
-    // whole submit path. Idempotent across the several releases one frame can
-    // make - after the first the fence is signalled and the wait returns on its
-    // initial status check.
-    if (candidate_index && history && state->session->d3d12_synthesis_queue) {
-        static_cast<void>(wait_for_previous_session_synthesis(state->session));
-    }
-
     std::unique_lock<std::mutex> gpu_lock;
     if (state->session->manual_control.stop_requested() || !state->session->menu_enabled) {
         // Preserve the application's acquire/wait/release bookkeeping, but
@@ -3716,8 +3650,13 @@ struct GeneratedFrameEndInfo {
     // Only the synthetic half of a pair carries these: the copy must reach
     // the queue after this frame has been handed over and before the
     // current frame follows a display period later.
-    std::vector<std::shared_ptr<xrfg::D3D12FrameSynthesizer>>
-        pending_current_copies;
+    struct PendingCurrentCopy {
+        std::shared_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
+        // The value this pair's copy signals. Carried rather than looked up
+        // at flush time: see D3D12FrameSynthesizer::flush_current_copy.
+        std::uint64_t fence_value{};
+    };
+    std::vector<PendingCurrentCopy> pending_current_copies;
 };
 
 [[nodiscard]] std::optional<OwnedCompositionLayer>
@@ -4729,14 +4668,15 @@ void continuous_presenter_main(
             // go to the queue now rather than ahead of it. It has a display
             // period before the current frame that reads it is submitted.
             if (request && request->owned_frame) {
-                for (const auto& synthesizer :
+                for (const auto& pending :
                      request->owned_frame->pending_current_copies) {
-                    if (synthesizer) {
+                    if (pending.synthesizer) {
                         static_cast<void>(
-                            synthesizer->flush_current_copy(
+                            pending.synthesizer->flush_current_copy(
                                 state->d3d12_synthesis_queue
                                     ? state->d3d12_queue.Get()
-                                    : nullptr));
+                                    : nullptr,
+                                pending.fence_value));
                     }
                 }
             }
@@ -6492,8 +6432,11 @@ struct PreparedGeneration {
     XrSwapchain current_handle{XR_NULL_HANDLE};
     XrSwapchain synthetic_handle{XR_NULL_HANDLE};
     // The synthesizer holding this pair's deferred current copy, so the
-    // presenter can submit it once the synthetic frame has gone.
+    // presenter can submit it once the synthetic frame has gone, and the
+    // value that copy signals - which the flush needs by hand, because the
+    // synthesiser's own latest value may belong to a later pair.
     std::shared_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
+    std::uint64_t copy_fence_value{};
     bool anchor_is_current{};
 };
 
@@ -6737,6 +6680,7 @@ struct PreparedProjectionFrame {
             // Only a pair defers its current copy; a prime submits it inline.
             if (request_pair) {
                 output.synthesizer = generation->synthesizer;
+                output.copy_fence_value = ticket.fence_value;
             }
             output.kind = request_pair ? PreparedGenerationKind::pair
                                        : PreparedGenerationKind::prime;
@@ -7778,7 +7722,8 @@ XrResult layer_end_frame_impl(
                  prepared.resources) {
                 if (resource.generation.synthesizer) {
                     first_generated.pending_current_copies.push_back(
-                        resource.generation.synthesizer);
+                        {resource.generation.synthesizer,
+                         resource.generation.copy_fence_value});
                 }
             }
             submitted_end_info = &first_generated.info;
@@ -8025,12 +7970,13 @@ XrResult layer_end_frame_impl(
 
     // The synthetic has gone downstream; submit its current copy before the
     // cycle that hands the runtime the frame which reads it.
-    for (const auto& synthesizer : first_generated.pending_current_copies) {
-        if (synthesizer) {
-            static_cast<void>(synthesizer->flush_current_copy(
+    for (const auto& pending : first_generated.pending_current_copies) {
+        if (pending.synthesizer) {
+            static_cast<void>(pending.synthesizer->flush_current_copy(
                 state->d3d12_synthesis_queue
                     ? state->d3d12_queue.Get()
-                    : nullptr));
+                    : nullptr,
+                pending.fence_value));
         }
     }
     const InternalCycleResult current_cycle =

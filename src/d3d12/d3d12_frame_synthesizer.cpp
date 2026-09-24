@@ -2278,21 +2278,6 @@ struct D3D12FrameSynthesizer::Impl {
         }
     }
 
-    [[nodiscard]] HRESULT submission_available() noexcept {
-        if (last_submitted_fence_value == 0) {
-            return S_OK;
-        }
-        const HRESULT status =
-            fence_status(fence.Get(), last_submitted_fence_value);
-        if (status == S_FALSE) {
-            return HRESULT_FROM_WIN32(ERROR_BUSY);
-        }
-        if (FAILED(status)) {
-            synthesis_enabled = false;
-        }
-        return status;
-    }
-
     [[nodiscard]] HRESULT wait_for_previous_submission(
         std::uint32_t timeout_milliseconds) noexcept {
         if (last_submitted_fence_value == 0) {
@@ -4184,16 +4169,11 @@ struct D3D12FrameSynthesizer::Impl {
         }
         // Before anything is asked about outstanding work. A copy still
         // pending holds its work slot and history lease, and the value it
-        // will signal is the one submission_available and
-        // wait_for_previous_submission both test, so a caller that never
-        // flushed would otherwise read as permanently busy rather than
-        // costing a frame of latency.
+        // will signal is what wait_for_previous_submission tests, so a caller
+        // that never flushed would otherwise read as permanently busy rather
+        // than costing a frame of latency.
         static_cast<void>(flush_pending_copy());
-        HRESULT result = submission_available();
-        if (FAILED(result)) {
-            return result;
-        }
-        result =
+        HRESULT result =
             destination_available(current_destinations[current_destination_index]);
         if (FAILED(result)) {
             return result;
@@ -4354,16 +4334,11 @@ struct D3D12FrameSynthesizer::Impl {
         }
         // Before anything is asked about outstanding work. A copy still
         // pending holds its work slot and history lease, and the value it
-        // will signal is the one submission_available and
-        // wait_for_previous_submission both test, so a caller that never
-        // flushed would otherwise read as permanently busy rather than
-        // costing a frame of latency.
+        // will signal is what wait_for_previous_submission tests, so a caller
+        // that never flushed would otherwise read as permanently busy rather
+        // than costing a frame of latency.
         static_cast<void>(flush_pending_copy());
-        HRESULT result = submission_available();
-        if (FAILED(result)) {
-            return result;
-        }
-        result =
+        HRESULT result =
             destination_available(current_destinations[current_destination_index]);
         if (FAILED(result)) {
             return result;
@@ -4740,7 +4715,8 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
 }
 
 HRESULT D3D12FrameSynthesizer::flush_current_copy(
-    ID3D12CommandQueue* consumer_queue) noexcept {
+    ID3D12CommandQueue* consumer_queue,
+    std::uint64_t copy_fence_value) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr) {
@@ -4750,13 +4726,24 @@ HRESULT D3D12FrameSynthesizer::flush_current_copy(
         // Now that the copy is on the queue, the value it will signal is a
         // value something is actually working towards, so a consumer can
         // wait on it without parking.
+        //
+        // This pair's value, never the synthesiser's latest. Several pairs
+        // can be outstanding at once, and the copy is usually already
+        // submitted by the time this runs, so flush_pending_copy above is a
+        // no-op and the latest value belongs to a *later* pair whose
+        // synthesis has not started. Joining the application's queue to that
+        // blocks the real frame inside xrEndFrame for a whole synthesis
+        // cycle, and the compositor keeps the synthetic and discards the real
+        // frame - measured as the real half's hand-over p90 going 1.0 to
+        // 4.8 ms with a 14 ms tail while the synthetic's stayed flat, costing
+        // 12-18 real frames a second at 13.6 megapixels an eye.
         if (SUCCEEDED(result) && consumer_queue != nullptr &&
             consumer_queue != impl_->queue.Get() &&
             impl_->fence != nullptr &&
-            impl_->last_submitted_fence_value != 0) {
+            copy_fence_value != 0) {
             static_cast<void>(consumer_queue->Wait(
                 impl_->fence.Get(),
-                impl_->last_submitted_fence_value));
+                copy_fence_value));
         }
         return result;
     } catch (...) {

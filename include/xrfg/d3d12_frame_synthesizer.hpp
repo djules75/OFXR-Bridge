@@ -196,8 +196,15 @@ public:
     // a queue of its own, is made to wait for that copy here rather than at
     // the pair's submission: at submission the copy has not been queued yet,
     // so the wait would park the consumer for a whole display period.
+    // copy_fence_value is this pair's own D3D12FrameSynthesisTicket
+    // fence_value - the value the held-back copy signals. It is a parameter
+    // rather than read from the synthesiser's latest submission because more
+    // than one pair can be in flight: the latest value may belong to a later
+    // pair whose synthesis has not run, and joining the consumer to that
+    // parks the real frame's hand-over for a whole synthesis cycle.
     [[nodiscard]] HRESULT flush_current_copy(
-        ID3D12CommandQueue* consumer_queue = nullptr) noexcept;
+        ID3D12CommandQueue* consumer_queue,
+        std::uint64_t copy_fence_value) noexcept;
 
     // Relinquishes the retained rolling source against its last GPU-use fence.
     // This is nonblocking and is required before history invalidation.
