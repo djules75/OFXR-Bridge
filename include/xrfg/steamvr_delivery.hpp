@@ -54,6 +54,31 @@ public:
     // session that is never shown nothing at all, which is the point.
     void mark_established() noexcept;
 
+    // Close the process-wide connection, because the last XrInstance is going
+    // away. Safe to call when nothing was ever opened.
+    //
+    // The two lifecycle constraints on this connection look contradictory and
+    // are not; they are about different boundaries.
+    //
+    //   It must outlive every *session*. Closing it leaves SteamVR's own
+    //   OpenXR runtime dereferencing null on the next xrCreateSession, because
+    //   the runtime and the OpenVR client are one binary. Assetto Corsa
+    //   rebuilds its session twice after the connection opens and both
+    //   succeed only because nothing closes it.
+    //
+    //   It must not outlive an *instance*. A connection still open across
+    //   xrDestroyInstance hangs the next xrCreateInstance, inside SteamVR,
+    //   with the layer only forwarding the call. R.E.A.L. VR rebuilds its
+    //   instance whenever the resolution is changed from its overlay, and
+    //   hangs there every time.
+    //
+    // Closing exactly at the instance boundary satisfies both. Assetto Corsa
+    // reaches this path only at process exit - measured, one instance
+    // create/destroy pair for a whole run against three session pairs - so it
+    // cannot regress. A later session may reopen the connection; the rule is
+    // that it never spans an instance boundary, not that it opens once.
+    static void release_process_connection() noexcept;
+
     // Distinct images the headset received per second, over a rolling window of
     // about a second. Empty until the first window closes. Attaches lazily on
     // the first call of any accessor after mark_established(), once.

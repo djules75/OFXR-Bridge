@@ -136,6 +136,10 @@ struct ProcessConnection {
     vr::IVRCompositor* compositor{};
     vr::IVRSystem* system{};
     AttachRoute route{AttachRoute::none};
+    // Only the background_init route owns anything to close. An existing_token
+    // context was borrowed from the application and is not ours to shut down.
+    PfnShutdownInternal shutdown{};
+    bool owns_context{};
 };
 
 [[nodiscard]] ProcessConnection& process_connection() noexcept {
@@ -364,6 +368,8 @@ struct SteamVrDelivery::Impl {
         shared.route = route;
         shared.usable = true;
         shared.attempted = true;
+        shared.shutdown = shutdown;
+        shared.owns_context = owns_context;
         bridge_flight_logger().event(
             BridgeFlightOperation::steamvr_delivery_attach,
             0,
@@ -485,6 +491,41 @@ SteamVrDelivery::~SteamVrDelivery() {
     // SteamVR's own runtime on the next xrCreateSession, and unloading the
     // module would do the same by another route. Only the per-session
     // accounting dies with this object.
+}
+
+void SteamVrDelivery::release_process_connection() noexcept {
+    ProcessConnection& shared = process_connection();
+    std::scoped_lock lock(shared.mutex);
+    if (!shared.attempted) {
+        return;
+    }
+    // Every session is destroyed before the instance that owns it, so no Impl
+    // still holds these pointers by the time this runs. Both captures show the
+    // order directly: session_destroy completes, then instance_destroy begins.
+    const AttachRoute released = shared.route;
+    const bool owned = shared.owns_context;
+    if (owned && shared.shutdown != nullptr) {
+        shared.shutdown();
+    }
+    shared.attempted = false;
+    shared.usable = false;
+    shared.compositor = nullptr;
+    shared.system = nullptr;
+    shared.route = AttachRoute::none;
+    shared.shutdown = nullptr;
+    shared.owns_context = false;
+    // The module handle is kept: openvr_api.dll stays loaded and a reopen
+    // resolves its exports again rather than reloading it.
+    //
+    // result=1 is a release, against 0 for an attach and negatives for the
+    // ways an attach can fail. a is the route that was let go, c whether it
+    // was ours to close.
+    bridge_flight_logger().event(
+        BridgeFlightOperation::steamvr_delivery_attach,
+        1,
+        static_cast<std::uint64_t>(released),
+        GetCurrentProcessId(),
+        owned ? 1 : 0);
 }
 
 void SteamVrDelivery::mark_established() noexcept {

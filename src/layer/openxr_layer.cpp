@@ -2385,6 +2385,7 @@ XrResult layer_destroy_instance_impl(XrInstance instance) {
         destroy_frame_generation_swapchains(swapchain_state);
     }
 
+    bool last_instance = false;
     const XrResult result = dispatch->destroy_instance(instance);
     if (XR_SUCCEEDED(result)) {
         std::scoped_lock lock(g_state_mutex);
@@ -2403,6 +2404,13 @@ XrResult layer_destroy_instance_impl(XrInstance instance) {
             }
         }
         g_instances.erase(instance);
+        last_instance = g_instances.empty();
+    }
+    if (last_instance) {
+        // The connection must not outlive the instance. See
+        // SteamVrDelivery::release_process_connection() for why that is not in
+        // conflict with it having to outlive every session.
+        xrfg::SteamVrDelivery::release_process_connection();
     }
     return result;
 }
