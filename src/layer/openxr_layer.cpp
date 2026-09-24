@@ -6606,6 +6606,28 @@ struct PreparedProjectionFrame {
                 generation->synthetic_images_per_slot +
             synthetic_image.acquired_index;
 
+        // Deferring the current copy keeps a full-resolution copy the
+        // synthetic never reads off its critical path, but it only works where
+        // the copy's destination is read after flush_current_copy. The D3D11
+        // interop's publish is read before it: it moves both results back
+        // across to the application's D3D11 images while the copy is still an
+        // unsubmitted command list, so it publishes the previous pair's B as
+        // this pair's current frame. The headset then runs forward to the
+        // midpoint and back a whole pair, every pair, which reads as doubling
+        // that scales with motion and disappears wherever the scene is still.
+        //
+        // The deeper pipeline does not defer either, for the opposite reason.
+        // Deferring existed to keep the copy off the critical path of a
+        // synthetic that had no slack; the depth gives it a whole display
+        // period of slack, so there is nothing left to protect. What deferring
+        // costs instead is an asymmetry between the two halves of a pair: the
+        // synthetic's pixels exist milliseconds before its hand-over, while
+        // the real frame's do not exist until the synthetic is handed over and
+        // then have to cross a queue boundary to reach the runtime. Submitted
+        // inline both halves are written and signalled together, and the
+        // consumer-queue join for the current image is not needed at all.
+        const bool defer_current_copy = generation->d3d11_interop == nullptr &&
+            !state->session->deep_pipeline;
         xrfg::D3D12FrameSynthesisTicket ticket{};
         const auto debug_marker = request_pair && xrfg::bridge_flight_logger().enabled() &&
                 state->session->fps_overlay
@@ -6629,17 +6651,6 @@ struct PreparedProjectionFrame {
                 submit_result =
                     generation->d3d11_interop->prepare_synthesis();
             }
-            // Deferring the current copy keeps a full-resolution copy the
-            // synthetic never reads off its critical path, but it only works
-            // where the copy's destination is read after flush_current_copy.
-            // The interop's publish below is read before it: it moves both
-            // results back across to the application's D3D11 images while the
-            // copy is still an unsubmitted command list, so it publishes the
-            // previous pair's B as this pair's current frame. The headset then
-            // runs forward to the midpoint and back a whole pair, every pair,
-            // which reads as doubling that scales with motion and disappears
-            // wherever the scene is still.
-            const bool defer_current_copy = generation->d3d11_interop == nullptr;
             if (!generation->d3d11_interop || SUCCEEDED(submit_result)) {
                 submit_result = request_pair
                                     ? generation->synthesizer->submit_pair(
@@ -6743,8 +6754,10 @@ struct PreparedProjectionFrame {
                 generation->synthetic_slot =
                     (synthetic_slot + 1) % generation->synthetic_slot_count;
             }
-            // Only a pair defers its current copy; a prime submits it inline.
-            if (request_pair) {
+            // Only a deferred copy leaves anything to do after the
+            // synthetic reaches the runtime. A prime always submits inline,
+            // and so does a pair in the deeper pipeline.
+            if (request_pair && defer_current_copy) {
                 output.synthesizer = generation->synthesizer;
                 output.copy_fence_value = ticket.fence_value;
             }
