@@ -81,7 +81,8 @@ int main(int argc, char** argv) {
             // Deterministic black images: no uninitialized texture can look like
             // a marker, including private slots the fake runtime never acquires.
             for (const auto* images : {&g_d3d11_application_swapchain_images,
-                    &g_d3d11_current_swapchain_images, &g_d3d11_synthetic_swapchain_images}) {
+                    &g_d3d11_current_swapchain_images, &g_d3d11_current_swapchain_b_images,
+                    &g_d3d11_synthetic_swapchain_images, &g_d3d11_synthetic_swapchain_b_images}) {
                 for (const auto& image : *images) {
                     D3D11_RENDER_TARGET_VIEW_DESC rtv{};
                     rtv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;

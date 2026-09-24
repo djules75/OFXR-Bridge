@@ -54,6 +54,11 @@ XrSwapchain g_synthetic_swapchain_right = fake_handle<XrSwapchain>(0x308);
 // creates two per application swapchain and this runtime hands out both.
 XrSwapchain g_current_swapchain_b = fake_handle<XrSwapchain>(0x309);
 XrSwapchain g_current_swapchain_right_b = fake_handle<XrSwapchain>(0x30a);
+// The synthetic output alternates across two slots as well, so that the
+// application can release the next pair's synthetic while the presenter still
+// has the previous one un-retired.
+XrSwapchain g_synthetic_swapchain_b = fake_handle<XrSwapchain>(0x30b);
+XrSwapchain g_synthetic_swapchain_right_b = fake_handle<XrSwapchain>(0x30c);
 XrSpace g_space = fake_handle<XrSpace>(0x404);
 std::atomic<XrSpace> g_valid_composition_space{g_space};
 std::atomic<bool> g_delay_composition_validation{false};
@@ -107,6 +112,11 @@ std::atomic<std::uint32_t> g_create_swapchain_calls{0};
 std::atomic<std::uint32_t> g_split_eye_application_creates{0};
 std::atomic<std::uint32_t> g_split_eye_private_creates{0};
 std::atomic<std::uint32_t> g_destroy_swapchain_calls{0};
+// How many synthetic slots the layer asked for. The count depends on the
+// pipeline depth the session runs at - one shallow, two deep - so the
+// expectations below are written against it rather than against a literal,
+// and hold whichever depth the layer was built or configured for.
+std::atomic<std::uint32_t> g_synthetic_private_creates{0};
 std::atomic<std::uint32_t> g_application_release_calls{0};
 std::atomic<std::uint32_t> g_current_acquire_calls{0};
 std::atomic<std::uint32_t> g_current_wait_calls{0};
@@ -164,14 +174,17 @@ std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_application_swapchain_images;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_current_swapchain_images;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_current_swapchain_b_images;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_synthetic_swapchain_images;
+std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_synthetic_swapchain_b_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_application_swapchain_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_current_swapchain_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_current_swapchain_b_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_images;
+std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_b_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_application_swapchain_right_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_current_swapchain_right_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_current_swapchain_right_b_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_right_images;
+std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_right_b_images;
 
 [[nodiscard]] bool is_application_swapchain(XrSwapchain swapchain) {
     return swapchain == g_application_swapchain ||
@@ -187,7 +200,9 @@ std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_right_images;
 
 [[nodiscard]] bool is_synthetic_swapchain(XrSwapchain swapchain) {
     return swapchain == g_synthetic_swapchain ||
-           swapchain == g_synthetic_swapchain_right;
+           swapchain == g_synthetic_swapchain_b ||
+           swapchain == g_synthetic_swapchain_right ||
+           swapchain == g_synthetic_swapchain_right_b;
 }
 
 [[nodiscard]] XrTime fake_camera_time(XrTime display_time) noexcept {
@@ -544,8 +559,8 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
             (create_info->usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) != 0 &&
             create_info->width == 4 && create_info->height == 4 &&
             create_info->arraySize == 1;
-        // Per application swapchain the layer creates both current slots and
-        // then the synthetic, so each eye claims four calls rather than three.
+        // Per application swapchain the layer creates two current slots and
+        // then two synthetic slots, so each eye claims four private calls.
         const auto record_current = [&](bool first) {
             g_current_create_info_valid.store(
                 (first ||
@@ -581,8 +596,21 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
             }
             return XR_SUCCESS;
         }
-        // Per application swapchain the layer creates both current slots and
-        // then the synthetic, in the order the projection views are mapped.
+        // Per application swapchain the layer creates every current slot and
+        // then every synthetic slot, in the order the projection views are
+        // mapped.
+        //
+        // This routing is pinned to the ring sizes the layer is built with,
+        // and it cannot be made to discover them. The eye cannot be inferred
+        // from how many application swapchains exist, because the layer defers
+        // creating its private swapchains until it arms - by then both
+        // application swapchains are there and every private create looks like
+        // the second eye's. Nor can the group boundary be found from the
+        // sequence: two current slots then one synthetic is indistinguishable
+        // from two current then two synthetic until the run is over. So when
+        // the pipeline depth becomes a setting rather than a build constant,
+        // this fake runtime has to be told which depth to expect, the same way
+        // the disarm test is told its mode.
         switch (g_split_eye_private_creates.fetch_add(
             1, std::memory_order_relaxed)) {
             case 0:
@@ -595,19 +623,35 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
                 break;
             case 2:
                 record_synthetic(true);
+                g_synthetic_private_creates.fetch_add(
+                    1, std::memory_order_relaxed);
                 *swapchain = g_synthetic_swapchain;
                 break;
             case 3:
-                record_current(false);
-                *swapchain = g_current_swapchain_right;
+                record_synthetic(false);
+                g_synthetic_private_creates.fetch_add(
+                    1, std::memory_order_relaxed);
+                *swapchain = g_synthetic_swapchain_b;
                 break;
             case 4:
                 record_current(false);
-                *swapchain = g_current_swapchain_right_b;
+                *swapchain = g_current_swapchain_right;
                 break;
             case 5:
+                record_current(false);
+                *swapchain = g_current_swapchain_right_b;
+                break;
+            case 6:
                 record_synthetic(false);
+                g_synthetic_private_creates.fetch_add(
+                    1, std::memory_order_relaxed);
                 *swapchain = g_synthetic_swapchain_right;
+                break;
+            case 7:
+                record_synthetic(false);
+                g_synthetic_private_creates.fetch_add(
+                    1, std::memory_order_relaxed);
+                *swapchain = g_synthetic_swapchain_right_b;
                 break;
             default:
                 return XR_ERROR_LIMIT_REACHED;
@@ -651,7 +695,23 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
                            create_info->height == 4 &&
                            create_info->arraySize == expected_array_size;
         g_synthetic_create_info_valid.store(valid, std::memory_order_release);
+        g_synthetic_private_creates.fetch_add(1, std::memory_order_relaxed);
         *swapchain = g_synthetic_swapchain;
+    } else if (call == 4) {
+        // Second synthetic slot: same create info as the first.
+        const std::uint32_t expected_width = g_double_wide_mode ? 8U : 4U;
+        const std::uint32_t expected_array_size = g_double_wide_mode ? 1U : 2U;
+        const bool valid = create_info != nullptr &&
+                           (create_info->usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) != 0 &&
+                           (create_info->usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) != 0 &&
+                           create_info->width == expected_width &&
+                           create_info->height == 4 &&
+                           create_info->arraySize == expected_array_size;
+        g_synthetic_create_info_valid.store(
+            g_synthetic_create_info_valid.load(std::memory_order_acquire) && valid,
+            std::memory_order_release);
+        g_synthetic_private_creates.fetch_add(1, std::memory_order_relaxed);
+        *swapchain = g_synthetic_swapchain_b;
     } else {
         return XR_ERROR_LIMIT_REACHED;
     }
@@ -728,6 +788,8 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_swapchain_images(
             selected_images = &g_d3d11_current_swapchain_b_images;
         } else if (swapchain == g_synthetic_swapchain) {
             selected_images = &g_d3d11_synthetic_swapchain_images;
+        } else if (swapchain == g_synthetic_swapchain_b) {
+            selected_images = &g_d3d11_synthetic_swapchain_b_images;
         }
         for (std::uint32_t index = 0; index < kImageCount; ++index) {
             if (d3d11_images[index].type !=
@@ -751,6 +813,8 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_swapchain_images(
             selected_images = &g_current_swapchain_b_images;
         } else if (swapchain == g_synthetic_swapchain) {
             selected_images = &g_synthetic_swapchain_images;
+        } else if (swapchain == g_synthetic_swapchain_b) {
+            selected_images = &g_synthetic_swapchain_b_images;
         } else if (swapchain == g_application_swapchain_right) {
             selected_images = &g_application_swapchain_right_images;
         } else if (swapchain == g_current_swapchain_right) {
@@ -759,6 +823,8 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_swapchain_images(
             selected_images = &g_current_swapchain_right_b_images;
         } else if (swapchain == g_synthetic_swapchain_right) {
             selected_images = &g_synthetic_swapchain_right_images;
+        } else if (swapchain == g_synthetic_swapchain_right_b) {
+            selected_images = &g_synthetic_swapchain_right_b_images;
         }
         d3d12_images[index].texture = (*selected_images)[index].Get();
     }
@@ -942,10 +1008,12 @@ template <typename Function>
              &g_current_swapchain_images,
              &g_current_swapchain_b_images,
              &g_synthetic_swapchain_images,
+             &g_synthetic_swapchain_b_images,
              &g_application_swapchain_right_images,
              &g_current_swapchain_right_images,
              &g_current_swapchain_right_b_images,
-             &g_synthetic_swapchain_right_images}) {
+             &g_synthetic_swapchain_right_images,
+             &g_synthetic_swapchain_right_b_images}) {
         for (auto& image : *images) {
             if (FAILED(g_device->CreateCommittedResource(
                     &heap_properties,
@@ -1011,7 +1079,8 @@ template <typename Function>
     for (auto* images : {
              &g_d3d11_current_swapchain_images,
              &g_d3d11_current_swapchain_b_images,
-             &g_d3d11_synthetic_swapchain_images}) {
+             &g_d3d11_synthetic_swapchain_images,
+             &g_d3d11_synthetic_swapchain_b_images}) {
         for (auto& image : *images) {
             if (FAILED(g_d3d11_device->CreateTexture2D(
                     &description,
@@ -1523,9 +1592,13 @@ int main(int argc, char** argv) {
             g_end_frame_calls.load(std::memory_order_relaxed) == 4 &&
             g_locate_views_calls.load(std::memory_order_relaxed) == 3 &&
             // Two application swapchains, each backed by two current slots
-            // and one synthetic.
-            g_create_swapchain_calls.load(std::memory_order_relaxed) == 8 &&
-            g_destroy_swapchain_calls.load(std::memory_order_relaxed) == 8 &&
+            // and however many synthetic slots this depth needs.
+            g_synthetic_private_creates.load(std::memory_order_relaxed) >= 2 &&
+            g_synthetic_private_creates.load(std::memory_order_relaxed) <= 4 &&
+            g_create_swapchain_calls.load(std::memory_order_relaxed) ==
+                6 + g_synthetic_private_creates.load(std::memory_order_relaxed) &&
+            g_destroy_swapchain_calls.load(std::memory_order_relaxed) ==
+                g_create_swapchain_calls.load(std::memory_order_relaxed) &&
             g_application_release_calls.load(std::memory_order_relaxed) == 6 &&
             g_current_acquire_calls.load(std::memory_order_relaxed) == 4 &&
             g_current_wait_calls.load(std::memory_order_relaxed) == 4 &&
@@ -2550,9 +2623,15 @@ int main(int argc, char** argv) {
         g_begin_frame_calls.load(std::memory_order_relaxed) == 19 - arm_skip &&
         g_end_frame_calls.load(std::memory_order_relaxed) == 18 - arm_skip &&
         g_locate_views_calls.load(std::memory_order_relaxed) == 10 &&
-        // One application swapchain, two current slots and one synthetic.
-        g_create_swapchain_calls.load(std::memory_order_relaxed) == 4 &&
-        g_destroy_swapchain_calls.load(std::memory_order_relaxed) == 4 &&
+        // One application swapchain, two current slots, and however many
+        // synthetic slots this depth needs. Every private swapchain created is
+        // destroyed, which is the part that must hold at either depth.
+        g_synthetic_private_creates.load(std::memory_order_relaxed) >= 1 &&
+        g_synthetic_private_creates.load(std::memory_order_relaxed) <= 2 &&
+        g_create_swapchain_calls.load(std::memory_order_relaxed) ==
+            3 + g_synthetic_private_creates.load(std::memory_order_relaxed) &&
+        g_destroy_swapchain_calls.load(std::memory_order_relaxed) ==
+            g_create_swapchain_calls.load(std::memory_order_relaxed) &&
         g_application_release_calls.load(std::memory_order_relaxed) == 14 &&
         g_current_acquire_calls.load(std::memory_order_relaxed) == 10 - arm_skip &&
         g_current_wait_calls.load(std::memory_order_relaxed) == 10 - arm_skip &&
