@@ -15,6 +15,38 @@ file(COPY "${PIPELINE_INI}" DESTINATION "${WORK_DIR}")
 get_filename_component(pipeline_ini_name "${PIPELINE_INI}" NAME)
 file(RENAME "${WORK_DIR}/${pipeline_ini_name}" "${WORK_DIR}/ofxr_bridge.ini")
 
+# With QUEUE_LAYER_DLL, the bridge's Vulkan queue layer is put in the test
+# process's layer chain through the loader's explicit-layer path, and the
+# call chain checks that it loaded.
+if(DEFINED QUEUE_LAYER_DLL)
+    file(COPY "${QUEUE_LAYER_DLL}" DESTINATION "${WORK_DIR}")
+    get_filename_component(queue_layer_name "${QUEUE_LAYER_DLL}" NAME)
+    file(TO_NATIVE_PATH "${WORK_DIR}/${queue_layer_name}" queue_layer_native)
+    string(REPLACE "\\" "\\\\" queue_layer_json "${queue_layer_native}")
+    file(WRITE "${WORK_DIR}/VK_LAYER_OFXR_queue_serialize.json"
+"{
+  \"file_format_version\": \"1.2.0\",
+  \"layer\": {
+    \"name\": \"VK_LAYER_OFXR_queue_serialize\",
+    \"type\": \"GLOBAL\",
+    \"library_path\": \"${queue_layer_json}\",
+    \"api_version\": \"1.3.296\",
+    \"implementation_version\": \"1\",
+    \"description\": \"OFXR queue layer under test\",
+    \"functions\": {
+      \"vkNegotiateLoaderLayerInterfaceVersion\": \"OFXR_vkNegotiateLoaderLayerInterfaceVersion\",
+      \"vkGetInstanceProcAddr\": \"OFXR_vkGetInstanceProcAddr\",
+      \"vkGetDeviceProcAddr\": \"OFXR_vkGetDeviceProcAddr\"
+    }
+  }
+}
+")
+    file(TO_NATIVE_PATH "${WORK_DIR}" work_dir_native)
+    set(ENV{VK_LAYER_PATH} "${work_dir_native}")
+    set(ENV{VK_INSTANCE_LAYERS} "VK_LAYER_OFXR_queue_serialize")
+    set(ENV{OFXR_TEST_EXPECT_QUEUE_LAYER} "1")
+endif()
+
 get_filename_component(layer_name "${LAYER_DLL}" NAME)
 set(mode_arguments "${MODE}")
 if(MODE STREQUAL "default")

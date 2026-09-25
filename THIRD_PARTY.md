@@ -27,7 +27,8 @@ checkout.
 The Vulkan interop needs the Vulkan API declarations and nothing else: every
 entry point is resolved at run time through the `vulkan-1.dll` the
 application already loaded, so the layer links no Vulkan library and runs
-unchanged where none is installed. The headers are copied without modification
+unchanged where none is installed. `vk_layer.h` is the loader's layer
+interface, which `OFXR_vulkan_queue_layer.dll` implements. The headers are copied without modification
 from Khronos Vulkan-Headers tag `v1.3.296` from
 <https://github.com/KhronosGroup/Vulkan-Headers> into
 `external/Vulkan-Headers/include`. They are licensed under Apache-2.0 OR MIT,
@@ -41,6 +42,7 @@ preserved beside them and both license texts are in
 | `vulkan/vulkan_core.h` | `50AF5A157C8AAB7D90DCD929A05758B4DC3E78A619F46552BFD5CDE67B2D46C1` |
 | `vulkan/vk_platform.h` | `C4CABBCF699C90CDE344095AE54DA9435D117951AAD114BA3A540C5997D7906F` |
 | `vulkan/vulkan_win32.h` | `FA3A9263D1764B82B634180EC5D3010ADC216108BAE11C02B157F733073F87F8` |
+| `vulkan/vk_layer.h` | `861CD0EA24C7D81B935E5726520D184DBBC00E571F9089E17A723CCBBC1944E2` |
 | `vk_video/vulkan_video_codec_av1std.h` | `F3AB53DBFDEB36A349F674656D50BD507F2E4B3C883343DA74AACE0DF4F02A02` |
 | `vk_video/vulkan_video_codec_av1std_decode.h` | `96F923DC01CD3E266C081D88FA020525A20D63FFE4CE09A4C807A04EF3AAF97E` |
 | `vk_video/vulkan_video_codec_h264std.h` | `072EE6EAC80E73D93BB4BFE0059F99E581FC8B55B1437236185BB4FF377914B1` |

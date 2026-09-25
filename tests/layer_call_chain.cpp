@@ -1218,6 +1218,14 @@ template <typename Function>
         std::cerr << "failed to create the Vulkan instance\n";
         return false;
     }
+    // The test harness puts the bridge's queue-serialising layer in the
+    // chain (VK_LAYER_PATH + VK_INSTANCE_LAYERS); instance creation must
+    // have loaded it, or the run says nothing about it.
+    if (std::getenv("OFXR_TEST_EXPECT_QUEUE_LAYER") != nullptr &&
+        GetModuleHandleW(L"OFXR_vulkan_queue_layer.dll") == nullptr) {
+        std::cerr << "the OFXR Vulkan queue layer was not loaded\n";
+        return false;
+    }
     PFN_vkEnumeratePhysicalDevices enumerate_physical_devices = nullptr;
     PFN_vkGetPhysicalDeviceProperties get_physical_device_properties = nullptr;
     PFN_vkGetPhysicalDeviceQueueFamilyProperties get_queue_family_properties = nullptr;

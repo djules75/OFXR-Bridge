@@ -31,6 +31,15 @@ inline constexpr wchar_t kRegistrySubkey[] =
 inline constexpr wchar_t kManifestPrefix[] =
     L"XR_APILAYER_XRFrameBridge_manual-";
 inline constexpr wchar_t kManifestSuffix[] = L".json";
+// The Vulkan implicit layer that serialises queue submissions, registered
+// beside the OpenXR one while the bridge is armed with Vulkan support on.
+// Same value scheme: the manifest path as the value name, DWORD 0.
+inline constexpr wchar_t kVulkanRegistrySubkey[] =
+    L"SOFTWARE\\Khronos\\Vulkan\\ImplicitLayers";
+inline constexpr wchar_t kVulkanManifestPrefix[] =
+    L"OFXR_vulkan_queue_manual-";
+inline constexpr wchar_t kVulkanLayerName[] = L"VK_LAYER_OFXR_queue_serialize";
+inline constexpr wchar_t kVulkanLayerDll[] = L"OFXR_vulkan_queue_layer.dll";
 
 enum class RegistryScope {
     current_user,
@@ -76,6 +85,14 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_deep_pipeline(
     const std::filesystem::path& module_directory) noexcept;
 
+// `[ofxr] vulkan_support`: whether the layer generates for Vulkan sessions.
+// Off unless set to 1: a Vulkan session needs the queue-serialising Vulkan
+// layer registered beside this one, which the tray does only with its
+// "Vulkan support" option on, and without it the presenter's submissions
+// race the game's on its queue.
+[[nodiscard]] bool read_vulkan_support(
+    const std::filesystem::path& module_directory) noexcept;
+
 [[nodiscard]] ConfiguredNvidiaOptions read_nvidia_options(
     const std::filesystem::path& module_directory) noexcept;
 
@@ -96,15 +113,19 @@ struct ConfiguredNvidiaOptions {
     RegistryScope scope,
     std::wstring_view registry_subkey = kRegistrySubkey) noexcept;
 
+// prefix says which of the tray's manifests: the OpenXR layer's
+// (kManifestPrefix) or the Vulkan layer's (kVulkanManifestPrefix).
 [[nodiscard]] bool owned_manifest_path(
     const std::filesystem::path& manifest,
-    const std::filesystem::path& runtime_directory) noexcept;
+    const std::filesystem::path& runtime_directory,
+    std::wstring_view prefix = kManifestPrefix) noexcept;
 
 // Recognizes only tray-owned manual manifests in RuntimeLayer (legacy) or
 // RuntimeLayer/vNNN. Does not require the manifest or DLL to still exist.
 [[nodiscard]] bool owned_registration_path(
     const std::filesystem::path& manifest,
-    const std::filesystem::path& local_directory) noexcept;
+    const std::filesystem::path& local_directory,
+    std::wstring_view prefix = kManifestPrefix) noexcept;
 
 // Disable before deleting; read back registry state, and retain the JSON when
 // deregistration fails. The caller must report a false result, never claim Off.
@@ -120,6 +141,7 @@ struct ConfiguredNvidiaOptions {
     const std::filesystem::path& local_directory,
     RegistryScope scope,
     std::wstring* error = nullptr,
-    std::wstring_view registry_subkey = kRegistrySubkey) noexcept;
+    std::wstring_view registry_subkey = kRegistrySubkey,
+    std::wstring_view prefix = kManifestPrefix) noexcept;
 
 } // namespace xrfg::implicit_layer

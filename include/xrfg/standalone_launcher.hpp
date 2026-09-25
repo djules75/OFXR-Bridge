@@ -35,6 +35,10 @@ struct LauncherSettings {
     bool nvidia_bidirectional{};
     // "Prefer FPS over latency": the layer's deeper pipeline. On by default.
     bool deep_pipeline{true};
+    // "Vulkan support": generate for Vulkan sessions and register the
+    // queue-serialising Vulkan layer while armed. Off by default: an
+    // implicit Vulkan layer loads into every Vulkan process on the machine.
+    bool vulkan_support{};
     bool diagnostics{};
     FpsOverlayPosition overlay_position{FpsOverlayPosition::upper_right};
 };
@@ -46,6 +50,11 @@ struct LauncherSettings {
     NvidiaInputScale scale);
 [[nodiscard]] LauncherSettings parse_settings(std::string_view text);
 [[nodiscard]] std::string serialize_settings(const LauncherSettings& settings);
+
+// The Vulkan implicit layer's manifest, for the loader's ImplicitLayers key.
+[[nodiscard]] std::string build_vulkan_layer_manifest(
+    const std::filesystem::path& layer_dll,
+    std::uint32_t implementation_version);
 
 [[nodiscard]] std::string build_implicit_layer_manifest(
     const std::filesystem::path& layer_dll,

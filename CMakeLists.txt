@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.321.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.323.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -316,6 +316,22 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${CMAKE_CURRENT_SOURCE_DIR}/layer/ofxr_bridge.ini"
             "$<TARGET_FILE_DIR:XR_APILAYER_XRFrameBridge_diagnostic>/ofxr_bridge.ini")
 
+    # The Vulkan implicit layer that serialises queue submissions; see the
+    # comment at the top of its source. Links nothing but the CRT.
+    add_library(OFXR_vulkan_queue_layer SHARED
+        src/vulkan_layer/vulkan_queue_layer.cpp)
+    target_include_directories(OFXR_vulkan_queue_layer PRIVATE
+        "${XRFG_VULKAN_INCLUDE_DIR}")
+    target_compile_features(OFXR_vulkan_queue_layer PRIVATE cxx_std_20)
+    target_compile_definitions(OFXR_vulkan_queue_layer PRIVATE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+        VK_NO_PROTOTYPES)
+    if(MSVC)
+        target_compile_options(OFXR_vulkan_queue_layer PRIVATE
+            /W4 /permissive- /EHsc)
+    endif()
+
     if(XRFG_BUILD_STANDALONE)
         add_library(xrfg_standalone_core STATIC
             src/tray/standalone_launcher.cpp
@@ -364,7 +380,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 "$<TARGET_FILE_DIR:OFXRBridgeTray>/ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll"
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                 "$<TARGET_FILE_DIR:XR_APILAYER_XRFrameBridge_diagnostic>/ofxr_bridge.ini"
-                "$<TARGET_FILE_DIR:OFXRBridgeTray>/ofxr/ofxr_bridge.ini")
+                "$<TARGET_FILE_DIR:OFXRBridgeTray>/ofxr/ofxr_bridge.ini"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:OFXR_vulkan_queue_layer>"
+                "$<TARGET_FILE_DIR:OFXRBridgeTray>/ofxr/OFXR_vulkan_queue_layer.dll")
+        add_dependencies(OFXRBridgeTray OFXR_vulkan_queue_layer)
 
         if(XRFG_BUILD_TESTS)
             add_executable(xrfg_standalone_launcher_tests
@@ -488,7 +508,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 XR_USE_PLATFORM_WIN32)
         endif()
         target_link_libraries(xrfg_layer_call_chain PRIVATE d3d11 d3d12 dxgi)
-        foreach(mode inverted-fov d3d11-inverted-fov vulkan)
+        foreach(mode inverted-fov d3d11-inverted-fov)
             add_test(NAME xrfg_layer_${mode} COMMAND xrfg_layer_call_chain
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
                 "${CMAKE_CURRENT_BINARY_DIR}/xrfg-${mode}.log" ${mode})
@@ -605,7 +625,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         # latency" unticked), which the shipped ini turns on: each runs from a
         # scratch directory whose ofxr_bridge.ini turns it off.
         foreach(mode default split-eye cropped-split-eye double-wide
-                d3d11-interop vulkan steamvr-presenter flight-simulator
+                d3d11-interop steamvr-presenter flight-simulator
                 uevr-pipelined-time flight-destroy-swapchain
                 steamvr-destroy-space)
             add_test(
@@ -618,6 +638,22 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                     "-DMODE=${mode}"
                     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
             set_tests_properties(xrfg_layer_shallow_${mode} PROPERTIES TIMEOUT 60)
+        endforeach()
+        # The Vulkan scenarios need vulkan_support on, which the shipped ini
+        # leaves off, and run with the queue layer in the chain, at both
+        # depths.
+        foreach(depth deep shallow)
+            add_test(
+                NAME xrfg_layer_vulkan_${depth}
+                COMMAND "${CMAKE_COMMAND}"
+                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                    "-DQUEUE_LAYER_DLL=$<TARGET_FILE:OFXR_vulkan_queue_layer>"
+                    "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_vulkan_${depth}.ini"
+                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/vulkan-${depth}"
+                    "-DMODE=vulkan"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
+            set_tests_properties(xrfg_layer_vulkan_${depth} PROPERTIES TIMEOUT 60)
         endforeach()
 
         add_test(

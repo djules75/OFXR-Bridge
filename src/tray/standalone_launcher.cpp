@@ -161,6 +161,9 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "deep_pipeline") {
                     settings.deep_pipeline = value == "1" ||
                         lower_ascii(value) == "true";
+                } else if (key == "vulkan_support") {
+                    settings.vulkan_support = value == "1" ||
+                        lower_ascii(value) == "true";
                 } else if (key == "overlay_position") {
                     settings.overlay_position = parse_overlay_position(lower_ascii(value));
                 } else if (key == "diagnostics") {
@@ -186,9 +189,39 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\nnvidia_bidirectional=" +
            (settings.nvidia_bidirectional ? "1" : "0") +
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
+           "\r\nvulkan_support=" + (settings.vulkan_support ? "1" : "0") +
            "\r\ndiagnostics=" + (settings.diagnostics ? "1" : "0") +
            "\r\noverlay_position=" + overlay_position_name(settings.overlay_position) +
            "\r\n";
+}
+
+std::string build_vulkan_layer_manifest(
+    const std::filesystem::path& layer_dll,
+    std::uint32_t implementation_version) {
+    const std::string escaped_path = escape_json(wide_to_utf8(
+        std::filesystem::absolute(layer_dll).lexically_normal().native()));
+    return "{\n"
+           "  \"file_format_version\": \"1.2.0\",\n"
+           "  \"layer\": {\n"
+           "    \"name\": \"VK_LAYER_OFXR_queue_serialize\",\n"
+           "    \"type\": \"GLOBAL\",\n"
+           "    \"library_path\": \"" + escaped_path + "\",\n"
+           "    \"api_version\": \"1.3.296\",\n"
+           "    \"implementation_version\": \"" +
+           std::to_string(implementation_version) + "\",\n"
+           "    \"description\": \"OFXR Bridge V" +
+           std::to_string(implementation_version) +
+           ": serialises Vulkan queue submissions while the bridge is armed\",\n"
+           "    \"functions\": {\n"
+           "      \"vkNegotiateLoaderLayerInterfaceVersion\": \"OFXR_vkNegotiateLoaderLayerInterfaceVersion\",\n"
+           "      \"vkGetInstanceProcAddr\": \"OFXR_vkGetInstanceProcAddr\",\n"
+           "      \"vkGetDeviceProcAddr\": \"OFXR_vkGetDeviceProcAddr\"\n"
+           "    },\n"
+           "    \"disable_environment\": {\n"
+           "      \"OFXR_DISABLE_VULKAN_QUEUE_LAYER\": \"1\"\n"
+           "    }\n"
+           "  }\n"
+           "}\n";
 }
 
 std::string build_implicit_layer_manifest(
@@ -225,6 +258,7 @@ std::string build_runtime_ini(
            "\r\nnvidia_bidirectional=" +
            (settings.nvidia_bidirectional ? "1" : "0") +
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
+           "\r\nvulkan_support=" + (settings.vulkan_support ? "1" : "0") +
            "\r\n\r\n[diagnostics]\r\nlogging_enabled=" +
            (settings.diagnostics ? "1" : "0") +
            "\r\nmax_file_mb=" + std::to_string(max_file_mb) +

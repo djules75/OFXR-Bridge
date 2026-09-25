@@ -46,6 +46,7 @@ enum MenuCommand : UINT {
     nvidia_scale_three_quarter = 116,
     nvidia_scale_half = 117,
     toggle_deep_pipeline = 118,
+    toggle_vulkan_support = 119,
     toggle_diagnostics = 120,
     overlay_off = 121,
     overlay_upper_left = 122,
@@ -66,6 +67,9 @@ struct AppState {
     std::filesystem::path local_directory;
     std::filesystem::path settings_path;
     std::filesystem::path armed_manifest;
+    // The Vulkan layer's manifest, registered beside the OpenXR one while
+    // Vulkan support is on; empty otherwise.
+    std::filesystem::path armed_vulkan_manifest;
     xrfg::implicit_layer::RegistryScope armed_scope{
         xrfg::implicit_layer::RegistryScope::current_user};
     HANDLE arm_signal{};
@@ -283,7 +287,9 @@ void log_lifecycle(const std::filesystem::path& local_directory,
 [[nodiscard]] bool prepare_runtime_layer(
     AppState& state,
     std::filesystem::path* manifest,
+    std::filesystem::path* vulkan_manifest,
     std::wstring* error) {
+    if (vulkan_manifest) vulkan_manifest->clear();
     try {
         const auto source_dll = state.executable_directory / L"ofxr" /
             L"XR_APILAYER_XRFrameBridge_diagnostic.dll";
@@ -325,6 +331,43 @@ void log_lifecycle(const std::filesystem::path& local_directory,
             return false;
         }
         *manifest = generated_manifest;
+        if (state.settings.vulkan_support && vulkan_manifest) {
+            // The queue-serialising Vulkan layer goes beside the OpenXR one,
+            // in the same version folder, with a manifest of the same shape.
+            const auto source_vulkan_dll = state.executable_directory / L"ofxr" /
+                xrfg::implicit_layer::kVulkanLayerDll;
+            if (!std::filesystem::is_regular_file(source_vulkan_dll)) {
+                if (error) {
+                    *error = L"The bundled OFXR Vulkan layer is missing:\r\n" +
+                             source_vulkan_dll.wstring();
+                }
+                remove_manifest_file(generated_manifest);
+                return false;
+            }
+            const auto runtime_vulkan_dll =
+                directory / xrfg::implicit_layer::kVulkanLayerDll;
+            if (!xrfg::standalone::install_runtime_layer_dll(
+                    source_vulkan_dll, runtime_vulkan_dll)) {
+                if (error) *error = last_error_message(L"Installing the Vulkan layer");
+                remove_manifest_file(generated_manifest);
+                return false;
+            }
+            const std::wstring vulkan_manifest_name =
+                std::wstring(xrfg::implicit_layer::kVulkanManifestPrefix) +
+                std::to_wstring(GetCurrentProcessId()) + L"-" +
+                std::to_wstring(last_arm_id) +
+                xrfg::implicit_layer::kManifestSuffix;
+            const auto generated_vulkan_manifest = directory / vulkan_manifest_name;
+            if (!write_text_atomic(
+                    generated_vulkan_manifest,
+                    xrfg::standalone::build_vulkan_layer_manifest(
+                        runtime_vulkan_dll, kImplementationVersion),
+                    error)) {
+                remove_manifest_file(generated_manifest);
+                return false;
+            }
+            *vulkan_manifest = generated_vulkan_manifest;
+        }
         return true;
     } catch (...) {
         if (error) *error = L"Unable to prepare the manual OpenXR layer.";
@@ -336,7 +379,8 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     const AppState& state,
     const std::filesystem::path& manifest,
     xrfg::implicit_layer::RegistryScope scope,
-    std::wstring* error) {
+    std::wstring* error,
+    const std::filesystem::path& vulkan_manifest = {}) {
     std::wstring command = xrfg::standalone::quote_windows_argument(
         (state.executable_directory / L"OFXRBridgeTray.exe").wstring());
     command += L" ";
@@ -347,6 +391,10 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     command += std::to_wstring(GetCurrentProcessId());
     command += L" ";
     command += xrfg::implicit_layer::registry_scope_name(scope);
+    if (!vulkan_manifest.empty()) {
+        command += L" ";
+        command += xrfg::standalone::quote_windows_argument(vulkan_manifest.wstring());
+    }
     std::vector<wchar_t> mutable_command(command.begin(), command.end());
     mutable_command.push_back(L'\0');
 
@@ -393,6 +441,20 @@ void log_lifecycle(const std::filesystem::path& local_directory,
                 *error += detail;
             }
         }
+        // The Vulkan layer's registrations, in the loader's own key.
+        std::wstring vulkan_detail;
+        if (!xrfg::implicit_layer::cleanup_owned_registrations(
+                state.local_directory, scope, &vulkan_detail,
+                xrfg::implicit_layer::kVulkanRegistrySubkey,
+                xrfg::implicit_layer::kVulkanManifestPrefix)) {
+            success = false;
+            if (error) {
+                if (!error->empty()) *error += L"\r\n";
+                *error += xrfg::implicit_layer::registry_scope_name(scope);
+                *error += L" (Vulkan): ";
+                *error += vulkan_detail;
+            }
+        }
     }
     return success;
 }
@@ -432,6 +494,9 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     }
     if (state.settings.deep_pipeline) {
         tooltip += L" - prefer FPS";
+    }
+    if (state.settings.vulkan_support) {
+        tooltip += L" - Vulkan";
     }
     if (state.settings.diagnostics) {
         tooltip += L" - recorder on";
@@ -497,6 +562,7 @@ void show_balloon(
     }
     state.armed = false;
     state.armed_manifest.clear();
+    state.armed_vulkan_manifest.clear();
     state.armed_scope = xrfg::implicit_layer::RegistryScope::current_user;
     refresh_tray_icon(state);
     return true;
@@ -507,10 +573,22 @@ void show_balloon(
     if (!disarm_bridge(state, error)) return false;
 
     std::filesystem::path manifest;
+    std::filesystem::path vulkan_manifest;
     const auto scope = xrfg::implicit_layer::preferred_registry_scope();
-    if (!prepare_runtime_layer(state, &manifest, error) ||
+    if (!prepare_runtime_layer(state, &manifest, &vulkan_manifest, error) ||
         !xrfg::implicit_layer::register_manifest(
-            manifest, scope, error, state.registry_subkey)) {
+            manifest, scope, error, state.registry_subkey) ||
+        (!vulkan_manifest.empty() &&
+         !xrfg::implicit_layer::register_manifest(
+             vulkan_manifest, scope, error,
+             xrfg::implicit_layer::kVulkanRegistrySubkey))) {
+        if (!vulkan_manifest.empty()) {
+            std::wstring cleanup_error;
+            if (!xrfg::implicit_layer::retire_manifest(
+                    vulkan_manifest, scope, &cleanup_error,
+                    xrfg::implicit_layer::kVulkanRegistrySubkey))
+                log_lifecycle(state.local_directory, L"arm-failure-cleanup", cleanup_error);
+        }
         if (!manifest.empty()) {
             std::wstring cleanup_error;
             if (!xrfg::implicit_layer::retire_manifest(
@@ -524,8 +602,13 @@ void show_balloon(
         }
         return false;
     }
-    if (!spawn_cleanup_helper(state, manifest, scope, error)) {
+    if (!spawn_cleanup_helper(state, manifest, scope, error, vulkan_manifest)) {
         std::wstring ignored;
+        if (!vulkan_manifest.empty()) {
+            static_cast<void>(xrfg::implicit_layer::retire_manifest(
+                vulkan_manifest, scope, &ignored,
+                xrfg::implicit_layer::kVulkanRegistrySubkey));
+        }
         static_cast<void>(xrfg::implicit_layer::retire_manifest(
             manifest, scope, &ignored, state.registry_subkey));
         if (state.arm_signal) {
@@ -677,6 +760,11 @@ void show_context_menu(AppState& state) {
         L"Prefer FPS over latency");
     AppendMenuW(
         menu,
+        MF_STRING | (state.settings.vulkan_support ? MF_CHECKED : MF_UNCHECKED),
+        toggle_vulkan_support,
+        L"Vulkan support (experimental)");
+    AppendMenuW(
+        menu,
         MF_STRING | (state.settings.diagnostics ? MF_CHECKED : MF_UNCHECKED),
         toggle_diagnostics,
         L"Bridge flight recorder");
@@ -782,6 +870,33 @@ void handle_command(AppState& state, UINT command) {
             L"(about 11 ms at 90 Hz). Leave off if the game already runs "
             L"comfortably. Takes effect the next time the game starts.");
         break;
+    case toggle_vulkan_support: {
+        state.settings.vulkan_support = !state.settings.vulkan_support;
+        save_settings(state);
+        // The Vulkan layer is registered at arm, so an armed bridge re-arms
+        // to add or remove it; the runtime ini is rewritten on the way.
+        if (state.armed) {
+            std::wstring error;
+            if (!arm_bridge(state, &error)) {
+                show_error(state.window, error);
+            }
+        }
+        refresh_tray_icon(state);
+        show_balloon(
+            state,
+            state.settings.vulkan_support
+                ? L"Vulkan support: on"
+                : L"Vulkan support: off",
+            state.settings.vulkan_support
+                ? L"Frame generation for Vulkan games (No Man's Sky through "
+                  L"OpenComposite). While the bridge is armed a small Vulkan "
+                  L"layer is registered that serialises queue submissions; it "
+                  L"is removed when you disarm. Takes effect the next time the "
+                  L"game starts."
+                : L"Vulkan games are passed through unchanged and the Vulkan "
+                  L"layer is no longer registered.");
+        break;
+    }
     case overlay_off:
     case overlay_upper_left:
     case overlay_upper_right:
@@ -943,9 +1058,17 @@ LRESULT CALLBACK window_procedure(
     HANDLE parent, const std::filesystem::path& manifest,
     const std::filesystem::path& local_directory, std::wstring* error,
     xrfg::implicit_layer::RegistryScope scope,
-    std::wstring_view registry_subkey = xrfg::implicit_layer::kRegistrySubkey) {
+    std::wstring_view registry_subkey = xrfg::implicit_layer::kRegistrySubkey,
+    const std::filesystem::path& vulkan_manifest = {}) {
     if (!xrfg::implicit_layer::owned_registration_path(manifest, local_directory)) {
         if (error) *error = L"Cleanup watchdog refused an unowned manifest.";
+        return false;
+    }
+    if (!vulkan_manifest.empty() &&
+        !xrfg::implicit_layer::owned_registration_path(
+            vulkan_manifest, local_directory,
+            xrfg::implicit_layer::kVulkanManifestPrefix)) {
+        if (error) *error = L"Cleanup watchdog refused an unowned Vulkan manifest.";
         return false;
     }
     while (xrfg::implicit_layer::manifest_registered(manifest, scope, registry_subkey)) {
@@ -953,8 +1076,21 @@ LRESULT CALLBACK window_procedure(
             break;
     }
     // Scoped to this arm only: an old helper must never revoke a newer arm.
-    return xrfg::implicit_layer::retire_manifest(
+    bool retired = xrfg::implicit_layer::retire_manifest(
         manifest, scope, error, registry_subkey);
+    if (!vulkan_manifest.empty()) {
+        std::wstring vulkan_error;
+        if (!xrfg::implicit_layer::retire_manifest(
+                vulkan_manifest, scope, &vulkan_error,
+                xrfg::implicit_layer::kVulkanRegistrySubkey)) {
+            retired = false;
+            if (error) {
+                if (!error->empty()) *error += L"\r\n";
+                *error += vulkan_error;
+            }
+        }
+    }
+    return retired;
 }
 
 [[nodiscard]] std::optional<int> run_cleanup_helper() {
@@ -967,11 +1103,13 @@ LRESULT CALLBACK window_procedure(
         LocalFree(arguments);
         return std::nullopt;
     }
-    if (argument_count != 5) {
+    if (argument_count != 5 && argument_count != 6) {
         LocalFree(arguments);
         return EXIT_FAILURE;
     }
     const std::filesystem::path manifest(arguments[2]);
+    const std::filesystem::path vulkan_manifest(
+        argument_count == 6 ? arguments[5] : L"");
     wchar_t* end = nullptr;
     const unsigned long parsed_pid = std::wcstoul(arguments[3], &end, 10);
     const bool valid_pid = end != arguments[3] && end != nullptr && *end == L'\0' &&
@@ -1000,7 +1138,8 @@ LRESULT CALLBACK window_procedure(
     HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(parsed_pid));
     std::wstring error;
     const bool cleaned = watch_registered_arm(parent, manifest,
-        local_app_data() / L"OFXR Bridge", &error, scope);
+        local_app_data() / L"OFXR Bridge", &error, scope,
+        xrfg::implicit_layer::kRegistrySubkey, vulkan_manifest);
     if (parent != nullptr) {
         CloseHandle(parent);
     }

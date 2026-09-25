@@ -160,6 +160,9 @@ struct SteamVrDelivery::Impl {
     // Held separately because GetTimeSinceLastVsync is on IVRSystem, not the
     // compositor. Its absence is not fatal: the delivered rate still works.
     vr::IVRSystem* system{};
+    // display_period()'s cache.
+    std::optional<std::chrono::nanoseconds> display_period;
+    std::chrono::steady_clock::time_point display_period_read{};
     AttachRoute route{AttachRoute::none};
     bool owns_context{};
 
@@ -607,6 +610,43 @@ SteamVrDelivery::vsync_anchor() noexcept {
         anchor.cost = std::chrono::duration_cast<std::chrono::microseconds>(
             now - entered);
         return anchor;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::chrono::nanoseconds>
+SteamVrDelivery::display_period() noexcept {
+    try {
+        if (!impl_) {
+            return std::nullopt;
+        }
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->established) {
+            return std::nullopt;
+        }
+        if (!impl_->attempted) {
+            impl_->attach();
+        }
+        if (!impl_->usable || impl_->system == nullptr) {
+            return std::nullopt;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (impl_->display_period_read != std::chrono::steady_clock::time_point{} &&
+            now - impl_->display_period_read < std::chrono::seconds(2)) {
+            return impl_->display_period;
+        }
+        impl_->display_period_read = now;
+        vr::ETrackedPropertyError error = vr::TrackedProp_Success;
+        const float hertz = impl_->system->GetFloatTrackedDeviceProperty(
+            vr::k_unTrackedDeviceIndex_Hmd, vr::Prop_DisplayFrequency_Float, &error);
+        if (error != vr::TrackedProp_Success || !(hertz >= 20.0F) || hertz > 500.0F) {
+            impl_->display_period.reset();
+            return std::nullopt;
+        }
+        impl_->display_period = std::chrono::nanoseconds(
+            static_cast<std::int64_t>(1e9 / static_cast<double>(hertz)));
+        return impl_->display_period;
     } catch (...) {
         return std::nullopt;
     }

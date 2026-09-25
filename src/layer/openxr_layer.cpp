@@ -840,6 +840,9 @@ struct SessionState {
     // whole pipeline whenever the scene got heavy, costing a repeated frame
     // each time, and where it settled would depend on what the player did.
     bool deep_pipeline{};
+    // `[ofxr] vulkan_support`: off, a Vulkan session passes through. See
+    // implicit_layer::read_vulkan_support for why it is a choice.
+    bool vulkan_support{};
     xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options{};
     bool dlss_motion_vectors{};
     SessionGraphicsBinding graphics_binding{SessionGraphicsBinding::none};
@@ -1503,6 +1506,7 @@ enum class SwapchainEligibilityReason : std::int64_t {
     vulkan_interop_initialize_failed = 19,
     unsupported_vulkan_format = 20,
     invalid_vulkan_image = 21,
+    vulkan_support_off = 22,
 };
 
 void log_swapchain_eligibility(
@@ -3657,6 +3661,8 @@ XrResult layer_create_session_impl(
     // the private swapchain rings and the admission bounds.
     state->deep_pipeline =
         xrfg::implicit_layer::read_deep_pipeline(current_layer_directory());
+    state->vulkan_support =
+        xrfg::implicit_layer::read_vulkan_support(current_layer_directory());
     state->menu_enabled = initial_control.desired.enabled;
     state->dlss_motion_vectors = initial_control.desired.motion_vectors == 1;
     state->control_revision = initial_control.revision;
@@ -3813,6 +3819,7 @@ XrResult layer_create_session_impl(
     // the LUID its physical device reports, with a high-priority queue that
     // all of synthesis runs on. Capability bit 64.
     if (state->graphics_binding == SessionGraphicsBinding::vulkan &&
+        state->vulkan_support &&
         state->vulkan_binding.device != VK_NULL_HANDLE) {
         const HRESULT bridge_device_result =
             xrfg::create_d3d12_device_for_vulkan(
@@ -4252,6 +4259,18 @@ XrResult layer_wait_frame_impl(
             state->minimum_runtime_display_period =
                 frame_state->predictedDisplayPeriod;
         }
+        // The runtime's period can be a throttled one - SteamVR reports two
+        // refreshes for an application it is throttling, and a session
+        // throttled from its first frame never sees anything shorter. The
+        // compositor's own refresh rate bounds it wherever it is known.
+        if (!use_continuous_presenter && state->steamvr_delivery) {
+            if (const auto scanout = state->steamvr_delivery->display_period();
+                scanout && scanout->count() > 0 &&
+                (state->minimum_runtime_display_period == 0 ||
+                 scanout->count() < state->minimum_runtime_display_period)) {
+                state->minimum_runtime_display_period = scanout->count();
+            }
+        }
         // A runtime that is pacing this application blocks the wait for most
         // of a display period. SteamVR returns in about 1.55 ms against
         // 11.11 ms, which is not pacing anything. Count the waits that came
@@ -4684,7 +4703,10 @@ XrResult layer_enumerate_swapchain_images_impl(
             if (!has_generation && !state->generation_declined &&
                 !state->session->generation_budget_exhausted.load(
                     std::memory_order_acquire)) {
-                if (static_image) {
+                if (!state->session->vulkan_support) {
+                    eligibility_reason =
+                        SwapchainEligibilityReason::vulkan_support_off;
+                } else if (static_image) {
                     eligibility_reason =
                         SwapchainEligibilityReason::static_image;
                     eligibility_detail = state->create_info.createFlags;
@@ -5918,6 +5940,19 @@ void continuous_presenter_main(
                      state->presenter_display_period)) {
                 state->presenter_display_period =
                     frame_state.predictedDisplayPeriod;
+            }
+            // And never longer than the headset's own scanout: the runtime
+            // reports a throttled period as if it were the display's. The
+            // grid paced to 27.8 ms on a 72 Hz headset that way, and the
+            // presenter, running at 36, kept the throttle going.
+            if (state->steamvr_delivery) {
+                if (const auto scanout = state->steamvr_delivery->display_period();
+                    scanout && scanout->count() >= kShortestCredibleDisplayPeriod &&
+                    scanout->count() <= kLongestCredibleDisplayPeriod &&
+                    (state->presenter_display_period == 0 ||
+                     scanout->count() < state->presenter_display_period)) {
+                    state->presenter_display_period = scanout->count();
+                }
             }
         }
         state->presenter_condition.notify_all();

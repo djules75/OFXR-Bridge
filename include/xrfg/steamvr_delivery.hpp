@@ -181,6 +181,16 @@ public:
     [[nodiscard]] std::optional<std::chrono::nanoseconds>
     frame_time_remaining() noexcept;
 
+    // The headset's scanout period, from Prop_DisplayFrequency_Float. The
+    // runtime's predictedDisplayPeriod is not it: when SteamVR throttles an
+    // application it reports the throttled period, two refreshes, and a
+    // session throttled from its first frame never sees anything shorter -
+    // No Man's Sky on OpenComposite at 72 Hz paced itself to 27.8 ms and
+    // delivered 36. Read from the compositor every couple of seconds, since a
+    // headset can change mode mid-session. Empty when unavailable.
+    [[nodiscard]] std::optional<std::chrono::nanoseconds>
+    display_period() noexcept;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

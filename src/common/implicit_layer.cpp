@@ -223,6 +223,20 @@ bool read_deep_pipeline(
     }
 }
 
+bool read_vulkan_support(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (module_directory.empty()) {
+            return false;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"vulkan_support", 0, ini_path.c_str()) == 1;
+    } catch (...) {
+        return false;
+    }
+}
+
 ConfiguredNvidiaOptions read_nvidia_options(
     const std::filesystem::path& module_directory) noexcept {
     ConfiguredNvidiaOptions options;
@@ -411,7 +425,8 @@ bool manifest_registered(
 
 bool owned_manifest_path(
     const std::filesystem::path& manifest,
-    const std::filesystem::path& runtime_directory) noexcept {
+    const std::filesystem::path& runtime_directory,
+    std::wstring_view prefix) noexcept {
     try {
         const auto normalized_manifest =
             std::filesystem::absolute(manifest).lexically_normal();
@@ -423,7 +438,6 @@ bool owned_manifest_path(
             return false;
         }
         const std::wstring filename = normalized_manifest.filename().wstring();
-        const std::wstring_view prefix(kManifestPrefix);
         const std::wstring_view suffix(kManifestSuffix);
         return filename.size() > prefix.size() + suffix.size() &&
                equal_case_insensitive(
@@ -438,7 +452,8 @@ bool owned_manifest_path(
 
 bool owned_registration_path(
     const std::filesystem::path& manifest,
-    const std::filesystem::path& local_directory) noexcept {
+    const std::filesystem::path& local_directory,
+    std::wstring_view prefix) noexcept {
     try {
         if (!manifest.is_absolute() || !local_directory.is_absolute()) return false;
         for (const auto& part : manifest) {
@@ -455,9 +470,9 @@ bool owned_registration_path(
             for (std::size_t i = 1; i < version.size(); ++i)
                 if (version[i] < L'0' || version[i] > L'9') return false;
         }
-        if (!owned_manifest_path(manifest, parent)) return false;
+        if (!owned_manifest_path(manifest, parent, prefix)) return false;
         const auto name = manifest.filename().wstring();
-        const std::wstring_view prefix(kManifestPrefix), suffix(kManifestSuffix);
+        const std::wstring_view suffix(kManifestSuffix);
         const auto id = std::wstring_view(name).substr(
             prefix.size(), name.size() - prefix.size() - suffix.size());
         const auto dash = id.find(L'-');
@@ -504,7 +519,8 @@ bool cleanup_owned_registrations(
     const std::filesystem::path& local_directory,
     RegistryScope scope,
     std::wstring* error,
-    std::wstring_view registry_subkey) noexcept {
+    std::wstring_view registry_subkey,
+    std::wstring_view prefix) noexcept {
     try {
         if (error) error->clear();
         bool success = true;
@@ -533,7 +549,7 @@ bool cleanup_owned_registrations(
                     break;
                 }
                 const std::filesystem::path path(std::wstring(name.data(), count));
-                if (owned_registration_path(path, local_directory)) manifests.push_back(path);
+                if (owned_registration_path(path, local_directory, prefix)) manifests.push_back(path);
             }
             RegCloseKey(key);
         } else if (opened != ERROR_FILE_NOT_FOUND && opened != ERROR_PATH_NOT_FOUND) {
@@ -562,14 +578,14 @@ bool cleanup_owned_registrations(
             if (scan_error) fail(L"Unable to inspect OFXR manifest cache: " + directory.wstring());
         };
         if (safe_directory(local_directory) && safe_directory(root)) {
+            const std::wstring probe = std::wstring(prefix) + L"1-1.json";
             scan_directory(root, [&](const std::filesystem::path& entry) {
-                if (owned_registration_path(entry, local_directory)) {
+                if (owned_registration_path(entry, local_directory, prefix)) {
                     manifests.push_back(entry);
                 } else if (safe_directory(entry) &&
-                    owned_registration_path(entry /
-                        L"XR_APILAYER_XRFrameBridge_manual-1-1.json", local_directory)) {
+                    owned_registration_path(entry / probe, local_directory, prefix)) {
                     scan_directory(entry, [&](const std::filesystem::path& child) {
-                        if (owned_registration_path(child, local_directory))
+                        if (owned_registration_path(child, local_directory, prefix))
                             manifests.push_back(child);
                     });
                 }
@@ -613,7 +629,7 @@ bool cleanup_owned_registrations(
                     break;
                 }
                 const std::filesystem::path path(std::wstring(name.data(), count));
-                if (owned_registration_path(path, local_directory))
+                if (owned_registration_path(path, local_directory, prefix))
                     fail(L"OFXR registration remains after cleanup: " + path.wstring());
             }
             RegCloseKey(key);
