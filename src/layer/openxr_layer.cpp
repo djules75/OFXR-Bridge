@@ -5794,31 +5794,51 @@ void stop_continuous_presenter(
 // must not turn a submitted frame into an error - it just stops waiting.
 //
 // This is the gate that paces the application on the presenter path. The
-// capacity bounds in xrEndFrame sit behind it and are normally slack, so
+// capacity bounds in xrEndFrame sit beside it and are normally slack, so
 // anything meant to move where the application runs has to move this.
+//
+// Where it is called differs by depth. The shallow pipeline calls it after the
+// pair is handed over. The deeper pipeline calls it at admission, before the
+// pair's synthesis is queued, and that placement matters on the GPU. Called
+// after the hand-over, the application queues synthesis the moment its images
+// are captured, so synthesis has to sit behind the frame the game has only
+// just submitted and runs that much later - into the synthetic's compositor
+// slot once the game's frame is heavy. Called at admission, synthesis is queued
+// about a pair after the capture, when that frame has long finished, and starts
+// at once. Measured on Cyberpunk 2077 at 3088x2592, at the same depth
+// (synthetic handed over 31-32 ms after its pair): after the hand-over lost 165
+// compositor frames in 75 s, almost all on synthetic slots; at admission, 3.
+//
+// It has to be this gate at admission, not the capacity bound alone. The bound
+// counts retirements, so it always lets the application go straight after a
+// real frame; this count follows the phase the presenter's depth rule sets,
+// and on Hogwarts Legacy at 8344x3268 that put the release after the synthetic
+// instead. The one run released there held 87+ for 67% of the time; the runs
+// released after the real frame, 44-46%.
 void wait_for_presenter_pair(
     const std::shared_ptr<SessionState>& state) noexcept {
     try {
-        // Two presenter frames per release in the deeper pipeline too. The
-        // pair rate does not follow this number - the application enqueues
-        // one pair per release and the presenter spends two frames on it - so
-        // all it sets is the phase at which the application renders.
-        //
-        // Releasing a frame earlier was tried as the way to deepen the
-        // pipeline, and it is not one. Where the layer had been holding the
-        // application back it did give synthesis more time, but by moving
-        // the application's whole frame earlier against the presentation
-        // grid - latency without a slot, since the synthetic still went out at
-        // the first grid point after its pair was ready - and on a title the
-        // layer was not holding back it changed nothing. The depth is the
-        // presenter's to enforce: see where it pops a submission.
+        // The pair rate does not follow this number: the application enqueues
+        // one pair per release and the presenter spends two frames on it, so
+        // all it sets is the phase at which the application renders. The
+        // depth is not set here either - the presenter enforces it where it
+        // pops a submission.
         constexpr std::uint64_t kPresenterFramesPerPair = 2;
         const auto entered = std::chrono::steady_clock::now();
         std::unique_lock lock(state->presenter_mutex);
         state->presenter_condition.wait(lock, [&] {
+            // A presenter with nothing queued and nothing to repeat stops
+            // counting until the application gives it something - which,
+            // when this is called at admission, is what it is waiting to do.
+            // A pipelined application leaves it in that state after every
+            // submission, and so does a swapchain teardown.
+            const bool presenter_starved =
+                state->presenter_submissions.empty() &&
+                state->presenter_last_frame == nullptr;
             return state->presenter_frame_serial >=
                        state->application_served_serial +
                            kPresenterFramesPerPair ||
+                   presenter_starved ||
                    XR_FAILED(state->presenter_failure) ||
                    state->presenter_stop_requested;
         });
@@ -7902,6 +7922,15 @@ XrResult layer_end_frame_impl(
         if (XR_FAILED(capacity_result)) {
             return capacity_result;
         }
+        if (state->deep_pipeline && metadata_pairable) {
+            // The once-per-pair hold, ahead of synthesis rather than after the
+            // hand-over: see wait_for_presenter_pair for why the placement
+            // matters. Only a frame that will pair is held, as it was after
+            // the hand-over; a prime costs the presenter one frame, not two.
+            // It returns without an error on a presenter failure; the enqueue
+            // below is what refuses the frame.
+            wait_for_presenter_pair(state);
+        }
     }
     // The synthetic is displayed one display period before the current frame,
     // so it should show the scene as it was one period before the current
@@ -8320,8 +8349,12 @@ XrResult layer_end_frame_impl(
         //
         // The frame lock goes first: an application whose wait runs on another
         // thread must not be shut out of xrWaitFrame while this waits.
+        //
+        // The deeper pipeline has already held this frame at admission.
         frame_call_lock.unlock();
-        wait_for_presenter_pair(state);
+        if (!state->deep_pipeline) {
+            wait_for_presenter_pair(state);
+        }
         return result;
     }
 
