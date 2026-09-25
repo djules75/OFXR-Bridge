@@ -4836,11 +4836,20 @@ HRESULT D3D12FrameSynthesizer::synchronize_consumer_queue(
         if (impl_ == nullptr || queue == nullptr) {
             return E_INVALIDARG;
         }
-        // The synthetic's value, never the pair's. fence_value is what the
-        // deferred current copy will signal, and that copy is not submitted
-        // until the presenter flushes it a display period later - so waiting
-        // on it here parks the application's own queue for that whole window,
-        // every frame, and the game cannot start rendering until it clears.
+        // The synthetic's value, never the pair's, and it only matters while
+        // the current copy is deferred. Deferred, fence_value is what that
+        // copy will signal and the copy is not submitted until the presenter
+        // flushes it a display period later, so waiting on it here would park
+        // the application's own queue for that whole window, every frame, and
+        // the game could not start rendering until it cleared.
+        //
+        // Submitted inline - every D3D11 title, and any session running the
+        // deeper pipeline - the two values are the same, because the synthetic
+        // and the copy are signalled together. The choice is then moot, and
+        // the application's queue waits for the copy as well as the synthesis:
+        // one resource copy more than it used to, against a synthesis cycle
+        // saved. Keep preferring the synthetic's value, because the deferred
+        // path is still what native D3D12 runs with the depth off.
         const std::uint64_t value = ticket.synthetic_fence_value != 0
             ? ticket.synthetic_fence_value
             : ticket.fence_value;
