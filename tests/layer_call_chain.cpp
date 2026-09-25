@@ -2018,9 +2018,20 @@ int main(int argc, char** argv) {
                     record.quad_layer_index == 1;
             }
         }
-        const bool only_optional_teardown_empty = empty_frames == 0 ||
-            (empty_frames == 1 && !end_records.empty() &&
-             end_records.back().layer_count == 0);
+        // One empty frame is allowed mid-sequence, on top of the optional one
+        // at teardown. The deeper pipeline holds the first synthetic for a
+        // display period while it establishes its depth, and in pipelined mode
+        // a held slot goes out empty rather than repeating a frame whose
+        // application handles may already be gone - the runtime keeps showing
+        // the last image. It happens once: a queue that is a slot deeper stays
+        // a slot deeper. More than one means the queue ran dry, which is the
+        // defect this check exists for.
+        const std::size_t trailing_empty =
+            (!end_records.empty() && end_records.back().layer_count == 0)
+                ? 1U
+                : 0U;
+        const bool only_optional_teardown_empty =
+            empty_frames <= 1U + trailing_empty;
         const std::uint32_t downstream_waits =
             g_wait_frame_calls.load(std::memory_order_relaxed);
         const bool valid = sequence_succeeded && teardown_succeeded &&

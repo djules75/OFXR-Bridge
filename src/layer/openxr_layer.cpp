@@ -351,6 +351,9 @@ struct PresenterSubmission {
     const XrFrameEndInfo* borrowed_frame{};
     XrResult result{XR_SUCCESS};
     bool completed{};
+    // When the application handed it over. The deeper pipeline holds a
+    // synthetic until it has been queued for a whole display period.
+    std::chrono::steady_clock::time_point queued_at{};
 };
 
 struct ProjectionLayerSnapshot {
@@ -4573,15 +4576,70 @@ void continuous_presenter_main(
             // Do not let the application release a newer private output while
             // the runtime is resolving the previous handle's last image.
             std::scoped_lock content_lock(state->presenter_content_mutex);
+            // The deeper pipeline's depth, enforced where it lives: on the
+            // presentation side. A synthetic is not handed over until its pair
+            // has been queued for a whole display period, so it always goes
+            // out one grid point later than the earliest one it could have
+            // taken, and synthesis always has at least a period to finish.
+            // That is the pipeline's whole contract - one period of latency
+            // for one period of synthesis - and it holds whether the
+            // application arrives early or late in the period.
+            //
+            // Measured before this existed, depth was only ever a side effect
+            // of when the application happened to be released, and on a title
+            // the layer was not holding back there was none: on MSFS 2024 a
+            // pair's synthesis finished about 18.5 ms after the pair was ready
+            // while its synthetic was handed over at 10.6 ms, and 81.6% of
+            // them went downstream before their pixels existed.
+            //
+            // Only a synthetic is held. The real frame behind it follows a
+            // grid point later as it always has, and a prime or a borrowed
+            // frame has nothing to wait for. Holding shows a repeat for one
+            // slot - once, when the phase is first established, because a
+            // queue that is a slot deeper stays a slot deeper: the next pair
+            // arrives a pair later and finds the previous real frame still in
+            // front of it.
+            const auto pop_now = std::chrono::steady_clock::now();
+            std::int64_t held_age_ns = -1;
+            std::uint64_t held_sequence = 0;
             {
                 std::scoped_lock lock(state->presenter_mutex);
                 if (!state->presenter_stop_requested &&
                     !state->presenter_submissions.empty()) {
-                    request = state->presenter_submissions.front();
-                    state->presenter_submissions.pop_front();
+                    const auto& front = state->presenter_submissions.front();
+                    const auto age = pop_now - front->queued_at;
+                    const auto period = std::chrono::nanoseconds(
+                        static_cast<std::int64_t>(
+                            state->presenter_display_period));
+                    const bool too_young = state->deep_pipeline &&
+                        period > std::chrono::nanoseconds::zero() &&
+                        front->owned_frame && front->owned_frame->synthetic &&
+                        age < period;
+                    if (too_young) {
+                        held_age_ns = std::chrono::duration_cast<
+                            std::chrono::nanoseconds>(age).count();
+                        held_sequence = front->sequence;
+                        repeated_frame = state->presenter_last_frame;
+                    } else {
+                        request = front;
+                        state->presenter_submissions.pop_front();
+                    }
                 } else if (!state->presenter_stop_requested) {
                     repeated_frame = state->presenter_last_frame;
                 }
+            }
+            // Recorded outside presenter_mutex, which the application waits
+            // on. result=400: a synthetic held for the pipeline's depth; a is
+            // its age in microseconds, b the display period in microseconds,
+            // c its sequence.
+            if (held_age_ns >= 0) {
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::presenter_transition,
+                    400,
+                    static_cast<std::uint64_t>(held_age_ns / 1000),
+                    static_cast<std::uint64_t>(
+                        state->presenter_display_period / 1000),
+                    held_sequence);
             }
             // A fresh frame whose images were left acquired: join the
             // application's queue to synthesis and hand them to the runtime
@@ -5741,30 +5799,26 @@ void stop_continuous_presenter(
 void wait_for_presenter_pair(
     const std::shared_ptr<SessionState>& state) noexcept {
     try {
-        constexpr std::uint64_t kPresenterFramesPerPair = 2;
-        // How many presenter frames have to pass before the application is let
-        // go. The pair rate does not follow this number: the application
-        // enqueues one pair per release and the presenter spends two frames on
-        // it, so content supply sets the rate and this sets only the phase.
-        // Letting go a frame earlier gives synthesis a whole display period
-        // more before its hand-over, and costs a display period of latency on
-        // every frame, which is what the deeper pipeline trades. The capacity
-        // bounds in xrEndFrame are what stop the application running further
-        // ahead than that.
+        // Two presenter frames per release in the deeper pipeline too. The
+        // pair rate does not follow this number - the application enqueues
+        // one pair per release and the presenter spends two frames on it - so
+        // all it sets is the phase at which the application renders.
         //
-        // Measured with those bounds raised and this gate left alone: the hold
-        // still ran 12.0 ms of every 22.4 ms application frame, synthesis was
-        // queued 2.1 ms before its hand-over against an optical flow cost of
-        // 3.5 ms, and six synthetics in ten reached the compositor with no
-        // pixels in them.
-        const std::uint64_t release_after = state->deep_pipeline
-            ? kPresenterFramesPerPair - 1
-            : kPresenterFramesPerPair;
+        // Releasing a frame earlier was tried as the way to deepen the
+        // pipeline, and it is not one. Where the layer had been holding the
+        // application back it did give synthesis more time, but by moving
+        // the application's whole frame earlier against the presentation
+        // grid - latency without a slot, since the synthetic still went out at
+        // the first grid point after its pair was ready - and on a title the
+        // layer was not holding back it changed nothing. The depth is the
+        // presenter's to enforce: see where it pops a submission.
+        constexpr std::uint64_t kPresenterFramesPerPair = 2;
         const auto entered = std::chrono::steady_clock::now();
         std::unique_lock lock(state->presenter_mutex);
         state->presenter_condition.wait(lock, [&] {
             return state->presenter_frame_serial >=
-                       state->application_served_serial + release_after ||
+                       state->application_served_serial +
+                           kPresenterFramesPerPair ||
                    XR_FAILED(state->presenter_failure) ||
                    state->presenter_stop_requested;
         });
@@ -5782,8 +5836,8 @@ void wait_for_presenter_pair(
         const std::uint64_t served = state->application_served_serial;
         const std::uint64_t reached = state->presenter_frame_serial;
         const std::uint64_t surplus =
-            reached > served + release_after
-            ? reached - served - release_after
+            reached > served + kPresenterFramesPerPair
+            ? reached - served - kPresenterFramesPerPair
             : 0;
         state->application_served_serial = reached;
         // Never record under presenter_mutex: the presenter thread takes it
@@ -5876,6 +5930,7 @@ enqueue_presenter_submission(
         request->sequence = state->next_presenter_sequence++;
         request->owned_frame = std::move(owned_frame);
         request->borrowed_frame = borrowed_frame;
+        request->queued_at = std::chrono::steady_clock::now();
         state->presenter_submissions.push_back(request);
         ++state->outstanding_presenter_submissions;
     }
@@ -5914,12 +5969,15 @@ enqueue_presenter_submission(
                 ? state->presenter_failure
                 : XR_ERROR_SESSION_NOT_RUNNING;
         }
+        const auto queued_at = std::chrono::steady_clock::now();
         auto first = std::make_shared<PresenterSubmission>();
         first->sequence = state->next_presenter_sequence++;
         first->owned_frame = std::move(synthetic);
+        first->queued_at = queued_at;
         auto second = std::make_shared<PresenterSubmission>();
         second->sequence = state->next_presenter_sequence++;
         second->owned_frame = std::move(current);
+        second->queued_at = queued_at;
         state->presenter_submissions.push_back(std::move(first));
         state->presenter_submissions.push_back(std::move(second));
         state->outstanding_presenter_submissions += 2;
@@ -7832,12 +7890,12 @@ XrResult layer_end_frame_impl(
     // frame names the other slot, and its synthetic has been retired, so
     // neither can be repointed by the release below.
     //
-    // This gate dates the synthesis budget: synthesis for this pair is queued
-    // as soon as it passes, against a hand-over that does not move. One notch
-    // further gives synthesis a whole display period more, at the cost of
-    // every frame reaching the headset a period older, and needs the synthetic
-    // ring for the same reason the current one exists -- the previous pair's
-    // synthetic is no longer retired by the time we release into it.
+    // The deeper pipeline admits one notch later in the count, because the
+    // presenter holds each synthetic a display period longer: at the shallow
+    // bound the application would be kept waiting for a slot the pipeline is
+    // holding on purpose. That needs the synthetic ring for the same reason
+    // the current one exists -- the previous pair's synthetic is no longer
+    // retired by the time we release into it.
     if (use_continuous_presenter) {
         const XrResult capacity_result = wait_for_presenter_capacity(
             state, state->deep_pipeline ? 2 : 1);
