@@ -2572,8 +2572,9 @@ XrResult layer_create_session_impl(
         D3D12_COMMAND_QUEUE_DESC synthesis_queue_description{};
         synthesis_queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
         // Synthesis has a hard deadline the application's rendering does
-        // not: it must finish inside one display period or its frame is
-        // reprojected away.
+        // not: its frame has a fixed slot on the presentation grid, and if
+        // the output is not written by then the frame is lost. The game's own
+        // frame can absorb a delay.
         synthesis_queue_description.Priority =
             D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
         synthesis_queue_description.NodeMask =

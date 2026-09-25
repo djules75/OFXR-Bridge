@@ -216,6 +216,13 @@ HRESULT create_d3d12_device_for_d3d11(
         }
         D3D12_COMMAND_QUEUE_DESC queue_description{};
         queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        // Every piece of a D3D11 session's synthesis runs on this queue, and
+        // it is queued while the game is submitting its next frame, so at
+        // normal priority it competes with that frame on equal terms. High
+        // priority for the same reason a native D3D12 session's synthesis
+        // queue has it: the game's frame can absorb a delay, and the pair
+        // behind it has a slot to meet.
+        queue_description.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
         ComPtr<ID3D12CommandQueue> queue;
         result = device->CreateCommandQueue(
             &queue_description,
