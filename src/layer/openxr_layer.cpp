@@ -2833,16 +2833,20 @@ XrResult layer_create_session_impl(
     }
 
     // Hand the runtime a queue of the layer's own on a native D3D12 session:
-    // see SessionState::binding_queue. The binding has to be the first
-    // structure chained on the create info for the substitution to be made
-    // without copying structures the layer does not know; every application
-    // seen chains it first. Anything that fails here leaves the runtime with
-    // the application's queue, which is what every build before this one
-    // did.
+    // see SessionState::binding_queue. SteamVR only: it is the runtime whose
+    // compositor was measured judging readiness from the binding queue;
+    // nothing measured on another runtime shows a gain from it, so they keep
+    // the application's queue. The binding has
+    // to be the first structure chained on the create info for the
+    // substitution to be made without copying structures the layer does not
+    // know; every application seen chains it first. Anything that fails here
+    // leaves the runtime with the application's queue, which every path
+    // downstream also handles.
     XrSessionCreateInfo substituted_info{};
     XrGraphicsBindingD3D12KHR substituted_binding{};
     const XrSessionCreateInfo* forwarded_info = create_info;
-    if (state->graphics_binding == SessionGraphicsBinding::d3d12 &&
+    if (dispatch->steamvr_runtime &&
+        state->graphics_binding == SessionGraphicsBinding::d3d12 &&
         create_info != nullptr && state->d3d12_device && state->d3d12_queue) {
         const auto* first = static_cast<const XrBaseInStructure*>(create_info->next);
         if (first != nullptr && first->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
