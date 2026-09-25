@@ -896,6 +896,29 @@ HRESULT D3D11D3D12SwapchainInterop::publish(
     }
 }
 
+HRESULT D3D11D3D12SwapchainInterop::publication_fence(
+    ID3D12Fence** fence,
+    std::uint64_t* value) const noexcept {
+    try {
+        if (fence == nullptr || value == nullptr) {
+            return E_POINTER;
+        }
+        *fence = nullptr;
+        *value = 0;
+        std::scoped_lock lock(mutex_);
+        if (impl_ == nullptr || impl_->d3d12_fence == nullptr ||
+            impl_->last_d3d11_access_value == 0) {
+            return E_UNEXPECTED;
+        }
+        *fence = impl_->d3d12_fence.Get();
+        (*fence)->AddRef();
+        *value = impl_->last_d3d11_access_value;
+        return S_OK;
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
 HRESULT D3D11D3D12SwapchainInterop::wait_for_idle() noexcept {
     try {
         std::scoped_lock lock(mutex_);

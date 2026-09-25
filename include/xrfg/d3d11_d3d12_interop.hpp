@@ -96,6 +96,16 @@ public:
         std::uint32_t current_destination_index,
         std::optional<std::uint32_t> synthetic_destination_index) noexcept;
 
+    // The shared fence, AddRef'd into *fence, and the value the most recent
+    // publish signals on the D3D11 context once its copies have run. Only
+    // then do the private OpenXR images hold the pair's output, so this - not
+    // the synthesizer's own fence - is what says a D3D11 pair is ready. Read
+    // it straight after publish. GetCompletedValue on the returned fence is
+    // safe from any thread.
+    [[nodiscard]] HRESULT publication_fence(
+        ID3D12Fence** fence,
+        std::uint64_t* value) const noexcept;
+
     [[nodiscard]] HRESULT wait_for_idle() noexcept;
     [[nodiscard]] bool initialized() const noexcept;
 

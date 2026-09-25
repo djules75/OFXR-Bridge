@@ -4867,6 +4867,25 @@ HRESULT D3D12FrameSynthesizer::synchronize_consumer_queue(
     }
 }
 
+HRESULT D3D12FrameSynthesizer::completion_fence(
+    ID3D12Fence** output_fence) const noexcept {
+    try {
+        if (output_fence == nullptr) {
+            return E_POINTER;
+        }
+        *output_fence = nullptr;
+        std::scoped_lock lock(mutex_);
+        if (impl_ == nullptr || impl_->fence == nullptr) {
+            return E_UNEXPECTED;
+        }
+        *output_fence = impl_->fence.Get();
+        (*output_fence)->AddRef();
+        return S_OK;
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
 bool D3D12FrameSynthesizer::initialized() const noexcept {
     try {
         std::scoped_lock lock(mutex_);

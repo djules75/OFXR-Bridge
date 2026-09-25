@@ -254,6 +254,13 @@ public:
     [[nodiscard]] HRESULT synchronize_producer_queue(
         ID3D12CommandQueue* queue) noexcept;
 
+    // The fence a ticket's values are signalled on, AddRef'd into *fence.
+    // For a caller that has to know whether a pair's output exists yet
+    // without taking this object's lock: ID3D12Fence::GetCompletedValue is
+    // safe from any thread, so the presenter can poll it while the
+    // application thread is inside a submission.
+    [[nodiscard]] HRESULT completion_fence(ID3D12Fence** fence) const noexcept;
+
     [[nodiscard]] bool initialized() const noexcept;
 
 private:

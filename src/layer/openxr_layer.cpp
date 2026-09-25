@@ -3752,7 +3752,33 @@ struct GeneratedFrameEndInfo {
     // runtime yet. Run and cleared by the presenter immediately before this
     // frame goes downstream, never again for a repeat of it.
     std::vector<PendingPrivateRelease> pending_releases;
+    // Only the synthetic half of a pair in the deeper pipeline: one entry per
+    // generated swapchain, each complete once that swapchain's output exists.
+    // The presenter polls these and never waits on them.
+    struct ReadyFence {
+        Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+        std::uint64_t value{};
+    };
+    std::vector<ReadyFence> synthetic_ready;
 };
+
+// Whether every output a synthetic names has been written. A fence that
+// reports the device lost reads as ready: holding cannot make it signal, and
+// the frame should go down and fail where the runtime can see it.
+[[nodiscard]] bool synthetic_output_ready(
+    const GeneratedFrameEndInfo& frame) noexcept {
+    for (const auto& ready : frame.synthetic_ready) {
+        if (ready.fence == nullptr || ready.value == 0) {
+            continue;
+        }
+        const std::uint64_t completed = ready.fence->GetCompletedValue();
+        if (completed != std::numeric_limits<std::uint64_t>::max() &&
+            completed < ready.value) {
+            return false;
+        }
+    }
+    return true;
+}
 
 // Joins the application's queue to synthesis and releases each image to the
 // runtime, in that order: the runtime orders its use of a private image
@@ -4599,9 +4625,29 @@ void continuous_presenter_main(
             // queue that is a slot deeper stays a slot deeper: the next pair
             // arrives a pair later and finds the previous real frame still in
             // front of it.
+            //
+            // A period of age is counted from the application's xrEndFrame,
+            // which is CPU time. Synthesis cannot start until the GPU has
+            // finished the frame that call submitted, and on a title at the
+            // edge of the GPU the CPU runs up to a frame ahead of it - so a
+            // synthetic can be a period old and still not exist. Handed over
+            // then, the compositor repeats the previous frame, and the real
+            // frame a slot later is ready, so the synthetic is never shown at
+            // all. The same hold therefore also waits for its output to have
+            // been written. That costs nothing the compositor was not about to
+            // cost anyway - the slot shows a repeat either way - and it keeps
+            // the synthetic for the next slot instead of losing it. It deepens
+            // the queue by a slot, once, for the same reason the age hold
+            // does; the admission bound stops it going further.
+            //
+            // Bounded, because a fence that never signals must not hold the
+            // presenter: past kReadinessHoldPeriods of age the synthetic goes
+            // down regardless, as it did before the check existed.
+            constexpr std::int64_t kReadinessHoldPeriods = 3;
             const auto pop_now = std::chrono::steady_clock::now();
             std::int64_t held_age_ns = -1;
             std::uint64_t held_sequence = 0;
+            std::int64_t held_reason = 0;
             {
                 std::scoped_lock lock(state->presenter_mutex);
                 if (!state->presenter_stop_requested &&
@@ -4611,14 +4657,19 @@ void continuous_presenter_main(
                     const auto period = std::chrono::nanoseconds(
                         static_cast<std::int64_t>(
                             state->presenter_display_period));
-                    const bool too_young = state->deep_pipeline &&
+                    const bool holdable_synthetic = state->deep_pipeline &&
                         period > std::chrono::nanoseconds::zero() &&
-                        front->owned_frame && front->owned_frame->synthetic &&
-                        age < period;
-                    if (too_young) {
+                        front->owned_frame && front->owned_frame->synthetic;
+                    const bool too_young = holdable_synthetic && age < period;
+                    const bool not_written = holdable_synthetic &&
+                        !too_young &&
+                        age < period * kReadinessHoldPeriods &&
+                        !synthetic_output_ready(*front->owned_frame);
+                    if (too_young || not_written) {
                         held_age_ns = std::chrono::duration_cast<
                             std::chrono::nanoseconds>(age).count();
                         held_sequence = front->sequence;
+                        held_reason = too_young ? 400 : 401;
                         repeated_frame = state->presenter_last_frame;
                     } else {
                         request = front;
@@ -4629,13 +4680,14 @@ void continuous_presenter_main(
                 }
             }
             // Recorded outside presenter_mutex, which the application waits
-            // on. result=400: a synthetic held for the pipeline's depth; a is
-            // its age in microseconds, b the display period in microseconds,
-            // c its sequence.
+            // on. result=400: a synthetic held for the pipeline's depth;
+            // 401: held because its output had not been written yet. a is its
+            // age in microseconds, b the display period in microseconds, c its
+            // sequence.
             if (held_age_ns >= 0) {
                 xrfg::bridge_flight_logger().event(
                     xrfg::BridgeFlightOperation::presenter_transition,
-                    400,
+                    held_reason,
                     static_cast<std::uint64_t>(held_age_ns / 1000),
                     static_cast<std::uint64_t>(
                         state->presenter_display_period / 1000),
@@ -6680,6 +6732,10 @@ struct PreparedGeneration {
     PrivateSwapchainState* deferred_synthetic{};
     PrivateSwapchainState* deferred_current{};
     xrfg::D3D12FrameSynthesisTicket deferred_ticket{};
+    // Where the pair's output becomes readable by the runtime, for the
+    // presenter's readiness hold. Set only for a pair in the deeper pipeline.
+    Microsoft::WRL::ComPtr<ID3D12Fence> ready_fence;
+    std::uint64_t ready_value{};
 };
 
 struct PreparedProjectionResource {
@@ -6977,6 +7033,26 @@ struct PreparedProjectionFrame {
             if (request_pair && defer_current_copy) {
                 output.synthesizer = generation->synthesizer;
                 output.copy_fence_value = ticket.fence_value;
+            }
+            // The value that says this pair's output exists. On D3D11 that is
+            // the publish copy on the application's context, not synthesis:
+            // the runtime reads the D3D11 images the copy writes. Both
+            // accessors hand back a fence the presenter can poll without
+            // either object's lock.
+            if (request_pair && release_at_handover_requested) {
+                if (generation->d3d11_interop) {
+                    std::uint64_t published = 0;
+                    if (SUCCEEDED(generation->d3d11_interop->publication_fence(
+                            output.ready_fence.ReleaseAndGetAddressOf(),
+                            &published))) {
+                        output.ready_value = published;
+                    }
+                } else if (SUCCEEDED(generation->synthesizer->completion_fence(
+                               output.ready_fence.ReleaseAndGetAddressOf()))) {
+                    output.ready_value = ticket.synthetic_fence_value != 0
+                        ? ticket.synthetic_fence_value
+                        : ticket.fence_value;
+                }
             }
             if (release_at_handover) {
                 // Slot addresses stay valid for as long as the generation
@@ -8081,6 +8157,11 @@ XrResult layer_end_frame_impl(
                     first_generated.pending_current_copies.push_back(
                         {resource.generation.synthesizer,
                          resource.generation.copy_fence_value});
+                }
+                if (resource.generation.ready_fence) {
+                    first_generated.synthetic_ready.push_back(
+                        {resource.generation.ready_fence,
+                         resource.generation.ready_value});
                 }
             }
             submitted_end_info = &first_generated.info;
