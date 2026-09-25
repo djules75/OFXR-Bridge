@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace xrfg {
 
@@ -161,6 +162,13 @@ public:
         float compositor_idle_cpu_ms{};
     };
     [[nodiscard]] std::optional<FramePresentation> last_presentation() noexcept;
+
+    // Every compositor frame that has settled since the last call, oldest
+    // first - including the ones presented zero times, which
+    // last_presentation() skips. A zero-present frame is one the compositor
+    // had a slot for and never showed: the direct record of a lost frame.
+    // Diagnostic; its own cursor, independent of last_presentation().
+    [[nodiscard]] std::vector<FramePresentation> settled_frames() noexcept;
 
     // How long the compositor says is left in the frame it is currently
     // assembling. Sampled at the moment of submission it is that submission's

@@ -168,6 +168,10 @@ struct SteamVrDelivery::Impl {
 
     std::uint32_t last_frame_index{};
     bool reported_frames{};
+    // settled_frames() keeps its own cursor, so it never takes a frame away
+    // from last_presentation() or the other way round.
+    std::uint32_t settled_last_index{};
+    bool settled_reported{};
 
     // Distinct frames the headset received, counted on the compositor's own
     // vsync-aligned clock.
@@ -633,6 +637,83 @@ SteamVrDelivery::frame_time_remaining() noexcept {
     } catch (...) {
         return std::nullopt;
     }
+}
+
+std::vector<SteamVrDelivery::FramePresentation>
+SteamVrDelivery::settled_frames() noexcept {
+    std::vector<FramePresentation> output;
+    try {
+        if (!impl_) {
+            return output;
+        }
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->established) {
+            return output;
+        }
+        if (!impl_->attempted) {
+            impl_->attach();
+        }
+        if (!impl_->usable) {
+            return output;
+        }
+        constexpr std::uint32_t kLookback = 16;
+        std::array<vr::Compositor_FrameTiming, kLookback> timings{};
+        timings[0].m_nSize = sizeof(vr::Compositor_FrameTiming);
+        const std::uint32_t filled =
+            impl_->compositor->GetFrameTimings(timings.data(), kLookback);
+        if (filled == 0 || filled > kLookback) {
+            return output;
+        }
+        // Ascending, oldest to newest. A frame is settled once a newer one has
+        // been presented: the newest ones report zero presents only because
+        // nothing has happened to them yet. Everything up to and including the
+        // newest presented frame is final, and a zero there is a frame the
+        // compositor had and never showed.
+        std::uint32_t newest_presented = filled;
+        for (std::uint32_t offset = filled; offset-- > 0;) {
+            if (timings[offset].m_nNumFramePresents != 0) {
+                newest_presented = offset;
+                break;
+            }
+        }
+        if (newest_presented == filled) {
+            return output;
+        }
+        for (std::uint32_t offset = 0; offset <= newest_presented; ++offset) {
+            const auto& timing = timings[offset];
+            if (impl_->settled_reported &&
+                timing.m_nFrameIndex <= impl_->settled_last_index) {
+                continue;
+            }
+            FramePresentation frame{};
+            frame.frame_index = timing.m_nFrameIndex;
+            frame.mispresented = timing.m_nNumMisPresented;
+            frame.presents = timing.m_nNumFramePresents;
+            frame.dropped = timing.m_nNumDroppedFrames;
+            frame.skipped = impl_->settled_reported
+                ? timing.m_nFrameIndex - impl_->settled_last_index - 1
+                : 0;
+            frame.reprojection_flags = timing.m_nReprojectionFlags;
+            frame.ready_vsyncs = timing.m_nNumVSyncsReadyForUse;
+            frame.vsyncs_to_first_view = timing.m_nNumVSyncsToFirstView;
+            frame.system_time_seconds = timing.m_flSystemTimeInSeconds;
+            frame.wait_get_poses_called_ms = timing.m_flWaitGetPosesCalledMs;
+            frame.new_poses_ready_ms = timing.m_flNewPosesReadyMs;
+            frame.new_frame_ready_ms = timing.m_flNewFrameReadyMs;
+            frame.compositor_update_start_ms =
+                timing.m_flCompositorUpdateStartMs;
+            frame.compositor_update_end_ms = timing.m_flCompositorUpdateEndMs;
+            frame.compositor_render_start_ms =
+                timing.m_flCompositorRenderStartMs;
+            frame.client_frame_interval_ms = timing.m_flClientFrameIntervalMs;
+            frame.compositor_idle_cpu_ms = timing.m_flCompositorIdleCpuMs;
+            output.push_back(frame);
+            impl_->settled_last_index = timing.m_nFrameIndex;
+            impl_->settled_reported = true;
+        }
+    } catch (...) {
+    }
+    return output;
 }
 
 std::optional<SteamVrDelivery::FramePresentation>

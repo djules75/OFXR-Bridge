@@ -833,15 +833,20 @@ struct SessionState {
     // only, apart from its own waiter.
     std::unique_ptr<JoinProbe> join_probe;
     std::uint64_t join_probe_next{};
+    // Both the application's thread (at a release) and the presenter (at a
+    // submission) signal the probe, and the values must reach the queue in
+    // the order they are numbered.
+    std::mutex join_probe_mutex;
 };
 
-// Marks where a release's join sits in the application's queue, so the
-// probe's waiter can stamp when the queue gets there (913 with the caller's
-// b and c; 914 when it completes). Called on the thread that just released
-// the images, straight after the release; only one thread releases per
-// session, so the counter needs no lock. Logging on only. See JoinProbe.
+// Marks a point in the application's queue, so the probe's waiter can stamp
+// when the queue gets there: `record` with the caller's b and c, then 914
+// when it completes. 913 is a release's join; 916 is the moment just before
+// the presenter's xrEndFrame, which is where a D3D12 runtime takes the queue
+// it judges the frame's completion by. Logging on only. See JoinProbe.
 void signal_join_probe(
     SessionState* state,
+    std::int64_t record,
     std::uint64_t b,
     std::uint64_t c) noexcept {
     if (state == nullptr || !state->d3d12_queue ||
@@ -849,6 +854,7 @@ void signal_join_probe(
         return;
     }
     try {
+        std::scoped_lock signal_lock(state->join_probe_mutex);
         if (!state->join_probe && state->d3d12_device) {
             auto probe = std::make_unique<JoinProbe>();
             probe->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -869,7 +875,7 @@ void signal_join_probe(
             const std::uint64_t value = ++state->join_probe_next;
             xrfg::bridge_flight_logger().event(
                 xrfg::BridgeFlightOperation::presenter_vsync_lock,
-                913,
+                record,
                 value,
                 b,
                 c);
@@ -4862,6 +4868,7 @@ void continuous_presenter_main(
                 if (joined) {
                     signal_join_probe(
                         state.get(),
+                        913,
                         request->sequence,
                         request->owned_frame->synthetic ? 2u : 1u);
                 }
@@ -5070,6 +5077,19 @@ void continuous_presenter_main(
                         }
                     }
                 }
+            }
+            // Where the application's queue stands as this frame is handed
+            // over. A D3D12 runtime is given that queue at session creation
+            // and judges the frame complete by the work queued on it up to
+            // this submission, so this mark clearing is the earliest the
+            // compositor can use the frame. 916: b the submission sequence
+            // (0 for a repeat), c 2 synthetic, 1 real, 0 repeat.
+            if (state->graphics_binding == SessionGraphicsBinding::d3d12) {
+                signal_join_probe(
+                    state.get(),
+                    916,
+                    request ? request->sequence : 0,
+                    fresh_synthetic ? 2u : (request ? 1u : 0u));
             }
             end_result = with_runtime_entry(state, [&] {
                 return state->fps_overlay
@@ -5936,6 +5956,39 @@ void continuous_presenter_main(
                 // Do not reinstate it without an instrument that separates the
                 // two causes. Delivery alone cannot: both look like frames
                 // presented more than once.
+            }
+        }
+        // Every compositor frame that settled since the last submission,
+        // including the ones it presented zero times - the direct record of a
+        // frame the compositor had and never showed, which the records above
+        // cannot carry because they describe the newest presented frame only.
+        // 915: a frame index; b the frame's vsync reference in microseconds of
+        // the compositor's clock; c the same 16-bit packing as 910 for
+        // WaitGetPosesCalled | NewFrameReady<<16 | CompositorRenderStart<<32,
+        // then presents (8 bits) <<48 and mispresented (8 bits) <<56.
+        // Diagnostic only, logging on only.
+        if (state->steamvr_delivery && xrfg::bridge_flight_logger().enabled()) {
+            const auto pack = [](float ms) -> std::uint64_t {
+                const double units = static_cast<double>(ms) * 100.0 + 32768.0;
+                return static_cast<std::uint64_t>(
+                    std::clamp(units, 0.0, 65535.0));
+            };
+            for (const auto& frame : state->steamvr_delivery->settled_frames()) {
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::presenter_vsync_lock,
+                    915,
+                    frame.frame_index,
+                    static_cast<std::uint64_t>(
+                        std::max(0.0, frame.system_time_seconds) * 1e6),
+                    pack(frame.wait_get_poses_called_ms) |
+                        (pack(frame.new_frame_ready_ms) << 16) |
+                        (pack(frame.compositor_render_start_ms) << 32) |
+                        (static_cast<std::uint64_t>(
+                             std::min<std::uint32_t>(frame.presents, 255))
+                         << 48) |
+                        (static_cast<std::uint64_t>(
+                             std::min<std::uint32_t>(frame.mispresented, 255))
+                         << 56));
             }
         }
         {
@@ -7248,6 +7301,7 @@ struct PreparedProjectionFrame {
                 // for a pair and 1 for a prime.
                 signal_join_probe(
                     state->session.get(),
+                    913,
                     ticket.current_serial,
                     request_pair ? 3u : 1u);
             }
