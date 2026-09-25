@@ -3,11 +3,11 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current pre-release: **v0.2.3_beta5 (internal build V312)**.
-See the [release notes](docs/releases/0.2.3_beta5.md).
+Current release: **v0.2.4 (internal build V312)**.
+See the [release notes](docs/releases/0.2.4.md).
 
 > [!WARNING]
-> This is a pre-release. It may not work with your game, VR mod, GPU or OpenXR
+> This is experimental software. It may not work with your game, VR mod, GPU or OpenXR
 > runtime. It may produce visual artifacts, fail to activate, freeze the game
 > or cause a crash. Use it at your own risk.
 
@@ -28,7 +28,11 @@ The current build provides:
 - AMD FidelityFX Optical Flow (default)
 - NVIDIA Optical Flow with Fast (test), Medium and Slow presets
 - 100%, 75% and 50% NVIDIA optical-flow calculation scales
-- manual persistent OpenXR Arm/Disarm from a tray icon
+- a tray icon that arms the bridge as soon as it starts, with manual
+  Arm/Disarm
+- **Prefer FPS over latency** (on by default): one frame of extra latency in
+  exchange for reaching full frame rate from half, with smoother dips
+- a pipeline built specifically for SteamVR's compositor
 - an optional transparent in-headset FPS number with four corner positions;
   green means recent synthetic submissions and red means inactive generation
 - an optional bridge flight recorder for diagnostics
@@ -39,14 +43,17 @@ rotation are still possible.
 
 ## Installation and use
 
-1. Download the latest pre-release archive from GitHub Releases.
+1. Download the latest release archive from GitHub Releases.
 2. Extract the complete archive to a writable folder.
-3. Run `OFXRBridgeTray.exe`.
-4. Right-click the tray icon and select the optical-flow backend and options.
-5. Select **Arm bridge until manual disarm**.
-6. Start the game normally. For injectors such as UEVR, arm OFXR Bridge before
-   starting the game and leave it armed while the VR mod is injected.
-7. Select **Disarm bridge** or close the tray application when finished.
+3. Run `OFXRBridgeTray.exe`. The bridge arms itself straight away.
+4. Right-click the tray icon to choose the optical-flow backend and options.
+   Most options take effect the next time the game starts.
+5. Start the game normally. For injectors such as UEVR, start the tray before
+   the game and leave it armed while the VR mod is injected.
+6. Select **Disarm bridge** or close the tray application when finished.
+
+If arming fails at start-up, the tray shows the reason and stays disarmed;
+select **Arm bridge until manual disarm** to retry.
 
 For supported NVIDIA GPUs, the suggested starting configuration is **NVIDIA
 Medium** with **50% optical flow resolution**. It should provide a decent
@@ -78,9 +85,47 @@ OFXR Bridge does not replace your active OpenXR runtime.
 
 FidelityFX is the most performing one but will produce artifacts during headset rotation in dark areas, this is known and cannot be avoided.
 
+### Prefer FPS over latency
+
+This tray option is **on by default**. The bridge holds each generated frame
+back by one display refresh, so the optical flow gets a whole refresh to
+finish instead of the gap the game leaves between frames.
+
+- **Gain:** a game that only sustains about half your headset's refresh rate
+  can reach the full rate. A game holding 45–50 FPS on a 90 Hz headset is
+  likely to reach 90. Dips are also much smoother.
+- **Cost:** one frame of extra latency, about 11 ms at 90 Hz.
+- **Turn it off** when your GPU has budget to spare. Try it: turn the option
+  off and play the same scene. If you still hold your full frame rate, leave
+  it off and save one frame of latency. If you lose frames, turn it back on.
+
+The change applies the next time the game starts.
+
+### SteamVR users
+
+SteamVR headsets (Pimax and others) get a pipeline built specifically for
+SteamVR's compositor. The bridge sends two frames for every game frame, and
+they must arrive one display refresh apart. Other runtimes, such as Virtual
+Desktop, pace this by themselves. SteamVR does not, so the bridge times each
+frame against SteamVR's compositor directly. For D3D12 games, the bridge also
+gives SteamVR a GPU queue of its own, so the game's next frame can no longer
+make a finished generated frame look unready.
+
+For the best results on SteamVR:
+
+- Leave **Prefer FPS over latency** on, then try the same scene with it off.
+  If you still hold full frame rate without it, keep it off for one frame
+  less latency.
+- Pick a refresh rate close to double your game's frame rate. If double is
+  still short of the refresh rate, SteamVR fills the gap with repeated frames
+  and the image judders.
+- If you get dips, disarm the bridge and play the same scene. If the dips
+  remain, lower SteamVR's per-eye resolution; the bridge cannot recover
+  frames the game does not render.
+
 ### What the tray changes on your PC
 
-When you select **Arm**, the tray copies the versioned OFXR layer and its
+When the tray arms the bridge (at start-up, or when you select **Arm**), it copies the versioned OFXR layer and its
 configuration into `%LOCALAPPDATA%\OFXR Bridge`, creates an absolute-path
 OpenXR implicit-layer manifest and registers that manifest for the current
 Windows user. It does not inject a DLL into the game, replace game files or
