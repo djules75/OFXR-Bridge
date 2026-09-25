@@ -7462,35 +7462,31 @@ struct PreparedProjectionFrame {
             ticket.fence_value);
 
         // The runtime orders its use of these swapchain images against the
-        // queue the application supplied: a release marks "complete as of
-        // this point" on that queue, and the compositor treats the image as
-        // ready once the queue has run past the mark. So when synthesis ran
-        // elsewhere, that queue has to wait for it immediately before the
-        // release, or the mark says complete before the pixels exist.
+        // binding queue (runtime_queue): a release marks "complete as of
+        // here" on it. So when synthesis ran on a queue of its own, the
+        // binding queue has to wait for it immediately before the release,
+        // or the mark says complete before the pixels exist.
         //
-        // Where the release sits in the queue decides when the runtime can
-        // see the frame. Here, inside the application's xrEndFrame, the mark
-        // lands after this frame's rendering, the capture and the join, and
-        // before anything of the next game frame - the application is still
-        // inside this call and has not submitted it. The join then makes the
-        // next game frame wait on the GPU for this pair's synthesis, but the
-        // GPU has both to do either way and synthesis runs on the
-        // high-priority queue, so the game frame finishes at about the same
-        // time whether it waits or is pre-empted.
+        // Where that join and release go depends on whose queue the runtime
+        // has. Everything on it is first in, first out, and it is also where
+        // the runtime marks each submission at xrEndFrame - the point the
+        // compositor waits for before it can use the frame.
         //
-        // V293-V303 released at the hand-over instead, on the presenter, so
-        // the game's next frame never waited for synthesis. That put the mark
-        // behind whatever the game had queued since it was released - its
-        // whole next frame - and the compositor could not see the image
-        // until that frame had rendered. Measured on Hogwarts Legacy: the
-        // real frame's mark cleared 7.3 ms after its hand-over (p50) and 1 ms
-        // before the compositor's render start at p90; in a heavy stretch
-        // 67% of the real frames the compositor never showed had cleared
-        // after it. Which half of the pair paid depended on where the
-        // application's release fell against the hand-overs, and the
-        // readiness hold could not see it, because it polls the synthesis
-        // fence and the runtime's readiness is the queue's progress past
-        // the mark. Released here, the two coincide.
+        // With the layer's own binding queue they wait for the hand-over, on
+        // the presenter. Joined here instead, the wait for this pair's
+        // synthesis would sit on that queue ahead of the previous pair's
+        // synthetic hand-over, which follows this call, and the previous
+        // synthetic would become visible only once this pair's synthesis -
+        // queued behind the game's frame - had finished. Measured on Hogwarts
+        // Legacy (V307): 124 synthetics lost that way, their marks clearing
+        // 8.5 ms after submission. At the hand-over the only thing ahead of
+        // the frame is its own join, and the readiness hold has already seen
+        // that synthesis finish.
+        //
+        // With the application's queue (no binding queue, or D3D11, whose
+        // immediate context must not be driven from the presenter thread)
+        // they stay here, where the mark lands before anything of the game's
+        // next frame.
         const bool release_at_handover = release_at_handover_requested &&
             generation->d3d11_interop == nullptr &&
             SUCCEEDED(submit_result);
@@ -8581,10 +8577,10 @@ XrResult layer_end_frame_impl(
             resource_mappings.mappings.size()),
         metadata_pairable,
         interpolation_fraction,
-        // Released here, inside this call, in every pipeline: see the note
-        // on the release in prepare_frame_generation for why the deeper
-        // pipeline no longer leaves it to the presenter.
-        false);
+        // Released at the hand-over where the runtime has the layer's own
+        // queue: see the note on the release in prepare_frame_generation.
+        use_continuous_presenter && state->deep_pipeline &&
+            state->binding_queue != nullptr);
     // Collected before anything below can reset `prepared`, so every image
     // left acquired is accounted for on every path out of this call.
     PrivateReleaseBatch synthetic_releases;
