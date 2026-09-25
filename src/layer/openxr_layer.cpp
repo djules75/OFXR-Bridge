@@ -1219,16 +1219,22 @@ void signal_join_probe(
 }
 
 // Sessions that never take a presenter thread, so that every runtime call
-// stays on the thread the application makes its own calls on. A D3D11 device
+// stays on the thread the application makes its own calls on: a D3D11 device
 // created single-threaded has no locking for a second thread to rely on
-// (single_threaded_d3d11). A Vulkan session is the same case by the API's
-// rules: the runtime submits on the queue the application handed it, and a
-// Vulkan queue may be driven by one thread at a time, so a presenter making
-// frame calls would race the application's render thread on it. Both run
-// generation inline and pass pipelined frames through.
+// (single_threaded_d3d11). Such a session runs generation inline and passes
+// pipelined frames through.
+//
+// A Vulkan session is not excluded, although by the API's rules it could
+// be: the runtime submits on the queue the application handed it, and a
+// Vulkan queue may be driven by one thread at a time, so the presenter's
+// frame calls race the application's render thread on that queue. It is
+// allowed anyway because the inline path cannot survive SteamVR's throttle:
+// No Man's Sky through OpenComposite at 72 Hz, throttled to half rate, had
+// SteamVR stop advancing the predicted time after the first inline pair and
+// return every wait at once, until the compositor showed one frame pinned
+// in space. The presenter is what handles that shape on every other API.
 [[nodiscard]] bool presenter_forbidden(const SessionState& state) noexcept {
-    return state.single_threaded_d3d11 ||
-        state.graphics_binding == SessionGraphicsBinding::vulkan;
+    return state.single_threaded_d3d11;
 }
 
 // Inside xrEndFrame, and inside each swapchain image call, the runtime drives
@@ -1254,7 +1260,10 @@ thread_local int runtime_entry_depth = 0;
 
 struct RuntimeEntry {
     explicit RuntimeEntry(SessionState* session) noexcept
-        : session_(session != nullptr && session->d3d11_device != nullptr
+        : session_(session != nullptr &&
+                           (session->d3d11_device != nullptr ||
+                            session->graphics_binding ==
+                                SessionGraphicsBinding::vulkan)
                        ? session
                        : nullptr) {
         if (session_ == nullptr) {
@@ -1349,6 +1358,24 @@ template <typename Call>
     const std::shared_ptr<SessionState>& session, Call&& call)
     -> decltype(call()) {
     return with_runtime_entry(session.get(), std::forward<Call>(call));
+}
+
+// xrWaitFrame, which the gate covers on D3D11 (the runtime's D3D11 work in a
+// wait is what a V265 capture found interleaving with a gated swapchain call)
+// and must not cover on Vulkan: a wait submits nothing on a Vulkan queue, and
+// SteamVR blocks the presenter's wait a whole throttled period - 27.8 ms at
+// 72 Hz - so a gate held across it starves every swapchain call the
+// application makes in the meantime. No Man's Sky spent 26-382 ms in each
+// and hung inside OpenComposite's own queue submission.
+template <typename Call>
+[[nodiscard]] auto with_runtime_entry_for_wait(
+    const std::shared_ptr<SessionState>& session, Call&& call)
+    -> decltype(call()) {
+    return with_runtime_entry(
+        session && session->graphics_binding == SessionGraphicsBinding::vulkan
+            ? nullptr
+            : session.get(),
+        std::forward<Call>(call));
 }
 
 enum class PrivateOwnershipPhase {
@@ -4192,7 +4219,7 @@ XrResult layer_wait_frame_impl(
         // on a D3D11 session this is the runtime working on the application's
         // single immediate context, and a second thread inside it at the same
         // time is what kills the driver. See RuntimeEntry.
-        result = with_runtime_entry(state, [&] {
+        result = with_runtime_entry_for_wait(state, [&] {
             return state->dispatch->wait_frame(session, wait_info, frame_state);
         });
         const auto application_wait_elapsed =
@@ -5793,7 +5820,7 @@ void continuous_presenter_main(
         const auto wait_token = xrfg::bridge_flight_logger().begin(
             xrfg::BridgeFlightOperation::internal_wait_frame,
             handle_value(state->handle));
-        const XrResult wait_result = with_runtime_entry(state, [&] {
+        const XrResult wait_result = with_runtime_entry_for_wait(state, [&] {
             return state->dispatch->wait_frame(
                 state->handle, &wait_info, &frame_state);
         });
@@ -7391,8 +7418,11 @@ void stop_continuous_presenter(
 // their pair rather than 32.
 [[nodiscard]] bool presenter_hold_at_admission(
     const SessionState& state) noexcept {
+    // Vulkan has the D3D11 coupling too: its publish copy sits on the
+    // application's queue and waits there for synthesis.
     return state.deep_pipeline &&
-        state.graphics_binding == SessionGraphicsBinding::d3d11;
+        (state.graphics_binding == SessionGraphicsBinding::d3d11 ||
+         state.graphics_binding == SessionGraphicsBinding::vulkan);
 }
 
 // Holds the application until the presenter has run a whole pair since it was
@@ -8896,7 +8926,7 @@ struct InternalCycleResult {
         xrfg::BridgeFlightOperation::internal_wait_frame,
         handle_value(state->handle));
     const auto wait_started = std::chrono::steady_clock::now();
-    const XrResult wait_result = with_runtime_entry(state, [&] {
+    const XrResult wait_result = with_runtime_entry_for_wait(state, [&] {
         return state->dispatch->wait_frame(
             state->handle, &wait_info, &frame_state);
     });

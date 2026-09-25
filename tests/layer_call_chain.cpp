@@ -220,6 +220,19 @@ struct VulkanTestDevice {
     VkQueue queue{};
     VkCommandPool command_pool{};
     PFN_vkQueueWaitIdle queue_wait_idle{};
+    PFN_vkAllocateCommandBuffers allocate_command_buffers{};
+    PFN_vkBeginCommandBuffer begin_command_buffer{};
+    PFN_vkEndCommandBuffer end_command_buffer{};
+    PFN_vkCmdPipelineBarrier cmd_pipeline_barrier{};
+    PFN_vkCmdClearColorImage cmd_clear_color_image{};
+    PFN_vkCmdCopyImageToBuffer cmd_copy_image_to_buffer{};
+    PFN_vkQueueSubmit queue_submit{};
+    PFN_vkResetCommandPool reset_command_pool{};
+    // A host-visible buffer one pixel of every private image is read back
+    // through, mapped for the life of the device.
+    VkBuffer readback{};
+    VkDeviceMemory readback_memory{};
+    void* readback_mapped{};
     std::vector<VkImage> images;
     std::vector<VkDeviceMemory> memories;
 };
@@ -1300,11 +1313,15 @@ template <typename Function>
     PFN_vkAllocateMemory allocate_memory = nullptr;
     PFN_vkBindImageMemory bind_image_memory = nullptr;
     PFN_vkCreateCommandPool create_command_pool = nullptr;
-    PFN_vkAllocateCommandBuffers allocate_command_buffers = nullptr;
-    PFN_vkBeginCommandBuffer begin_command_buffer = nullptr;
-    PFN_vkEndCommandBuffer end_command_buffer = nullptr;
-    PFN_vkCmdPipelineBarrier cmd_pipeline_barrier = nullptr;
-    PFN_vkQueueSubmit queue_submit = nullptr;
+    PFN_vkCreateBuffer create_buffer = nullptr;
+    PFN_vkGetBufferMemoryRequirements get_buffer_memory_requirements = nullptr;
+    PFN_vkBindBufferMemory bind_buffer_memory = nullptr;
+    PFN_vkMapMemory map_memory = nullptr;
+    auto& allocate_command_buffers = g_vulkan.allocate_command_buffers;
+    auto& begin_command_buffer = g_vulkan.begin_command_buffer;
+    auto& end_command_buffer = g_vulkan.end_command_buffer;
+    auto& cmd_pipeline_barrier = g_vulkan.cmd_pipeline_barrier;
+    auto& queue_submit = g_vulkan.queue_submit;
     if (!device_function(g_vulkan.queue_wait_idle, "vkQueueWaitIdle") ||
         !device_function(get_device_queue, "vkGetDeviceQueue") ||
         !device_function(create_image, "vkCreateImage") ||
@@ -1316,7 +1333,14 @@ template <typename Function>
         !device_function(begin_command_buffer, "vkBeginCommandBuffer") ||
         !device_function(end_command_buffer, "vkEndCommandBuffer") ||
         !device_function(cmd_pipeline_barrier, "vkCmdPipelineBarrier") ||
-        !device_function(queue_submit, "vkQueueSubmit")) {
+        !device_function(queue_submit, "vkQueueSubmit") ||
+        !device_function(g_vulkan.cmd_clear_color_image, "vkCmdClearColorImage") ||
+        !device_function(g_vulkan.cmd_copy_image_to_buffer, "vkCmdCopyImageToBuffer") ||
+        !device_function(g_vulkan.reset_command_pool, "vkResetCommandPool") ||
+        !device_function(create_buffer, "vkCreateBuffer") ||
+        !device_function(get_buffer_memory_requirements, "vkGetBufferMemoryRequirements") ||
+        !device_function(bind_buffer_memory, "vkBindBufferMemory") ||
+        !device_function(map_memory, "vkMapMemory")) {
         return false;
     }
     get_device_queue(g_vulkan.device, g_vulkan.queue_family, 0, &g_vulkan.queue);
@@ -1391,9 +1415,41 @@ template <typename Function>
     }
 
     VkCommandPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
     pool_info.queueFamilyIndex = g_vulkan.queue_family;
     if (create_command_pool(g_vulkan.device, &pool_info, nullptr, &g_vulkan.command_pool) != VK_SUCCESS) {
         return false;
+    }
+    {
+        VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        buffer_info.size = 4 * 16;
+        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (create_buffer(g_vulkan.device, &buffer_info, nullptr, &g_vulkan.readback) != VK_SUCCESS) {
+            return false;
+        }
+        VkMemoryRequirements requirements{};
+        get_buffer_memory_requirements(g_vulkan.device, g_vulkan.readback, &requirements);
+        std::optional<std::uint32_t> type;
+        for (std::uint32_t index = 0; index < memory_properties.memoryTypeCount; ++index) {
+            const VkMemoryPropertyFlags wanted =
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            if ((requirements.memoryTypeBits & (1U << index)) != 0 &&
+                (memory_properties.memoryTypes[index].propertyFlags & wanted) == wanted) {
+                type = index;
+                break;
+            }
+        }
+        VkMemoryAllocateInfo allocate_info{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocate_info.allocationSize = requirements.size;
+        allocate_info.memoryTypeIndex = type.value_or(0);
+        if (!type ||
+            allocate_memory(g_vulkan.device, &allocate_info, nullptr, &g_vulkan.readback_memory) != VK_SUCCESS ||
+            bind_buffer_memory(g_vulkan.device, g_vulkan.readback, g_vulkan.readback_memory, 0) != VK_SUCCESS ||
+            map_memory(g_vulkan.device, g_vulkan.readback_memory, 0, VK_WHOLE_SIZE, 0, &g_vulkan.readback_mapped) != VK_SUCCESS) {
+            std::cerr << "failed to create the Vulkan readback buffer\n";
+            return false;
+        }
     }
     VkCommandBufferAllocateInfo buffer_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     buffer_info.commandPool = g_vulkan.command_pool;
@@ -1434,6 +1490,118 @@ template <typename Function>
         return false;
     }
     return true;
+}
+
+// Records and runs one command buffer on the application's queue, then
+// waits for it. Test-side only; the layer never does this on a frame.
+template <typename Record>
+[[nodiscard]] bool run_vulkan_commands(Record&& record) {
+    if (g_vulkan.queue_wait_idle(g_vulkan.queue) != VK_SUCCESS ||
+        g_vulkan.reset_command_pool(g_vulkan.device, g_vulkan.command_pool, 0) != VK_SUCCESS) {
+        return false;
+    }
+    VkCommandBufferAllocateInfo buffer_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    buffer_info.commandPool = g_vulkan.command_pool;
+    buffer_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    buffer_info.commandBufferCount = 1;
+    VkCommandBuffer buffer = VK_NULL_HANDLE;
+    VkCommandBufferBeginInfo begin_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (g_vulkan.allocate_command_buffers(g_vulkan.device, &buffer_info, &buffer) != VK_SUCCESS ||
+        g_vulkan.begin_command_buffer(buffer, &begin_info) != VK_SUCCESS) {
+        return false;
+    }
+    record(buffer);
+    VkSubmitInfo submit_info{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &buffer;
+    return g_vulkan.end_command_buffer(buffer) == VK_SUCCESS &&
+        g_vulkan.queue_submit(g_vulkan.queue, 1, &submit_info, VK_NULL_HANDLE) == VK_SUCCESS &&
+        g_vulkan.queue_wait_idle(g_vulkan.queue) == VK_SUCCESS;
+}
+
+[[nodiscard]] VkImageMemoryBarrier vulkan_test_barrier(
+    VkImage image, VkImageLayout from, VkImageLayout to) {
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    barrier.oldLayout = from;
+    barrier.newLayout = to;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange = {
+        VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
+    return barrier;
+}
+
+// The application "renders" a frame: every pixel of the image one colour,
+// and the image back in the layout the runtime expects at release.
+[[nodiscard]] bool paint_vulkan_image(VkImage image, std::uint8_t red) {
+    return run_vulkan_commands([&](VkCommandBuffer buffer) {
+        const VkImageMemoryBarrier to_transfer = vulkan_test_barrier(
+            image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        g_vulkan.cmd_pipeline_barrier(
+            buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &to_transfer);
+        VkClearColorValue color{};
+        color.float32[0] = static_cast<float>(red) / 255.0F;
+        color.float32[1] = 0.25F;
+        color.float32[2] = 0.5F;
+        color.float32[3] = 1.0F;
+        const VkImageSubresourceRange range{
+            VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
+        g_vulkan.cmd_clear_color_image(
+            buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &color, 1, &range);
+        const VkImageMemoryBarrier back = vulkan_test_barrier(
+            image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        g_vulkan.cmd_pipeline_barrier(
+            buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &back);
+    });
+}
+
+// The red channel of pixel (0,0), layer 0, of a private image, read the
+// way the runtime would read it: from COLOR_ATTACHMENT_OPTIMAL and back.
+[[nodiscard]] std::optional<std::uint8_t> read_vulkan_pixel(VkImage image) {
+    const bool ran = run_vulkan_commands([&](VkCommandBuffer buffer) {
+        const VkImageMemoryBarrier to_transfer = vulkan_test_barrier(
+            image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        g_vulkan.cmd_pipeline_barrier(
+            buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &to_transfer);
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {1, 1, 1};
+        g_vulkan.cmd_copy_image_to_buffer(
+            buffer, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_vulkan.readback, 1, &region);
+        const VkImageMemoryBarrier back = vulkan_test_barrier(
+            image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        g_vulkan.cmd_pipeline_barrier(
+            buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &back);
+    });
+    if (!ran) {
+        return std::nullopt;
+    }
+    return static_cast<const std::uint8_t*>(g_vulkan.readback_mapped)[0];
+}
+
+// Whether any current private image holds a frame painted with this red
+// value: the pair's "current" output is a copy of the frame just submitted,
+// and it reached the runtime through both interop copies and the D3D12
+// history in between.
+[[nodiscard]] bool vulkan_current_images_contain(std::uint8_t red) {
+    for (const auto* images : {&g_vulkan_current_swapchain_images,
+                               &g_vulkan_current_swapchain_b_images}) {
+        for (VkImage image : *images) {
+            const auto pixel = read_vulkan_pixel(image);
+            if (pixel && *pixel == red) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 [[nodiscard]] bool wait_for_queue_idle() {
@@ -2458,15 +2626,33 @@ int main(int argc, char** argv) {
         // this thread. In vulkan mode the generation behind those counts ran
         // through the Vulkan interop on a real device.
         bool frame_sequence_succeeded = true;
+        // In vulkan mode every frame is painted a colour of its own before
+        // it is released, and once a pair has gone out its current copy has
+        // to be found in a private image: the pixels crossed into D3D12 and
+        // back, through every wait between the two APIs.
+        int pixel_failures = 0;
         XrFrameState application_frame{XR_TYPE_FRAME_STATE};
         for (int index = 0; index < 10; ++index) {
+            const auto red = static_cast<std::uint8_t>(40 + index * 20);
             frame_sequence_succeeded = frame_sequence_succeeded &&
                 XR_SUCCEEDED(wait_frame(
                     session, &frame_wait_info, &application_frame)) &&
                 application_frame.predictedDisplayPeriod == kFakeDisplayPeriod &&
                 XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
-                capture_fresh_application_image() &&
-                submit_frame(application_frame.predictedDisplayTime);
+                wait_for_queue_idle() &&
+                XR_SUCCEEDED(acquire_image(swapchain, &acquire_info, &acquired_index)) &&
+                XR_SUCCEEDED(wait_image(swapchain, &image_wait_info)) &&
+                (!g_vulkan_mode ||
+                 paint_vulkan_image(
+                     g_vulkan_application_swapchain_images[acquired_index], red)) &&
+                XR_SUCCEEDED(release_image(swapchain, &release_info)) &&
+                submit_frame(application_frame.predictedDisplayTime) &&
+                wait_for_queue_idle();
+            // The first frame arms and passes through, the second primes.
+            if (g_vulkan_mode && frame_sequence_succeeded && index >= 2 &&
+                !vulkan_current_images_contain(red)) {
+                ++pixel_failures;
+            }
         }
         const bool teardown_succeeded =
             XR_SUCCEEDED(end_session(session)) &&
@@ -2478,8 +2664,10 @@ int main(int argc, char** argv) {
             g_off_thread_frame_calls.load(std::memory_order_relaxed);
         const std::uint32_t synthetic_acquires =
             g_synthetic_acquire_calls.load(std::memory_order_relaxed);
+        // The fake runtime never throttles this mode, so vulkan stays
+        // inline here; only the single-threaded device forbids a presenter.
         const bool valid = frame_sequence_succeeded && teardown_succeeded &&
-            off_thread == 0 &&
+            (off_thread == 0 || g_vulkan_mode) && pixel_failures == 0 &&
             // Generation still runs, inline: all but the arming frame and
             // the first frame, which primes, submit a synthetic.
             synthetic_acquires >= 7 &&
@@ -2489,7 +2677,8 @@ int main(int argc, char** argv) {
                       << " validation failed: sequence="
                       << frame_sequence_succeeded << " teardown="
                       << teardown_succeeded << " off-thread=" << off_thread
-                      << " synthetic=" << synthetic_acquires << '\n';
+                      << " synthetic=" << synthetic_acquires
+                      << " stale-pixels=" << pixel_failures << '\n';
             return EXIT_FAILURE;
         }
         std::cout << (g_vulkan_mode

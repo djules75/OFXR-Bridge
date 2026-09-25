@@ -90,6 +90,13 @@ struct VulkanFunctions {
     PFN_vkCreateFence create_fence{};
     PFN_vkDestroyFence destroy_fence{};
     PFN_vkWaitForFences wait_for_fences{};
+    // Diagnostic sampling only; see Impl::sample.
+    PFN_vkCreateBuffer create_buffer{};
+    PFN_vkDestroyBuffer destroy_buffer{};
+    PFN_vkGetBufferMemoryRequirements get_buffer_memory_requirements{};
+    PFN_vkBindBufferMemory bind_buffer_memory{};
+    PFN_vkMapMemory map_memory{};
+    PFN_vkCmdCopyImageToBuffer cmd_copy_image_to_buffer{};
 
     [[nodiscard]] bool load_loader() noexcept {
         HMODULE module = GetModuleHandleW(L"vulkan-1.dll");
@@ -160,7 +167,13 @@ struct VulkanFunctions {
             load(queue_submit, "vkQueueSubmit") &&
             load(create_fence, "vkCreateFence") &&
             load(destroy_fence, "vkDestroyFence") &&
-            load(wait_for_fences, "vkWaitForFences");
+            load(wait_for_fences, "vkWaitForFences") &&
+            load(create_buffer, "vkCreateBuffer") &&
+            load(destroy_buffer, "vkDestroyBuffer") &&
+            load(get_buffer_memory_requirements, "vkGetBufferMemoryRequirements") &&
+            load(bind_buffer_memory, "vkBindBufferMemory") &&
+            load(map_memory, "vkMapMemory") &&
+            load(cmd_copy_image_to_buffer, "vkCmdCopyImageToBuffer");
     }
 };
 
@@ -385,6 +398,21 @@ struct VulkanD3D12SwapchainInterop::Impl {
     std::vector<ID3D12Resource*> current_d3d12_views;
     std::vector<ID3D12Resource*> synthetic_d3d12_views;
     std::vector<CommandBuffer> command_buffers;
+    // Diagnostic, flight recorder on only: every kSampleInterval captures, a
+    // strip of the application's image as captured and of the shared
+    // output as Vulkan reads it are copied into this host-visible buffer,
+    // and their checksums logged on the next sample, by which time the
+    // fence has passed the copy. No wait is added to any frame. Slot 0 holds
+    // the source strip, slot 1 the output strip.
+    static constexpr std::uint32_t kSampleInterval = 90;
+    static constexpr std::uint32_t kSamplePixels = 64;
+    static constexpr VkDeviceSize kSampleSlotBytes = kSamplePixels * 16;
+    VkBuffer sample_buffer{};
+    VkDeviceMemory sample_memory{};
+    void* sample_mapped{};
+    std::uint32_t capture_count{};
+    std::uint64_t sample_serial{};
+    bool sample_pending{};
     std::uint64_t next_fence_value{1};
     std::uint64_t last_fence_value{};
     std::uint64_t last_d3d12_access_value{};
@@ -403,6 +431,12 @@ struct VulkanD3D12SwapchainInterop::Impl {
             }
             if (semaphore != VK_NULL_HANDLE && vk.destroy_semaphore) {
                 vk.destroy_semaphore(binding.device, semaphore, nullptr);
+            }
+            if (sample_buffer != VK_NULL_HANDLE && vk.destroy_buffer) {
+                vk.destroy_buffer(binding.device, sample_buffer, nullptr);
+            }
+            if (sample_memory != VK_NULL_HANDLE && vk.free_memory) {
+                vk.free_memory(binding.device, sample_memory, nullptr);
             }
         }
         if (fence_event != nullptr) {
@@ -634,6 +668,100 @@ struct VulkanD3D12SwapchainInterop::Impl {
         bridge_flight_logger().event(
             BridgeFlightOperation::vulkan_interop, step,
             d3d12_fence ? d3d12_fence->GetCompletedValue() : 0, signal, wait);
+    }
+
+    void create_sample_buffer() noexcept {
+        if (!bridge_flight_logger().enabled()) {
+            return;
+        }
+        VkBufferCreateInfo buffer_info{};
+        buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        buffer_info.size = kSampleSlotBytes * 2;
+        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vk.create_buffer(binding.device, &buffer_info, nullptr, &sample_buffer) != VK_SUCCESS) {
+            return;
+        }
+        VkMemoryRequirements requirements{};
+        vk.get_buffer_memory_requirements(binding.device, sample_buffer, &requirements);
+        std::optional<std::uint32_t> type;
+        for (std::uint32_t index = 0; index < memory_properties.memoryTypeCount; ++index) {
+            const VkMemoryPropertyFlags wanted = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            if ((requirements.memoryTypeBits & (1U << index)) != 0 &&
+                (memory_properties.memoryTypes[index].propertyFlags & wanted) == wanted) {
+                type = index;
+                break;
+            }
+        }
+        VkMemoryAllocateInfo allocate_info{};
+        allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocate_info.allocationSize = requirements.size;
+        allocate_info.memoryTypeIndex = type.value_or(0);
+        if (!type ||
+            vk.allocate_memory(binding.device, &allocate_info, nullptr, &sample_memory) != VK_SUCCESS ||
+            vk.bind_buffer_memory(binding.device, sample_buffer, sample_memory, 0) != VK_SUCCESS ||
+            vk.map_memory(binding.device, sample_memory, 0, VK_WHOLE_SIZE, 0, &sample_mapped) != VK_SUCCESS) {
+            if (sample_memory != VK_NULL_HANDLE) {
+                vk.free_memory(binding.device, sample_memory, nullptr);
+                sample_memory = VK_NULL_HANDLE;
+            }
+            vk.destroy_buffer(binding.device, sample_buffer, nullptr);
+            sample_buffer = VK_NULL_HANDLE;
+            sample_mapped = nullptr;
+        }
+    }
+
+    [[nodiscard]] std::uint64_t sample_checksum(std::uint32_t slot) const noexcept {
+        const auto* bytes = static_cast<const std::uint8_t*>(sample_mapped) +
+            slot * kSampleSlotBytes;
+        std::uint64_t hash = 14695981039346656037ULL;
+        for (VkDeviceSize index = 0; index < kSampleSlotBytes; ++index) {
+            hash ^= bytes[index];
+            hash *= 1099511628211ULL;
+        }
+        return hash;
+    }
+
+    // Copies a strip from the middle of layer 0 into a sample slot. The
+    // image must be in a layout that allows a transfer read.
+    void record_sample(
+        VkCommandBuffer buffer,
+        VkImage image,
+        VkImageLayout layout,
+        std::uint32_t slot) noexcept {
+        VkBufferImageCopy region{};
+        region.bufferOffset = slot * kSampleSlotBytes;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset.x = static_cast<std::int32_t>(
+            description.width > kSamplePixels ? (description.width - kSamplePixels) / 2 : 0);
+        region.imageOffset.y = static_cast<std::int32_t>(description.height / 2);
+        region.imageExtent.width = std::min(kSamplePixels, description.width);
+        region.imageExtent.height = 1;
+        region.imageExtent.depth = 1;
+        vk.cmd_copy_image_to_buffer(buffer, image, layout, sample_buffer, 1, &region);
+    }
+
+    // Whether this capture takes a sample, logging the previous one first.
+    [[nodiscard]] bool begin_sample() noexcept {
+        if (sample_mapped == nullptr) {
+            return false;
+        }
+        ++capture_count;
+        if (capture_count % kSampleInterval != 0) {
+            return false;
+        }
+        if (sample_pending) {
+            bridge_flight_logger().event(
+                BridgeFlightOperation::vulkan_interop, 5,
+                sample_checksum(0), sample_checksum(1), sample_serial);
+        }
+        ++sample_serial;
+        sample_pending = true;
+        return true;
     }
 
     void mark_submitted(VkCommandBuffer buffer, std::uint64_t value) noexcept {
@@ -948,6 +1076,7 @@ struct VulkanD3D12SwapchainInterop::Impl {
                 VulkanInteropInitializationStage::command_pool,
                 hresult_from_vulkan(vk_result));
         }
+        create_sample_buffer();
         fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (fence_event == nullptr) {
             const DWORD error = GetLastError();
@@ -1003,6 +1132,14 @@ struct VulkanD3D12SwapchainInterop::Impl {
         copy_mip_zero(
             buffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, shared,
             VK_IMAGE_LAYOUT_GENERAL);
+        if (begin_sample()) {
+            record_sample(buffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0);
+            if (!shared_current_destinations.empty()) {
+                record_sample(
+                    buffer, shared_current_destinations.front().image,
+                    VK_IMAGE_LAYOUT_GENERAL, 1);
+            }
+        }
         barrier(
             buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
             image_barrier(

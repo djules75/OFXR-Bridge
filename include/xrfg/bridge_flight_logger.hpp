@@ -163,7 +163,11 @@ enum class BridgeFlightOperation : std::uint32_t {
     // c= the value it waits for (0: none). result: 1 capture submitted on
     // the Vulkan queue, 2 the D3D12 history copy signalled, 3 the D3D12
     // queue told to wait for the last publish, 4 publish submitted on the
-    // Vulkan queue.
+    // Vulkan queue. result 5, every 90th capture: a= checksum of a strip of
+    // the application's image as captured, b= checksum of the same strip of
+    // the shared current output as Vulkan reads it, c= sample serial - a
+    // moving a with a still b says the D3D12 leg is stale from Vulkan's
+    // side; both moving says the runtime is not showing what it was given.
     vulkan_interop,
 };
 
