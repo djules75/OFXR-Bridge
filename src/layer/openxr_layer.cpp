@@ -5023,13 +5023,39 @@ void continuous_presenter_main(
                         !too_young &&
                         age < period * kReadinessHoldPeriods &&
                         !synthetic_output_ready(*front->owned_frame);
-                    if (too_young || not_written) {
+                    // A hold shows the previous frame for a slot, so it needs a
+                    // previous frame to show. A pipelined application gets
+                    // none - its frames may name handles it destroys as soon
+                    // as its xrEndFrame returns, so the presenter never keeps
+                    // one - and neither does a presenter that has not
+                    // submitted yet. Held there, the slot went down with no
+                    // layers, and SteamVR shows black for that: measured on
+                    // MSFS 2024, 31 of 32 empty submissions in one run were
+                    // holds, and each was a black flash in the headset.
+                    //
+                    // So with nothing to repeat, hand the synthetic over now.
+                    // The runtime judges whether it is finished by the
+                    // binding queue, which waits for its synthesis, so an
+                    // unwritten one is treated as not ready and the
+                    // compositor keeps showing the previous image, reprojected,
+                    // instead of black. What this gives up is the slot of
+                    // depth the hold would have bought, for this frame only.
+                    const bool can_hold =
+                        state->presenter_last_frame != nullptr;
+                    if ((too_young || not_written) && can_hold) {
                         held_age_ns = std::chrono::duration_cast<
                             std::chrono::nanoseconds>(age).count();
                         held_sequence = front->sequence;
                         held_reason = too_young ? 400 : 401;
                         repeated_frame = state->presenter_last_frame;
                     } else {
+                        if (too_young || not_written) {
+                            // Recorded below as 402: would have held.
+                            held_age_ns = std::chrono::duration_cast<
+                                std::chrono::nanoseconds>(age).count();
+                            held_sequence = front->sequence;
+                            held_reason = 402;
+                        }
                         request = front;
                         state->presenter_submissions.pop_front();
                     }
@@ -5039,9 +5065,10 @@ void continuous_presenter_main(
             }
             // Recorded outside presenter_mutex, which the application waits
             // on. result=400: a synthetic held for the pipeline's depth;
-            // 401: held because its output had not been written yet. a is its
-            // age in microseconds, b the display period in microseconds, c its
-            // sequence.
+            // 401: held because its output had not been written yet; 402: one
+            // of those, handed over anyway because there was no frame to
+            // repeat. a is its age in microseconds, b the display period in
+            // microseconds, c its sequence.
             if (held_age_ns >= 0) {
                 xrfg::bridge_flight_logger().event(
                     xrfg::BridgeFlightOperation::presenter_transition,
