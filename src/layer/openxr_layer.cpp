@@ -5788,6 +5788,38 @@ void stop_continuous_presenter(
     return state->presenter_active && !state->presenter_stop_requested;
 }
 
+// Where the once-per-pair hold keeps the application: after the pair is handed
+// over, or at admission, before its synthesis is queued. It decides what
+// synthesis waits behind on the GPU, and the two APIs want opposite answers.
+//
+// Held after the hand-over, the application queues synthesis the moment its
+// images are captured, and synthesis follows the game's frame directly on the
+// GPU. Native D3D12 wants exactly that: nothing of the game's waits on it.
+// Hogwarts Legacy at 8344x3268 held 87+ for 67% and 69% of the time over two
+// runs held there, and 44-47% over three held at admission.
+//
+// A D3D11 session cannot have it. The synthetic reaches the runtime through a
+// copy on the game's own immediate context that first waits for synthesis to
+// finish, so every D3D11 command the game issues after it waits on the GPU
+// behind the whole of synthesis - and queued at capture, that is the game's
+// next frame, pushed late into the synthetic's compositor slot. Held at
+// admission, synthesis is queued about a pair after the capture, when that
+// frame has long finished. Cyberpunk 2077 at 3088x2592: held after the
+// hand-over, the compositor skipped 152 frames a minute, almost all on
+// synthetic slots; at admission, 3-16.
+//
+// Admission has to use this hold rather than leave the capacity bound to meter
+// the application: the bound counts retirements, so it releases straight after
+// a real frame and the queue settles a whole pair deep, where this hold
+// follows the phase the presenter's depth rule sets and gives the one period
+// the pipeline is meant to add - on Cyberpunk, synthetics out 21 ms after
+// their pair rather than 32.
+[[nodiscard]] bool presenter_hold_at_admission(
+    const SessionState& state) noexcept {
+    return state.deep_pipeline &&
+        state.graphics_binding == SessionGraphicsBinding::d3d11;
+}
+
 // Holds the application until the presenter has run a whole pair since it was
 // last released. Deliberately returns nothing: it is called after the frame has
 // already been handed over, so a presenter that stops or fails while this waits
@@ -5797,24 +5829,9 @@ void stop_continuous_presenter(
 // capacity bounds in xrEndFrame sit beside it and are normally slack, so
 // anything meant to move where the application runs has to move this.
 //
-// Where it is called differs by depth. The shallow pipeline calls it after the
-// pair is handed over. The deeper pipeline calls it at admission, before the
-// pair's synthesis is queued, and that placement matters on the GPU. Called
-// after the hand-over, the application queues synthesis the moment its images
-// are captured, so synthesis has to sit behind the frame the game has only
-// just submitted and runs that much later - into the synthetic's compositor
-// slot once the game's frame is heavy. Called at admission, synthesis is queued
-// about a pair after the capture, when that frame has long finished, and starts
-// at once. Measured on Cyberpunk 2077 at 3088x2592, at the same depth
-// (synthetic handed over 31-32 ms after its pair): after the hand-over lost 165
-// compositor frames in 75 s, almost all on synthetic slots; at admission, 3.
-//
-// It has to be this gate at admission, not the capacity bound alone. The bound
-// counts retirements, so it always lets the application go straight after a
-// real frame; this count follows the phase the presenter's depth rule sets,
-// and on Hogwarts Legacy at 8344x3268 that put the release after the synthetic
-// instead. The one run released there held 87+ for 67% of the time; the runs
-// released after the real frame, 44-46%.
+// It is called after the pair is handed over, except in the deeper pipeline on
+// a D3D11 session, where it is called at admission, before the pair's
+// synthesis is queued; see presenter_hold_at_admission.
 void wait_for_presenter_pair(
     const std::shared_ptr<SessionState>& state) noexcept {
     try {
@@ -7922,9 +7939,9 @@ XrResult layer_end_frame_impl(
         if (XR_FAILED(capacity_result)) {
             return capacity_result;
         }
-        if (state->deep_pipeline && metadata_pairable) {
+        if (presenter_hold_at_admission(*state) && metadata_pairable) {
             // The once-per-pair hold, ahead of synthesis rather than after the
-            // hand-over: see wait_for_presenter_pair for why the placement
+            // hand-over: see presenter_hold_at_admission for why the placement
             // matters. Only a frame that will pair is held, as it was after
             // the hand-over; a prime costs the presenter one frame, not two.
             // It returns without an error on a presenter failure; the enqueue
@@ -8350,9 +8367,9 @@ XrResult layer_end_frame_impl(
         // The frame lock goes first: an application whose wait runs on another
         // thread must not be shut out of xrWaitFrame while this waits.
         //
-        // The deeper pipeline has already held this frame at admission.
+        // Unless this frame was already held at admission.
         frame_call_lock.unlock();
-        if (!state->deep_pipeline) {
+        if (!presenter_hold_at_admission(*state)) {
             wait_for_presenter_pair(state);
         }
         return result;
