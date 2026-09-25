@@ -701,6 +701,20 @@ SteamVrDelivery::last_presentation() noexcept {
                 timing.m_flCompositorRenderGpuMs * 1000.0F);
             presentation.ready_vsyncs = timing.m_nNumVSyncsReadyForUse;
             presentation.vsyncs_to_first_view = timing.m_nNumVSyncsToFirstView;
+            presentation.system_time_seconds = timing.m_flSystemTimeInSeconds;
+            presentation.wait_get_poses_called_ms =
+                timing.m_flWaitGetPosesCalledMs;
+            presentation.new_poses_ready_ms = timing.m_flNewPosesReadyMs;
+            presentation.new_frame_ready_ms = timing.m_flNewFrameReadyMs;
+            presentation.compositor_update_start_ms =
+                timing.m_flCompositorUpdateStartMs;
+            presentation.compositor_update_end_ms =
+                timing.m_flCompositorUpdateEndMs;
+            presentation.compositor_render_start_ms =
+                timing.m_flCompositorRenderStartMs;
+            presentation.client_frame_interval_ms =
+                timing.m_flClientFrameIntervalMs;
+            presentation.compositor_idle_cpu_ms = timing.m_flCompositorIdleCpuMs;
             impl_->last_frame_index = timing.m_nFrameIndex;
             impl_->reported_frames = true;
             return presentation;

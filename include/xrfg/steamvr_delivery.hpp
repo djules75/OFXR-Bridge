@@ -143,6 +143,22 @@ public:
         // vsyncs_to_first_view how many passed before it was first shown.
         std::uint32_t ready_vsyncs{};
         std::uint32_t vsyncs_to_first_view{};
+        // The compositor's own timeline for this frame, as it reports it.
+        // system_time_seconds is the vsync its running start is relative to;
+        // every millisecond field below is an offset from it. Carried so the
+        // two edges of the window a submission has to land in - the running
+        // start and the start of the compositor's render - can be read per
+        // frame instead of assumed, along with where our submission and our
+        // wait actually fell.
+        double system_time_seconds{};
+        float wait_get_poses_called_ms{};
+        float new_poses_ready_ms{};
+        float new_frame_ready_ms{};
+        float compositor_update_start_ms{};
+        float compositor_update_end_ms{};
+        float compositor_render_start_ms{};
+        float client_frame_interval_ms{};
+        float compositor_idle_cpu_ms{};
     };
     [[nodiscard]] std::optional<FramePresentation> last_presentation() noexcept;
 

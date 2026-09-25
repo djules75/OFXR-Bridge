@@ -447,6 +447,107 @@ enum class GenerationQuarantineReason : std::int64_t {
 // one to accept.
 constexpr bool kDeepPipelineForced = true;
 
+// Diagnostic only, and only with logging on. Measures when the application's
+// own queue gets past the join a hand-over queues on it.
+//
+// On a native D3D12 session the runtime orders its use of a private image
+// against the application's queue, so an image is only ready, as the
+// compositor sees it, once that queue has executed the join - which sits
+// behind whatever the game had already queued. The synthesis fence says when
+// the pixels exist; nothing said when the runtime could see them. The
+// presenter signals `fence` on the application's queue straight after the
+// join and records it (913); this thread timestamps each value as it
+// completes (914). Values complete in order on one queue, so it waits for
+// them one at a time.
+struct JoinProbe {
+    Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+    HANDLE event{};
+    std::thread thread;
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::uint64_t signaled{};
+    bool stop{};
+
+    JoinProbe() = default;
+    JoinProbe(const JoinProbe&) = delete;
+    JoinProbe& operator=(const JoinProbe&) = delete;
+
+    ~JoinProbe() {
+        {
+            std::scoped_lock lock(mutex);
+            stop = true;
+        }
+        condition.notify_all();
+        if (event != nullptr) {
+            SetEvent(event);
+        }
+        if (thread.joinable()) {
+            thread.join();
+        }
+        if (event != nullptr) {
+            CloseHandle(event);
+        }
+    }
+
+    void run() noexcept {
+        try {
+            std::uint64_t waited = 0;
+            for (;;) {
+                std::uint64_t target = 0;
+                {
+                    std::unique_lock lock(mutex);
+                    condition.wait(
+                        lock, [&] { return stop || signaled > waited; });
+                    if (stop) {
+                        return;
+                    }
+                    target = waited + 1;
+                }
+                std::uint64_t completed = fence->GetCompletedValue();
+                if (completed == std::numeric_limits<std::uint64_t>::max()) {
+                    return; // Device removed: nothing further will complete.
+                }
+                if (completed < target) {
+                    if (FAILED(fence->SetEventOnCompletion(target, event))) {
+                        return;
+                    }
+                    WaitForSingleObject(event, INFINITE);
+                    {
+                        std::scoped_lock lock(mutex);
+                        if (stop) {
+                            return;
+                        }
+                    }
+                    completed = fence->GetCompletedValue();
+                    if (completed == std::numeric_limits<std::uint64_t>::max()) {
+                        return;
+                    }
+                    if (completed < target) {
+                        continue; // A stale wake; re-arm for the same value.
+                    }
+                }
+                // Several may have completed together; stamp each.
+                for (std::uint64_t value = target; value <= completed; ++value) {
+                    {
+                        std::scoped_lock lock(mutex);
+                        if (value > signaled) {
+                            break;
+                        }
+                    }
+                    xrfg::bridge_flight_logger().event(
+                        xrfg::BridgeFlightOperation::presenter_vsync_lock,
+                        914,
+                        value,
+                        0,
+                        0);
+                    waited = value;
+                }
+            }
+        } catch (...) {
+        }
+    }
+};
+
 struct SessionState {
     explicit SessionState(std::shared_ptr<Dispatch> next_dispatch)
         : dispatch(std::move(next_dispatch)), manual_control(current_layer_directory()) {}
@@ -728,7 +829,59 @@ struct SessionState {
     bool presenter_stop_requested{};
     bool presenter_active{};
     XrSession handle{XR_NULL_HANDLE};
+    // Created by the presenter on first use; see JoinProbe. Presenter thread
+    // only, apart from its own waiter.
+    std::unique_ptr<JoinProbe> join_probe;
+    std::uint64_t join_probe_next{};
 };
+
+// Marks where a release's join sits in the application's queue, so the
+// probe's waiter can stamp when the queue gets there (913 with the caller's
+// b and c; 914 when it completes). Called on the thread that just released
+// the images, straight after the release; only one thread releases per
+// session, so the counter needs no lock. Logging on only. See JoinProbe.
+void signal_join_probe(
+    SessionState* state,
+    std::uint64_t b,
+    std::uint64_t c) noexcept {
+    if (state == nullptr || !state->d3d12_queue ||
+        !xrfg::bridge_flight_logger().enabled()) {
+        return;
+    }
+    try {
+        if (!state->join_probe && state->d3d12_device) {
+            auto probe = std::make_unique<JoinProbe>();
+            probe->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (probe->event != nullptr &&
+                SUCCEEDED(state->d3d12_device->CreateFence(
+                    0,
+                    D3D12_FENCE_FLAG_NONE,
+                    IID_PPV_ARGS(probe->fence.ReleaseAndGetAddressOf())))) {
+                probe->thread =
+                    std::thread([raw = probe.get()] { raw->run(); });
+                state->join_probe = std::move(probe);
+            }
+        }
+        if (state->join_probe &&
+            SUCCEEDED(state->d3d12_queue->Signal(
+                state->join_probe->fence.Get(),
+                state->join_probe_next + 1))) {
+            const std::uint64_t value = ++state->join_probe_next;
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::presenter_vsync_lock,
+                913,
+                value,
+                b,
+                c);
+            {
+                std::scoped_lock lock(state->join_probe->mutex);
+                state->join_probe->signaled = value;
+            }
+            state->join_probe->condition.notify_all();
+        }
+    } catch (...) {
+    }
+}
 
 // Inside xrEndFrame, and inside each swapchain image call, the runtime drives
 // the application's single D3D11 immediate context. ID3D11Multithread makes
@@ -4701,8 +4854,17 @@ void continuous_presenter_main(
             // Never for a repeat - its images were released when it first
             // went down, and the slot may have been reacquired since.
             if (request && request->owned_frame) {
+                const bool joined =
+                    !request->owned_frame->pending_releases.empty() &&
+                    state->d3d12_synthesis_queue != nullptr;
                 run_private_releases(
                     state.get(), request->owned_frame->pending_releases);
+                if (joined) {
+                    signal_join_probe(
+                        state.get(),
+                        request->sequence,
+                        request->owned_frame->synthetic ? 2u : 1u);
+                }
             }
 
             const XrFrameEndInfo* source = request
@@ -5689,6 +5851,76 @@ void continuous_presenter_main(
                     presented->ready_vsyncs,
                     presented->vsyncs_to_first_view,
                     presented->presents);
+                // The compositor's own timeline for the same frame: where its
+                // running start and its render fell, and where our submission
+                // and our wait arrived, all against the vsync it measures
+                // from. The submit margin and the pair bias both stand in for
+                // this window; recorded so it can be read instead of assumed.
+                // Diagnostic only.
+                //
+                // Each millisecond offset is packed into 16 bits, in 10 us
+                // units biased by 32768 - plus or minus 327 ms, far more than
+                // a frame. 910 and 911 carry the frame index in a so the two
+                // halves join; 910's b is the frame's vsync reference in
+                // microseconds of the compositor's clock, and 912 puts the
+                // most recent vsync on this log's clock beside the
+                // compositor's frame counter, so the two clocks can be tied
+                // together afterwards.
+                if (xrfg::bridge_flight_logger().enabled()) {
+                    const auto pack = [](float ms) -> std::uint64_t {
+                        const double units =
+                            static_cast<double>(ms) * 100.0 + 32768.0;
+                        return static_cast<std::uint64_t>(
+                            std::clamp(units, 0.0, 65535.0));
+                    };
+                    const auto pack4 = [&](float first, float second,
+                                           float third, float fourth) {
+                        return pack(first) | (pack(second) << 16) |
+                            (pack(third) << 32) | (pack(fourth) << 48);
+                    };
+                    xrfg::bridge_flight_logger().event(
+                        xrfg::BridgeFlightOperation::presenter_vsync_lock,
+                        910,
+                        presented->frame_index,
+                        static_cast<std::uint64_t>(
+                            std::max(0.0, presented->system_time_seconds) *
+                            1e6),
+                        pack4(
+                            presented->wait_get_poses_called_ms,
+                            presented->new_poses_ready_ms,
+                            presented->new_frame_ready_ms,
+                            presented->compositor_render_start_ms));
+                    xrfg::bridge_flight_logger().event(
+                        xrfg::BridgeFlightOperation::presenter_vsync_lock,
+                        911,
+                        presented->frame_index,
+                        0,
+                        pack4(
+                            presented->compositor_update_start_ms,
+                            presented->compositor_update_end_ms,
+                            presented->client_frame_interval_ms,
+                            presented->compositor_idle_cpu_ms));
+                    if (const auto anchor =
+                            state->steamvr_delivery->vsync_anchor()) {
+                        LARGE_INTEGER counter{};
+                        QueryPerformanceCounter(&counter);
+                        const auto steady_now = std::chrono::steady_clock::now();
+                        const std::int64_t vsync_log_us =
+                            xrfg::bridge_flight_logger().microseconds_for_counter(
+                                counter.QuadPart) -
+                            std::chrono::duration_cast<
+                                std::chrono::microseconds>(
+                                steady_now - anchor->at)
+                                .count();
+                        xrfg::bridge_flight_logger().event(
+                            xrfg::BridgeFlightOperation::presenter_vsync_lock,
+                            912,
+                            static_cast<std::uint64_t>(
+                                std::max<std::int64_t>(0, vsync_log_us)),
+                            anchor->frame_counter,
+                            0);
+                    }
+                }
                 // The margin used to walk itself down from here, half a
                 // millisecond at a time, whenever more than 30% of a 450-frame
                 // window was presented other than once. It is gone, and the
@@ -6957,28 +7189,35 @@ struct PreparedProjectionFrame {
             ticket.fence_value);
 
         // The runtime orders its use of these swapchain images against the
-        // queue the application supplied, so when synthesis ran elsewhere
-        // that queue has to wait for it before the release hands the images
-        // over.
+        // queue the application supplied: a release marks "complete as of
+        // this point" on that queue, and the compositor treats the image as
+        // ready once the queue has run past the mark. So when synthesis ran
+        // elsewhere, that queue has to wait for it immediately before the
+        // release, or the mark says complete before the pixels exist.
         //
-        // Where that join sits decides what it costs. It is a Wait on the
-        // application's own queue, so every command the application submits
-        // after it cannot start on the GPU until synthesis has finished. Made
-        // here, inside the application's xrEndFrame, that is the next game
-        // frame's entire render queued behind this pair's synthesis - the
-        // two serialised, which is exactly what the deeper pipeline exists to
-        // stop. It was free while the application was parked for a pair
-        // after this call, because its next frame reached the queue after
-        // synthesis had finished anyway; once it is released straight away
-        // it is not.
+        // Where the release sits in the queue decides when the runtime can
+        // see the frame. Here, inside the application's xrEndFrame, the mark
+        // lands after this frame's rendering, the capture and the join, and
+        // before anything of the next game frame - the application is still
+        // inside this call and has not submitted it. The join then makes the
+        // next game frame wait on the GPU for this pair's synthesis, but the
+        // GPU has both to do either way and synthesis runs on the
+        // high-priority queue, so the game frame finishes at about the same
+        // time whether it waits or is pre-empted.
         //
-        // So in the deeper pipeline the join and the release both move to
-        // the presenter, immediately before each image is handed over. By
-        // then synthesis has had its display period and the fence is already
-        // signalled, the Wait costs nothing, and the game's next frame never
-        // waits for the synthetic. Everywhere else - the shallow pipeline,
-        // the inline path, and D3D11, whose immediate context must not be
-        // driven from the presenter thread - they stay here.
+        // V293-V303 released at the hand-over instead, on the presenter, so
+        // the game's next frame never waited for synthesis. That put the mark
+        // behind whatever the game had queued since it was released - its
+        // whole next frame - and the compositor could not see the image
+        // until that frame had rendered. Measured on Hogwarts Legacy: the
+        // real frame's mark cleared 7.3 ms after its hand-over (p50) and 1 ms
+        // before the compositor's render start at p90; in a heavy stretch
+        // 67% of the real frames the compositor never showed had cleared
+        // after it. Which half of the pair paid depended on where the
+        // application's release fell against the hand-overs, and the
+        // readiness hold could not see it, because it polls the synthesis
+        // fence and the runtime's readiness is the queue's progress past
+        // the mark. Released here, the two coincide.
         const bool release_at_handover = release_at_handover_requested &&
             generation->d3d11_interop == nullptr &&
             SUCCEEDED(submit_result);
@@ -7002,6 +7241,16 @@ struct PreparedProjectionFrame {
                 state->session.get(),
                 state->session->dispatch,
                 current_image);
+            if (state->session->d3d12_synthesis_queue &&
+                SUCCEEDED(submit_result)) {
+                // One mark for the pair: both images were released at the
+                // same point in the queue. b is the capture serial, c is 3
+                // for a pair and 1 for a prime.
+                signal_join_probe(
+                    state->session.get(),
+                    ticket.current_serial,
+                    request_pair ? 3u : 1u);
+            }
         }
 
         if (FAILED(submit_result)) {
@@ -7040,7 +7289,7 @@ struct PreparedProjectionFrame {
             // the runtime reads the D3D11 images the copy writes. Both
             // accessors hand back a fence the presenter can poll without
             // either object's lock.
-            if (request_pair && release_at_handover_requested) {
+            if (request_pair && state->session->deep_pipeline) {
                 if (generation->d3d11_interop) {
                     std::uint64_t published = 0;
                     if (SUCCEEDED(generation->d3d11_interop->publication_fence(
@@ -8046,7 +8295,10 @@ XrResult layer_end_frame_impl(
             resource_mappings.mappings.size()),
         metadata_pairable,
         interpolation_fraction,
-        use_continuous_presenter && state->deep_pipeline);
+        // Released here, inside this call, in every pipeline: see the note
+        // on the release in prepare_frame_generation for why the deeper
+        // pipeline no longer leaves it to the presenter.
+        false);
     // Collected before anything below can reset `prepared`, so every image
     // left acquired is accounted for on every path out of this call.
     PrivateReleaseBatch synthetic_releases;
