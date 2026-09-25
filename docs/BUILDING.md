@@ -62,6 +62,11 @@ OpenVR — `IVRCompositor::GetCumulativeStats`, the same source fpsVR reads. No
 OpenXR call reports it. The standalone `xrfg_steamvr_delivery_probe` uses the
 same header.
 
+The Vulkan headers the Vulkan interop compiles against are vendored under
+`external/Vulkan-Headers` (Khronos Vulkan-Headers `v1.3.296`, listed in
+`THIRD_PARTY.md`); nothing further to install, and no Vulkan library is
+linked.
+
 Place a single header at `external/openvr/openvr.h`:
 
 ```powershell

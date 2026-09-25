@@ -9,6 +9,8 @@
 #include <optional>
 #include <span>
 
+#include "xrfg/swapchain_interop.hpp"
+
 namespace xrfg {
 
 enum class D3D11InteropInitializationStage : std::uint32_t {
@@ -51,10 +53,10 @@ enum class D3D11InteropInitializationStage : std::uint32_t {
 // released mip-zero OpenXR image from D3D11 into the existing D3D12 history and
 // to publish current/synthetic D3D12 output back into private D3D11 OpenXR
 // swapchains. Every transfer is GPU ordered; per-frame calls do not CPU-wait.
-class D3D11D3D12SwapchainInterop final {
+class D3D11D3D12SwapchainInterop final : public SwapchainInterop {
 public:
     D3D11D3D12SwapchainInterop() noexcept;
-    ~D3D11D3D12SwapchainInterop();
+    ~D3D11D3D12SwapchainInterop() override;
 
     D3D11D3D12SwapchainInterop(const D3D11D3D12SwapchainInterop&) = delete;
     D3D11D3D12SwapchainInterop& operator=(
@@ -70,31 +72,31 @@ public:
         std::span<ID3D11Texture2D* const> synthetic_destination_images,
         D3D11InteropInitializationStage* failure_stage = nullptr) noexcept;
 
-    [[nodiscard]] std::span<ID3D12Resource* const> source_images() const noexcept;
+    [[nodiscard]] std::span<ID3D12Resource* const> source_images() const noexcept override;
     [[nodiscard]] std::span<ID3D12Resource* const>
-    current_destination_images() const noexcept;
+    current_destination_images() const noexcept override;
     [[nodiscard]] std::span<ID3D12Resource* const>
-    synthetic_destination_images() const noexcept;
+    synthetic_destination_images() const noexcept override;
 
     // Must be called while the application still owns the released source
     // image. Queues D3D11 mip-zero copies and makes the D3D12 queue wait for
     // them before any history access.
-    [[nodiscard]] HRESULT prepare_capture(std::uint32_t source_index) noexcept;
+    [[nodiscard]] HRESULT prepare_capture(std::uint32_t source_index) noexcept override;
 
     // Marks the shared source safe for the next D3D11 write after the history
     // copy submitted immediately before this call completes on the D3D12 queue.
-    [[nodiscard]] HRESULT finish_capture() noexcept;
+    [[nodiscard]] HRESULT finish_capture() noexcept override;
 
     // Makes the D3D12 queue wait for any earlier D3D11 publication copy before
     // the synthesizer can reuse a shared destination.
-    [[nodiscard]] HRESULT prepare_synthesis() noexcept;
+    [[nodiscard]] HRESULT prepare_synthesis() noexcept override;
 
     // Called immediately after the synthesizer submission on the same D3D12
     // queue. Queues a D3D11 wait and mip-zero copies into the acquired private
     // OpenXR images.
     [[nodiscard]] HRESULT publish(
         std::uint32_t current_destination_index,
-        std::optional<std::uint32_t> synthetic_destination_index) noexcept;
+        std::optional<std::uint32_t> synthetic_destination_index) noexcept override;
 
     // The shared fence, AddRef'd into *fence, and the value the most recent
     // publish signals on the D3D11 context once its copies have run. Only
@@ -104,10 +106,10 @@ public:
     // safe from any thread.
     [[nodiscard]] HRESULT publication_fence(
         ID3D12Fence** fence,
-        std::uint64_t* value) const noexcept;
+        std::uint64_t* value) const noexcept override;
 
-    [[nodiscard]] HRESULT wait_for_idle() noexcept;
-    [[nodiscard]] bool initialized() const noexcept;
+    [[nodiscard]] HRESULT wait_for_idle() noexcept override;
+    [[nodiscard]] bool initialized() const noexcept override;
 
 private:
     struct Impl;

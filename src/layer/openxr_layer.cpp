@@ -2,6 +2,7 @@
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/d3d11_d3d12_interop.hpp"
+#include "xrfg/vulkan_d3d12_interop.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/generation_backpressure.hpp"
 #include "xrfg/implicit_layer.hpp"
@@ -305,95 +306,14 @@ template <typename Handle>
     return code | (options.bidirectional ? 0x100U : 0U) | scale_code;
 }
 
-// The Vulkan types the OpenXR Vulkan extensions pass through, mirrored field
-// for field. Only read, and only to record what an application negotiates:
-// the layer does not support Vulkan yet and is not built against its headers.
-struct VulkanInstanceCreateInfoMirror {
-    std::int32_t sType;
-    const void* pNext;
-    std::uint32_t flags;
-    const void* pApplicationInfo;
-    std::uint32_t enabledLayerCount;
-    const char* const* ppEnabledLayerNames;
-    std::uint32_t enabledExtensionCount;
-    const char* const* ppEnabledExtensionNames;
-};
-
-struct VulkanDeviceQueueCreateInfoMirror {
-    std::int32_t sType;
-    const void* pNext;
-    std::uint32_t flags;
-    std::uint32_t queueFamilyIndex;
-    std::uint32_t queueCount;
-    const float* pQueuePriorities;
-};
-
-struct VulkanDeviceCreateInfoMirror {
-    std::int32_t sType;
-    const void* pNext;
-    std::uint32_t flags;
-    std::uint32_t queueCreateInfoCount;
-    const VulkanDeviceQueueCreateInfoMirror* pQueueCreateInfos;
-    std::uint32_t enabledLayerCount;
-    const char* const* ppEnabledLayerNames;
-    std::uint32_t enabledExtensionCount;
-    const char* const* ppEnabledExtensionNames;
-    const void* pEnabledFeatures;
-};
-
-// XrVulkanInstanceCreateInfoKHR and XrVulkanDeviceCreateInfoKHR.
-struct XrVulkanInstanceCreateInfoMirror {
-    XrStructureType type;
-    const void* next;
-    XrSystemId systemId;
-    XrFlags64 createFlags;
-    void* pfnGetInstanceProcAddr;
-    const VulkanInstanceCreateInfoMirror* vulkanCreateInfo;
-    const void* vulkanAllocator;
-};
-
-struct XrVulkanDeviceCreateInfoMirror {
-    XrStructureType type;
-    const void* next;
-    XrSystemId systemId;
-    XrFlags64 createFlags;
-    void* pfnGetInstanceProcAddr;
-    void* vulkanPhysicalDevice;
-    const VulkanDeviceCreateInfoMirror* vulkanCreateInfo;
-    const void* vulkanAllocator;
-};
-
-// XrGraphicsRequirementsVulkanKHR, which enable2 aliases.
-struct XrGraphicsRequirementsVulkanMirror {
-    XrStructureType type;
-    void* next;
-    XrVersion minApiVersionSupported;
-    XrVersion maxApiVersionSupported;
-};
-
-// XrGraphicsBindingVulkanKHR, which enable2 aliases.
-struct XrGraphicsBindingVulkanMirror {
-    XrStructureType type;
-    const void* next;
-    void* instance;
-    void* physicalDevice;
-    void* device;
-    std::uint32_t queueFamilyIndex;
-    std::uint32_t queueIndex;
-};
-
-using PFN_GetVulkanExtensions = XrResult(XRAPI_PTR*)(
-    XrInstance, XrSystemId, std::uint32_t, std::uint32_t*, char*);
-using PFN_CreateVulkanInstance = XrResult(XRAPI_PTR*)(
-    XrInstance, const XrVulkanInstanceCreateInfoMirror*, void**, std::int32_t*);
-using PFN_CreateVulkanDevice = XrResult(XRAPI_PTR*)(
-    XrInstance, const XrVulkanDeviceCreateInfoMirror*, void**, std::int32_t*);
-using PFN_GetVulkanGraphicsDevice = XrResult(XRAPI_PTR*)(
-    XrInstance, XrSystemId, void*, void**);
-using PFN_GetVulkanGraphicsDevice2 = XrResult(XRAPI_PTR*)(
-    XrInstance, const void*, void**);
-using PFN_GetVulkanGraphicsRequirements = XrResult(XRAPI_PTR*)(
-    XrInstance, XrSystemId, XrGraphicsRequirementsVulkanMirror*);
+// The runtime's Vulkan entry points, by the names the layer gives them. The
+// enable2 variants share the signatures of the originals.
+using PFN_GetVulkanExtensions = PFN_xrGetVulkanInstanceExtensionsKHR;
+using PFN_CreateVulkanInstance = PFN_xrCreateVulkanInstanceKHR;
+using PFN_CreateVulkanDevice = PFN_xrCreateVulkanDeviceKHR;
+using PFN_GetVulkanGraphicsDevice = PFN_xrGetVulkanGraphicsDeviceKHR;
+using PFN_GetVulkanGraphicsDevice2 = PFN_xrGetVulkanGraphicsDevice2KHR;
+using PFN_GetVulkanGraphicsRequirements = PFN_xrGetVulkanGraphicsRequirementsKHR;
 
 struct VulkanNegotiationDispatch {
     PFN_GetVulkanExtensions get_instance_extensions{};
@@ -477,7 +397,7 @@ struct VulkanExtensionSummary {
 
 [[nodiscard]] std::uint64_t pack_negotiation_results(
     XrResult xr_result,
-    std::int32_t vk_result) noexcept {
+    VkResult vk_result) noexcept {
     return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(xr_result))
             << 32) |
         static_cast<std::uint32_t>(vk_result);
@@ -503,25 +423,16 @@ void log_vulkan_negotiation(
 //   12  a= the same interop extension bits, for what the physical device
 //       supports at all; b= how many device extensions it lists
 void probe_vulkan_interop_support(
-    const XrGraphicsBindingVulkanMirror& binding) noexcept {
+    const XrGraphicsBindingVulkanKHR& binding) noexcept {
     try {
         const HMODULE vulkan = GetModuleHandleW(L"vulkan-1.dll");
-        if (vulkan == nullptr || binding.device == nullptr) {
+        if (vulkan == nullptr || binding.device == VK_NULL_HANDLE) {
             log_vulkan_negotiation(11, 0, 0, 1);
             return;
         }
-        using VoidFunction = void (*)();
-        using GetDeviceProcAddr = VoidFunction (*)(void*, const char*);
-        using GetInstanceProcAddr = VoidFunction (*)(void*, const char*);
-        struct ExtensionProperties {
-            char extensionName[256];
-            std::uint32_t specVersion;
-        };
-        using EnumerateDeviceExtensions = std::int32_t (*)(
-            void*, const char*, std::uint32_t*, ExtensionProperties*);
-        const auto get_device_proc = reinterpret_cast<GetDeviceProcAddr>(
+        const auto get_device_proc = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
             GetProcAddress(vulkan, "vkGetDeviceProcAddr"));
-        const auto get_instance_proc = reinterpret_cast<GetInstanceProcAddr>(
+        const auto get_instance_proc = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
             GetProcAddress(vulkan, "vkGetInstanceProcAddr"));
         if (get_device_proc != nullptr) {
             constexpr std::array<const char*, 5> kCommands{
@@ -539,19 +450,20 @@ void probe_vulkan_interop_support(
             }
             log_vulkan_negotiation(11, live);
         }
-        if (get_instance_proc != nullptr && binding.instance != nullptr &&
-            binding.physicalDevice != nullptr) {
-            const auto enumerate = reinterpret_cast<EnumerateDeviceExtensions>(
-                get_instance_proc(
-                    binding.instance, "vkEnumerateDeviceExtensionProperties"));
+        if (get_instance_proc != nullptr && binding.instance != VK_NULL_HANDLE &&
+            binding.physicalDevice != VK_NULL_HANDLE) {
+            const auto enumerate =
+                reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+                    get_instance_proc(
+                        binding.instance, "vkEnumerateDeviceExtensionProperties"));
             std::uint32_t extension_count = 0;
             if (enumerate != nullptr &&
                 enumerate(binding.physicalDevice, nullptr, &extension_count,
-                          nullptr) == 0 &&
+                          nullptr) == VK_SUCCESS &&
                 extension_count > 0) {
-                std::vector<ExtensionProperties> extensions(extension_count);
+                std::vector<VkExtensionProperties> extensions(extension_count);
                 if (enumerate(binding.physicalDevice, nullptr, &extension_count,
-                              extensions.data()) >= 0) {
+                              extensions.data()) >= VK_SUCCESS) {
                     std::uint64_t supported = 0;
                     for (std::uint32_t index = 0; index < extension_count; ++index) {
                         supported |= vulkan_interop_extension_bit(
@@ -697,6 +609,7 @@ enum class GenerationQuarantineReason : std::int64_t {
     generated_end_info_failed = 9,
     presenter_composition_failed = 10,
     downstream_end_failed = 11,
+    vulkan_images_changed = 12,
 };
 
 // Windows 10 1803 and later. Declared here so the layer still builds against
@@ -895,7 +808,8 @@ struct SessionState {
     // interop turns on covers the immediate context, not the device, so it
     // cannot help. Such a session never promotes a presenter: every runtime
     // call stays on the application's own thread, and frames the application
-    // pipelines pass through ungenerated. Fixed for the session.
+    // pipelines pass through ungenerated. Fixed for the session. A Vulkan
+    // session is the same case by construction; see presenter_forbidden.
     bool single_threaded_d3d11{};
     XrFrameState last_inline_frame_state{XR_TYPE_FRAME_STATE};
     bool last_inline_frame_state_valid{};
@@ -941,6 +855,10 @@ struct SessionState {
     std::atomic<bool> generation_budget_exhausted{false};
     Microsoft::WRL::ComPtr<ID3D11Device> d3d11_device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3d11_context;
+    // The application's Vulkan session, for the interop; the queue is the
+    // application's own, which is why a Vulkan session never takes a
+    // presenter (presenter_forbidden).
+    xrfg::VulkanSessionBinding vulkan_binding;
     // Serialises this layer's entries into the runtime for as long as the
     // application's binding is D3D11. See RuntimeEntry below for why the gate
     // is here rather than on the device. Recursive because the frame path
@@ -1300,6 +1218,19 @@ void signal_join_probe(
     }
 }
 
+// Sessions that never take a presenter thread, so that every runtime call
+// stays on the thread the application makes its own calls on. A D3D11 device
+// created single-threaded has no locking for a second thread to rely on
+// (single_threaded_d3d11). A Vulkan session is the same case by the API's
+// rules: the runtime submits on the queue the application handed it, and a
+// Vulkan queue may be driven by one thread at a time, so a presenter making
+// frame calls would race the application's render thread on it. Both run
+// generation inline and pass pipelined frames through.
+[[nodiscard]] bool presenter_forbidden(const SessionState& state) noexcept {
+    return state.single_threaded_d3d11 ||
+        state.graphics_binding == SessionGraphicsBinding::vulkan;
+}
+
 // Inside xrEndFrame, and inside each swapchain image call, the runtime drives
 // the application's single D3D11 immediate context. ID3D11Multithread makes
 // each of the runtime's own D3D11 calls atomic and no more, so the sequence
@@ -1469,7 +1400,7 @@ struct FrameGenerationSwapchainState {
     std::size_t synthetic_slot_count{kSyntheticSlotCountShallow};
     std::size_t synthetic_slot{};
     std::shared_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
-    std::shared_ptr<xrfg::D3D11D3D12SwapchainInterop> d3d11_interop;
+    std::shared_ptr<xrfg::SwapchainInterop> interop;
 };
 
 void log_completed_nvidia_gpu_timings(
@@ -1542,6 +1473,9 @@ enum class SwapchainEligibilityReason : std::int64_t {
     invalid_d3d11_image = 16,
     awaiting_projection_use = 17,
     budget_exhausted = 18,
+    vulkan_interop_initialize_failed = 19,
+    unsupported_vulkan_format = 20,
+    invalid_vulkan_image = 21,
 };
 
 void log_swapchain_eligibility(
@@ -1573,6 +1507,9 @@ struct SwapchainState {
     std::shared_ptr<xrfg::D3D12SwapchainHistory> d3d12_history;
     std::vector<Microsoft::WRL::ComPtr<ID3D11Texture2D>> enumerated_d3d11_images;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> enumerated_d3d12_images;
+    // Not owned: a VkImage is a handle the application's device owns, and
+    // the layer holds nothing that keeps it alive.
+    std::vector<VkImage> enumerated_vulkan_images;
     std::optional<xrfg::D3D12HistoryCaptureTicket> last_released_capture;
     std::shared_ptr<const xrfg::DlssMotionVectorSet> last_released_motion_vectors;
     std::shared_ptr<FrameGenerationSwapchainState> frame_generation;
@@ -1775,9 +1712,9 @@ void drain_swapchain_gpu(const std::shared_ptr<SwapchainState>& state) noexcept 
                 result = history_result;
             }
         }
-        if (generation && generation->d3d11_interop) {
+        if (generation && generation->interop) {
             const HRESULT interop_result =
-                generation->d3d11_interop->wait_for_idle();
+                generation->interop->wait_for_idle();
             if (SUCCEEDED(result)) {
                 result = interop_result;
             }
@@ -1918,6 +1855,7 @@ struct CreatedPrivateSwapchain {
     PrivateSwapchainState state;
     std::vector<ID3D12Resource*> d3d12_resources;
     std::vector<ID3D11Texture2D*> d3d11_resources;
+    std::vector<VkImage> vulkan_resources;
 };
 
 [[nodiscard]] bool create_private_swapchain(
@@ -1954,7 +1892,33 @@ struct CreatedPrivateSwapchain {
         return false;
     }
 
-    if (state->session->graphics_binding == SessionGraphicsBinding::d3d11) {
+    if (state->session->graphics_binding == SessionGraphicsBinding::vulkan) {
+        std::vector<XrSwapchainImageVulkanKHR> images(image_count);
+        for (auto& image : images) {
+            image.type = XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR;
+            image.next = nullptr;
+            image.image = VK_NULL_HANDLE;
+        }
+        result = dispatch->enumerate_swapchain_images(
+            handle,
+            image_count,
+            &image_count,
+            reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data()));
+        if (XR_FAILED(result) || image_count != images.size()) {
+            dispatch->destroy_swapchain(handle);
+            return false;
+        }
+        output->vulkan_resources.resize(image_count);
+        for (std::uint32_t index = 0; index < image_count; ++index) {
+            if (images[index].type != XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR ||
+                images[index].image == VK_NULL_HANDLE) {
+                dispatch->destroy_swapchain(handle);
+                output->vulkan_resources.clear();
+                return false;
+            }
+            output->vulkan_resources[index] = images[index].image;
+        }
+    } else if (state->session->graphics_binding == SessionGraphicsBinding::d3d11) {
         std::vector<XrSwapchainImageD3D11KHR> images(image_count);
         for (auto& image : images) {
             image.type = XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
@@ -2012,9 +1976,10 @@ struct CreatedPrivateSwapchain {
 struct CreatedPrivateRing {
     std::array<CreatedPrivateSwapchain, kPrivateRingSlotMax> slots{};
     // Every slot's destination images end to end, in slot order, which is the
-    // flat addressing both the synthesizer and the D3D11 interop expect.
+    // flat addressing both the synthesizer and the interops expect.
     std::vector<ID3D12Resource*> d3d12_resources;
     std::vector<ID3D11Texture2D*> d3d11_resources;
+    std::vector<VkImage> vulkan_resources;
     std::uint32_t images_per_slot{};
     std::size_t slot_count{};
 };
@@ -2054,9 +2019,11 @@ void destroy_private_ring(
             return false;
         }
         const CreatedPrivateSwapchain& created = output->slots[slot];
-        const std::size_t count = created.d3d12_resources.empty()
-            ? created.d3d11_resources.size()
-            : created.d3d12_resources.size();
+        const std::size_t count = !created.d3d12_resources.empty()
+            ? created.d3d12_resources.size()
+            : !created.d3d11_resources.empty()
+                ? created.d3d11_resources.size()
+                : created.vulkan_resources.size();
         // A flat destination index assumes one stride for every slot, so a
         // runtime that hands out different image counts is not usable here.
         if (count == 0 ||
@@ -2072,6 +2039,10 @@ void destroy_private_ring(
             output->d3d11_resources.end(),
             created.d3d11_resources.begin(),
             created.d3d11_resources.end());
+        output->vulkan_resources.insert(
+            output->vulkan_resources.end(),
+            created.vulkan_resources.begin(),
+            created.vulkan_resources.end());
     }
     return true;
 }
@@ -2470,7 +2441,7 @@ create_d3d11_frame_generation_swapchains(
         adopt_current_ring(generation, current);
         adopt_synthetic_ring(generation, synthetic);
         generation->synthesizer = std::move(synthesizer);
-        generation->d3d11_interop = std::move(interop);
+        generation->interop = std::move(interop);
         {
             std::scoped_lock lock(state->mutex);
             state->d3d12_history = std::move(history);
@@ -2531,6 +2502,240 @@ void release_session_generation_budget(
 // Creates the generation resources a swapchain deferred at enumeration time.
 // Returns false only when the runtime refused a private swapchain, which is
 // the caller's signal to hand the session's whole budget back.
+[[nodiscard]] std::shared_ptr<FrameGenerationSwapchainState>
+create_vulkan_frame_generation_swapchains(
+    const std::shared_ptr<SwapchainState>& state,
+    std::span<const VkImage> application_images,
+    SwapchainEligibilityReason* failure_reason,
+    std::uint64_t* failure_detail) {
+    CreatedPrivateRing current;
+    CreatedPrivateRing synthetic;
+    if (failure_reason != nullptr) {
+        *failure_reason = SwapchainEligibilityReason::exception;
+    }
+    if (failure_detail != nullptr) {
+        *failure_detail = 0;
+    }
+    try {
+        const auto& session = state->session;
+        const auto& dispatch = session->dispatch;
+        const bool is_color =
+            (state->create_info.usageFlags &
+             XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) != 0;
+        const bool is_depth =
+            (state->create_info.usageFlags &
+             XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
+        const bool protected_content =
+            (state->create_info.createFlags &
+             XR_SWAPCHAIN_CREATE_PROTECTED_CONTENT_BIT) != 0;
+        const bool static_image =
+            (state->create_info.createFlags &
+             XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) != 0;
+        // In a Vulkan session the swapchain format is a VkFormat; the
+        // synthesizer works in the D3D12 format the shared textures take.
+        const auto vulkan_format =
+            static_cast<VkFormat>(state->create_info.format);
+        const DXGI_FORMAT dxgi_format =
+            xrfg::dxgi_format_for_vulkan(vulkan_format);
+        // A Vulkan application need not render into the swapchain image:
+        // OpenComposite copies the game's own texture in, so No Man's Sky's
+        // swapchains carry only TRANSFER_DST. Any non-depth swapchain is a
+        // colour one here; the layer's private rings add the attachment bit
+        // for themselves.
+        static_cast<void>(is_color);
+        if (is_depth || protected_content || static_image ||
+            state->create_info.faceCount != 1 || application_images.empty() ||
+            session->handle == XR_NULL_HANDLE ||
+            dispatch->create_swapchain == nullptr ||
+            dispatch->destroy_swapchain == nullptr ||
+            dispatch->enumerate_swapchain_images == nullptr ||
+            session->vulkan_binding.device == VK_NULL_HANDLE ||
+            session->d3d12_device == nullptr ||
+            session->d3d12_queue == nullptr ||
+            dxgi_format == DXGI_FORMAT_UNKNOWN) {
+            if (failure_reason != nullptr) {
+                *failure_reason = protected_content
+                    ? SwapchainEligibilityReason::protected_content
+                    : static_image
+                        ? SwapchainEligibilityReason::static_image
+                        : state->create_info.faceCount != 1
+                            ? SwapchainEligibilityReason::unsupported_face_count
+                            : dxgi_format == DXGI_FORMAT_UNKNOWN
+                                ? SwapchainEligibilityReason::unsupported_vulkan_format
+                                : SwapchainEligibilityReason::missing_dispatch_or_history;
+            }
+            if (failure_detail != nullptr && dxgi_format == DXGI_FORMAT_UNKNOWN) {
+                *failure_detail = static_cast<std::uint64_t>(state->create_info.format);
+            }
+            return nullptr;
+        }
+
+        const auto destroy_private = [&]() noexcept {
+            destroy_private_ring(dispatch, &synthetic);
+            destroy_private_ring(dispatch, &current);
+        };
+
+        XrSwapchainCreateInfo private_info = state->create_info;
+        private_info.next = nullptr;
+        private_info.usageFlags |= XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
+                                   XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+        XrResult refusal = XR_SUCCESS;
+        if (!create_private_ring(
+                state, private_info, kCurrentSlotCount, &current, &refusal)) {
+            if (failure_reason != nullptr) {
+                *failure_reason =
+                    SwapchainEligibilityReason::current_private_swapchain_failed;
+            }
+            if (failure_detail != nullptr) {
+                *failure_detail = static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(refusal));
+            }
+            destroy_private();
+            return nullptr;
+        }
+        if (!create_private_ring(
+                state,
+                private_info,
+                synthetic_slot_count_for(*session),
+                &synthetic,
+                &refusal)) {
+            if (failure_reason != nullptr) {
+                *failure_reason =
+                    SwapchainEligibilityReason::synthetic_private_swapchain_failed;
+            }
+            if (failure_detail != nullptr) {
+                *failure_detail = static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(refusal));
+            }
+            destroy_private();
+            return nullptr;
+        }
+
+        // Vulkan cannot describe an image after the fact; the create info
+        // the application's swapchain was made with is the description, and
+        // the private swapchains were made from the same one.
+        xrfg::VulkanImageDescription description{};
+        description.format = vulkan_format;
+        description.width = state->create_info.width;
+        description.height = state->create_info.height;
+        description.array_size = state->create_info.arraySize;
+        description.mip_levels = state->create_info.mipCount;
+        description.sample_count = state->create_info.sampleCount;
+        auto interop = std::make_shared<xrfg::VulkanD3D12SwapchainInterop>();
+        xrfg::VulkanInteropInitializationStage interop_failure_stage =
+            xrfg::VulkanInteropInitializationStage::complete;
+        HRESULT gpu_result = interop->initialize(
+            session->vulkan_binding,
+            session->d3d12_device.Get(),
+            session->d3d12_queue.Get(),
+            description,
+            application_images,
+            std::span<const VkImage>(
+                current.vulkan_resources.data(),
+                current.vulkan_resources.size()),
+            std::span<const VkImage>(
+                synthetic.vulkan_resources.data(),
+                synthetic.vulkan_resources.size()),
+            &interop_failure_stage);
+        if (FAILED(gpu_result)) {
+            if (failure_reason != nullptr) {
+                *failure_reason =
+                    SwapchainEligibilityReason::vulkan_interop_initialize_failed;
+            }
+            if (failure_detail != nullptr) {
+                *failure_detail =
+                    (static_cast<std::uint64_t>(interop_failure_stage) << 32) |
+                    static_cast<std::uint32_t>(gpu_result);
+            }
+            destroy_private();
+            return nullptr;
+        }
+
+        auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
+        xrfg::D3D12HistoryInitializationStage history_failure_stage =
+            xrfg::D3D12HistoryInitializationStage::complete;
+        gpu_result = history->initialize(
+            session->d3d12_device.Get(),
+            session->d3d12_queue.Get(),
+            interop->source_images(),
+            D3D12_RESOURCE_STATE_COMMON,
+            &history_failure_stage);
+        if (FAILED(gpu_result)) {
+            if (failure_reason != nullptr) {
+                *failure_reason =
+                    SwapchainEligibilityReason::history_initialize_failed;
+            }
+            if (failure_detail != nullptr) {
+                *failure_detail =
+                    (static_cast<std::uint64_t>(history_failure_stage) << 32) |
+                    static_cast<std::uint32_t>(gpu_result);
+            }
+            destroy_private();
+            return nullptr;
+        }
+
+        auto synthesizer = std::make_shared<xrfg::D3D12FrameSynthesizer>();
+        const xrfg::D3D12OpticalFlowBackend backend =
+            session->optical_flow_backend;
+        const auto initialize_token = xrfg::bridge_flight_logger().begin(
+            xrfg::BridgeFlightOperation::synthesis_initialize,
+            handle_value(session->handle),
+            (static_cast<std::uint64_t>(state->create_info.width) << 32) |
+                state->create_info.height,
+            optical_flow_configuration_code(
+                backend, session->nvidia_options));
+        gpu_result = synthesizer->initialize(
+            session->d3d12_device.Get(),
+            session->d3d12_queue.Get(),
+            history,
+            interop->current_destination_images(),
+            interop->synthetic_destination_images(),
+            dxgi_format,
+            D3D12_RESOURCE_STATE_COMMON,
+            backend,
+            session->nvidia_options,
+            xrfg::bridge_flight_logger().enabled());
+        xrfg::bridge_flight_logger().end(
+            initialize_token,
+            xrfg::BridgeFlightOperation::synthesis_initialize,
+            gpu_result,
+            interop->current_destination_images().size(),
+            interop->synthetic_destination_images().size(),
+            state->create_info.arraySize);
+        if (FAILED(gpu_result)) {
+            if (failure_reason != nullptr) {
+                *failure_reason =
+                    SwapchainEligibilityReason::synthesis_initialize_failed;
+            }
+            if (failure_detail != nullptr) {
+                *failure_detail = static_cast<std::uint64_t>(gpu_result);
+            }
+            destroy_private();
+            return nullptr;
+        }
+
+        auto generation = std::make_shared<FrameGenerationSwapchainState>();
+        adopt_current_ring(generation, current);
+        adopt_synthetic_ring(generation, synthetic);
+        generation->synthesizer = std::move(synthesizer);
+        generation->interop = std::move(interop);
+        {
+            std::scoped_lock lock(state->mutex);
+            state->d3d12_history = std::move(history);
+        }
+        if (failure_reason != nullptr) {
+            *failure_reason = SwapchainEligibilityReason::ready;
+        }
+        return generation;
+    } catch (...) {
+        if (state && state->session && state->session->dispatch) {
+            destroy_private_ring(state->session->dispatch, &synthetic);
+            destroy_private_ring(state->session->dispatch, &current);
+        }
+        return nullptr;
+    }
+}
+
 [[nodiscard]] bool ensure_frame_generation(
     const std::shared_ptr<SwapchainState>& state) noexcept {
     try {
@@ -2601,6 +2806,47 @@ void release_session_generation_budget(
                         state,
                         std::span<ID3D11Texture2D* const>(
                             images.data(), images.size()),
+                        &reason,
+                        &detail);
+                }
+            } else if (state->session->graphics_binding ==
+                       SessionGraphicsBinding::vulkan) {
+                // Re-enumerated for the same reason as D3D11's above: the
+                // images are the application's.
+                std::vector<XrSwapchainImageVulkanKHR> enumerated(
+                    state->enumerated_image_count,
+                    XrSwapchainImageVulkanKHR{
+                        XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR, nullptr,
+                        VK_NULL_HANDLE});
+                std::uint32_t count = 0;
+                const XrResult enumerate_result =
+                    state->session->dispatch->enumerate_swapchain_images(
+                        state->handle,
+                        state->enumerated_image_count,
+                        &count,
+                        reinterpret_cast<XrSwapchainImageBaseHeader*>(
+                            enumerated.data()));
+                std::vector<VkImage> images;
+                if (XR_SUCCEEDED(enumerate_result) &&
+                    count == state->enumerated_image_count) {
+                    images.reserve(count);
+                    for (const XrSwapchainImageVulkanKHR& image : enumerated) {
+                        if (image.image != VK_NULL_HANDLE) {
+                            images.push_back(image.image);
+                        }
+                    }
+                }
+                if (images.size() != state->enumerated_image_count) {
+                    images.clear();
+                }
+                if (images.empty()) {
+                    reason = SwapchainEligibilityReason::invalid_vulkan_image;
+                    detail = static_cast<std::uint64_t>(
+                        static_cast<std::int64_t>(enumerate_result));
+                } else {
+                    candidate = create_vulkan_frame_generation_swapchains(
+                        state,
+                        std::span<const VkImage>(images.data(), images.size()),
                         &reason,
                         &detail);
                 }
@@ -2847,9 +3093,9 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_get_vulkan_device_extensions(
 
 XRAPI_ATTR XrResult XRAPI_CALL layer_create_vulkan_instance(
     XrInstance instance,
-    const XrVulkanInstanceCreateInfoMirror* create_info,
-    void** vulkan_instance,
-    std::int32_t* vulkan_result) {
+    const XrVulkanInstanceCreateInfoKHR* create_info,
+    VkInstance* vulkan_instance,
+    VkResult* vulkan_result) {
     return guard_c_api_boundary([&]() -> XrResult {
         const auto dispatch = find_dispatch(instance);
         if (!dispatch || dispatch->vulkan.create_instance == nullptr) {
@@ -2866,16 +3112,16 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_create_vulkan_instance(
         log_vulkan_negotiation(
             4, summary.count, summary.bits,
             pack_negotiation_results(
-                result, vulkan_result != nullptr ? *vulkan_result : 0));
+                result, vulkan_result != nullptr ? *vulkan_result : VK_SUCCESS));
         return result;
     });
 }
 
 XRAPI_ATTR XrResult XRAPI_CALL layer_create_vulkan_device(
     XrInstance instance,
-    const XrVulkanDeviceCreateInfoMirror* create_info,
-    void** vulkan_device,
-    std::int32_t* vulkan_result) {
+    const XrVulkanDeviceCreateInfoKHR* create_info,
+    VkDevice* vulkan_device,
+    VkResult* vulkan_result) {
     return guard_c_api_boundary([&]() -> XrResult {
         const auto dispatch = find_dispatch(instance);
         if (!dispatch || dispatch->vulkan.create_device == nullptr) {
@@ -2883,7 +3129,7 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_create_vulkan_device(
         }
         const XrResult result = dispatch->vulkan.create_device(
             instance, create_info, vulkan_device, vulkan_result);
-        const VulkanDeviceCreateInfoMirror* device_info =
+        const VkDeviceCreateInfo* device_info =
             create_info != nullptr ? create_info->vulkanCreateInfo : nullptr;
         VulkanExtensionSummary summary{};
         if (device_info != nullptr) {
@@ -2894,7 +3140,7 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_create_vulkan_device(
         log_vulkan_negotiation(
             5, summary.count, summary.bits,
             pack_negotiation_results(
-                result, vulkan_result != nullptr ? *vulkan_result : 0));
+                result, vulkan_result != nullptr ? *vulkan_result : VK_SUCCESS));
         if (device_info != nullptr && device_info->pQueueCreateInfos != nullptr) {
             for (std::uint32_t index = 0;
                  index < device_info->queueCreateInfoCount;
@@ -2911,8 +3157,8 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_create_vulkan_device(
 XRAPI_ATTR XrResult XRAPI_CALL layer_get_vulkan_graphics_device(
     XrInstance instance,
     XrSystemId system_id,
-    void* vulkan_instance,
-    void** physical_device) {
+    VkInstance vulkan_instance,
+    VkPhysicalDevice* physical_device) {
     return guard_c_api_boundary([&]() -> XrResult {
         const auto dispatch = find_dispatch(instance);
         if (!dispatch || dispatch->vulkan.get_graphics_device == nullptr) {
@@ -2926,8 +3172,8 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_get_vulkan_graphics_device(
 
 XRAPI_ATTR XrResult XRAPI_CALL layer_get_vulkan_graphics_device2(
     XrInstance instance,
-    const void* get_info,
-    void** physical_device) {
+    const XrVulkanGraphicsDeviceGetInfoKHR* get_info,
+    VkPhysicalDevice* physical_device) {
     return guard_c_api_boundary([&]() -> XrResult {
         const auto dispatch = find_dispatch(instance);
         if (!dispatch || dispatch->vulkan.get_graphics_device2 == nullptr) {
@@ -2944,7 +3190,7 @@ XrResult get_vulkan_requirements_recorded(
     std::uint64_t which,
     XrInstance instance,
     XrSystemId system_id,
-    XrGraphicsRequirementsVulkanMirror* requirements) {
+    XrGraphicsRequirementsVulkanKHR* requirements) {
     if (next == nullptr) {
         return XR_ERROR_FUNCTION_UNSUPPORTED;
     }
@@ -2960,7 +3206,7 @@ XrResult get_vulkan_requirements_recorded(
 XRAPI_ATTR XrResult XRAPI_CALL layer_get_vulkan_graphics_requirements(
     XrInstance instance,
     XrSystemId system_id,
-    XrGraphicsRequirementsVulkanMirror* requirements) {
+    XrGraphicsRequirementsVulkanKHR* requirements) {
     return guard_c_api_boundary([&]() -> XrResult {
         const auto dispatch = find_dispatch(instance);
         return get_vulkan_requirements_recorded(
@@ -2972,7 +3218,7 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_get_vulkan_graphics_requirements(
 XRAPI_ATTR XrResult XRAPI_CALL layer_get_vulkan_graphics_requirements2(
     XrInstance instance,
     XrSystemId system_id,
-    XrGraphicsRequirementsVulkanMirror* requirements) {
+    XrGraphicsRequirementsVulkanKHR* requirements) {
     return guard_c_api_boundary([&]() -> XrResult {
         const auto dispatch = find_dispatch(instance);
         return get_vulkan_requirements_recorded(
@@ -3430,7 +3676,13 @@ XrResult layer_create_session_impl(
                 state->graphics_binding = SessionGraphicsBinding::vulkan;
                 binding_structure_type = next->type;
                 const auto* binding =
-                    reinterpret_cast<const XrGraphicsBindingVulkanMirror*>(next);
+                    reinterpret_cast<const XrGraphicsBindingVulkanKHR*>(next);
+                state->vulkan_binding = xrfg::VulkanSessionBinding{
+                    binding->instance,
+                    binding->physicalDevice,
+                    binding->device,
+                    binding->queueFamilyIndex,
+                    binding->queueIndex};
                 log_vulkan_negotiation(
                     9,
                     reinterpret_cast<std::uintptr_t>(binding->device),
@@ -3524,6 +3776,24 @@ XrResult layer_create_session_impl(
                 state->d3d12_queue.ReleaseAndGetAddressOf());
         if (SUCCEEDED(bridge_device_result)) {
             state->graphics_binding_capabilities |= 4ULL;
+        } else {
+            state->d3d12_device.Reset();
+            state->d3d12_queue.Reset();
+        }
+    }
+    // A Vulkan session gets the same arrangement as a D3D11 one: a D3D12
+    // device of the layer's own on the application's adapter, found through
+    // the LUID its physical device reports, with a high-priority queue that
+    // all of synthesis runs on. Capability bit 64.
+    if (state->graphics_binding == SessionGraphicsBinding::vulkan &&
+        state->vulkan_binding.device != VK_NULL_HANDLE) {
+        const HRESULT bridge_device_result =
+            xrfg::create_d3d12_device_for_vulkan(
+                state->vulkan_binding,
+                state->d3d12_device.ReleaseAndGetAddressOf(),
+                state->d3d12_queue.ReleaseAndGetAddressOf());
+        if (SUCCEEDED(bridge_device_result)) {
+            state->graphics_binding_capabilities |= 64ULL;
         } else {
             state->d3d12_device.Reset();
             state->d3d12_queue.Reset();
@@ -3670,8 +3940,8 @@ void reset_swapchain_bookkeeping(const std::shared_ptr<SessionState>& session) n
             if (history) {
                 static_cast<void>(history->invalidate());
             }
-            if (generation && generation->d3d11_interop) {
-                static_cast<void>(generation->d3d11_interop->wait_for_idle());
+            if (generation && generation->interop) {
+                static_cast<void>(generation->interop->wait_for_idle());
             }
         }
     } catch (...) {
@@ -3749,7 +4019,7 @@ XrResult layer_wait_frame_impl(
         }
         if (state->pipelined_wait_streak >= 2 &&
             state->last_inline_frame_state_valid &&
-            !state->single_threaded_d3d11) {
+            !presenter_forbidden(*state)) {
             // The current runtime frame is still owned by the render thread,
             // so the transition cannot start its presenter until xrEndFrame
             // closes that boundary. Return the first virtual wait now and
@@ -4307,6 +4577,121 @@ XrResult layer_enumerate_swapchain_images_impl(
                     state->create_info.arraySize);
             return result;
         }
+        if (state->session->graphics_binding == SessionGraphicsBinding::vulkan) {
+            if (*image_count_output == 0 ||
+                image_capacity_input < *image_count_output) {
+                log_swapchain_eligibility(
+                    state,
+                    SwapchainEligibilityReason::incomplete_enumeration,
+                    image_capacity_input,
+                    *image_count_output);
+                return result;
+            }
+            const std::uint32_t count = *image_count_output;
+            std::vector<VkImage> resources(count);
+            auto* vulkan_images =
+                reinterpret_cast<XrSwapchainImageVulkanKHR*>(images);
+            for (std::uint32_t index = 0; index < count; ++index) {
+                if (vulkan_images[index].type !=
+                        XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR ||
+                    vulkan_images[index].image == VK_NULL_HANDLE) {
+                    log_swapchain_eligibility(
+                        state,
+                        SwapchainEligibilityReason::invalid_vulkan_image,
+                        index,
+                        static_cast<std::uint64_t>(vulkan_images[index].type));
+                    return result;
+                }
+                resources[index] = vulkan_images[index].image;
+                // A Vulkan image cannot be asked for its description; the
+                // create info stands in for it.
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::swapchain_image,
+                    state->create_info.format,
+                    handle_value(state->handle),
+                    static_cast<std::uint64_t>(
+                        reinterpret_cast<std::uintptr_t>(vulkan_images[index].image)),
+                    state->create_info.usageFlags);
+            }
+
+            bool has_generation = false;
+            bool resources_changed = false;
+            {
+                std::scoped_lock lock(state->mutex);
+                resources_changed = !state->enumerated_vulkan_images.empty() &&
+                    (state->enumerated_vulkan_images.size() != resources.size() ||
+                     !std::equal(
+                         state->enumerated_vulkan_images.begin(),
+                         state->enumerated_vulkan_images.end(),
+                         resources.begin()));
+            }
+            if (resources_changed) {
+                schedule_generation_quarantine(
+                    state->session,
+                    GenerationQuarantineReason::vulkan_images_changed,
+                    handle_value(state->handle));
+                drain_swapchain_gpu(state);
+                destroy_frame_generation_swapchains(state);
+                std::shared_ptr<xrfg::D3D12SwapchainHistory> retired_history;
+                {
+                    std::scoped_lock lock(state->mutex);
+                    retired_history = std::move(state->d3d12_history);
+                    state->last_released_capture.reset();
+                    state->last_released_motion_vectors.reset();
+                }
+                retired_history.reset();
+                state->generation_declined = false;
+            }
+            {
+                std::scoped_lock lock(state->mutex);
+                state->enumerated_vulkan_images = resources;
+                has_generation = static_cast<bool>(state->frame_generation);
+            }
+            SwapchainEligibilityReason eligibility_reason =
+                SwapchainEligibilityReason::ready;
+            std::uint64_t eligibility_detail = count;
+            // Deferred to first projection use, as the D3D11 path is.
+            const bool static_image =
+                (state->create_info.createFlags &
+                 XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) != 0;
+            if (!has_generation && !state->generation_declined &&
+                !state->session->generation_budget_exhausted.load(
+                    std::memory_order_acquire)) {
+                if (static_image) {
+                    eligibility_reason =
+                        SwapchainEligibilityReason::static_image;
+                    eligibility_detail = state->create_info.createFlags;
+                } else if (state->create_info.faceCount != 1) {
+                    eligibility_reason =
+                        SwapchainEligibilityReason::unsupported_face_count;
+                    eligibility_detail = state->create_info.faceCount;
+                } else if (state->session->d3d12_device.Get() == nullptr ||
+                           state->session->d3d12_queue.Get() == nullptr) {
+                    eligibility_reason =
+                        SwapchainEligibilityReason::no_d3d12_binding;
+                } else if (xrfg::dxgi_format_for_vulkan(static_cast<VkFormat>(
+                               state->create_info.format)) ==
+                           DXGI_FORMAT_UNKNOWN) {
+                    eligibility_reason =
+                        SwapchainEligibilityReason::unsupported_vulkan_format;
+                    eligibility_detail =
+                        static_cast<std::uint64_t>(state->create_info.format);
+                } else {
+                    state->enumerated_image_count = count;
+                    state->generation_eligible_pending = true;
+                    eligibility_reason =
+                        SwapchainEligibilityReason::awaiting_projection_use;
+                }
+            }
+            log_swapchain_eligibility(
+                state,
+                has_generation ? SwapchainEligibilityReason::ready
+                               : eligibility_reason,
+                eligibility_detail,
+                (static_cast<std::uint64_t>(count) << 32) |
+                    state->create_info.arraySize);
+            return result;
+        }
         if (state->session->d3d12_device.Get() == nullptr ||
             state->session->d3d12_queue.Get() == nullptr) {
             log_swapchain_eligibility(
@@ -4548,7 +4933,7 @@ XrResult layer_release_swapchain_image_impl(
     std::scoped_lock call_lock(state->call_mutex);
     std::optional<std::uint32_t> candidate_index;
     std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
-    std::shared_ptr<xrfg::D3D11D3D12SwapchainInterop> d3d11_interop;
+    std::shared_ptr<xrfg::SwapchainInterop> interop;
     {
         std::scoped_lock lock(state->mutex);
         if (state->ownership_tracking_valid && state->front_waited &&
@@ -4556,7 +4941,7 @@ XrResult layer_release_swapchain_image_impl(
             candidate_index = state->acquired_indices.front();
             history = state->d3d12_history;
             if (state->frame_generation) {
-                d3d11_interop = state->frame_generation->d3d11_interop;
+                interop = state->frame_generation->interop;
             }
         }
     }
@@ -4566,7 +4951,7 @@ XrResult layer_release_swapchain_image_impl(
         // Preserve the application's acquire/wait/release bookkeeping, but
         // stop recording new bridge history after the manual arm is revoked.
         history.reset();
-        d3d11_interop.reset();
+        interop.reset();
     }
     if (candidate_index && history) {
         gpu_lock = std::unique_lock<std::mutex>(state->session->gpu_mutex);
@@ -4585,13 +4970,13 @@ XrResult layer_release_swapchain_image_impl(
         }
         xrfg::D3D12HistoryCaptureTicket ticket{};
         HRESULT capture_result = S_OK;
-        if (d3d11_interop) {
+        if (interop) {
             const auto interop_token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::d3d11_capture,
                 handle_value(state->handle),
                 *candidate_index,
                 0);
-            capture_result = d3d11_interop->prepare_capture(*candidate_index);
+            capture_result = interop->prepare_capture(*candidate_index);
             xrfg::bridge_flight_logger().end(
                 interop_token,
                 xrfg::BridgeFlightOperation::d3d11_capture,
@@ -4603,8 +4988,8 @@ XrResult layer_release_swapchain_image_impl(
         if (SUCCEEDED(capture_result)) {
             capture_result = history->capture(*candidate_index, &ticket);
         }
-        if (SUCCEEDED(capture_result) && d3d11_interop) {
-            const HRESULT finish_result = d3d11_interop->finish_capture();
+        if (SUCCEEDED(capture_result) && interop) {
+            const HRESULT finish_result = interop->finish_capture();
             xrfg::bridge_flight_logger().event(
                 xrfg::BridgeFlightOperation::d3d11_capture,
                 finish_result,
@@ -7855,9 +8240,9 @@ enum class GenerationPrepareReason : std::int64_t {
     manual_disarmed = 17,
     structural_quarantine_active = 18,
     synthesis_busy = 19,
-    // A frame the application pipelined on a single-threaded D3D11 device;
-    // see SessionState::single_threaded_d3d11.
-    single_threaded_pipelined = 20,
+    // A frame the application pipelined on a session that never takes a
+    // presenter; see presenter_forbidden.
+    inline_only_pipelined = 20,
 };
 
 [[nodiscard]] constexpr GenerationPrepareReason classify_synthesis_failure(
@@ -8030,7 +8415,7 @@ struct PreparedProjectionFrame {
         // then have to cross a queue boundary to reach the runtime. Submitted
         // inline both halves are written and signalled together, and the
         // consumer-queue join for the current image is not needed at all.
-        const bool defer_current_copy = generation->d3d11_interop == nullptr &&
+        const bool defer_current_copy = generation->interop == nullptr &&
             !state->session->deep_pipeline;
         xrfg::D3D12FrameSynthesisTicket ticket{};
         const auto debug_marker = request_pair && xrfg::bridge_flight_logger().enabled() &&
@@ -8051,11 +8436,11 @@ struct PreparedProjectionFrame {
         {
             std::scoped_lock gpu_lock(state->session->gpu_mutex);
             log_completed_nvidia_gpu_timings(generation->synthesizer);
-            if (generation->d3d11_interop) {
+            if (generation->interop) {
                 submit_result =
-                    generation->d3d11_interop->prepare_synthesis();
+                    generation->interop->prepare_synthesis();
             }
-            if (!generation->d3d11_interop || SUCCEEDED(submit_result)) {
+            if (!generation->interop || SUCCEEDED(submit_result)) {
                 submit_result = request_pair
                                     ? generation->synthesizer->submit_pair(
                                           *capture,
@@ -8075,7 +8460,7 @@ struct PreparedProjectionFrame {
                                           &ticket,
                                           motion_vectors);
             }
-            if (SUCCEEDED(submit_result) && generation->d3d11_interop) {
+            if (SUCCEEDED(submit_result) && generation->interop) {
                 const auto publish_token = xrfg::bridge_flight_logger().begin(
                     xrfg::BridgeFlightOperation::d3d11_publish,
                     handle_value(application_swapchain),
@@ -8083,7 +8468,7 @@ struct PreparedProjectionFrame {
                     request_pair ? synthetic_destination_index
                                  : std::numeric_limits<std::uint32_t>::max());
                 const HRESULT publish_result =
-                    generation->d3d11_interop->publish(
+                    generation->interop->publish(
                         current_destination_index,
                         request_pair
                             ? std::optional<std::uint32_t>(
@@ -8138,7 +8523,7 @@ struct PreparedProjectionFrame {
         // they stay here, where the mark lands before anything of the game's
         // next frame.
         const bool release_at_handover = release_at_handover_requested &&
-            generation->d3d11_interop == nullptr &&
+            generation->interop == nullptr &&
             SUCCEEDED(submit_result);
         bool synthetic_released = true;
         bool current_released = true;
@@ -8210,9 +8595,9 @@ struct PreparedProjectionFrame {
             // accessors hand back a fence the presenter can poll without
             // either object's lock.
             if (request_pair && state->session->deep_pipeline) {
-                if (generation->d3d11_interop) {
+                if (generation->interop) {
                     std::uint64_t published = 0;
-                    if (SUCCEEDED(generation->d3d11_interop->publication_fence(
+                    if (SUCCEEDED(generation->interop->publication_fence(
                             output.ready_fence.ReleaseAndGetAddressOf(),
                             &published))) {
                         output.ready_value = published;
@@ -8804,12 +9189,19 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
         if (!chain->frame_generation && control.desired.enabled && eligible) {
             std::vector<ID3D11Texture2D*> sources;
             for (const auto& image : chain->enumerated_d3d11_images) sources.push_back(image.Get());
+            const std::vector<VkImage> vulkan_sources = chain->enumerated_vulkan_images;
             lock.unlock();
             SwapchainEligibilityReason reason{};
             std::uint64_t detail{};
-            auto candidate = state->graphics_binding == SessionGraphicsBinding::d3d11
-                ? create_d3d11_frame_generation_swapchains(chain, sources, &reason, &detail)
-                : create_d3d12_frame_generation_swapchains(chain, &reason, &detail);
+            std::shared_ptr<FrameGenerationSwapchainState> candidate;
+            if (state->graphics_binding == SessionGraphicsBinding::d3d11) {
+                candidate = create_d3d11_frame_generation_swapchains(chain, sources, &reason, &detail);
+            } else if (state->graphics_binding == SessionGraphicsBinding::vulkan) {
+                candidate = create_vulkan_frame_generation_swapchains(
+                    chain, std::span<const VkImage>(vulkan_sources), &reason, &detail);
+            } else {
+                candidate = create_d3d12_frame_generation_swapchains(chain, &reason, &detail);
+            }
             lock.lock();
             const std::uint64_t auxiliary =
                 (static_cast<std::uint64_t>(chain->enumerated_image_count) << 32) |
@@ -8844,8 +9236,8 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
             }
         }
         if (SUCCEEDED(result) && chain->d3d12_history) result = chain->d3d12_history->wait_for_idle();
-        if (SUCCEEDED(result) && chain->frame_generation && chain->frame_generation->d3d11_interop)
-            result = chain->frame_generation->d3d11_interop->wait_for_idle();
+        if (SUCCEEDED(result) && chain->frame_generation && chain->frame_generation->interop)
+            result = chain->frame_generation->interop->wait_for_idle();
         chain->last_released_capture.reset();
         chain->last_released_motion_vectors.reset();
         if (FAILED(result)) break;
@@ -9061,14 +9453,15 @@ XrResult layer_end_frame_impl(
             }
         }
     }
-    // Generating a frame the application pipelined needs the presenter, and a
-    // single-threaded D3D11 session must not have one. The frame goes to the
-    // runtime unchanged, on this thread, exactly as it would without the
-    // layer, and the next one does not pair across it.
-    if (state->single_threaded_d3d11 && frame_had_overlapping_wait) {
+    // Generating a frame the application pipelined needs the presenter, and
+    // a session that must not have one (presenter_forbidden) passes it
+    // through instead: to the runtime unchanged, on this thread, exactly as
+    // it would go without the layer, and the next frame does not pair
+    // across it.
+    if (presenter_forbidden(*state) && frame_had_overlapping_wait) {
         clear_generation_continuity(state);
         return bypass_generation(
-            GenerationPrepareReason::single_threaded_pipelined);
+            GenerationPrepareReason::inline_only_pipelined);
     }
     if (generation_cooling_down || manually_disarmed || !state->menu_enabled) {
         return bypass_generation(
@@ -9677,7 +10070,7 @@ XrResult layer_end_frame_impl(
         // continuity reset; treating it as a structural resize would retain a
         // private image in an uncertain ownership phase for the whole timeout.
         clear_generation_continuity(state);
-    } else if (!state->single_threaded_d3d11 &&
+    } else if (!presenter_forbidden(*state) &&
                (steamvr_wait_requires_continuous_presenter(
                     state,
                     current_cycle) ||

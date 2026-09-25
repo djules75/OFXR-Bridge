@@ -157,6 +157,14 @@ enum class BridgeFlightOperation : std::uint32_t {
     // 9 VK_KHR_external_semaphore_capabilities,
     // 10 VK_KHR_get_physical_device_properties2.
     vulkan_negotiation,
+    // The Vulkan interop's fence traffic, one record per step, so the two
+    // APIs' progress can be read against each other. a= the shared fence's
+    // completed value when the step ran, b= the value the step signals,
+    // c= the value it waits for (0: none). result: 1 capture submitted on
+    // the Vulkan queue, 2 the D3D12 history copy signalled, 3 the D3D12
+    // queue told to wait for the last publish, 4 publish submitted on the
+    // Vulkan queue.
+    vulkan_interop,
 };
 
 struct BridgeFlightToken {

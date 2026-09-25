@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.315.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.318.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -24,6 +24,13 @@ set(XRFG_OPENXR_SDK_ROOT
 # openvr_api.dll is loaded from the SteamVR installation at run time.
 set(XRFG_OPENVR_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/openvr"
     CACHE PATH "Directory containing openvr.h")
+
+# Vulkan headers, vendored like the OpenXR ones: the layer takes every Vulkan
+# entry point from the application's own loader at run time and links nothing.
+set(XRFG_VULKAN_INCLUDE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/Vulkan-Headers/include"
+    CACHE PATH
+    "Directory containing vulkan/vulkan.h")
 
 set(XRFG_FIDELITYFX_SDK_ROOT
     "${CMAKE_CURRENT_SOURCE_DIR}/external/FidelityFX-SDK-v1.1.4/sdk"
@@ -179,6 +186,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
 
     add_library(xrfg_d3d12_history STATIC
         src/d3d11/d3d11_d3d12_interop.cpp
+        src/vulkan/vulkan_d3d12_interop.cpp
         src/d3d12/d3d12_history.cpp
         src/d3d12/d3d12_frame_synthesizer.cpp
         src/common/dlss_motion_vectors.cpp
@@ -192,7 +200,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}")
     target_include_directories(xrfg_d3d12_history
-        PUBLIC include
+        PUBLIC include "${XRFG_VULKAN_INCLUDE_DIR}"
         PRIVATE
             "${XRFG_GENERATED_SHADER_DIR}"
             "${XRFG_FIDELITYFX_INCLUDE_DIR}"
@@ -208,6 +216,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     target_compile_definitions(xrfg_d3d12_history PRIVATE
         NOMINMAX
         WIN32_LEAN_AND_MEAN)
+    # Anything that includes the Vulkan interop header sees the same Vulkan
+    # header configuration: no prototypes, since nothing links vulkan-1.
+    target_compile_definitions(xrfg_d3d12_history PUBLIC
+        VK_NO_PROTOTYPES
+        VK_USE_PLATFORM_WIN32_KHR)
     if(MSVC)
         target_compile_options(xrfg_d3d12_history PRIVATE
             /W4 /permissive- /EHsc)
@@ -290,6 +303,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         WIN32_LEAN_AND_MEAN
         XR_USE_GRAPHICS_API_D3D11
         XR_USE_GRAPHICS_API_D3D12
+        XR_USE_GRAPHICS_API_VULKAN
         XR_USE_PLATFORM_WIN32
         OFXR_PROVIDER_API_EXPORTS)
     if(MSVC)
@@ -458,7 +472,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
 
         add_executable(xrfg_layer_call_chain tests/layer_call_chain.cpp)
         target_include_directories(xrfg_layer_call_chain PRIVATE
-            "${XRFG_OPENXR_SDK_ROOT}/include")
+            "${XRFG_OPENXR_SDK_ROOT}/include"
+            "${XRFG_VULKAN_INCLUDE_DIR}")
         target_compile_features(xrfg_layer_call_chain PRIVATE cxx_std_20)
         if(MSVC)
             target_compile_options(xrfg_layer_call_chain PRIVATE /W4 /permissive- /EHsc)
@@ -467,10 +482,13 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 WIN32_LEAN_AND_MEAN
                 XR_USE_GRAPHICS_API_D3D11
                 XR_USE_GRAPHICS_API_D3D12
+                XR_USE_GRAPHICS_API_VULKAN
+                VK_NO_PROTOTYPES
+                VK_USE_PLATFORM_WIN32_KHR
                 XR_USE_PLATFORM_WIN32)
         endif()
         target_link_libraries(xrfg_layer_call_chain PRIVATE d3d11 d3d12 dxgi)
-        foreach(mode inverted-fov d3d11-inverted-fov)
+        foreach(mode inverted-fov d3d11-inverted-fov vulkan)
             add_test(NAME xrfg_layer_${mode} COMMAND xrfg_layer_call_chain
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
                 "${CMAKE_CURRENT_BINARY_DIR}/xrfg-${mode}.log" ${mode})
@@ -587,7 +605,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         # latency" unticked), which the shipped ini turns on: each runs from a
         # scratch directory whose ofxr_bridge.ini turns it off.
         foreach(mode default split-eye cropped-split-eye double-wide
-                d3d11-interop steamvr-presenter flight-simulator
+                d3d11-interop vulkan steamvr-presenter flight-simulator
                 uevr-pipelined-time flight-destroy-swapchain
                 steamvr-destroy-space)
             add_test(

@@ -1,0 +1,1370 @@
+#include "xrfg/vulkan_d3d12_interop.hpp"
+
+#include "xrfg/bridge_flight_logger.hpp"
+
+#include <windows.h>
+#include <dxgi1_4.h>
+#include <wrl/client.h>
+
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <limits>
+#include <new>
+#include <utility>
+#include <vector>
+
+namespace xrfg {
+namespace {
+
+using Microsoft::WRL::ComPtr;
+
+// How many command buffers publish and capture may have in flight before a
+// call fails open. Each submission signals the shared fence, so a buffer is
+// free again once the fence has passed the value it signalled; a frame's
+// capture and publish take two, and the depth of the pipeline is a pair.
+constexpr std::size_t kCommandBufferLimit = 16;
+
+struct UniqueHandle {
+    HANDLE value{};
+
+    ~UniqueHandle() {
+        if (value != nullptr && value != INVALID_HANDLE_VALUE) {
+            CloseHandle(value);
+        }
+    }
+
+    UniqueHandle() = default;
+    UniqueHandle(const UniqueHandle&) = delete;
+    UniqueHandle& operator=(const UniqueHandle&) = delete;
+
+    // The Vulkan import of a Windows handle takes the handle over, so it
+    // must not be closed here afterwards.
+    void release() noexcept { value = nullptr; }
+};
+
+// A VkResult as an HRESULT the flight log can carry beside the stage: the
+// negative Vulkan code in the low half, under an ITF facility so it cannot be
+// mistaken for a Win32 or D3D code.
+[[nodiscard]] HRESULT hresult_from_vulkan(VkResult result) noexcept {
+    if (result >= VK_SUCCESS) {
+        return S_OK;
+    }
+    return MAKE_HRESULT(
+        1, FACILITY_ITF,
+        static_cast<std::uint16_t>(-static_cast<std::int32_t>(result)));
+}
+
+[[nodiscard]] bool same_luid(const LUID& left, const LUID& right) noexcept {
+    return left.HighPart == right.HighPart && left.LowPart == right.LowPart;
+}
+
+// The entry points the interop uses, resolved through the application's
+// loader. Instance-level ones come from vkGetInstanceProcAddr, device-level
+// ones from vkGetDeviceProcAddr so they dispatch straight into the driver
+// for the application's device.
+struct VulkanFunctions {
+    PFN_vkGetInstanceProcAddr get_instance_proc_addr{};
+    PFN_vkGetDeviceProcAddr get_device_proc_addr{};
+    PFN_vkGetPhysicalDeviceProperties2 get_physical_device_properties2{};
+    PFN_vkGetPhysicalDeviceMemoryProperties get_physical_device_memory_properties{};
+    PFN_vkGetDeviceQueue get_device_queue{};
+    PFN_vkCreateImage create_image{};
+    PFN_vkDestroyImage destroy_image{};
+    PFN_vkGetImageMemoryRequirements get_image_memory_requirements{};
+    PFN_vkAllocateMemory allocate_memory{};
+    PFN_vkFreeMemory free_memory{};
+    PFN_vkBindImageMemory bind_image_memory{};
+    PFN_vkCreateSemaphore create_semaphore{};
+    PFN_vkDestroySemaphore destroy_semaphore{};
+    PFN_vkImportSemaphoreWin32HandleKHR import_semaphore_win32_handle{};
+    PFN_vkCreateCommandPool create_command_pool{};
+    PFN_vkDestroyCommandPool destroy_command_pool{};
+    PFN_vkAllocateCommandBuffers allocate_command_buffers{};
+    PFN_vkResetCommandBuffer reset_command_buffer{};
+    PFN_vkBeginCommandBuffer begin_command_buffer{};
+    PFN_vkEndCommandBuffer end_command_buffer{};
+    PFN_vkCmdPipelineBarrier cmd_pipeline_barrier{};
+    PFN_vkCmdCopyImage cmd_copy_image{};
+    PFN_vkQueueSubmit queue_submit{};
+    PFN_vkCreateFence create_fence{};
+    PFN_vkDestroyFence destroy_fence{};
+    PFN_vkWaitForFences wait_for_fences{};
+
+    [[nodiscard]] bool load_loader() noexcept {
+        HMODULE module = GetModuleHandleW(L"vulkan-1.dll");
+        if (module == nullptr) {
+            module = LoadLibraryW(L"vulkan-1.dll");
+        }
+        if (module == nullptr) {
+            return false;
+        }
+        get_instance_proc_addr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+            GetProcAddress(module, "vkGetInstanceProcAddr"));
+        return get_instance_proc_addr != nullptr;
+    }
+
+    [[nodiscard]] bool load_instance(VkInstance instance) noexcept {
+        if (get_instance_proc_addr == nullptr || instance == VK_NULL_HANDLE) {
+            return false;
+        }
+        get_device_proc_addr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+            get_instance_proc_addr(instance, "vkGetDeviceProcAddr"));
+        get_physical_device_properties2 =
+            reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
+                get_instance_proc_addr(instance, "vkGetPhysicalDeviceProperties2"));
+        if (get_physical_device_properties2 == nullptr) {
+            // Vulkan 1.0 instances reach it through the KHR extension the
+            // runtime asks the application to enable.
+            get_physical_device_properties2 =
+                reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
+                    get_instance_proc_addr(
+                        instance, "vkGetPhysicalDeviceProperties2KHR"));
+        }
+        get_physical_device_memory_properties =
+            reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+                get_instance_proc_addr(
+                    instance, "vkGetPhysicalDeviceMemoryProperties"));
+        return get_device_proc_addr != nullptr &&
+            get_physical_device_properties2 != nullptr &&
+            get_physical_device_memory_properties != nullptr;
+    }
+
+    [[nodiscard]] bool load_device(VkDevice device) noexcept {
+        if (get_device_proc_addr == nullptr || device == VK_NULL_HANDLE) {
+            return false;
+        }
+        const auto load = [&](auto& target, const char* name) {
+            target = reinterpret_cast<std::remove_reference_t<decltype(target)>>(
+                get_device_proc_addr(device, name));
+            return target != nullptr;
+        };
+        return load(get_device_queue, "vkGetDeviceQueue") &&
+            load(create_image, "vkCreateImage") &&
+            load(destroy_image, "vkDestroyImage") &&
+            load(get_image_memory_requirements, "vkGetImageMemoryRequirements") &&
+            load(allocate_memory, "vkAllocateMemory") &&
+            load(free_memory, "vkFreeMemory") &&
+            load(bind_image_memory, "vkBindImageMemory") &&
+            load(create_semaphore, "vkCreateSemaphore") &&
+            load(destroy_semaphore, "vkDestroySemaphore") &&
+            load(import_semaphore_win32_handle, "vkImportSemaphoreWin32HandleKHR") &&
+            load(create_command_pool, "vkCreateCommandPool") &&
+            load(destroy_command_pool, "vkDestroyCommandPool") &&
+            load(allocate_command_buffers, "vkAllocateCommandBuffers") &&
+            load(reset_command_buffer, "vkResetCommandBuffer") &&
+            load(begin_command_buffer, "vkBeginCommandBuffer") &&
+            load(end_command_buffer, "vkEndCommandBuffer") &&
+            load(cmd_pipeline_barrier, "vkCmdPipelineBarrier") &&
+            load(cmd_copy_image, "vkCmdCopyImage") &&
+            load(queue_submit, "vkQueueSubmit") &&
+            load(create_fence, "vkCreateFence") &&
+            load(destroy_fence, "vkDestroyFence") &&
+            load(wait_for_fences, "vkWaitForFences");
+    }
+};
+
+[[nodiscard]] HRESULT vulkan_adapter_luid(
+    const VulkanFunctions& vk,
+    VkPhysicalDevice physical_device,
+    LUID* luid) noexcept {
+    if (luid == nullptr || physical_device == VK_NULL_HANDLE ||
+        vk.get_physical_device_properties2 == nullptr) {
+        return E_POINTER;
+    }
+    VkPhysicalDeviceIDProperties id_properties{};
+    id_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+    VkPhysicalDeviceProperties2 properties{};
+    properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    properties.pNext = &id_properties;
+    vk.get_physical_device_properties2(physical_device, &properties);
+    if (!id_properties.deviceLUIDValid) {
+        return E_FAIL;
+    }
+    static_assert(sizeof(LUID) == VK_LUID_SIZE);
+    std::memcpy(luid, id_properties.deviceLUID, sizeof(LUID));
+    return S_OK;
+}
+
+[[nodiscard]] HRESULT adapter_for_luid(
+    const LUID& luid,
+    IDXGIAdapter1** adapter) noexcept {
+    if (adapter == nullptr) {
+        return E_POINTER;
+    }
+    *adapter = nullptr;
+    ComPtr<IDXGIFactory4> factory;
+    HRESULT result = CreateDXGIFactory1(IID_PPV_ARGS(factory.GetAddressOf()));
+    if (FAILED(result)) {
+        return result;
+    }
+    ComPtr<IDXGIAdapter> found;
+    result = factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(found.GetAddressOf()));
+    if (FAILED(result)) {
+        return result;
+    }
+    ComPtr<IDXGIAdapter1> adapter1;
+    result = found.As(&adapter1);
+    if (SUCCEEDED(result)) {
+        DXGI_ADAPTER_DESC1 description{};
+        result = adapter1->GetDesc1(&description);
+        if (SUCCEEDED(result) && !same_luid(description.AdapterLuid, luid)) {
+            result = DXGI_ERROR_NOT_FOUND;
+        }
+    }
+    if (SUCCEEDED(result)) {
+        *adapter = adapter1.Detach();
+    }
+    return result;
+}
+
+[[nodiscard]] std::optional<std::uint32_t> device_local_memory_type(
+    const VkPhysicalDeviceMemoryProperties& properties,
+    std::uint32_t type_bits) noexcept {
+    std::optional<std::uint32_t> any;
+    for (std::uint32_t index = 0; index < properties.memoryTypeCount; ++index) {
+        if ((type_bits & (1U << index)) == 0) {
+            continue;
+        }
+        if ((properties.memoryTypes[index].propertyFlags &
+             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
+            return index;
+        }
+        if (!any) {
+            any = index;
+        }
+    }
+    return any;
+}
+
+// Whole-image barriers: a runtime may hand out private images with fewer
+// mips than the create info asked for, and the copies only ever touch mip
+// zero, so the range is whatever the image has.
+[[nodiscard]] VkImageMemoryBarrier image_barrier(
+    VkImage image,
+    VkImageLayout old_layout,
+    VkImageLayout new_layout,
+    VkAccessFlags source_access,
+    VkAccessFlags destination_access) noexcept {
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.srcAccessMask = source_access;
+    barrier.dstAccessMask = destination_access;
+    barrier.oldLayout = old_layout;
+    barrier.newLayout = new_layout;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+    return barrier;
+}
+
+}  // namespace
+
+DXGI_FORMAT dxgi_format_for_vulkan(VkFormat format) noexcept {
+    switch (format) {
+        case VK_FORMAT_R8G8B8A8_UNORM:
+            return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case VK_FORMAT_R8G8B8A8_SRGB:
+            return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        case VK_FORMAT_B8G8R8A8_UNORM:
+            return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case VK_FORMAT_B8G8R8A8_SRGB:
+            return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+        case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+            return DXGI_FORMAT_R10G10B10A2_UNORM;
+        case VK_FORMAT_R16G16B16A16_SFLOAT:
+            return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        case VK_FORMAT_R16G16B16A16_UNORM:
+            return DXGI_FORMAT_R16G16B16A16_UNORM;
+        case VK_FORMAT_R32G32B32A32_SFLOAT:
+            return DXGI_FORMAT_R32G32B32A32_FLOAT;
+        case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+            return DXGI_FORMAT_R11G11B10_FLOAT;
+        default:
+            return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
+HRESULT create_d3d12_device_for_vulkan(
+    const VulkanSessionBinding& binding,
+    ID3D12Device** d3d12_device,
+    ID3D12CommandQueue** d3d12_queue) noexcept {
+    if (d3d12_device != nullptr) {
+        *d3d12_device = nullptr;
+    }
+    if (d3d12_queue != nullptr) {
+        *d3d12_queue = nullptr;
+    }
+    if (d3d12_device == nullptr || d3d12_queue == nullptr ||
+        binding.instance == VK_NULL_HANDLE ||
+        binding.physical_device == VK_NULL_HANDLE) {
+        return E_POINTER;
+    }
+    try {
+        VulkanFunctions vk;
+        if (!vk.load_loader() || !vk.load_instance(binding.instance)) {
+            return E_FAIL;
+        }
+        LUID luid{};
+        HRESULT result = vulkan_adapter_luid(vk, binding.physical_device, &luid);
+        if (FAILED(result)) {
+            return result;
+        }
+        ComPtr<IDXGIAdapter1> adapter;
+        result = adapter_for_luid(luid, adapter.GetAddressOf());
+        if (FAILED(result)) {
+            return result;
+        }
+        ComPtr<ID3D12Device> device;
+        result = D3D12CreateDevice(
+            adapter.Get(),
+            D3D_FEATURE_LEVEL_11_0,
+            IID_PPV_ARGS(device.GetAddressOf()));
+        if (FAILED(result)) {
+            return result;
+        }
+        D3D12_COMMAND_QUEUE_DESC queue_description{};
+        queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        // As for a D3D11 session: every piece of synthesis runs here while the
+        // game submits its next frame, and the pair behind it has a slot to
+        // meet where the game's frame can absorb a delay.
+        queue_description.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+        ComPtr<ID3D12CommandQueue> queue;
+        result = device->CreateCommandQueue(
+            &queue_description,
+            IID_PPV_ARGS(queue.GetAddressOf()));
+        if (FAILED(result)) {
+            return result;
+        }
+        *d3d12_device = device.Detach();
+        *d3d12_queue = queue.Detach();
+        return S_OK;
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
+struct VulkanD3D12SwapchainInterop::Impl {
+    struct SharedImage {
+        ComPtr<ID3D12Resource> d3d12;
+        VkImage image{};
+        VkDeviceMemory memory{};
+    };
+
+    // One recorded submission. A buffer is free again once the shared fence
+    // has passed the value the submission signalled.
+    struct CommandBuffer {
+        VkCommandBuffer buffer{};
+        std::uint64_t signal_value{};
+    };
+
+    VulkanFunctions vk;
+    VulkanSessionBinding binding;
+    VkQueue queue{};
+    ComPtr<ID3D12Device> d3d12_device;
+    ComPtr<ID3D12CommandQueue> d3d12_queue;
+    ComPtr<ID3D12Fence> d3d12_fence;
+    VkSemaphore semaphore{};
+    VkCommandPool command_pool{};
+    HANDLE fence_event{};
+    VulkanImageDescription description;
+    DXGI_FORMAT dxgi_format{DXGI_FORMAT_UNKNOWN};
+    VkPhysicalDeviceMemoryProperties memory_properties{};
+    std::vector<VkImage> source_images;
+    std::vector<VkImage> current_destination_images;
+    std::vector<VkImage> synthetic_destination_images;
+    std::vector<SharedImage> shared_sources;
+    std::vector<SharedImage> shared_current_destinations;
+    std::vector<SharedImage> shared_synthetic_destinations;
+    std::vector<ID3D12Resource*> source_d3d12_views;
+    std::vector<ID3D12Resource*> current_d3d12_views;
+    std::vector<ID3D12Resource*> synthetic_d3d12_views;
+    std::vector<CommandBuffer> command_buffers;
+    std::uint64_t next_fence_value{1};
+    std::uint64_t last_fence_value{};
+    std::uint64_t last_d3d12_access_value{};
+    std::uint64_t last_vulkan_access_value{};
+    bool enabled{};
+
+    ~Impl() {
+        // The owner has waited for the fence before destroying us, so nothing
+        // queued still names these.
+        if (binding.device != VK_NULL_HANDLE) {
+            destroy_shared_images(&shared_sources);
+            destroy_shared_images(&shared_current_destinations);
+            destroy_shared_images(&shared_synthetic_destinations);
+            if (command_pool != VK_NULL_HANDLE && vk.destroy_command_pool) {
+                vk.destroy_command_pool(binding.device, command_pool, nullptr);
+            }
+            if (semaphore != VK_NULL_HANDLE && vk.destroy_semaphore) {
+                vk.destroy_semaphore(binding.device, semaphore, nullptr);
+            }
+        }
+        if (fence_event != nullptr) {
+            CloseHandle(fence_event);
+        }
+    }
+
+    void destroy_shared_images(std::vector<SharedImage>* images) noexcept {
+        for (SharedImage& image : *images) {
+            if (image.image != VK_NULL_HANDLE && vk.destroy_image) {
+                vk.destroy_image(binding.device, image.image, nullptr);
+                image.image = VK_NULL_HANDLE;
+            }
+            if (image.memory != VK_NULL_HANDLE && vk.free_memory) {
+                vk.free_memory(binding.device, image.memory, nullptr);
+                image.memory = VK_NULL_HANDLE;
+            }
+        }
+    }
+
+    [[nodiscard]] HRESULT create_shared_image(
+        SharedImage* output,
+        VulkanInteropInitializationStage create_stage,
+        VulkanInteropInitializationStage handle_stage,
+        VulkanInteropInitializationStage image_stage,
+        VulkanInteropInitializationStage memory_stage,
+        VulkanInteropInitializationStage bind_stage,
+        VulkanInteropInitializationStage* failure_stage) noexcept {
+        if (output == nullptr) {
+            return E_POINTER;
+        }
+        const auto fail = [&](VulkanInteropInitializationStage stage,
+                              HRESULT result) {
+            if (failure_stage != nullptr) {
+                *failure_stage = stage;
+            }
+            return result;
+        };
+        D3D12_HEAP_PROPERTIES heap_properties{};
+        heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+        heap_properties.CreationNodeMask = 1;
+        heap_properties.VisibleNodeMask = 1;
+
+        // Simultaneous access keeps the texture uncompressed, which is what
+        // lets the Vulkan side treat it as a plain GENERAL-layout image; the
+        // D3D11 interop shares its textures the same way.
+        D3D12_RESOURCE_DESC resource_description{};
+        resource_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        resource_description.Width = description.width;
+        resource_description.Height = description.height;
+        resource_description.DepthOrArraySize =
+            static_cast<UINT16>(description.array_size);
+        resource_description.MipLevels = 1;
+        resource_description.Format = dxgi_format;
+        resource_description.SampleDesc.Count = 1;
+        resource_description.SampleDesc.Quality = 0;
+        resource_description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        resource_description.Flags = static_cast<D3D12_RESOURCE_FLAGS>(
+            D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+            D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS);
+        HRESULT result = d3d12_device->CreateCommittedResource(
+            &heap_properties,
+            D3D12_HEAP_FLAG_SHARED,
+            &resource_description,
+            D3D12_RESOURCE_STATE_COMMON,
+            nullptr,
+            IID_PPV_ARGS(output->d3d12.GetAddressOf()));
+        if (FAILED(result)) {
+            return fail(create_stage, result);
+        }
+        UniqueHandle handle;
+        result = d3d12_device->CreateSharedHandle(
+            output->d3d12.Get(), nullptr, GENERIC_ALL, nullptr, &handle.value);
+        if (FAILED(result)) {
+            return fail(handle_stage, result);
+        }
+
+        VkExternalMemoryImageCreateInfo external_info{};
+        external_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+        external_info.handleTypes =
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
+        VkImageCreateInfo image_info{};
+        image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        image_info.pNext = &external_info;
+        image_info.imageType = VK_IMAGE_TYPE_2D;
+        image_info.format = description.format;
+        image_info.extent.width = description.width;
+        image_info.extent.height = description.height;
+        image_info.extent.depth = 1;
+        image_info.mipLevels = 1;
+        image_info.arrayLayers = description.array_size;
+        image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkResult vk_result = vk.create_image(
+            binding.device, &image_info, nullptr, &output->image);
+        if (vk_result != VK_SUCCESS) {
+            return fail(image_stage, hresult_from_vulkan(vk_result));
+        }
+
+        VkMemoryRequirements requirements{};
+        vk.get_image_memory_requirements(
+            binding.device, output->image, &requirements);
+        const auto memory_type = device_local_memory_type(
+            memory_properties, requirements.memoryTypeBits);
+        if (!memory_type) {
+            return fail(memory_stage, E_FAIL);
+        }
+        // A D3D12 resource is imported as a dedicated allocation: the
+        // committed resource is one allocation, and the image binds to the
+        // whole of it.
+        VkImportMemoryWin32HandleInfoKHR import_info{};
+        import_info.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+        import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
+        import_info.handle = handle.value;
+        VkMemoryDedicatedAllocateInfo dedicated_info{};
+        dedicated_info.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+        dedicated_info.pNext = &import_info;
+        dedicated_info.image = output->image;
+        VkMemoryAllocateInfo allocate_info{};
+        allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocate_info.pNext = &dedicated_info;
+        allocate_info.allocationSize = requirements.size;
+        allocate_info.memoryTypeIndex = *memory_type;
+        vk_result = vk.allocate_memory(
+            binding.device, &allocate_info, nullptr, &output->memory);
+        if (vk_result != VK_SUCCESS) {
+            return fail(memory_stage, hresult_from_vulkan(vk_result));
+        }
+        // Vulkan owns the handle from here.
+        handle.release();
+        vk_result = vk.bind_image_memory(
+            binding.device, output->image, output->memory, 0);
+        if (vk_result != VK_SUCCESS) {
+            return fail(bind_stage, hresult_from_vulkan(vk_result));
+        }
+        return S_OK;
+    }
+
+    [[nodiscard]] HRESULT create_shared_images(
+        std::size_t count,
+        std::vector<SharedImage>* images,
+        std::vector<ID3D12Resource*>* views,
+        VulkanInteropInitializationStage create_stage,
+        VulkanInteropInitializationStage handle_stage,
+        VulkanInteropInitializationStage image_stage,
+        VulkanInteropInitializationStage memory_stage,
+        VulkanInteropInitializationStage bind_stage,
+        VulkanInteropInitializationStage* failure_stage) {
+        images->resize(count);
+        views->reserve(count);
+        for (SharedImage& image : *images) {
+            const HRESULT result = create_shared_image(
+                &image, create_stage, handle_stage, image_stage, memory_stage,
+                bind_stage, failure_stage);
+            if (FAILED(result)) {
+                return result;
+            }
+            views->push_back(image.d3d12.Get());
+        }
+        return S_OK;
+    }
+
+    [[nodiscard]] HRESULT allocate_fence_value(std::uint64_t* value) noexcept {
+        if (value == nullptr) {
+            return E_POINTER;
+        }
+        if (next_fence_value == 0 ||
+            next_fence_value == std::numeric_limits<std::uint64_t>::max()) {
+            enabled = false;
+            return E_FAIL;
+        }
+        *value = next_fence_value;
+        ++next_fence_value;
+        return S_OK;
+    }
+
+    // A command buffer whose last submission the fence has passed, or a new
+    // one while the ring is under its limit. Never waits: past the limit the
+    // frame fails open instead.
+    [[nodiscard]] HRESULT acquire_command_buffer(VkCommandBuffer* output) noexcept {
+        if (output == nullptr) {
+            return E_POINTER;
+        }
+        const std::uint64_t completed = d3d12_fence->GetCompletedValue();
+        if (completed == std::numeric_limits<std::uint64_t>::max()) {
+            enabled = false;
+            return E_FAIL;
+        }
+        for (CommandBuffer& candidate : command_buffers) {
+            if (candidate.signal_value <= completed) {
+                const VkResult reset = vk.reset_command_buffer(candidate.buffer, 0);
+                if (reset != VK_SUCCESS) {
+                    return hresult_from_vulkan(reset);
+                }
+                candidate.signal_value = std::numeric_limits<std::uint64_t>::max();
+                *output = candidate.buffer;
+                return S_OK;
+            }
+        }
+        if (command_buffers.size() >= kCommandBufferLimit) {
+            return HRESULT_FROM_WIN32(ERROR_BUSY);
+        }
+        VkCommandBufferAllocateInfo allocate_info{};
+        allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocate_info.commandPool = command_pool;
+        allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocate_info.commandBufferCount = 1;
+        VkCommandBuffer buffer = VK_NULL_HANDLE;
+        const VkResult result = vk.allocate_command_buffers(
+            binding.device, &allocate_info, &buffer);
+        if (result != VK_SUCCESS) {
+            return hresult_from_vulkan(result);
+        }
+        try {
+            command_buffers.push_back(
+                {buffer, std::numeric_limits<std::uint64_t>::max()});
+        } catch (...) {
+            return E_OUTOFMEMORY;
+        }
+        *output = buffer;
+        return S_OK;
+    }
+
+    void record(std::int64_t step, std::uint64_t signal, std::uint64_t wait) noexcept {
+        bridge_flight_logger().event(
+            BridgeFlightOperation::vulkan_interop, step,
+            d3d12_fence ? d3d12_fence->GetCompletedValue() : 0, signal, wait);
+    }
+
+    void mark_submitted(VkCommandBuffer buffer, std::uint64_t value) noexcept {
+        for (CommandBuffer& candidate : command_buffers) {
+            if (candidate.buffer == buffer) {
+                candidate.signal_value = value;
+                return;
+            }
+        }
+    }
+
+    // Submits one recorded buffer on the application's queue, waiting for
+    // the shared fence to reach wait_value (0: no wait) and signalling
+    // signal_value once the buffer has run.
+    [[nodiscard]] HRESULT submit(
+        VkCommandBuffer buffer,
+        std::uint64_t wait_value,
+        std::uint64_t signal_value,
+        VkFence fence = VK_NULL_HANDLE) noexcept {
+        const VkPipelineStageFlags wait_stage =
+            VK_PIPELINE_STAGE_TRANSFER_BIT;
+        VkTimelineSemaphoreSubmitInfo timeline_info{};
+        timeline_info.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timeline_info.waitSemaphoreValueCount = wait_value != 0 ? 1U : 0U;
+        timeline_info.pWaitSemaphoreValues = &wait_value;
+        timeline_info.signalSemaphoreValueCount = 1;
+        timeline_info.pSignalSemaphoreValues = &signal_value;
+        VkSubmitInfo submit_info{};
+        submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit_info.pNext = &timeline_info;
+        submit_info.waitSemaphoreCount = wait_value != 0 ? 1U : 0U;
+        submit_info.pWaitSemaphores = &semaphore;
+        submit_info.pWaitDstStageMask = &wait_stage;
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &buffer;
+        submit_info.signalSemaphoreCount = 1;
+        submit_info.pSignalSemaphores = &semaphore;
+        const VkResult result = vk.queue_submit(queue, 1, &submit_info, fence);
+        if (result != VK_SUCCESS) {
+            enabled = false;
+            return hresult_from_vulkan(result);
+        }
+        mark_submitted(buffer, signal_value);
+        return S_OK;
+    }
+
+    void copy_mip_zero(
+        VkCommandBuffer buffer,
+        VkImage source,
+        VkImageLayout source_layout,
+        VkImage destination,
+        VkImageLayout destination_layout) noexcept {
+        VkImageCopy region{};
+        region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.srcSubresource.mipLevel = 0;
+        region.srcSubresource.baseArrayLayer = 0;
+        region.srcSubresource.layerCount = description.array_size;
+        region.dstSubresource = region.srcSubresource;
+        region.extent.width = description.width;
+        region.extent.height = description.height;
+        region.extent.depth = 1;
+        vk.cmd_copy_image(
+            buffer, source, source_layout, destination, destination_layout,
+            1, &region);
+    }
+
+    void barrier(
+        VkCommandBuffer buffer,
+        VkPipelineStageFlags source_stage,
+        VkPipelineStageFlags destination_stage,
+        const VkImageMemoryBarrier& image) noexcept {
+        vk.cmd_pipeline_barrier(
+            buffer, source_stage, destination_stage, 0, 0, nullptr, 0, nullptr,
+            1, &image);
+    }
+
+    // The shared images start in UNDEFINED and are moved to GENERAL once,
+    // before D3D12 writes any of them: a transition out of UNDEFINED may
+    // discard contents, so it cannot be left until a frame. The one CPU wait
+    // in this file, at initialization.
+    [[nodiscard]] HRESULT transition_shared_images_to_general(
+        VulkanInteropInitializationStage* failure_stage) noexcept {
+        const auto fail = [&](HRESULT result) {
+            if (failure_stage != nullptr) {
+                *failure_stage = VulkanInteropInitializationStage::initial_layout;
+            }
+            return result;
+        };
+        VkCommandBuffer buffer = VK_NULL_HANDLE;
+        HRESULT result = acquire_command_buffer(&buffer);
+        if (FAILED(result)) {
+            return fail(result);
+        }
+        VkCommandBufferBeginInfo begin_info{};
+        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VkResult vk_result = vk.begin_command_buffer(buffer, &begin_info);
+        if (vk_result != VK_SUCCESS) {
+            return fail(hresult_from_vulkan(vk_result));
+        }
+        for (const auto* images : {&shared_sources, &shared_current_destinations,
+                                   &shared_synthetic_destinations}) {
+            for (const SharedImage& image : *images) {
+                barrier(
+                    buffer,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                    image_barrier(
+                image.image,
+                        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                        0, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT));
+            }
+        }
+        vk_result = vk.end_command_buffer(buffer);
+        if (vk_result != VK_SUCCESS) {
+            return fail(hresult_from_vulkan(vk_result));
+        }
+        VkFenceCreateInfo fence_info{};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkFence fence = VK_NULL_HANDLE;
+        vk_result = vk.create_fence(binding.device, &fence_info, nullptr, &fence);
+        if (vk_result != VK_SUCCESS) {
+            return fail(hresult_from_vulkan(vk_result));
+        }
+        std::uint64_t value = 0;
+        result = allocate_fence_value(&value);
+        if (SUCCEEDED(result)) {
+            result = submit(buffer, 0, value, fence);
+        }
+        if (SUCCEEDED(result)) {
+            vk_result = vk.wait_for_fences(
+                binding.device, 1, &fence, VK_TRUE,
+                std::numeric_limits<std::uint64_t>::max());
+            if (vk_result != VK_SUCCESS) {
+                result = hresult_from_vulkan(vk_result);
+            }
+        }
+        vk.destroy_fence(binding.device, fence, nullptr);
+        if (FAILED(result)) {
+            return fail(result);
+        }
+        last_fence_value = value;
+        return S_OK;
+    }
+
+    [[nodiscard]] HRESULT initialize(
+        const VulkanSessionBinding& input_binding,
+        ID3D12Device* input_d3d12_device,
+        ID3D12CommandQueue* input_d3d12_queue,
+        const VulkanImageDescription& input_description,
+        std::span<const VkImage> input_sources,
+        std::span<const VkImage> input_current_destinations,
+        std::span<const VkImage> input_synthetic_destinations,
+        VulkanInteropInitializationStage* failure_stage) {
+        const auto fail = [&](VulkanInteropInitializationStage stage,
+                              HRESULT result) {
+            if (failure_stage != nullptr) {
+                *failure_stage = stage;
+            }
+            return result;
+        };
+        if (failure_stage != nullptr) {
+            *failure_stage = VulkanInteropInitializationStage::complete;
+        }
+        const auto any_null = [](std::span<const VkImage> images) {
+            return std::any_of(images.begin(), images.end(), [](VkImage image) {
+                return image == VK_NULL_HANDLE;
+            });
+        };
+        if (input_binding.instance == VK_NULL_HANDLE ||
+            input_binding.physical_device == VK_NULL_HANDLE ||
+            input_binding.device == VK_NULL_HANDLE ||
+            input_d3d12_device == nullptr || input_d3d12_queue == nullptr ||
+            input_sources.empty() || input_current_destinations.empty() ||
+            input_synthetic_destinations.empty() || any_null(input_sources) ||
+            any_null(input_current_destinations) ||
+            any_null(input_synthetic_destinations) ||
+            input_description.width == 0 || input_description.height == 0 ||
+            input_description.array_size == 0 ||
+            input_description.array_size >
+                D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION ||
+            input_description.mip_levels == 0 ||
+            input_description.sample_count != 1 ||
+            input_d3d12_queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+            return fail(VulkanInteropInitializationStage::arguments, E_INVALIDARG);
+        }
+        if (!vk.load_loader()) {
+            return fail(VulkanInteropInitializationStage::loader, E_FAIL);
+        }
+        if (!vk.load_instance(input_binding.instance)) {
+            return fail(VulkanInteropInitializationStage::instance_functions, E_FAIL);
+        }
+        if (!vk.load_device(input_binding.device)) {
+            // vkImportSemaphoreWin32HandleKHR is the one that goes missing:
+            // the application's device did not enable
+            // VK_KHR_external_semaphore_win32.
+            return fail(VulkanInteropInitializationStage::device_functions, E_FAIL);
+        }
+        LUID luid{};
+        HRESULT result = vulkan_adapter_luid(vk, input_binding.physical_device, &luid);
+        if (FAILED(result) || !same_luid(luid, input_d3d12_device->GetAdapterLuid())) {
+            return fail(
+                VulkanInteropInitializationStage::adapter_luid,
+                FAILED(result) ? result : E_INVALIDARG);
+        }
+        dxgi_format = dxgi_format_for_vulkan(input_description.format);
+        if (dxgi_format == DXGI_FORMAT_UNKNOWN) {
+            return fail(VulkanInteropInitializationStage::format, E_INVALIDARG);
+        }
+
+        binding = input_binding;
+        d3d12_device = input_d3d12_device;
+        d3d12_queue = input_d3d12_queue;
+        description = input_description;
+        vk.get_physical_device_memory_properties(
+            binding.physical_device, &memory_properties);
+        vk.get_device_queue(
+            binding.device, binding.queue_family, binding.queue_index, &queue);
+        if (queue == VK_NULL_HANDLE) {
+            return fail(VulkanInteropInitializationStage::queue, E_FAIL);
+        }
+        source_images.assign(input_sources.begin(), input_sources.end());
+        current_destination_images.assign(
+            input_current_destinations.begin(), input_current_destinations.end());
+        synthetic_destination_images.assign(
+            input_synthetic_destinations.begin(),
+            input_synthetic_destinations.end());
+
+        result = create_shared_images(
+            source_images.size(), &shared_sources, &source_d3d12_views,
+            VulkanInteropInitializationStage::source_create_d3d12,
+            VulkanInteropInitializationStage::source_create_handle,
+            VulkanInteropInitializationStage::source_create_image,
+            VulkanInteropInitializationStage::source_import_memory,
+            VulkanInteropInitializationStage::source_bind_memory,
+            failure_stage);
+        if (FAILED(result)) {
+            return result;
+        }
+        result = create_shared_images(
+            current_destination_images.size(), &shared_current_destinations,
+            &current_d3d12_views,
+            VulkanInteropInitializationStage::current_create_d3d12,
+            VulkanInteropInitializationStage::current_create_handle,
+            VulkanInteropInitializationStage::current_create_image,
+            VulkanInteropInitializationStage::current_import_memory,
+            VulkanInteropInitializationStage::current_bind_memory,
+            failure_stage);
+        if (FAILED(result)) {
+            return result;
+        }
+        result = create_shared_images(
+            synthetic_destination_images.size(), &shared_synthetic_destinations,
+            &synthetic_d3d12_views,
+            VulkanInteropInitializationStage::synthetic_create_d3d12,
+            VulkanInteropInitializationStage::synthetic_create_handle,
+            VulkanInteropInitializationStage::synthetic_create_image,
+            VulkanInteropInitializationStage::synthetic_import_memory,
+            VulkanInteropInitializationStage::synthetic_bind_memory,
+            failure_stage);
+        if (FAILED(result)) {
+            return result;
+        }
+
+        result = d3d12_device->CreateFence(
+            0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(d3d12_fence.GetAddressOf()));
+        if (FAILED(result)) {
+            return fail(VulkanInteropInitializationStage::create_fence, result);
+        }
+        UniqueHandle fence_handle;
+        result = d3d12_device->CreateSharedHandle(
+            d3d12_fence.Get(), nullptr, GENERIC_ALL, nullptr, &fence_handle.value);
+        if (FAILED(result)) {
+            return fail(VulkanInteropInitializationStage::create_fence_handle, result);
+        }
+        VkSemaphoreTypeCreateInfo type_info{};
+        type_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+        type_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        type_info.initialValue = 0;
+        VkSemaphoreCreateInfo semaphore_info{};
+        semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        semaphore_info.pNext = &type_info;
+        VkResult vk_result = vk.create_semaphore(
+            binding.device, &semaphore_info, nullptr, &semaphore);
+        if (vk_result != VK_SUCCESS) {
+            return fail(
+                VulkanInteropInitializationStage::create_semaphore,
+                hresult_from_vulkan(vk_result));
+        }
+        VkImportSemaphoreWin32HandleInfoKHR import_info{};
+        import_info.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR;
+        import_info.semaphore = semaphore;
+        import_info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT;
+        import_info.handle = fence_handle.value;
+        vk_result = vk.import_semaphore_win32_handle(binding.device, &import_info);
+        if (vk_result != VK_SUCCESS) {
+            return fail(
+                VulkanInteropInitializationStage::import_semaphore,
+                hresult_from_vulkan(vk_result));
+        }
+        fence_handle.release();
+
+        VkCommandPoolCreateInfo pool_info{};
+        pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT |
+            VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        pool_info.queueFamilyIndex = binding.queue_family;
+        vk_result = vk.create_command_pool(
+            binding.device, &pool_info, nullptr, &command_pool);
+        if (vk_result != VK_SUCCESS) {
+            return fail(
+                VulkanInteropInitializationStage::command_pool,
+                hresult_from_vulkan(vk_result));
+        }
+        fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (fence_event == nullptr) {
+            const DWORD error = GetLastError();
+            return fail(
+                VulkanInteropInitializationStage::create_event,
+                HRESULT_FROM_WIN32(
+                    error == ERROR_SUCCESS ? ERROR_NOT_ENOUGH_MEMORY : error));
+        }
+        result = transition_shared_images_to_general(failure_stage);
+        if (FAILED(result)) {
+            return result;
+        }
+        enabled = true;
+        return S_OK;
+    }
+
+    // The application's image arrives in COLOR_ATTACHMENT_OPTIMAL, the layout
+    // OpenXR requires of a released color image, and is put back there so
+    // the runtime finds what it expects when the release reaches it.
+    [[nodiscard]] HRESULT prepare_capture(std::uint32_t source_index) noexcept {
+        if (!enabled || source_index >= source_images.size() ||
+            source_index >= shared_sources.size()) {
+            return E_INVALIDARG;
+        }
+        VkCommandBuffer buffer = VK_NULL_HANDLE;
+        HRESULT result = acquire_command_buffer(&buffer);
+        if (FAILED(result)) {
+            return result;
+        }
+        VkCommandBufferBeginInfo begin_info{};
+        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VkResult vk_result = vk.begin_command_buffer(buffer, &begin_info);
+        if (vk_result != VK_SUCCESS) {
+            return hresult_from_vulkan(vk_result);
+        }
+        const VkImage source = source_images[source_index];
+        const VkImage shared = shared_sources[source_index].image;
+        barrier(
+            buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            image_barrier(
+                source,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT));
+        barrier(
+            buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            image_barrier(
+                shared,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT));
+        copy_mip_zero(
+            buffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, shared,
+            VK_IMAGE_LAYOUT_GENERAL);
+        barrier(
+            buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            image_barrier(
+                source,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_ACCESS_TRANSFER_READ_BIT,
+                VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT));
+        barrier(
+            buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            image_barrier(
+                shared,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT));
+        vk_result = vk.end_command_buffer(buffer);
+        if (vk_result != VK_SUCCESS) {
+            return hresult_from_vulkan(vk_result);
+        }
+        std::uint64_t value = 0;
+        result = allocate_fence_value(&value);
+        if (FAILED(result)) {
+            return result;
+        }
+        // The shared source is free once the history copy of the previous
+        // capture has run on the D3D12 queue.
+        record(1, value, last_d3d12_access_value);
+        result = submit(buffer, last_d3d12_access_value, value);
+        if (FAILED(result)) {
+            return result;
+        }
+        result = d3d12_queue->Wait(d3d12_fence.Get(), value);
+        if (FAILED(result)) {
+            enabled = false;
+            return result;
+        }
+        last_fence_value = value;
+        return S_OK;
+    }
+
+    [[nodiscard]] HRESULT finish_capture() noexcept {
+        if (!enabled) {
+            return E_UNEXPECTED;
+        }
+        std::uint64_t value = 0;
+        HRESULT result = allocate_fence_value(&value);
+        if (FAILED(result)) {
+            return result;
+        }
+        record(2, value, 0);
+        result = d3d12_queue->Signal(d3d12_fence.Get(), value);
+        if (FAILED(result)) {
+            enabled = false;
+            return result;
+        }
+        last_d3d12_access_value = value;
+        last_fence_value = value;
+        return S_OK;
+    }
+
+    [[nodiscard]] HRESULT prepare_synthesis() noexcept {
+        if (!enabled) {
+            return E_UNEXPECTED;
+        }
+        if (last_vulkan_access_value == 0) {
+            return S_OK;
+        }
+        record(3, 0, last_vulkan_access_value);
+        const HRESULT result = d3d12_queue->Wait(
+            d3d12_fence.Get(), last_vulkan_access_value);
+        if (FAILED(result)) {
+            enabled = false;
+        }
+        return result;
+    }
+
+    void record_publish_copy(
+        VkCommandBuffer buffer,
+        VkImage shared,
+        VkImage destination) noexcept {
+        // A private image just acquired and waited is in
+        // COLOR_ATTACHMENT_OPTIMAL, as the runtime hands it out, and goes back
+        // there for the release that follows.
+        barrier(
+            buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            image_barrier(
+                destination,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT));
+        barrier(
+            buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            image_barrier(
+                shared,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT));
+        copy_mip_zero(
+            buffer, shared, VK_IMAGE_LAYOUT_GENERAL, destination,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        barrier(
+            buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            image_barrier(
+                destination,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT));
+        barrier(
+            buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            image_barrier(
+                shared,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_WRITE_BIT));
+    }
+
+    [[nodiscard]] HRESULT publish(
+        std::uint32_t current_destination_index,
+        std::optional<std::uint32_t> synthetic_destination_index) noexcept {
+        if (!enabled ||
+            current_destination_index >= current_destination_images.size() ||
+            current_destination_index >= shared_current_destinations.size() ||
+            (synthetic_destination_index &&
+             (*synthetic_destination_index >= synthetic_destination_images.size() ||
+              *synthetic_destination_index >=
+                  shared_synthetic_destinations.size()))) {
+            return E_INVALIDARG;
+        }
+        std::uint64_t ready_value = 0;
+        HRESULT result = allocate_fence_value(&ready_value);
+        if (FAILED(result)) {
+            return result;
+        }
+        result = d3d12_queue->Signal(d3d12_fence.Get(), ready_value);
+        if (FAILED(result)) {
+            enabled = false;
+            return result;
+        }
+        VkCommandBuffer buffer = VK_NULL_HANDLE;
+        result = acquire_command_buffer(&buffer);
+        if (FAILED(result)) {
+            return result;
+        }
+        VkCommandBufferBeginInfo begin_info{};
+        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VkResult vk_result = vk.begin_command_buffer(buffer, &begin_info);
+        if (vk_result != VK_SUCCESS) {
+            return hresult_from_vulkan(vk_result);
+        }
+        record_publish_copy(
+            buffer,
+            shared_current_destinations[current_destination_index].image,
+            current_destination_images[current_destination_index]);
+        if (synthetic_destination_index) {
+            record_publish_copy(
+                buffer,
+                shared_synthetic_destinations[*synthetic_destination_index].image,
+                synthetic_destination_images[*synthetic_destination_index]);
+        }
+        vk_result = vk.end_command_buffer(buffer);
+        if (vk_result != VK_SUCCESS) {
+            return hresult_from_vulkan(vk_result);
+        }
+        std::uint64_t complete_value = 0;
+        result = allocate_fence_value(&complete_value);
+        if (FAILED(result)) {
+            return result;
+        }
+        record(4, complete_value, ready_value);
+        result = submit(buffer, ready_value, complete_value);
+        if (FAILED(result)) {
+            return result;
+        }
+        last_vulkan_access_value = complete_value;
+        last_fence_value = complete_value;
+        return S_OK;
+    }
+
+    [[nodiscard]] HRESULT wait_for_idle() noexcept {
+        if (last_fence_value == 0) {
+            return S_OK;
+        }
+        if (d3d12_fence == nullptr || fence_event == nullptr) {
+            return E_UNEXPECTED;
+        }
+        const std::uint64_t completed = d3d12_fence->GetCompletedValue();
+        if (completed == std::numeric_limits<std::uint64_t>::max()) {
+            enabled = false;
+            return E_FAIL;
+        }
+        if (completed >= last_fence_value) {
+            return S_OK;
+        }
+        HRESULT result = d3d12_fence->SetEventOnCompletion(
+            last_fence_value, fence_event);
+        if (FAILED(result)) {
+            enabled = false;
+            return result;
+        }
+        if (WaitForSingleObject(fence_event, INFINITE) != WAIT_OBJECT_0) {
+            const DWORD error = GetLastError();
+            enabled = false;
+            return HRESULT_FROM_WIN32(
+                error == ERROR_SUCCESS ? ERROR_GEN_FAILURE : error);
+        }
+        return d3d12_fence->GetCompletedValue() >= last_fence_value ? S_OK
+                                                                      : E_FAIL;
+    }
+};
+
+VulkanD3D12SwapchainInterop::VulkanD3D12SwapchainInterop() noexcept = default;
+
+VulkanD3D12SwapchainInterop::~VulkanD3D12SwapchainInterop() {
+    try {
+        std::scoped_lock lock(mutex_);
+        if (impl_ != nullptr && FAILED(impl_->wait_for_idle())) {
+            // Preserve resources if completion cannot be proven.
+            static_cast<void>(impl_.release());
+        }
+    } catch (...) {
+    }
+}
+
+HRESULT VulkanD3D12SwapchainInterop::initialize(
+    const VulkanSessionBinding& binding,
+    ID3D12Device* d3d12_device,
+    ID3D12CommandQueue* d3d12_queue,
+    const VulkanImageDescription& description,
+    std::span<const VkImage> source_images,
+    std::span<const VkImage> current_destination_images,
+    std::span<const VkImage> synthetic_destination_images,
+    VulkanInteropInitializationStage* failure_stage) noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if (impl_ != nullptr) {
+            return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
+        }
+        auto candidate = std::make_unique<Impl>();
+        const HRESULT result = candidate->initialize(
+            binding, d3d12_device, d3d12_queue, description, source_images,
+            current_destination_images, synthetic_destination_images,
+            failure_stage);
+        if (FAILED(result)) {
+            // A partly built candidate may have queued the layout transition;
+            // its destructor only frees what it created, after the fence.
+            static_cast<void>(candidate->wait_for_idle());
+            return result;
+        }
+        impl_ = std::move(candidate);
+        return S_OK;
+    } catch (const std::bad_alloc&) {
+        return E_OUTOFMEMORY;
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
+std::span<ID3D12Resource* const>
+VulkanD3D12SwapchainInterop::source_images() const noexcept {
+    std::scoped_lock lock(mutex_);
+    return impl_ == nullptr
+        ? std::span<ID3D12Resource* const>{}
+        : std::span<ID3D12Resource* const>(impl_->source_d3d12_views);
+}
+
+std::span<ID3D12Resource* const>
+VulkanD3D12SwapchainInterop::current_destination_images() const noexcept {
+    std::scoped_lock lock(mutex_);
+    return impl_ == nullptr
+        ? std::span<ID3D12Resource* const>{}
+        : std::span<ID3D12Resource* const>(impl_->current_d3d12_views);
+}
+
+std::span<ID3D12Resource* const>
+VulkanD3D12SwapchainInterop::synthetic_destination_images() const noexcept {
+    std::scoped_lock lock(mutex_);
+    return impl_ == nullptr
+        ? std::span<ID3D12Resource* const>{}
+        : std::span<ID3D12Resource* const>(impl_->synthetic_d3d12_views);
+}
+
+HRESULT VulkanD3D12SwapchainInterop::prepare_capture(
+    std::uint32_t source_index) noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ == nullptr ? E_UNEXPECTED
+                                : impl_->prepare_capture(source_index);
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
+HRESULT VulkanD3D12SwapchainInterop::finish_capture() noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ == nullptr ? E_UNEXPECTED : impl_->finish_capture();
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
+HRESULT VulkanD3D12SwapchainInterop::prepare_synthesis() noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ == nullptr ? E_UNEXPECTED : impl_->prepare_synthesis();
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
+HRESULT VulkanD3D12SwapchainInterop::publish(
+    std::uint32_t current_destination_index,
+    std::optional<std::uint32_t> synthetic_destination_index) noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ == nullptr
+            ? E_UNEXPECTED
+            : impl_->publish(current_destination_index, synthetic_destination_index);
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
+HRESULT VulkanD3D12SwapchainInterop::publication_fence(
+    ID3D12Fence** fence,
+    std::uint64_t* value) const noexcept {
+    try {
+        if (fence == nullptr || value == nullptr) {
+            return E_POINTER;
+        }
+        *fence = nullptr;
+        *value = 0;
+        std::scoped_lock lock(mutex_);
+        if (impl_ == nullptr || impl_->d3d12_fence == nullptr ||
+            impl_->last_vulkan_access_value == 0) {
+            return E_UNEXPECTED;
+        }
+        *fence = impl_->d3d12_fence.Get();
+        (*fence)->AddRef();
+        *value = impl_->last_vulkan_access_value;
+        return S_OK;
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
+HRESULT VulkanD3D12SwapchainInterop::wait_for_idle() noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ == nullptr ? S_OK : impl_->wait_for_idle();
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
+bool VulkanD3D12SwapchainInterop::initialized() const noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ != nullptr && impl_->enabled;
+    } catch (...) {
+        return false;
+    }
+}
+
+}  // namespace xrfg

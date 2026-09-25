@@ -4,6 +4,9 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
+// Before openxr_platform.h, which expects the Vulkan types to exist.
+#include <vulkan/vulkan.h>
+
 #include <openxr/openxr.h>
 #include <openxr/openxr_loader_negotiation.h>
 #include <openxr/openxr_platform.h>
@@ -74,6 +77,10 @@ bool g_cropped_subimage_mode = false;
 bool g_double_wide_mode = false;
 bool g_uevr_pipelined_display_time_mode = false;
 bool g_d3d11_interop_mode = false;
+// vulkan: the application binds a real Vulkan device, so the layer's Vulkan
+// interop runs against the driver rather than a stand-in. Importing the D3D12
+// textures and the shared fence is the part no fake can vouch for.
+bool g_vulkan_mode = false;
 bool g_inverted_vertical_fov = false;
 bool g_steamvr_runtime_mode = false;
 bool g_steamvr_presenter_mode = false;
@@ -98,7 +105,7 @@ std::atomic<bool> g_swapchain_destroyed{false};
 std::atomic<unsigned> g_submission_after_destroy{0};
 DWORD g_test_application_thread_id{};
 void record_frame_call_thread() noexcept {
-    if (g_single_threaded_mode &&
+    if ((g_single_threaded_mode || g_vulkan_mode) &&
         GetCurrentThreadId() != g_test_application_thread_id) {
         g_off_thread_frame_calls.fetch_add(1, std::memory_order_relaxed);
     }
@@ -192,6 +199,31 @@ ComPtr<ID3D12CommandQueue> g_queue;
 ComPtr<ID3D11Device> g_d3d11_device;
 ComPtr<ID3D11DeviceContext> g_d3d11_context;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_application_swapchain_images;
+std::array<VkImage, 3> g_vulkan_application_swapchain_images{};
+std::array<VkImage, 3> g_vulkan_current_swapchain_images{};
+std::array<VkImage, 3> g_vulkan_current_swapchain_b_images{};
+std::array<VkImage, 3> g_vulkan_synthetic_swapchain_images{};
+std::array<VkImage, 3> g_vulkan_synthetic_swapchain_b_images{};
+
+// Everything the vulkan mode creates, loaded through vulkan-1.dll the way an
+// application does; the test links no Vulkan library either. Nothing is
+// destroyed: the layer's own Vulkan objects go with its sessions, and on a
+// path that leaves a session behind they go at process exit, which has to
+// find the device still there.
+struct VulkanTestDevice {
+    HMODULE module{};
+    PFN_vkGetInstanceProcAddr get_instance_proc_addr{};
+    VkInstance instance{};
+    VkPhysicalDevice physical_device{};
+    VkDevice device{};
+    std::uint32_t queue_family{};
+    VkQueue queue{};
+    VkCommandPool command_pool{};
+    PFN_vkQueueWaitIdle queue_wait_idle{};
+    std::vector<VkImage> images;
+    std::vector<VkDeviceMemory> memories;
+};
+VulkanTestDevice g_vulkan;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_current_swapchain_images;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_current_swapchain_b_images;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_synthetic_swapchain_images;
@@ -791,6 +823,29 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_swapchain_images(
         return XR_ERROR_SIZE_INSUFFICIENT;
     }
 
+    if (g_vulkan_mode) {
+        auto* vulkan_images =
+            reinterpret_cast<XrSwapchainImageVulkanKHR*>(images);
+        const auto* selected_images = &g_vulkan_application_swapchain_images;
+        if (swapchain == g_current_swapchain) {
+            selected_images = &g_vulkan_current_swapchain_images;
+        } else if (swapchain == g_current_swapchain_b) {
+            selected_images = &g_vulkan_current_swapchain_b_images;
+        } else if (swapchain == g_synthetic_swapchain) {
+            selected_images = &g_vulkan_synthetic_swapchain_images;
+        } else if (swapchain == g_synthetic_swapchain_b) {
+            selected_images = &g_vulkan_synthetic_swapchain_b_images;
+        }
+        for (std::uint32_t index = 0; index < kImageCount; ++index) {
+            if (vulkan_images[index].type !=
+                XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR) {
+                return XR_ERROR_VALIDATION_FAILURE;
+            }
+            vulkan_images[index].image = (*selected_images)[index];
+        }
+        return XR_SUCCESS;
+    }
+
     if (g_d3d11_interop_mode) {
         auto* d3d11_images =
             reinterpret_cast<XrSwapchainImageD3D11KHR*>(images);
@@ -1108,7 +1163,283 @@ template <typename Function>
     return true;
 }
 
+// The device an application on OpenComposite would create from SteamVR's
+// extension list plus the semaphore extension the layer appends, and the
+// images a Vulkan runtime hands out: in COLOR_ATTACHMENT_OPTIMAL, the layout
+// OpenXR requires of a released colour image and the one the layer's copies
+// assume.
+[[nodiscard]] bool initialize_vulkan() {
+    g_vulkan.module = LoadLibraryW(L"vulkan-1.dll");
+    if (g_vulkan.module == nullptr) {
+        std::cerr << "vulkan-1.dll is not available\n";
+        return false;
+    }
+    g_vulkan.get_instance_proc_addr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        GetProcAddress(g_vulkan.module, "vkGetInstanceProcAddr"));
+    if (g_vulkan.get_instance_proc_addr == nullptr) {
+        return false;
+    }
+    const auto instance_function = [&](auto& function, const char* name) {
+        function = reinterpret_cast<std::remove_reference_t<decltype(function)>>(
+            g_vulkan.get_instance_proc_addr(g_vulkan.instance, name));
+        return function != nullptr;
+    };
+    PFN_vkCreateInstance create_instance = nullptr;
+    if (!instance_function(create_instance, "vkCreateInstance")) {
+        return false;
+    }
+    VkApplicationInfo application_info{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    application_info.pApplicationName = "xrfg_layer_call_chain";
+    application_info.apiVersion = VK_API_VERSION_1_2;
+    const std::array<const char*, 3> instance_extensions{
+        "VK_KHR_get_physical_device_properties2",
+        "VK_KHR_external_memory_capabilities",
+        "VK_KHR_external_semaphore_capabilities",
+    };
+    VkInstanceCreateInfo instance_info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    instance_info.pApplicationInfo = &application_info;
+    instance_info.enabledExtensionCount =
+        static_cast<std::uint32_t>(instance_extensions.size());
+    instance_info.ppEnabledExtensionNames = instance_extensions.data();
+    if (create_instance(&instance_info, nullptr, &g_vulkan.instance) != VK_SUCCESS) {
+        std::cerr << "failed to create the Vulkan instance\n";
+        return false;
+    }
+    PFN_vkEnumeratePhysicalDevices enumerate_physical_devices = nullptr;
+    PFN_vkGetPhysicalDeviceProperties get_physical_device_properties = nullptr;
+    PFN_vkGetPhysicalDeviceQueueFamilyProperties get_queue_family_properties = nullptr;
+    PFN_vkGetPhysicalDeviceMemoryProperties get_memory_properties = nullptr;
+    PFN_vkCreateDevice create_device = nullptr;
+    PFN_vkGetDeviceProcAddr get_device_proc_addr = nullptr;
+    if (!instance_function(enumerate_physical_devices, "vkEnumeratePhysicalDevices") ||
+        !instance_function(get_physical_device_properties, "vkGetPhysicalDeviceProperties") ||
+        !instance_function(get_queue_family_properties, "vkGetPhysicalDeviceQueueFamilyProperties") ||
+        !instance_function(get_memory_properties, "vkGetPhysicalDeviceMemoryProperties") ||
+        !instance_function(create_device, "vkCreateDevice") ||
+        !instance_function(get_device_proc_addr, "vkGetDeviceProcAddr")) {
+        return false;
+    }
+    std::uint32_t physical_device_count = 0;
+    if (enumerate_physical_devices(g_vulkan.instance, &physical_device_count, nullptr) != VK_SUCCESS ||
+        physical_device_count == 0) {
+        std::cerr << "no Vulkan physical device\n";
+        return false;
+    }
+    std::vector<VkPhysicalDevice> physical_devices(physical_device_count);
+    if (enumerate_physical_devices(
+            g_vulkan.instance, &physical_device_count, physical_devices.data()) < VK_SUCCESS) {
+        return false;
+    }
+    // The first discrete GPU with a graphics queue, as the runtime would pick.
+    bool found = false;
+    for (int pass = 0; pass < 2 && !found; ++pass) {
+        for (VkPhysicalDevice candidate : physical_devices) {
+            VkPhysicalDeviceProperties properties{};
+            get_physical_device_properties(candidate, &properties);
+            if (pass == 0 &&
+                properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+                continue;
+            }
+            std::uint32_t family_count = 0;
+            get_queue_family_properties(candidate, &family_count, nullptr);
+            std::vector<VkQueueFamilyProperties> families(family_count);
+            get_queue_family_properties(candidate, &family_count, families.data());
+            for (std::uint32_t family = 0; family < family_count; ++family) {
+                if ((families[family].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) {
+                    g_vulkan.physical_device = candidate;
+                    g_vulkan.queue_family = family;
+                    found = true;
+                    break;
+                }
+            }
+            if (found) {
+                break;
+            }
+        }
+    }
+    if (!found) {
+        std::cerr << "no Vulkan device with a graphics queue\n";
+        return false;
+    }
+    const float priority = 1.0F;
+    VkDeviceQueueCreateInfo queue_info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    queue_info.queueFamilyIndex = g_vulkan.queue_family;
+    queue_info.queueCount = 1;
+    queue_info.pQueuePriorities = &priority;
+    const std::array<const char*, 7> device_extensions{
+        "VK_KHR_external_memory",
+        "VK_KHR_external_memory_win32",
+        "VK_KHR_external_semaphore",
+        "VK_KHR_external_semaphore_win32",
+        "VK_KHR_timeline_semaphore",
+        "VK_KHR_dedicated_allocation",
+        "VK_KHR_get_memory_requirements2",
+    };
+    VkPhysicalDeviceTimelineSemaphoreFeatures timeline_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
+    timeline_features.timelineSemaphore = VK_TRUE;
+    VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    device_info.pNext = &timeline_features;
+    device_info.queueCreateInfoCount = 1;
+    device_info.pQueueCreateInfos = &queue_info;
+    device_info.enabledExtensionCount =
+        static_cast<std::uint32_t>(device_extensions.size());
+    device_info.ppEnabledExtensionNames = device_extensions.data();
+    if (create_device(g_vulkan.physical_device, &device_info, nullptr, &g_vulkan.device) != VK_SUCCESS) {
+        std::cerr << "failed to create the Vulkan device\n";
+        return false;
+    }
+    const auto device_function = [&](auto& function, const char* name) {
+        function = reinterpret_cast<std::remove_reference_t<decltype(function)>>(
+            get_device_proc_addr(g_vulkan.device, name));
+        return function != nullptr;
+    };
+    PFN_vkGetDeviceQueue get_device_queue = nullptr;
+    PFN_vkCreateImage create_image = nullptr;
+    PFN_vkGetImageMemoryRequirements get_image_memory_requirements = nullptr;
+    PFN_vkAllocateMemory allocate_memory = nullptr;
+    PFN_vkBindImageMemory bind_image_memory = nullptr;
+    PFN_vkCreateCommandPool create_command_pool = nullptr;
+    PFN_vkAllocateCommandBuffers allocate_command_buffers = nullptr;
+    PFN_vkBeginCommandBuffer begin_command_buffer = nullptr;
+    PFN_vkEndCommandBuffer end_command_buffer = nullptr;
+    PFN_vkCmdPipelineBarrier cmd_pipeline_barrier = nullptr;
+    PFN_vkQueueSubmit queue_submit = nullptr;
+    if (!device_function(g_vulkan.queue_wait_idle, "vkQueueWaitIdle") ||
+        !device_function(get_device_queue, "vkGetDeviceQueue") ||
+        !device_function(create_image, "vkCreateImage") ||
+        !device_function(get_image_memory_requirements, "vkGetImageMemoryRequirements") ||
+        !device_function(allocate_memory, "vkAllocateMemory") ||
+        !device_function(bind_image_memory, "vkBindImageMemory") ||
+        !device_function(create_command_pool, "vkCreateCommandPool") ||
+        !device_function(allocate_command_buffers, "vkAllocateCommandBuffers") ||
+        !device_function(begin_command_buffer, "vkBeginCommandBuffer") ||
+        !device_function(end_command_buffer, "vkEndCommandBuffer") ||
+        !device_function(cmd_pipeline_barrier, "vkCmdPipelineBarrier") ||
+        !device_function(queue_submit, "vkQueueSubmit")) {
+        return false;
+    }
+    get_device_queue(g_vulkan.device, g_vulkan.queue_family, 0, &g_vulkan.queue);
+    VkPhysicalDeviceMemoryProperties memory_properties{};
+    get_memory_properties(g_vulkan.physical_device, &memory_properties);
+
+    const auto make_image = [&](std::uint32_t mip_levels, VkImage* output) {
+        VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        image_info.imageType = VK_IMAGE_TYPE_2D;
+        image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+        image_info.extent = {4, 4, 1};
+        image_info.mipLevels = mip_levels;
+        image_info.arrayLayers = 2;
+        image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkImage image = VK_NULL_HANDLE;
+        if (create_image(g_vulkan.device, &image_info, nullptr, &image) != VK_SUCCESS) {
+            return false;
+        }
+        g_vulkan.images.push_back(image);
+        VkMemoryRequirements requirements{};
+        get_image_memory_requirements(g_vulkan.device, image, &requirements);
+        std::optional<std::uint32_t> type;
+        for (std::uint32_t index = 0; index < memory_properties.memoryTypeCount; ++index) {
+            if ((requirements.memoryTypeBits & (1U << index)) != 0 &&
+                (memory_properties.memoryTypes[index].propertyFlags &
+                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
+                type = index;
+                break;
+            }
+        }
+        if (!type) {
+            return false;
+        }
+        VkMemoryAllocateInfo allocate_info{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocate_info.allocationSize = requirements.size;
+        allocate_info.memoryTypeIndex = *type;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        if (allocate_memory(g_vulkan.device, &allocate_info, nullptr, &memory) != VK_SUCCESS) {
+            return false;
+        }
+        g_vulkan.memories.push_back(memory);
+        if (bind_image_memory(g_vulkan.device, image, memory, 0) != VK_SUCCESS) {
+            return false;
+        }
+        *output = image;
+        return true;
+    };
+    for (VkImage& image : g_vulkan_application_swapchain_images) {
+        if (!make_image(3, &image)) {
+            std::cerr << "failed to create a fake Vulkan application image\n";
+            return false;
+        }
+    }
+    // One-mip private images, as a real runtime may hand out.
+    for (auto* images : {
+             &g_vulkan_current_swapchain_images,
+             &g_vulkan_current_swapchain_b_images,
+             &g_vulkan_synthetic_swapchain_images,
+             &g_vulkan_synthetic_swapchain_b_images}) {
+        for (VkImage& image : *images) {
+            if (!make_image(1, &image)) {
+                std::cerr << "failed to create a fake Vulkan private image\n";
+                return false;
+            }
+        }
+    }
+
+    VkCommandPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    pool_info.queueFamilyIndex = g_vulkan.queue_family;
+    if (create_command_pool(g_vulkan.device, &pool_info, nullptr, &g_vulkan.command_pool) != VK_SUCCESS) {
+        return false;
+    }
+    VkCommandBufferAllocateInfo buffer_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    buffer_info.commandPool = g_vulkan.command_pool;
+    buffer_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    buffer_info.commandBufferCount = 1;
+    VkCommandBuffer buffer = VK_NULL_HANDLE;
+    VkCommandBufferBeginInfo begin_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (allocate_command_buffers(g_vulkan.device, &buffer_info, &buffer) != VK_SUCCESS ||
+        begin_command_buffer(buffer, &begin_info) != VK_SUCCESS) {
+        return false;
+    }
+    std::vector<VkImageMemoryBarrier> barriers;
+    for (VkImage image : g_vulkan.images) {
+        VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;
+        barrier.subresourceRange = {
+            VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0,
+            VK_REMAINING_ARRAY_LAYERS};
+        barriers.push_back(barrier);
+    }
+    cmd_pipeline_barrier(
+        buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        0, 0, nullptr, 0, nullptr, static_cast<std::uint32_t>(barriers.size()),
+        barriers.data());
+    VkSubmitInfo submit_info{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &buffer;
+    if (end_command_buffer(buffer) != VK_SUCCESS ||
+        queue_submit(g_vulkan.queue, 1, &submit_info, VK_NULL_HANDLE) != VK_SUCCESS ||
+        g_vulkan.queue_wait_idle(g_vulkan.queue) != VK_SUCCESS) {
+        std::cerr << "failed to put the fake Vulkan images in COLOR_ATTACHMENT_OPTIMAL\n";
+        return false;
+    }
+    return true;
+}
+
 [[nodiscard]] bool wait_for_queue_idle() {
+    if (g_vulkan_mode) {
+        return g_vulkan.queue_wait_idle(g_vulkan.queue) == VK_SUCCESS;
+    }
     if (g_d3d11_interop_mode) {
         ComPtr<ID3D11Device5> device5;
         ComPtr<ID3D11DeviceContext4> context4;
@@ -1163,7 +1494,7 @@ int main(int argc, char** argv) {
             "[split-eye|cropped-split-eye|double-wide|d3d11-interop|"
             "d3d11-double-wide|steamvr-inline|steamvr-presenter|"
             "flight-simulator|uevr-pipelined-time|inverted-fov|"
-            "d3d11-inverted-fov|d3d11-single-threaded]\n";
+            "d3d11-inverted-fov|d3d11-single-threaded|vulkan]\n";
         return EXIT_FAILURE;
     }
     g_cropped_subimage_mode =
@@ -1176,6 +1507,7 @@ int main(int argc, char** argv) {
         (argc == 4 && std::strcmp(argv[3], "steamvr-presenter") == 0);
     g_single_threaded_mode =
         argc == 4 && std::strcmp(argv[3], "d3d11-single-threaded") == 0;
+    g_vulkan_mode = argc == 4 && std::strcmp(argv[3], "vulkan") == 0;
     g_steamvr_runtime_mode = g_steamvr_presenter_mode ||
         g_single_threaded_mode ||
         (argc == 4 && std::strcmp(argv[3], "steamvr-inline") == 0);
@@ -1208,7 +1540,7 @@ int main(int argc, char** argv) {
     if (argc == 4 && !g_split_eye_mode && !g_double_wide_mode &&
         !g_d3d11_interop_mode && !g_steamvr_runtime_mode &&
         !g_flight_simulator_mode && !g_uevr_pipelined_display_time_mode &&
-        !g_inverted_vertical_fov) {
+        !g_inverted_vertical_fov && !g_vulkan_mode) {
         std::cerr << "unknown test mode\n";
         return EXIT_FAILURE;
     }
@@ -1243,8 +1575,9 @@ int main(int argc, char** argv) {
         }
     }
     g_log_path = argv[2];
-    if (g_d3d11_interop_mode ? !initialize_d3d11()
-                             : !initialize_d3d12()) {
+    if (g_vulkan_mode ? !initialize_vulkan()
+        : g_d3d11_interop_mode ? !initialize_d3d11()
+                               : !initialize_d3d12()) {
         return EXIT_FAILURE;
     }
 
@@ -1352,10 +1685,19 @@ int main(int argc, char** argv) {
     XrGraphicsBindingD3D11KHR d3d11_graphics_binding{
         XR_TYPE_GRAPHICS_BINDING_D3D11_KHR};
     d3d11_graphics_binding.device = g_d3d11_device.Get();
+    XrGraphicsBindingVulkanKHR vulkan_graphics_binding{
+        XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR};
+    vulkan_graphics_binding.instance = g_vulkan.instance;
+    vulkan_graphics_binding.physicalDevice = g_vulkan.physical_device;
+    vulkan_graphics_binding.device = g_vulkan.device;
+    vulkan_graphics_binding.queueFamilyIndex = g_vulkan.queue_family;
+    vulkan_graphics_binding.queueIndex = 0;
     XrSessionCreateInfo session_info{XR_TYPE_SESSION_CREATE_INFO};
-    session_info.next = g_d3d11_interop_mode
-        ? static_cast<const void*>(&d3d11_graphics_binding)
-        : static_cast<const void*>(&graphics_binding);
+    session_info.next = g_vulkan_mode
+        ? static_cast<const void*>(&vulkan_graphics_binding)
+        : g_d3d11_interop_mode
+            ? static_cast<const void*>(&d3d11_graphics_binding)
+            : static_cast<const void*>(&graphics_binding);
     session_info.systemId = 1;
     XrSession session = XR_NULL_HANDLE;
     XrSessionBeginInfo session_begin_info{XR_TYPE_SESSION_BEGIN_INFO};
@@ -1366,15 +1708,22 @@ int main(int argc, char** argv) {
     }
 
     XrSwapchainCreateInfo swapchain_info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-    swapchain_info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
-    swapchain_info.format = static_cast<std::int64_t>(DXGI_FORMAT_R8G8B8A8_UNORM);
+    // A Vulkan application through OpenComposite copies its own texture into
+    // the swapchain image and asks for nothing but TRANSFER_DST.
+    swapchain_info.usageFlags = g_vulkan_mode
+        ? XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT
+        : XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+    // A Vulkan session's swapchain format is a VkFormat.
+    swapchain_info.format = g_vulkan_mode
+        ? static_cast<std::int64_t>(VK_FORMAT_R8G8B8A8_UNORM)
+        : static_cast<std::int64_t>(DXGI_FORMAT_R8G8B8A8_UNORM);
     swapchain_info.sampleCount = 1;
     swapchain_info.width = g_double_wide_mode ? 8 : 4;
     swapchain_info.height = 4;
     swapchain_info.faceCount = 1;
     swapchain_info.arraySize =
         (g_split_eye_mode || g_double_wide_mode) ? 1 : 2;
-    swapchain_info.mipCount = g_d3d11_interop_mode ? 3 : 1;
+    swapchain_info.mipCount = (g_d3d11_interop_mode || g_vulkan_mode) ? 3 : 1;
 
     if (g_split_eye_mode) {
         XrSwapchain left_swapchain = XR_NULL_HANDLE;
@@ -1655,32 +2004,46 @@ int main(int argc, char** argv) {
     std::uint32_t acquired_index = 0;
     std::array<XrSwapchainImageD3D12KHR, 3> swapchain_images{};
     std::array<XrSwapchainImageD3D11KHR, 3> d3d11_swapchain_images{};
+    std::array<XrSwapchainImageVulkanKHR, 3> vulkan_swapchain_images{};
     for (auto& image : swapchain_images) {
         image.type = XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR;
     }
     for (auto& image : d3d11_swapchain_images) {
         image.type = XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
     }
+    for (auto& image : vulkan_swapchain_images) {
+        image.type = XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR;
+    }
     std::array<XrSwapchainImageD3D12KHR, 2> partial_images{};
     std::array<XrSwapchainImageD3D11KHR, 2> d3d11_partial_images{};
+    std::array<XrSwapchainImageVulkanKHR, 2> vulkan_partial_images{};
     for (auto& image : partial_images) {
         image.type = XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR;
     }
     for (auto& image : d3d11_partial_images) {
         image.type = XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
     }
+    for (auto& image : vulkan_partial_images) {
+        image.type = XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR;
+    }
     XrSwapchainImageBaseHeader* const full_image_headers =
-        g_d3d11_interop_mode
+        g_vulkan_mode
             ? reinterpret_cast<XrSwapchainImageBaseHeader*>(
-                  d3d11_swapchain_images.data())
-            : reinterpret_cast<XrSwapchainImageBaseHeader*>(
-                  swapchain_images.data());
+                  vulkan_swapchain_images.data())
+            : g_d3d11_interop_mode
+                ? reinterpret_cast<XrSwapchainImageBaseHeader*>(
+                      d3d11_swapchain_images.data())
+                : reinterpret_cast<XrSwapchainImageBaseHeader*>(
+                      swapchain_images.data());
     XrSwapchainImageBaseHeader* const partial_image_headers =
-        g_d3d11_interop_mode
+        g_vulkan_mode
             ? reinterpret_cast<XrSwapchainImageBaseHeader*>(
-                  d3d11_partial_images.data())
-            : reinterpret_cast<XrSwapchainImageBaseHeader*>(
-                  partial_images.data());
+                  vulkan_partial_images.data())
+            : g_d3d11_interop_mode
+                ? reinterpret_cast<XrSwapchainImageBaseHeader*>(
+                      d3d11_partial_images.data())
+                : reinterpret_cast<XrSwapchainImageBaseHeader*>(
+                      partial_images.data());
     if (XR_FAILED(enumerate_images(swapchain, 0, &image_count, nullptr)) || image_count != 3 ||
         enumerate_images(
             swapchain,
@@ -2085,12 +2448,15 @@ int main(int argc, char** argv) {
         return EXIT_SUCCESS;
     }
 
-    if (g_single_threaded_mode) {
+    if (g_single_threaded_mode || g_vulkan_mode) {
         // Every frame from this one thread, as an application with a
-        // single-threaded device must. The inline second cycle is throttled,
-        // which promotes a presenter on any other session; here the layer has
+        // single-threaded device must and a Vulkan application always does:
+        // the runtime submits on the queue the application handed it. In the
+        // single-threaded mode the inline second cycle is throttled, which
+        // promotes a presenter on any other session; either way the layer has
         // to keep generating inline and make every runtime frame call from
-        // this thread.
+        // this thread. In vulkan mode the generation behind those counts ran
+        // through the Vulkan interop on a real device.
         bool frame_sequence_succeeded = true;
         XrFrameState application_frame{XR_TYPE_FRAME_STATE};
         for (int index = 0; index < 10; ++index) {
@@ -2119,13 +2485,16 @@ int main(int argc, char** argv) {
             synthetic_acquires >= 7 &&
             g_waited_display_times.empty() && !g_begun_display_time;
         if (!valid) {
-            std::cerr << "single-threaded D3D11 validation failed: sequence="
+            std::cerr << (g_vulkan_mode ? "Vulkan" : "single-threaded D3D11")
+                      << " validation failed: sequence="
                       << frame_sequence_succeeded << " teardown="
                       << teardown_succeeded << " off-thread=" << off_thread
                       << " synthetic=" << synthetic_acquires << '\n';
             return EXIT_FAILURE;
         }
-        std::cout << "OpenXR single-threaded D3D11 test passed\n";
+        std::cout << (g_vulkan_mode
+                          ? "OpenXR Vulkan interop test passed\n"
+                          : "OpenXR single-threaded D3D11 test passed\n");
         return EXIT_SUCCESS;
     }
 
