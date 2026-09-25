@@ -33,6 +33,8 @@ struct LauncherSettings {
     NvidiaPerformancePreset nvidia_preset{NvidiaPerformancePreset::medium};
     NvidiaInputScale nvidia_input_scale{NvidiaInputScale::half};
     bool nvidia_bidirectional{};
+    // "Prefer FPS over latency": the layer's deeper pipeline. Off by default.
+    bool deep_pipeline{};
     bool diagnostics{};
     FpsOverlayPosition overlay_position{FpsOverlayPosition::upper_right};
 };

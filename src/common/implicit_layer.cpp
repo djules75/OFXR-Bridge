@@ -209,6 +209,20 @@ ConfiguredFlowBackend read_flow_backend(
     return ConfiguredFlowBackend::fidelity_fx;
 }
 
+bool read_deep_pipeline(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (module_directory.empty()) {
+            return false;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"deep_pipeline", 0, ini_path.c_str()) == 1;
+    } catch (...) {
+        return false;
+    }
+}
+
 ConfiguredNvidiaOptions read_nvidia_options(
     const std::filesystem::path& module_directory) noexcept {
     ConfiguredNvidiaOptions options;

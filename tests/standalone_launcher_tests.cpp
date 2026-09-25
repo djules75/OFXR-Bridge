@@ -36,6 +36,8 @@ int main() {
         release_defaults.nvidia_preset != NvidiaPerformancePreset::medium ||
         release_defaults.nvidia_input_scale != NvidiaInputScale::half ||
         release_defaults.nvidia_bidirectional || release_defaults.diagnostics ||
+        release_defaults.deep_pipeline ||
+        !contains(default_runtime_ini, "deep_pipeline=0") ||
         !contains(default_runtime_ini, "[ofxr]\r\nbackend=fidelityfx") ||
         !contains(default_runtime_ini, "motion_vectors=dlss") ||
         !contains(default_runtime_ini, "nvidia_preset=medium") ||
@@ -66,13 +68,15 @@ int main() {
     settings.nvidia_preset = NvidiaPerformancePreset::slow;
     settings.nvidia_input_scale = NvidiaInputScale::half;
     settings.nvidia_bidirectional = true;
+    settings.deep_pipeline = true;
     settings.diagnostics = true;
     const std::string serialized = serialize_settings(settings);
     const LauncherSettings parsed = parse_settings(serialized);
     if (parsed.backend != FlowBackend::nvidia ||
         parsed.nvidia_preset != NvidiaPerformancePreset::slow ||
         parsed.nvidia_input_scale != NvidiaInputScale::half ||
-        !parsed.nvidia_bidirectional || !parsed.diagnostics) {
+        !parsed.nvidia_bidirectional || !parsed.deep_pipeline ||
+        !parsed.diagnostics) {
         std::cerr << "standalone settings round-trip failed\n";
         return 1;
     }
@@ -97,6 +101,7 @@ int main() {
         !contains(runtime_ini, "nvidia_preset=slow") ||
         !contains(runtime_ini, "nvidia_input_scale=50") ||
         !contains(runtime_ini, "nvidia_bidirectional=1") ||
+        !contains(runtime_ini, "deep_pipeline=1") ||
         !contains(runtime_ini, "[diagnostics]\r\nlogging_enabled=1") ||
         contains(runtime_ini, "one_shot") ||
         contains(runtime_ini, "manifest=")) {

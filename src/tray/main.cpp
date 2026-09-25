@@ -45,6 +45,7 @@ enum MenuCommand : UINT {
     nvidia_scale_full = 115,
     nvidia_scale_three_quarter = 116,
     nvidia_scale_half = 117,
+    toggle_deep_pipeline = 118,
     toggle_diagnostics = 120,
     overlay_off = 121,
     overlay_upper_left = 122,
@@ -429,6 +430,9 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     } else {
         tooltip += L"FidelityFX";
     }
+    if (state.settings.deep_pipeline) {
+        tooltip += L" - prefer FPS";
+    }
     if (state.settings.diagnostics) {
         tooltip += L" - recorder on";
     }
@@ -668,6 +672,11 @@ void show_context_menu(AppState& state) {
         L"Optical flow resolution");
     AppendMenuW(
         menu,
+        MF_STRING | (state.settings.deep_pipeline ? MF_CHECKED : MF_UNCHECKED),
+        toggle_deep_pipeline,
+        L"Prefer FPS over latency");
+    AppendMenuW(
+        menu,
         MF_STRING | (state.settings.diagnostics ? MF_CHECKED : MF_UNCHECKED),
         toggle_diagnostics,
         L"Bridge flight recorder");
@@ -757,6 +766,21 @@ void handle_command(AppState& state, UINT command) {
         state.settings.nvidia_input_scale =
             xrfg::standalone::NvidiaInputScale::half;
         update_runtime_options(state);
+        break;
+    case toggle_deep_pipeline:
+        state.settings.deep_pipeline = !state.settings.deep_pipeline;
+        update_runtime_options(state);
+        // A menu item cannot carry a tooltip, so the explanation goes in
+        // the notification, armed or not.
+        show_balloon(
+            state,
+            state.settings.deep_pipeline
+                ? L"Prefer FPS over latency: on"
+                : L"Prefer FPS over latency: off",
+            L"Helps games that only just reach half your headset's refresh "
+            L"rate hold full FPS more steadily. Adds one frame of latency "
+            L"(about 11 ms at 90 Hz). Leave off if the game already runs "
+            L"comfortably. Takes effect the next time the game starts.");
         break;
     case overlay_off:
     case overlay_upper_left:

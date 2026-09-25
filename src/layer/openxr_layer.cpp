@@ -442,14 +442,6 @@ enum class GenerationQuarantineReason : std::int64_t {
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
 
-// One display period of extra pipeline depth: the application is admitted a
-// period earlier, so synthesis has a period longer to finish before its
-// hand-over, and every frame reaches the headset a period older. Forced on for
-// this build so it can be measured; it becomes an ini setting and a tray
-// option, off by default, because the latency is a real cost the user is the
-// one to accept.
-constexpr bool kDeepPipelineForced = true;
-
 // Diagnostic only, and only with logging on. Measures when the application's
 // own queue gets past the join a hand-over queues on it.
 //
@@ -2781,7 +2773,14 @@ XrResult layer_create_session_impl(
         static_cast<xrfg::D3D12NvidiaPerformancePreset>(initial_control.desired.preset),
         static_cast<xrfg::D3D12NvidiaInputScale>(initial_control.desired.scale),
         initial_control.desired.backward};
-    state->deep_pipeline = kDeepPipelineForced;
+    // One display period of extra depth, bought with one display period of
+    // latency: every synthetic is held until it is a period old, so synthesis
+    // gets a period to finish instead of the gap the game leaves. Off by
+    // default, because the latency is a cost the user is the one to accept;
+    // the tray's "Prefer FPS over latency". Fixed for the session - it sets
+    // the private swapchain rings and the admission bounds.
+    state->deep_pipeline =
+        xrfg::implicit_layer::read_deep_pipeline(current_layer_directory());
     state->menu_enabled = initial_control.desired.enabled;
     state->dlss_motion_vectors = initial_control.desired.motion_vectors == 1;
     state->control_revision = initial_control.revision;
@@ -8605,9 +8604,11 @@ XrResult layer_end_frame_impl(
         metadata_pairable,
         interpolation_fraction,
         // Released at the hand-over where the runtime has the layer's own
-        // queue: see the note on the release in prepare_frame_generation.
-        use_continuous_presenter && state->deep_pipeline &&
-            state->binding_queue != nullptr);
+        // queue, in either pipeline: see the note on the release in
+        // prepare_frame_generation. The shallow pipeline admits the next
+        // pair while this one's real frame is still to be handed over, so
+        // joined here that pair's synthesis wait would sit in front of it.
+        use_continuous_presenter && state->binding_queue != nullptr);
     // Collected before anything below can reset `prepared`, so every image
     // left acquired is accounted for on every path out of this call.
     PrivateReleaseBatch synthetic_releases;

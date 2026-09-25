@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -64,6 +65,11 @@ std::atomic<XrSpace> g_valid_composition_space{g_space};
 std::atomic<bool> g_delay_composition_validation{false};
 XrTime g_next_display_time = 100;
 bool g_split_eye_mode = false;
+// Whether the layer under test runs the deeper pipeline. Read from the same
+// ofxr_bridge.ini the layer reads, beside the layer DLL, so the fake runtime
+// expects the ring sizes the layer will actually ask for: one synthetic slot
+// per application swapchain shallow, two deep.
+bool g_deep_pipeline = false;
 bool g_cropped_subimage_mode = false;
 bool g_double_wide_mode = false;
 bool g_uevr_pipelined_display_time_mode = false;
@@ -600,62 +606,45 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
         // then every synthetic slot, in the order the projection views are
         // mapped.
         //
-        // This routing is pinned to the ring sizes the layer is built with,
-        // and it cannot be made to discover them. The eye cannot be inferred
-        // from how many application swapchains exist, because the layer defers
-        // creating its private swapchains until it arms - by then both
-        // application swapchains are there and every private create looks like
-        // the second eye's. Nor can the group boundary be found from the
-        // sequence: two current slots then one synthetic is indistinguishable
-        // from two current then two synthetic until the run is over. So when
-        // the pipeline depth becomes a setting rather than a build constant,
-        // this fake runtime has to be told which depth to expect, the same way
-        // the disarm test is told its mode.
-        switch (g_split_eye_private_creates.fetch_add(
-            1, std::memory_order_relaxed)) {
-            case 0:
-                record_current(true);
-                *swapchain = g_current_swapchain;
-                break;
-            case 1:
-                record_current(false);
-                *swapchain = g_current_swapchain_b;
-                break;
-            case 2:
-                record_synthetic(true);
-                g_synthetic_private_creates.fetch_add(
-                    1, std::memory_order_relaxed);
-                *swapchain = g_synthetic_swapchain;
-                break;
-            case 3:
-                record_synthetic(false);
-                g_synthetic_private_creates.fetch_add(
-                    1, std::memory_order_relaxed);
-                *swapchain = g_synthetic_swapchain_b;
-                break;
-            case 4:
-                record_current(false);
-                *swapchain = g_current_swapchain_right;
-                break;
-            case 5:
-                record_current(false);
-                *swapchain = g_current_swapchain_right_b;
-                break;
-            case 6:
-                record_synthetic(false);
-                g_synthetic_private_creates.fetch_add(
-                    1, std::memory_order_relaxed);
-                *swapchain = g_synthetic_swapchain_right;
-                break;
-            case 7:
-                record_synthetic(false);
-                g_synthetic_private_creates.fetch_add(
-                    1, std::memory_order_relaxed);
-                *swapchain = g_synthetic_swapchain_right_b;
-                break;
-            default:
-                return XR_ERROR_LIMIT_REACHED;
+        // The routing cannot discover the ring sizes: the eye cannot be
+        // inferred from how many application swapchains exist, because the
+        // layer defers creating its private swapchains until it arms, and two
+        // current slots then one synthetic is indistinguishable from two
+        // current then two synthetic until the run is over. So it is told
+        // the depth, from the ini the layer reads (g_deep_pipeline).
+        // Per eye: every current slot, then every synthetic slot - two
+        // current, then one synthetic shallow or two deep.
+        struct Route {
+            XrSwapchain handle;
+            bool synthetic;
+        };
+        const std::array<Route, 4> left{{
+            {g_current_swapchain, false},
+            {g_current_swapchain_b, false},
+            {g_synthetic_swapchain, true},
+            {g_synthetic_swapchain_b, true},
+        }};
+        const std::array<Route, 4> right{{
+            {g_current_swapchain_right, false},
+            {g_current_swapchain_right_b, false},
+            {g_synthetic_swapchain_right, true},
+            {g_synthetic_swapchain_right_b, true},
+        }};
+        const std::uint32_t per_eye = g_deep_pipeline ? 4U : 3U;
+        const std::uint32_t index = g_split_eye_private_creates.fetch_add(
+            1, std::memory_order_relaxed);
+        if (index >= per_eye * 2U) {
+            return XR_ERROR_LIMIT_REACHED;
         }
+        const Route& route =
+            index < per_eye ? left[index] : right[index - per_eye];
+        if (route.synthetic) {
+            record_synthetic(index == 2U);
+            g_synthetic_private_creates.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            record_current(index == 0U);
+        }
+        *swapchain = route.handle;
         return XR_SUCCESS;
     }
     if (call == 0) {
@@ -1181,6 +1170,12 @@ int main(int argc, char** argv) {
          d3d11_double_wide_mode || g_uevr_pipelined_display_time_mode);
     g_split_eye_mode = argc == 4 &&
         (std::strcmp(argv[3], "split-eye") == 0 || g_cropped_subimage_mode);
+    {
+        std::filesystem::path ini = std::filesystem::path(argv[1]).parent_path() /
+            L"ofxr_bridge.ini";
+        g_deep_pipeline = GetPrivateProfileIntW(
+            L"ofxr", L"deep_pipeline", 0, ini.wstring().c_str()) == 1;
+    }
     if (argc == 4 && !g_split_eye_mode && !g_double_wide_mode &&
         !g_d3d11_interop_mode && !g_steamvr_runtime_mode &&
         !g_flight_simulator_mode && !g_uevr_pipelined_display_time_mode &&
@@ -1593,8 +1588,8 @@ int main(int argc, char** argv) {
             g_locate_views_calls.load(std::memory_order_relaxed) == 3 &&
             // Two application swapchains, each backed by two current slots
             // and however many synthetic slots this depth needs.
-            g_synthetic_private_creates.load(std::memory_order_relaxed) >= 2 &&
-            g_synthetic_private_creates.load(std::memory_order_relaxed) <= 4 &&
+            g_synthetic_private_creates.load(std::memory_order_relaxed) ==
+                (g_deep_pipeline ? 4U : 2U) &&
             g_create_swapchain_calls.load(std::memory_order_relaxed) ==
                 6 + g_synthetic_private_creates.load(std::memory_order_relaxed) &&
             g_destroy_swapchain_calls.load(std::memory_order_relaxed) ==
@@ -2637,8 +2632,8 @@ int main(int argc, char** argv) {
         // One application swapchain, two current slots, and however many
         // synthetic slots this depth needs. Every private swapchain created is
         // destroyed, which is the part that must hold at either depth.
-        g_synthetic_private_creates.load(std::memory_order_relaxed) >= 1 &&
-        g_synthetic_private_creates.load(std::memory_order_relaxed) <= 2 &&
+        g_synthetic_private_creates.load(std::memory_order_relaxed) ==
+            (g_deep_pipeline ? 2U : 1U) &&
         g_create_swapchain_calls.load(std::memory_order_relaxed) ==
             3 + g_synthetic_private_creates.load(std::memory_order_relaxed) &&
         g_destroy_swapchain_calls.load(std::memory_order_relaxed) ==
