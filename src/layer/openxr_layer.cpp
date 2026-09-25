@@ -3718,6 +3718,16 @@ using OwnedCompositionLayer = std::variant<
     XrCompositionLayerPassthroughHTC,
     XrCompositionLayerPassthroughANDROID>;
 
+// A private image left acquired so that it is handed to the runtime by
+// whoever hands its frame over, together with the join that has to precede
+// that release on the application's queue. See prepare_frame_generation.
+struct PendingPrivateRelease {
+    // Keeps the slot the pointer below addresses alive.
+    std::shared_ptr<FrameGenerationSwapchainState> generation;
+    PrivateSwapchainState* image{};
+    xrfg::D3D12FrameSynthesisTicket ticket{};
+};
+
 struct GeneratedFrameEndInfo {
     bool synthetic{};
     XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
@@ -3735,6 +3745,55 @@ struct GeneratedFrameEndInfo {
         std::uint64_t fence_value{};
     };
     std::vector<PendingCurrentCopy> pending_current_copies;
+    // Private images this frame names that have not been released to the
+    // runtime yet. Run and cleared by the presenter immediately before this
+    // frame goes downstream, never again for a repeat of it.
+    std::vector<PendingPrivateRelease> pending_releases;
+};
+
+// Joins the application's queue to synthesis and releases each image to the
+// runtime, in that order: the runtime orders its use of a private image
+// against the application's queue, so the join has to be on that queue ahead
+// of the release. Clears the list so a frame never releases twice.
+void run_private_releases(
+    SessionState* session,
+    std::vector<PendingPrivateRelease>& releases) noexcept {
+    if (session != nullptr) {
+        for (PendingPrivateRelease& pending : releases) {
+            if (!pending.generation || pending.image == nullptr) {
+                continue;
+            }
+            if (session->d3d12_synthesis_queue &&
+                pending.generation->synthesizer) {
+                static_cast<void>(
+                    pending.generation->synthesizer->synchronize_consumer_queue(
+                        session->d3d12_queue.Get(),
+                        pending.ticket));
+            }
+            static_cast<void>(release_private_image(
+                session, session->dispatch, *pending.image));
+        }
+    }
+    releases.clear();
+}
+
+// Whatever was deferred for a frame and did not end up in a frame the
+// presenter took is released when the frame call returns, on the application
+// thread - which is exactly what every frame did before the handoff moved.
+// Nothing reaches here on the path that works; this is for the ones that do
+// not, so a failed build or a refused enqueue cannot leave an image acquired.
+struct PrivateReleaseBatch {
+    SessionState* session{};
+    std::vector<PendingPrivateRelease> releases;
+    PrivateReleaseBatch() = default;
+    PrivateReleaseBatch(const PrivateReleaseBatch&) = delete;
+    PrivateReleaseBatch& operator=(const PrivateReleaseBatch&) = delete;
+    ~PrivateReleaseBatch() { run_private_releases(session, releases); }
+    [[nodiscard]] std::vector<PendingPrivateRelease> take() noexcept {
+        std::vector<PendingPrivateRelease> taken;
+        taken.swap(releases);
+        return taken;
+    }
 };
 
 [[nodiscard]] std::optional<OwnedCompositionLayer>
@@ -4523,6 +4582,16 @@ void continuous_presenter_main(
                 } else if (!state->presenter_stop_requested) {
                     repeated_frame = state->presenter_last_frame;
                 }
+            }
+            // A fresh frame whose images were left acquired: join the
+            // application's queue to synthesis and hand them to the runtime
+            // now, immediately before the frame that names them goes down.
+            // Outside presenter_mutex, because this calls into the runtime.
+            // Never for a repeat - its images were released when it first
+            // went down, and the slot may have been reacquired since.
+            if (request && request->owned_frame) {
+                run_private_releases(
+                    state.get(), request->owned_frame->pending_releases);
             }
 
             const XrFrameEndInfo* source = request
@@ -6489,6 +6558,12 @@ struct PreparedGeneration {
     std::shared_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
     std::uint64_t copy_fence_value{};
     bool anchor_is_current{};
+    // Set only when the release to the runtime is left to whoever hands the
+    // frame over; the images stay acquired until then.
+    std::shared_ptr<FrameGenerationSwapchainState> deferred_generation;
+    PrivateSwapchainState* deferred_synthetic{};
+    PrivateSwapchainState* deferred_current{};
+    xrfg::D3D12FrameSynthesisTicket deferred_ticket{};
 };
 
 struct PreparedProjectionResource {
@@ -6508,7 +6583,8 @@ struct PreparedProjectionFrame {
     XrSwapchain application_swapchain,
     bool request_pair,
     std::span<const xrfg::D3D12ReprojectionView> current_source_views,
-    float interpolation_fraction) noexcept {
+    float interpolation_fraction,
+    bool release_at_handover_requested) noexcept {
     PreparedGeneration output{};
     try {
         const auto state = find_swapchain(application_swapchain);
@@ -6709,26 +6785,51 @@ struct PreparedProjectionFrame {
 
         // The runtime orders its use of these swapchain images against the
         // queue the application supplied, so when synthesis ran elsewhere
-        // that queue has to wait for it before the release below hands the
-        // images over. GPU-side, so it costs the application thread nothing.
-        if (state->session->d3d12_synthesis_queue && SUCCEEDED(submit_result)) {
-            static_cast<void>(
-                generation->synthesizer->synchronize_consumer_queue(
-                    state->session->d3d12_queue.Get(),
-                    ticket));
-        }
-
+        // that queue has to wait for it before the release hands the images
+        // over.
+        //
+        // Where that join sits decides what it costs. It is a Wait on the
+        // application's own queue, so every command the application submits
+        // after it cannot start on the GPU until synthesis has finished. Made
+        // here, inside the application's xrEndFrame, that is the next game
+        // frame's entire render queued behind this pair's synthesis - the
+        // two serialised, which is exactly what the deeper pipeline exists to
+        // stop. It was free while the application was parked for a pair
+        // after this call, because its next frame reached the queue after
+        // synthesis had finished anyway; once it is released straight away
+        // it is not.
+        //
+        // So in the deeper pipeline the join and the release both move to
+        // the presenter, immediately before each image is handed over. By
+        // then synthesis has had its display period and the fence is already
+        // signalled, the Wait costs nothing, and the game's next frame never
+        // waits for the synthetic. Everywhere else - the shallow pipeline,
+        // the inline path, and D3D11, whose immediate context must not be
+        // driven from the presenter thread - they stay here.
+        const bool release_at_handover = release_at_handover_requested &&
+            generation->d3d11_interop == nullptr &&
+            SUCCEEDED(submit_result);
         bool synthetic_released = true;
-        if (request_pair) {
-            synthetic_released = release_private_image(
+        bool current_released = true;
+        if (!release_at_handover) {
+            if (state->session->d3d12_synthesis_queue &&
+                SUCCEEDED(submit_result)) {
+                static_cast<void>(
+                    generation->synthesizer->synchronize_consumer_queue(
+                        state->session->d3d12_queue.Get(),
+                        ticket));
+            }
+            if (request_pair) {
+                synthetic_released = release_private_image(
+                    state->session.get(),
+                    state->session->dispatch,
+                    synthetic_image);
+            }
+            current_released = release_private_image(
                 state->session.get(),
                 state->session->dispatch,
-                synthetic_image);
+                current_image);
         }
-        const bool current_released = release_private_image(
-            state->session.get(),
-            state->session->dispatch,
-            current_image);
 
         if (FAILED(submit_result)) {
             output.reason = classify_synthesis_failure(submit_result);
@@ -6760,6 +6861,18 @@ struct PreparedProjectionFrame {
             if (request_pair && defer_current_copy) {
                 output.synthesizer = generation->synthesizer;
                 output.copy_fence_value = ticket.fence_value;
+            }
+            if (release_at_handover) {
+                // Slot addresses stay valid for as long as the generation
+                // state lives, which the shared pointer guarantees. Whether
+                // the slot is free to reuse is still decided by retirement:
+                // a submission retires only after its downstream xrEndFrame,
+                // and that comes after this release.
+                output.deferred_generation = generation;
+                output.deferred_current = &current_image;
+                output.deferred_synthetic =
+                    request_pair ? &synthetic_image : nullptr;
+                output.deferred_ticket = ticket;
             }
             output.kind = request_pair ? PreparedGenerationKind::pair
                                        : PreparedGenerationKind::prime;
@@ -6819,7 +6932,8 @@ struct PreparedProjectionFrame {
     const ProjectionSnapshot& snapshot,
     std::span<const ProjectionResourceMapping> mappings,
     bool request_pair,
-    float interpolation_fraction) noexcept {
+    float interpolation_fraction,
+    bool release_at_handover) noexcept {
     PreparedProjectionFrame output{};
     try {
         if (mappings.empty()) {
@@ -6846,7 +6960,8 @@ struct PreparedProjectionFrame {
                 std::span<const xrfg::D3D12ReprojectionView>(
                     reprojection_views->data(),
                     reprojection_views->size()),
-                interpolation_fraction);
+                interpolation_fraction,
+                release_at_handover);
             all_expected_kind =
                 all_expected_kind && generation.kind == expected_kind;
             all_anchor_current =
@@ -7725,7 +7840,34 @@ XrResult layer_end_frame_impl(
             resource_mappings.mappings.data(),
             resource_mappings.mappings.size()),
         metadata_pairable,
-        interpolation_fraction);
+        interpolation_fraction,
+        use_continuous_presenter && state->deep_pipeline);
+    // Collected before anything below can reset `prepared`, so every image
+    // left acquired is accounted for on every path out of this call.
+    PrivateReleaseBatch synthetic_releases;
+    PrivateReleaseBatch current_releases;
+    synthetic_releases.session = state.get();
+    current_releases.session = state.get();
+    for (const PreparedProjectionResource& resource : prepared.resources) {
+        const PreparedGeneration& deferred = resource.generation;
+        if (!deferred.deferred_generation) {
+            continue;
+        }
+        if (deferred.deferred_synthetic != nullptr) {
+            synthetic_releases.releases.push_back({
+                deferred.deferred_generation,
+                deferred.deferred_synthetic,
+                deferred.deferred_ticket,
+            });
+        }
+        if (deferred.deferred_current != nullptr) {
+            current_releases.releases.push_back({
+                deferred.deferred_generation,
+                deferred.deferred_current,
+                deferred.deferred_ticket,
+            });
+        }
+    }
     // Acquire, synthesis and release all ran without the content lock, so the
     // presenter kept submitting throughout. Hold it only across the handoff.
     if (use_continuous_presenter) {
@@ -7851,6 +7993,18 @@ XrResult layer_end_frame_impl(
             prepared = {};
         } else {
             submitted_end_info = &presenter_first_frame->info;
+            // Handed to the frames before they are queued, so the presenter
+            // can never see a frame without them. A prime is the current
+            // frame alone.
+            if (pair_ready) {
+                presenter_first_frame->pending_releases =
+                    synthetic_releases.take();
+                presenter_current_frame->pending_releases =
+                    current_releases.take();
+            } else {
+                presenter_first_frame->pending_releases =
+                    current_releases.take();
+            }
         }
     }
 
@@ -7877,6 +8031,14 @@ XrResult layer_end_frame_impl(
                 state,
                 presenter_first_frame,
                 presenter_current_frame);
+            if (XR_FAILED(result)) {
+                // Refused before anything was queued, so nothing else will
+                // ever release these.
+                run_private_releases(
+                    state.get(), presenter_first_frame->pending_releases);
+                run_private_releases(
+                    state.get(), presenter_current_frame->pending_releases);
+            }
             if (presenter_content_lock.owns_lock()) {
                 presenter_content_lock.unlock();
             }
@@ -7907,6 +8069,11 @@ XrResult layer_end_frame_impl(
                 state,
                 presenter_first_frame,
                 nullptr);
+            if (!request->owned_frame) {
+                // Refused: the presenter never saw this frame.
+                run_private_releases(
+                    state.get(), presenter_first_frame->pending_releases);
+            }
             if (presenter_content_lock.owns_lock()) {
                 presenter_content_lock.unlock();
             }
