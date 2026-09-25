@@ -6286,11 +6286,32 @@ build_reprojection_views(
     return output;
 }
 
+// Whether two consecutive application frames can be paired.
+//
+// require_advancing_time is off in the deeper pipeline, and the reason is the
+// same one that keeps the time out of the layout test below: the display time
+// an application submits is its own label, not the layer's timeline and not a
+// statement about content. MSFS 2024 runs its own frame timing and submits
+// times that wander by whole display periods around the ones it is served -
+// with the served sequence strictly increasing, 1373 of 1567 submitted times
+// were values the layer never handed it, and 202 went backwards. Each of those
+// frames was refused a pair and generated as a prime, with no synthetic at
+// all: 13.9% of frames, up from 2.7% on the shallow pipeline, because a
+// deeper pipeline puts more of that application's frames in flight.
+//
+// What the time was standing in for is checked properly elsewhere. That the
+// current frame is the one after the previous is proven by the capture
+// serials in D3D12FrameSynthesizer::submit_pair, which refuses anything that
+// is neither the same capture nor the next one. And a degenerate interval
+// cannot produce a bad midpoint, because the interpolation fraction falls
+// back to one half outside 0.05-0.95.
 [[nodiscard]] bool projection_snapshots_compatible(
     const ProjectionSnapshot& previous,
-    const ProjectionSnapshot& current) noexcept {
+    const ProjectionSnapshot& current,
+    bool require_advancing_time) noexcept {
     if (previous.environment_blend_mode != current.environment_blend_mode ||
-        current.display_time <= previous.display_time ||
+        (require_advancing_time &&
+         current.display_time <= previous.display_time) ||
         previous.layers.size() != current.layers.size()) {
         return false;
     }
@@ -7777,7 +7798,10 @@ XrResult layer_end_frame_impl(
     }
     const bool snapshots_compatible =
         !previous_snapshot ||
-        projection_snapshots_compatible(*previous_snapshot, current_snapshot);
+        projection_snapshots_compatible(
+            *previous_snapshot,
+            current_snapshot,
+            !state->deep_pipeline);
     const bool metadata_pairable =
         latest_application_frame && previous_snapshot && snapshots_compatible;
     if (previous_snapshot && !snapshots_compatible) {
@@ -8077,7 +8101,22 @@ XrResult layer_end_frame_impl(
             if (presenter_content_lock.owns_lock()) {
                 presenter_content_lock.unlock();
             }
-            result = wait_for_presenter_submission(state, request);
+            if (state->deep_pipeline) {
+                // Enqueue and return, exactly as a pair does. Waiting here
+                // blocks the application until the presenter has submitted
+                // this frame, which behind a deeper queue is most of the
+                // queue: the application must never wait on presentation.
+                // Nothing needs the wait. The frame is owned rather than
+                // borrowed, so the application's end-frame data does not
+                // have to outlive the call - that is what the borrowed path
+                // below waits for - and a downstream failure latches in the
+                // presenter and fails the next frame call, the same way a
+                // pair's does. A refusal is the only result worth returning
+                // now, and it is final before the request ever leaves here.
+                result = request->owned_frame ? XR_SUCCESS : request->result;
+            } else {
+                result = wait_for_presenter_submission(state, request);
+            }
         } else {
             result = submit_borrowed_to_presenter();
         }
