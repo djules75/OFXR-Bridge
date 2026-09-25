@@ -354,6 +354,9 @@ struct PresenterSubmission {
     // When the application handed it over. The deeper pipeline holds a
     // synthetic until it has been queued for a whole display period.
     std::chrono::steady_clock::time_point queued_at{};
+    // app_release_counter at the application's xrEndFrame for this frame;
+    // see join_runtime_queue_to_application.
+    std::uint64_t app_release_value{};
 };
 
 struct ProjectionLayerSnapshot {
@@ -691,6 +694,49 @@ struct SessionState {
     // holds only this. Null when the application binds D3D11, where
     // d3d12_queue is already the layer's own bridge queue.
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> d3d12_synthesis_queue;
+    // The queue the runtime is handed at session creation, in place of the
+    // application's, on a native D3D12 session. Null where that could not be
+    // arranged, and then d3d12_queue is what the runtime has.
+    //
+    // A D3D12 runtime judges a frame complete by the work queued on the
+    // binding queue up to the xrEndFrame that names it: it passes that queue
+    // to the compositor with each texture, and the compositor waits for the
+    // queue to reach the point of submission. Handed the application's queue,
+    // that point sat behind whatever the game had queued since it was last
+    // released - its whole next frame, in the deeper pipeline - and one half
+    // of every pair became visible to the compositor only when that frame
+    // had rendered. Measured on Hogwarts Legacy at 8344x3268: the real
+    // frame's mark cleared 7.6 ms after its hand-over (p50) and past the
+    // compositor's render start on 88% of the frames the compositor never
+    // showed, against 4% of the ones it did.
+    //
+    // With a queue of the layer's own, the only work ahead of a submission
+    // is what the layer put there: a wait for the synthesis that wrote a
+    // private image, and a wait for the application's release of any image
+    // of its own that the frame names. The game's own rendering is never in
+    // front of it, and the join before a private image's release no longer
+    // holds the game's next frame either.
+    //
+    // Two joins keep the runtime's ordering intact across the two queues,
+    // both GPU-side. At each of the application's releases, its queue
+    // signals app_release_fence; before each downstream xrEndFrame the
+    // binding queue waits for the value that stood at the application's own
+    // xrEndFrame, which every image the frame names was released before.
+    // It does not wait at the release itself: that would put the game's
+    // next frame back in front of the next hand-over. After each of the
+    // application's xrWaitSwapchainImage calls, the binding queue signals
+    // reacquire_fence and the application's queue waits for it, so whatever
+    // the runtime queued there to keep the image safe to write still holds
+    // the application's writes.
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> binding_queue;
+    Microsoft::WRL::ComPtr<ID3D12Fence> app_release_fence;
+    Microsoft::WRL::ComPtr<ID3D12Fence> reacquire_fence;
+    std::mutex binding_join_mutex;
+    std::uint64_t app_release_counter{};   // binding_join_mutex
+    std::uint64_t reacquire_counter{};     // binding_join_mutex
+    // app_release_counter as it stood when the application entered its
+    // current xrEndFrame. frame_call_mutex.
+    std::uint64_t app_end_frame_release_value{};
     // Some SteamVR configurations throttle the inline second wait/begin/end
     // cycle to the application's half-rate interval. After that behavior is
     // measured, the dedicated presenter becomes the sole owner of downstream
@@ -839,6 +885,102 @@ struct SessionState {
     std::mutex join_probe_mutex;
 };
 
+// The queue the runtime orders swapchain images against: the layer's own
+// binding queue where one was arranged, otherwise whatever the runtime was
+// given (the application's queue, or the D3D11 session's bridge queue).
+[[nodiscard]] ID3D12CommandQueue* runtime_queue(const SessionState& state) noexcept {
+    return state.binding_queue ? state.binding_queue.Get()
+                               : state.d3d12_queue.Get();
+}
+
+// The application has released one of its images: mark where its queue
+// stands, for the join before a downstream xrEndFrame that names it. See
+// SessionState::binding_queue. Nothing waits here.
+void mark_application_release(SessionState* state) noexcept {
+    if (state == nullptr || !state->binding_queue || !state->app_release_fence ||
+        !state->d3d12_queue) {
+        return;
+    }
+    try {
+        std::scoped_lock lock(state->binding_join_mutex);
+        const std::uint64_t value = state->app_release_counter + 1;
+        if (SUCCEEDED(state->d3d12_queue->Signal(
+                state->app_release_fence.Get(), value))) {
+            state->app_release_counter = value;
+        }
+    } catch (...) {
+    }
+}
+
+// The runtime has made one of the application's images safe to write, on the
+// binding queue. Carry that to the queue the application will write it on.
+void carry_reacquire_to_application(SessionState* state) noexcept {
+    if (state == nullptr || !state->binding_queue || !state->reacquire_fence ||
+        !state->d3d12_queue) {
+        return;
+    }
+    try {
+        std::scoped_lock lock(state->binding_join_mutex);
+        const std::uint64_t value = state->reacquire_counter + 1;
+        if (SUCCEEDED(state->binding_queue->Signal(
+                state->reacquire_fence.Get(), value))) {
+            state->reacquire_counter = value;
+            static_cast<void>(state->d3d12_queue->Wait(
+                state->reacquire_fence.Get(), value));
+        }
+    } catch (...) {
+    }
+}
+
+// Before a downstream xrEndFrame: the binding queue waits until the
+// application's queue has run past the release of every image of the
+// application's that the frame names. `value` is app_release_counter as it
+// stood at the application's own xrEndFrame for that frame. A repeat waits
+// the same value again, which costs nothing.
+void join_runtime_queue_to_application(
+    SessionState* state,
+    std::uint64_t value) noexcept {
+    if (state == nullptr || !state->binding_queue || !state->app_release_fence ||
+        value == 0) {
+        return;
+    }
+    static_cast<void>(
+        state->binding_queue->Wait(state->app_release_fence.Get(), value));
+}
+
+// Lets the binding queue finish what it holds before the session it serves
+// goes away. Bounded: a wait it holds for the application's queue could
+// otherwise keep this here for as long as the application's queue is stuck.
+void drain_binding_queue(SessionState* state) noexcept {
+    if (state == nullptr || !state->binding_queue || !state->reacquire_fence) {
+        return;
+    }
+    try {
+        std::uint64_t value = 0;
+        {
+            std::scoped_lock lock(state->binding_join_mutex);
+            value = state->reacquire_counter + 1;
+            if (FAILED(state->binding_queue->Signal(
+                    state->reacquire_fence.Get(), value))) {
+                return;
+            }
+            state->reacquire_counter = value;
+        }
+        if (state->reacquire_fence->GetCompletedValue() >= value) {
+            return;
+        }
+        HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (event == nullptr) {
+            return;
+        }
+        if (SUCCEEDED(state->reacquire_fence->SetEventOnCompletion(value, event))) {
+            WaitForSingleObject(event, 2000);
+        }
+        CloseHandle(event);
+    } catch (...) {
+    }
+}
+
 // Marks a point in the application's queue, so the probe's waiter can stamp
 // when the queue gets there: `record` with the caller's b and c, then 914
 // when it completes. 913 is a release's join; 916 is the moment just before
@@ -849,7 +991,7 @@ void signal_join_probe(
     std::int64_t record,
     std::uint64_t b,
     std::uint64_t c) noexcept {
-    if (state == nullptr || !state->d3d12_queue ||
+    if (state == nullptr || runtime_queue(*state) == nullptr ||
         !xrfg::bridge_flight_logger().enabled()) {
         return;
     }
@@ -869,7 +1011,7 @@ void signal_join_probe(
             }
         }
         if (state->join_probe &&
-            SUCCEEDED(state->d3d12_queue->Signal(
+            SUCCEEDED(runtime_queue(*state)->Signal(
                 state->join_probe->fence.Get(),
                 state->join_probe_next + 1))) {
             const std::uint64_t value = ++state->join_probe_next;
@@ -2691,8 +2833,52 @@ XrResult layer_create_session_impl(
         }
     }
 
+    // Hand the runtime a queue of the layer's own on a native D3D12 session:
+    // see SessionState::binding_queue. The binding has to be the first
+    // structure chained on the create info for the substitution to be made
+    // without copying structures the layer does not know; every application
+    // seen chains it first. Anything that fails here leaves the runtime with
+    // the application's queue, which is what every build before this one
+    // did.
+    XrSessionCreateInfo substituted_info{};
+    XrGraphicsBindingD3D12KHR substituted_binding{};
+    const XrSessionCreateInfo* forwarded_info = create_info;
+    if (state->graphics_binding == SessionGraphicsBinding::d3d12 &&
+        create_info != nullptr && state->d3d12_device && state->d3d12_queue) {
+        const auto* first = static_cast<const XrBaseInStructure*>(create_info->next);
+        if (first != nullptr && first->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
+            D3D12_COMMAND_QUEUE_DESC binding_queue_description{};
+            binding_queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+            binding_queue_description.NodeMask =
+                state->d3d12_queue->GetDesc().NodeMask;
+            Microsoft::WRL::ComPtr<ID3D12CommandQueue> binding_queue;
+            Microsoft::WRL::ComPtr<ID3D12Fence> release_fence;
+            Microsoft::WRL::ComPtr<ID3D12Fence> reacquire_fence;
+            if (SUCCEEDED(state->d3d12_device->CreateCommandQueue(
+                    &binding_queue_description,
+                    IID_PPV_ARGS(binding_queue.GetAddressOf()))) &&
+                SUCCEEDED(state->d3d12_device->CreateFence(
+                    0, D3D12_FENCE_FLAG_NONE,
+                    IID_PPV_ARGS(release_fence.GetAddressOf()))) &&
+                SUCCEEDED(state->d3d12_device->CreateFence(
+                    0, D3D12_FENCE_FLAG_NONE,
+                    IID_PPV_ARGS(reacquire_fence.GetAddressOf())))) {
+                substituted_binding =
+                    *reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(first);
+                substituted_binding.queue = binding_queue.Get();
+                substituted_info = *create_info;
+                substituted_info.next = &substituted_binding;
+                forwarded_info = &substituted_info;
+                state->binding_queue = std::move(binding_queue);
+                state->app_release_fence = std::move(release_fence);
+                state->reacquire_fence = std::move(reacquire_fence);
+                state->graphics_binding_capabilities |= 16ULL;
+            }
+        }
+    }
+
     XrSession created_session = XR_NULL_HANDLE;
-    const XrResult result = dispatch->create_session(instance, create_info, &created_session);
+    const XrResult result = dispatch->create_session(instance, forwarded_info, &created_session);
     if (XR_FAILED(result)) {
         return result;
     }
@@ -2704,7 +2890,9 @@ XrResult layer_create_session_impl(
         state->fps_overlay = std::make_unique<xrfg::OpenXrFpsOverlay>(
             instance, created_session, create_info ? create_info->systemId : 0,
             dispatch->get_instance_proc_addr, dispatch->end_frame,
-            state->d3d12_device.Get(), state->d3d12_queue.Get(),
+            // The overlay draws into swapchain images of its own, so it
+            // draws on the queue the runtime orders those images against.
+            state->d3d12_device.Get(), runtime_queue(*state),
             state->d3d11_device.Get(), current_layer_directory() / L"ofxr_bridge.ini",
             state->steamvr_delivery.get());
     } catch (...) {}
@@ -2790,6 +2978,7 @@ XrResult layer_destroy_session_impl(XrSession session) {
         drain_swapchain_gpu(swapchain_state);
         destroy_frame_generation_swapchains(swapchain_state);
     }
+    drain_binding_queue(state.get());
 
     const XrResult result = state->dispatch->destroy_session(session);
     if (XR_SUCCEEDED(result)) {
@@ -3709,6 +3898,9 @@ XrResult layer_wait_swapchain_image_impl(
             swapchain, wait_info);
     });
     if (result == XR_SUCCESS || result == XR_SESSION_LOSS_PENDING) {
+        // The runtime made the image safe to write on the binding queue;
+        // the application writes it on its own.
+        carry_reacquire_to_application(state->session.get());
         std::scoped_lock lock(state->mutex);
         if (state->ownership_tracking_valid) {
             if (!state->front_waited && !state->acquired_indices.empty()) {
@@ -3808,6 +4000,9 @@ XrResult layer_release_swapchain_image_impl(
         }
     }
 
+    // Where the application's queue stands with this image rendered, for the
+    // binding queue to wait on before a frame that names it goes down.
+    mark_application_release(state->session.get());
     XrResult result = XR_ERROR_RUNTIME_FAILURE;
     try {
         result = with_runtime_entry(state->session.get(), [&] {
@@ -3920,6 +4115,9 @@ struct GeneratedFrameEndInfo {
         std::uint64_t value{};
     };
     std::vector<ReadyFence> synthetic_ready;
+    // As on PresenterSubmission, kept here as well so a repeat of this frame
+    // can make the same join.
+    std::uint64_t app_release_value{};
 };
 
 // Whether every output a synthetic names has been written. A fence that
@@ -3956,7 +4154,7 @@ void run_private_releases(
                 pending.generation->synthesizer) {
                 static_cast<void>(
                     pending.generation->synthesizer->synchronize_consumer_queue(
-                        session->d3d12_queue.Get(),
+                        runtime_queue(*session),
                         pending.ticket));
             }
             static_cast<void>(release_private_image(
@@ -5084,6 +5282,13 @@ void continuous_presenter_main(
             // this submission, so this mark clearing is the earliest the
             // compositor can use the frame. 916: b the submission sequence
             // (0 for a repeat), c 2 synthetic, 1 real, 0 repeat.
+            // The binding queue must have run past the application's release
+            // of every image of its own that this frame names.
+            join_runtime_queue_to_application(
+                state.get(),
+                request ? request->app_release_value
+                        : repeated_frame ? repeated_frame->app_release_value
+                                         : 0);
             if (state->graphics_binding == SessionGraphicsBinding::d3d12) {
                 signal_join_probe(
                     state.get(),
@@ -5111,7 +5316,7 @@ void continuous_presenter_main(
                         static_cast<void>(
                             pending.synthesizer->flush_current_copy(
                                 state->d3d12_synthesis_queue
-                                    ? state->d3d12_queue.Get()
+                                    ? runtime_queue(*state)
                                     : nullptr,
                                 pending.fence_value));
                     }
@@ -6306,6 +6511,11 @@ enqueue_presenter_submission(
         request->owned_frame = std::move(owned_frame);
         request->borrowed_frame = borrowed_frame;
         request->queued_at = std::chrono::steady_clock::now();
+        request->app_release_value = state->app_end_frame_release_value;
+        if (request->owned_frame) {
+            request->owned_frame->app_release_value =
+                request->app_release_value;
+        }
         state->presenter_submissions.push_back(request);
         ++state->outstanding_presenter_submissions;
     }
@@ -6345,14 +6555,24 @@ enqueue_presenter_submission(
                 : XR_ERROR_SESSION_NOT_RUNNING;
         }
         const auto queued_at = std::chrono::steady_clock::now();
+        const std::uint64_t app_release_value =
+            state->app_end_frame_release_value;
         auto first = std::make_shared<PresenterSubmission>();
         first->sequence = state->next_presenter_sequence++;
         first->owned_frame = std::move(synthetic);
         first->queued_at = queued_at;
+        first->app_release_value = app_release_value;
+        if (first->owned_frame) {
+            first->owned_frame->app_release_value = app_release_value;
+        }
         auto second = std::make_shared<PresenterSubmission>();
         second->sequence = state->next_presenter_sequence++;
         second->owned_frame = std::move(current);
         second->queued_at = queued_at;
+        second->app_release_value = app_release_value;
+        if (second->owned_frame) {
+            second->owned_frame->app_release_value = app_release_value;
+        }
         state->presenter_submissions.push_back(std::move(first));
         state->presenter_submissions.push_back(std::move(second));
         state->outstanding_presenter_submissions += 2;
@@ -7128,7 +7348,7 @@ struct PreparedProjectionFrame {
             std::scoped_lock gpu_lock(state->session->gpu_mutex);
             static_cast<void>(
                 generation->synthesizer->synchronize_producer_queue(
-                    state->session->d3d12_queue.Get()));
+                    runtime_queue(*state->session)));
         }
 
         const std::uint32_t current_destination_index =
@@ -7281,7 +7501,7 @@ struct PreparedProjectionFrame {
                 SUCCEEDED(submit_result)) {
                 static_cast<void>(
                     generation->synthesizer->synchronize_consumer_queue(
-                        state->session->d3d12_queue.Get(),
+                        runtime_queue(*state->session),
                         ticket));
             }
             if (request_pair) {
@@ -7692,6 +7912,8 @@ struct InternalCycleResult {
         handle_value(state->handle),
         static_cast<std::uint64_t>(submitted.displayTime),
         submitted.layerCount);
+    join_runtime_queue_to_application(
+        state.get(), state->app_end_frame_release_value);
     const XrResult end_result = with_runtime_entry(state, [&] {
         return state->fps_overlay
             ? state->fps_overlay->end_frame(&submitted, false)
@@ -8019,6 +8241,12 @@ XrResult layer_end_frame_impl(
     // waits. Everything this mutex protects is finished by then.
     std::unique_lock frame_call_lock(state->frame_call_mutex);
     const auto application_end_now = std::chrono::steady_clock::now();
+    // Every image of the application's that this frame names was released
+    // before this call, so the counter as it stands now covers them all.
+    {
+        std::scoped_lock join_lock(state->binding_join_mutex);
+        state->app_end_frame_release_value = state->app_release_counter;
+    }
     const bool frame_had_overlapping_wait =
         state->application_frame_has_overlapping_wait;
     const bool pipelined_presenter_mode = state->pipelined_presenter_mode;
@@ -8123,6 +8351,10 @@ XrResult layer_end_frame_impl(
                 handle_value(session),
                 end_info ? static_cast<std::uint64_t>(end_info->displayTime) : 0,
                 end_info ? end_info->layerCount : 0);
+            if (!use_continuous_presenter) {
+                join_runtime_queue_to_application(
+                    state.get(), state->app_end_frame_release_value);
+            }
             const XrResult end_result = use_continuous_presenter
                 ? submit_borrowed_to_presenter()
                 : with_runtime_entry(state, [&] {
@@ -8613,6 +8845,8 @@ XrResult layer_end_frame_impl(
             result = submit_borrowed_to_presenter();
         }
     } else {
+        join_runtime_queue_to_application(
+            state.get(), state->app_end_frame_release_value);
         result = with_runtime_entry(state, [&] {
             return state->fps_overlay
                 ? state->fps_overlay->end_frame(submitted_end_info, pair_ready)
@@ -8769,7 +9003,7 @@ XrResult layer_end_frame_impl(
         if (pending.synthesizer) {
             static_cast<void>(pending.synthesizer->flush_current_copy(
                 state->d3d12_synthesis_queue
-                    ? state->d3d12_queue.Get()
+                    ? runtime_queue(*state)
                     : nullptr,
                 pending.fence_value));
         }
