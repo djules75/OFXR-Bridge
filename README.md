@@ -3,8 +3,8 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current release: **v0.2.4 (internal build V312)**.
-See the [release notes](docs/releases/0.2.4.md).
+Current release: **v0.2.5 (internal build V324)**.
+See the [release notes](docs/releases/0.2.5.md).
 
 > [!WARNING]
 > This is experimental software. It may not work with your game, VR mod, GPU or OpenXR
@@ -33,6 +33,8 @@ The current build provides:
 - **Prefer FPS over latency** (on by default): one frame of extra latency in
   exchange for reaching full frame rate from half, with smoother dips
 - a pipeline built specifically for SteamVR's compositor
+- **Vulkan support (experimental, off by default)**: frame generation for
+  Vulkan games, tested with No Man's Sky through OpenComposite
 - an optional transparent in-headset FPS number with four corner positions;
   green means recent synthetic submissions and red means inactive generation
 - an optional bridge flight recorder for diagnostics
@@ -100,6 +102,29 @@ finish instead of the gap the game leaves between frames.
   it off and save one frame of latency. If you lose frames, turn it back on.
 
 The change applies the next time the game starts.
+
+### Vulkan games (experimental)
+
+**Vulkan support** in the tray is **off by default**. Turn it on for a game
+that renders through Vulkan — No Man's Sky through
+[OpenComposite](https://www.nexusmods.com/nomanssky/mods/4363) is the one it
+has been tested with. It is experimental: it needs more testing and feedback
+before it can be on by default, so please report results either way.
+
+- While the bridge is armed with the option on, it registers a small Vulkan
+  layer of its own (`OFXR_vulkan_queue_layer.dll`) that serialises GPU queue
+  submissions, which the bridge's second thread otherwise races the game
+  for. It is removed when you disarm or close the tray. A Vulkan implicit
+  layer loads into every Vulkan application while registered, browsers
+  included; that is why the option is off by default.
+- **No FPS number in Vulkan games** for now: the overlay has no Vulkan path.
+  The diagnostic squares still show generation running; read the rate in
+  fpsVR or the Virtual Desktop overlay.
+- On SteamVR, turn off the game's **fixed frame rate at half** and Motion
+  Smoothing in the per-application video settings, or SteamVR holds the game
+  to half rate and the bridge can only deliver half.
+- Off, Vulkan games are passed through unchanged and nothing Vulkan is
+  registered.
 
 ### SteamVR users
 

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.323.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.324.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -508,17 +508,20 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 XR_USE_PLATFORM_WIN32)
         endif()
         target_link_libraries(xrfg_layer_call_chain PRIVATE d3d11 d3d12 dxgi)
-        foreach(mode inverted-fov d3d11-inverted-fov)
+        foreach(mode inverted-fov d3d11-inverted-fov swapchain-budget)
             add_test(NAME xrfg_layer_${mode} COMMAND xrfg_layer_call_chain
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
                 "${CMAKE_CURRENT_BINARY_DIR}/xrfg-${mode}.log" ${mode})
         endforeach()
         add_dependencies(xrfg_layer_call_chain XR_APILAYER_XRFrameBridge_diagnostic)
         add_executable(xrfg_layer_manual_disarm_tests tests/layer_manual_disarm_tests.cpp)
-        target_include_directories(xrfg_layer_manual_disarm_tests PRIVATE "${XRFG_OPENXR_SDK_ROOT}/include")
+        target_include_directories(xrfg_layer_manual_disarm_tests PRIVATE
+            "${XRFG_OPENXR_SDK_ROOT}/include"
+            "${XRFG_VULKAN_INCLUDE_DIR}")
         target_link_libraries(xrfg_layer_manual_disarm_tests PRIVATE xrfg_implicit_layer d3d11 d3d12 dxgi)
         target_compile_definitions(xrfg_layer_manual_disarm_tests PRIVATE
-            NOMINMAX WIN32_LEAN_AND_MEAN XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_PLATFORM_WIN32)
+            NOMINMAX WIN32_LEAN_AND_MEAN XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12
+            XR_USE_GRAPHICS_API_VULKAN VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR XR_USE_PLATFORM_WIN32)
         if(MSVC)
             target_compile_options(xrfg_layer_manual_disarm_tests PRIVATE /W4 /permissive- /EHsc)
         endif()

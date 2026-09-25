@@ -839,6 +839,8 @@ struct SessionState {
     // Fixed for the session. A depth that engaged on load would re-phase the
     // whole pipeline whenever the scene got heavy, costing a repeated frame
     // each time, and where it settled would depend on what the player did.
+    // The one change allowed is downward, while arming, before anything has
+    // been generated: see fall_back_to_shallow_pipeline.
     bool deep_pipeline{};
     // `[ofxr] vulkan_support`: off, a Vulkan session passes through. See
     // implicit_layer::read_vulkan_support for why it is a choice.
@@ -1507,6 +1509,10 @@ enum class SwapchainEligibilityReason : std::int64_t {
     unsupported_vulkan_format = 20,
     invalid_vulkan_image = 21,
     vulkan_support_off = 22,
+    // The runtime refused a private swapchain while the session was arming
+    // with the deeper pipeline; it fell back to the shallow depth and armed
+    // again. `detail` is the runtime's refusal, `auxiliary` the session.
+    deep_pipeline_fallback = 23,
 };
 
 void log_swapchain_eligibility(
@@ -2907,6 +2913,55 @@ create_vulkan_frame_generation_swapchains(
     }
 }
 
+// The deeper pipeline costs four private swapchains per application
+// swapchain against the shallow one's three, and a runtime caps the session:
+// SteamVR at 16. Ghostwire Tokyo under UEVR with depth submission creates
+// eight of its own, so the second eye's synthetic ring was the sixteenth and
+// SteamVR refused it, which latched the budget and passed the whole session
+// through. Nothing has been generated when arming fails, so the depth is
+// still free to change: every private ring made so far is released, the
+// session drops to the shallow depth, and arming runs once more. Only
+// without a presenter, which would hold submissions naming those rings.
+[[nodiscard]] bool fall_back_to_shallow_pipeline(
+    const std::shared_ptr<SessionState>& session,
+    const std::shared_ptr<SwapchainState>& refused,
+    std::span<const ProjectionResourceMapping> mappings) noexcept {
+    try {
+        if (!session || !session->deep_pipeline ||
+            continuous_presenter_active(session)) {
+            return false;
+        }
+        log_swapchain_eligibility(
+            refused,
+            SwapchainEligibilityReason::deep_pipeline_fallback,
+            0,
+            handle_value(session->handle));
+        for (const auto& swapchain : find_swapchains(session)) {
+            drain_swapchain_gpu(swapchain);
+            destroy_frame_generation_swapchains(swapchain);
+            std::scoped_lock call_lock(swapchain->call_mutex);
+            std::scoped_lock lock(swapchain->mutex);
+            // The next capture is a new ring's first; a serial from the old
+            // one would only refuse the pair.
+            swapchain->last_released_capture.reset();
+            swapchain->last_released_motion_vectors.reset();
+        }
+        session->deep_pipeline = false;
+        for (const ProjectionResourceMapping& mapping : mappings) {
+            const auto swapchain = find_swapchain(mapping.application_swapchain);
+            if (!swapchain) {
+                continue;
+            }
+            std::scoped_lock call_lock(swapchain->call_mutex);
+            swapchain->generation_declined = false;
+            swapchain->generation_eligible_pending = true;
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 // Spends the generation budget on the swapchains this frame actually submits
 // as projection views. Returns false once the runtime has refused one, meaning
 // the caller must release the session's budget and stop generating.
@@ -2917,19 +2972,30 @@ create_vulkan_frame_generation_swapchains(
         session->generation_budget_exhausted.load(std::memory_order_acquire)) {
         return true;
     }
-    for (const ProjectionResourceMapping& mapping : mappings) {
-        const auto swapchain = find_swapchain(mapping.application_swapchain);
-        if (!swapchain || ensure_frame_generation(swapchain)) {
-            continue;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        bool refused = false;
+        for (const ProjectionResourceMapping& mapping : mappings) {
+            const auto swapchain = find_swapchain(mapping.application_swapchain);
+            if (!swapchain || ensure_frame_generation(swapchain)) {
+                continue;
+            }
+            if (attempt == 0 &&
+                fall_back_to_shallow_pipeline(session, swapchain, mappings)) {
+                refused = true;
+                break;
+            }
+            session->generation_budget_exhausted.store(
+                true, std::memory_order_release);
+            log_swapchain_eligibility(
+                swapchain,
+                SwapchainEligibilityReason::budget_exhausted,
+                0,
+                handle_value(session->handle));
+            return false;
         }
-        session->generation_budget_exhausted.store(
-            true, std::memory_order_release);
-        log_swapchain_eligibility(
-            swapchain,
-            SwapchainEligibilityReason::budget_exhausted,
-            0,
-            handle_value(session->handle));
-        return false;
+        if (!refused) {
+            return true;
+        }
     }
     return true;
 }

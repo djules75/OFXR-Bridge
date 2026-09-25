@@ -97,6 +97,16 @@ std::atomic<bool> g_application_in_end_frame{false};
 // inside them, and D3D11 does no locking of its own on such a device.
 bool g_single_threaded_mode = false;
 std::atomic<std::uint32_t> g_off_thread_frame_calls{0};
+// swapchain-budget: the runtime allows three private swapchains beside the
+// application's, one short of the deeper pipeline's four, and refuses the
+// fourth with XR_ERROR_LIMIT_REACHED - what SteamVR does at its cap of 16
+// for a UEVR title that creates eight of its own. The layer has to fall back
+// to the shallow depth and keep generating. Private swapchains are routed by
+// how many are alive rather than by call index, so the second attempt lands
+// on the same handles the first one gave back.
+bool g_swapchain_budget_mode = false;
+std::atomic<std::uint32_t> g_budget_live_privates{0};
+std::atomic<std::uint32_t> g_budget_refusals{0};
 
 bool g_flight_simulator_mode = false;
 bool g_destroy_pending_swapchain = false;
@@ -716,6 +726,24 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
         *swapchain = route.handle;
         return XR_SUCCESS;
     }
+    if (g_swapchain_budget_mode && call > 0) {
+        const std::uint32_t live =
+            g_budget_live_privates.load(std::memory_order_acquire);
+        if (live >= 3) {
+            g_budget_refusals.fetch_add(1, std::memory_order_relaxed);
+            return XR_ERROR_LIMIT_REACHED;
+        }
+        g_budget_live_privates.store(live + 1, std::memory_order_release);
+        if (live == 0) {
+            *swapchain = g_current_swapchain;
+        } else if (live == 1) {
+            *swapchain = g_current_swapchain_b;
+        } else {
+            g_synthetic_private_creates.fetch_add(1, std::memory_order_relaxed);
+            *swapchain = g_synthetic_swapchain;
+        }
+        return XR_SUCCESS;
+    }
     if (call == 0) {
         *swapchain = g_application_swapchain;
     } else if (call == 1) {
@@ -811,9 +839,14 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_poll_event(
     return XR_SUCCESS;
 }
 
-XRAPI_ATTR XrResult XRAPI_CALL fake_destroy_swapchain(XrSwapchain) {
+XRAPI_ATTR XrResult XRAPI_CALL fake_destroy_swapchain(XrSwapchain swapchain) {
     g_swapchain_destroyed.store(true, std::memory_order_release);
     g_destroy_swapchain_calls.fetch_add(1, std::memory_order_relaxed);
+    if (g_swapchain_budget_mode &&
+        (is_current_swapchain(swapchain) || is_synthetic_swapchain(swapchain)) &&
+        g_budget_live_privates.load(std::memory_order_acquire) > 0) {
+        g_budget_live_privates.fetch_sub(1, std::memory_order_acq_rel);
+    }
     return XR_SUCCESS;
 }
 
@@ -1670,7 +1703,7 @@ int main(int argc, char** argv) {
             "[split-eye|cropped-split-eye|double-wide|d3d11-interop|"
             "d3d11-double-wide|steamvr-inline|steamvr-presenter|"
             "flight-simulator|uevr-pipelined-time|inverted-fov|"
-            "d3d11-inverted-fov|d3d11-single-threaded|vulkan]\n";
+            "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget]\n";
         return EXIT_FAILURE;
     }
     g_cropped_subimage_mode =
@@ -1684,6 +1717,8 @@ int main(int argc, char** argv) {
     g_single_threaded_mode =
         argc == 4 && std::strcmp(argv[3], "d3d11-single-threaded") == 0;
     g_vulkan_mode = argc == 4 && std::strcmp(argv[3], "vulkan") == 0;
+    g_swapchain_budget_mode =
+        argc == 4 && std::strcmp(argv[3], "swapchain-budget") == 0;
     g_steamvr_runtime_mode = g_steamvr_presenter_mode ||
         g_single_threaded_mode ||
         (argc == 4 && std::strcmp(argv[3], "steamvr-inline") == 0);
@@ -1716,7 +1751,7 @@ int main(int argc, char** argv) {
     if (argc == 4 && !g_split_eye_mode && !g_double_wide_mode &&
         !g_d3d11_interop_mode && !g_steamvr_runtime_mode &&
         !g_flight_simulator_mode && !g_uevr_pipelined_display_time_mode &&
-        !g_inverted_vertical_fov && !g_vulkan_mode) {
+        !g_inverted_vertical_fov && !g_vulkan_mode && !g_swapchain_budget_mode) {
         std::cerr << "unknown test mode\n";
         return EXIT_FAILURE;
     }
@@ -2624,7 +2659,7 @@ int main(int argc, char** argv) {
         return EXIT_SUCCESS;
     }
 
-    if (g_single_threaded_mode || g_vulkan_mode) {
+    if (g_single_threaded_mode || g_vulkan_mode || g_swapchain_budget_mode) {
         // Every frame from this one thread, as an application with a
         // single-threaded device must and a Vulkan application always does:
         // the runtime submits on the queue the application handed it. In the
@@ -2672,10 +2707,18 @@ int main(int argc, char** argv) {
             g_off_thread_frame_calls.load(std::memory_order_relaxed);
         const std::uint32_t synthetic_acquires =
             g_synthetic_acquire_calls.load(std::memory_order_relaxed);
+        // swapchain-budget: exactly one refusal, the deeper attempt's fourth
+        // private swapchain, and every swapchain the layer got is given back.
+        const std::uint32_t refusals = g_budget_refusals.load(std::memory_order_relaxed);
+        const bool budget_valid = !g_swapchain_budget_mode ||
+            (refusals == 1 &&
+             g_destroy_swapchain_calls.load(std::memory_order_relaxed) ==
+                 g_create_swapchain_calls.load(std::memory_order_relaxed) - refusals);
         // The fake runtime never throttles this mode, so vulkan stays
         // inline here; only the single-threaded device forbids a presenter.
         const bool valid = frame_sequence_succeeded && teardown_succeeded &&
             (off_thread == 0 || g_vulkan_mode) && pixel_failures == 0 &&
+            budget_valid &&
             // Generation still runs, inline: all but the arming frame and
             // the first frame, which primes, submit a synthetic.
             synthetic_acquires >= 7 &&
@@ -2686,12 +2729,17 @@ int main(int argc, char** argv) {
                       << frame_sequence_succeeded << " teardown="
                       << teardown_succeeded << " off-thread=" << off_thread
                       << " synthetic=" << synthetic_acquires
-                      << " stale-pixels=" << pixel_failures << '\n';
+                      << " stale-pixels=" << pixel_failures
+                      << " budget-refusals=" << refusals
+                      << " creates=" << g_create_swapchain_calls.load()
+                      << " destroys=" << g_destroy_swapchain_calls.load() << '\n';
             return EXIT_FAILURE;
         }
         std::cout << (g_vulkan_mode
                           ? "OpenXR Vulkan interop test passed\n"
-                          : "OpenXR single-threaded D3D11 test passed\n");
+                          : g_swapchain_budget_mode
+                              ? "OpenXR swapchain-budget fallback test passed\n"
+                              : "OpenXR single-threaded D3D11 test passed\n");
         return EXIT_SUCCESS;
     }
 
