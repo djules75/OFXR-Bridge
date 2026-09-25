@@ -305,6 +305,266 @@ template <typename Handle>
     return code | (options.bidirectional ? 0x100U : 0U) | scale_code;
 }
 
+// The Vulkan types the OpenXR Vulkan extensions pass through, mirrored field
+// for field. Only read, and only to record what an application negotiates:
+// the layer does not support Vulkan yet and is not built against its headers.
+struct VulkanInstanceCreateInfoMirror {
+    std::int32_t sType;
+    const void* pNext;
+    std::uint32_t flags;
+    const void* pApplicationInfo;
+    std::uint32_t enabledLayerCount;
+    const char* const* ppEnabledLayerNames;
+    std::uint32_t enabledExtensionCount;
+    const char* const* ppEnabledExtensionNames;
+};
+
+struct VulkanDeviceQueueCreateInfoMirror {
+    std::int32_t sType;
+    const void* pNext;
+    std::uint32_t flags;
+    std::uint32_t queueFamilyIndex;
+    std::uint32_t queueCount;
+    const float* pQueuePriorities;
+};
+
+struct VulkanDeviceCreateInfoMirror {
+    std::int32_t sType;
+    const void* pNext;
+    std::uint32_t flags;
+    std::uint32_t queueCreateInfoCount;
+    const VulkanDeviceQueueCreateInfoMirror* pQueueCreateInfos;
+    std::uint32_t enabledLayerCount;
+    const char* const* ppEnabledLayerNames;
+    std::uint32_t enabledExtensionCount;
+    const char* const* ppEnabledExtensionNames;
+    const void* pEnabledFeatures;
+};
+
+// XrVulkanInstanceCreateInfoKHR and XrVulkanDeviceCreateInfoKHR.
+struct XrVulkanInstanceCreateInfoMirror {
+    XrStructureType type;
+    const void* next;
+    XrSystemId systemId;
+    XrFlags64 createFlags;
+    void* pfnGetInstanceProcAddr;
+    const VulkanInstanceCreateInfoMirror* vulkanCreateInfo;
+    const void* vulkanAllocator;
+};
+
+struct XrVulkanDeviceCreateInfoMirror {
+    XrStructureType type;
+    const void* next;
+    XrSystemId systemId;
+    XrFlags64 createFlags;
+    void* pfnGetInstanceProcAddr;
+    void* vulkanPhysicalDevice;
+    const VulkanDeviceCreateInfoMirror* vulkanCreateInfo;
+    const void* vulkanAllocator;
+};
+
+// XrGraphicsRequirementsVulkanKHR, which enable2 aliases.
+struct XrGraphicsRequirementsVulkanMirror {
+    XrStructureType type;
+    void* next;
+    XrVersion minApiVersionSupported;
+    XrVersion maxApiVersionSupported;
+};
+
+// XrGraphicsBindingVulkanKHR, which enable2 aliases.
+struct XrGraphicsBindingVulkanMirror {
+    XrStructureType type;
+    const void* next;
+    void* instance;
+    void* physicalDevice;
+    void* device;
+    std::uint32_t queueFamilyIndex;
+    std::uint32_t queueIndex;
+};
+
+using PFN_GetVulkanExtensions = XrResult(XRAPI_PTR*)(
+    XrInstance, XrSystemId, std::uint32_t, std::uint32_t*, char*);
+using PFN_CreateVulkanInstance = XrResult(XRAPI_PTR*)(
+    XrInstance, const XrVulkanInstanceCreateInfoMirror*, void**, std::int32_t*);
+using PFN_CreateVulkanDevice = XrResult(XRAPI_PTR*)(
+    XrInstance, const XrVulkanDeviceCreateInfoMirror*, void**, std::int32_t*);
+using PFN_GetVulkanGraphicsDevice = XrResult(XRAPI_PTR*)(
+    XrInstance, XrSystemId, void*, void**);
+using PFN_GetVulkanGraphicsDevice2 = XrResult(XRAPI_PTR*)(
+    XrInstance, const void*, void**);
+using PFN_GetVulkanGraphicsRequirements = XrResult(XRAPI_PTR*)(
+    XrInstance, XrSystemId, XrGraphicsRequirementsVulkanMirror*);
+
+struct VulkanNegotiationDispatch {
+    PFN_GetVulkanExtensions get_instance_extensions{};
+    PFN_GetVulkanExtensions get_device_extensions{};
+    PFN_CreateVulkanInstance create_instance{};
+    PFN_CreateVulkanDevice create_device{};
+    PFN_GetVulkanGraphicsDevice get_graphics_device{};
+    PFN_GetVulkanGraphicsDevice2 get_graphics_device2{};
+    PFN_GetVulkanGraphicsRequirements get_graphics_requirements{};
+    PFN_GetVulkanGraphicsRequirements get_graphics_requirements2{};
+};
+
+// The Vulkan extensions an interop with D3D12 would need, as bits; the
+// numbering is the one BridgeFlightOperation::vulkan_negotiation documents.
+[[nodiscard]] std::uint64_t vulkan_interop_extension_bit(
+    std::string_view name) noexcept {
+    constexpr std::array<std::string_view, 11> kNames{
+        "VK_KHR_external_memory_win32",
+        "VK_KHR_external_semaphore_win32",
+        "VK_KHR_external_memory",
+        "VK_KHR_external_semaphore",
+        "VK_KHR_timeline_semaphore",
+        "VK_KHR_dedicated_allocation",
+        "VK_KHR_get_memory_requirements2",
+        "VK_KHR_win32_keyed_mutex",
+        "VK_KHR_external_memory_capabilities",
+        "VK_KHR_external_semaphore_capabilities",
+        "VK_KHR_get_physical_device_properties2",
+    };
+    for (std::size_t index = 0; index < kNames.size(); ++index) {
+        if (name == kNames[index]) {
+            return 1ULL << index;
+        }
+    }
+    return 0;
+}
+
+struct VulkanExtensionSummary {
+    std::uint64_t count{};
+    std::uint64_t bits{};
+};
+
+// The runtime's answer to xrGetVulkan*ExtensionsKHR: one space-separated
+// string.
+[[nodiscard]] VulkanExtensionSummary summarize_vulkan_extension_string(
+    std::string_view list) noexcept {
+    VulkanExtensionSummary summary{};
+    std::size_t start = 0;
+    while (start < list.size()) {
+        const std::size_t end = list.find(' ', start);
+        const std::string_view name = list.substr(
+            start,
+            end == std::string_view::npos ? list.size() - start : end - start);
+        if (!name.empty()) {
+            ++summary.count;
+            summary.bits |= vulkan_interop_extension_bit(name);
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return summary;
+}
+
+[[nodiscard]] VulkanExtensionSummary summarize_vulkan_extension_array(
+    const char* const* names,
+    std::uint32_t count) noexcept {
+    VulkanExtensionSummary summary{};
+    if (names == nullptr) {
+        return summary;
+    }
+    for (std::uint32_t index = 0; index < count; ++index) {
+        if (names[index] != nullptr) {
+            ++summary.count;
+            summary.bits |= vulkan_interop_extension_bit(names[index]);
+        }
+    }
+    return summary;
+}
+
+[[nodiscard]] std::uint64_t pack_negotiation_results(
+    XrResult xr_result,
+    std::int32_t vk_result) noexcept {
+    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(xr_result))
+            << 32) |
+        static_cast<std::uint32_t>(vk_result);
+}
+
+void log_vulkan_negotiation(
+    std::int64_t selector,
+    std::uint64_t a,
+    std::uint64_t b = 0,
+    std::uint64_t c = 0) noexcept {
+    xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::vulkan_negotiation, selector, a, b, c);
+}
+
+// Whether the application's Vulkan device can take part in a D3D12 interop,
+// asked of the device itself: with XR_KHR_vulkan_enable the application
+// creates the device, so the list it was handed says what it was asked to
+// enable, not what it did. A device returns no entry point for a command of
+// an extension it did not enable.
+//   11  a= commands the device returned: bit 0 vkGetMemoryWin32HandleKHR,
+//       1 vkGetSemaphoreWin32HandleKHR, 2 vkImportSemaphoreWin32HandleKHR,
+//       3 vkGetSemaphoreCounterValueKHR, 4 vkGetSemaphoreCounterValue
+//   12  a= the same interop extension bits, for what the physical device
+//       supports at all; b= how many device extensions it lists
+void probe_vulkan_interop_support(
+    const XrGraphicsBindingVulkanMirror& binding) noexcept {
+    try {
+        const HMODULE vulkan = GetModuleHandleW(L"vulkan-1.dll");
+        if (vulkan == nullptr || binding.device == nullptr) {
+            log_vulkan_negotiation(11, 0, 0, 1);
+            return;
+        }
+        using VoidFunction = void (*)();
+        using GetDeviceProcAddr = VoidFunction (*)(void*, const char*);
+        using GetInstanceProcAddr = VoidFunction (*)(void*, const char*);
+        struct ExtensionProperties {
+            char extensionName[256];
+            std::uint32_t specVersion;
+        };
+        using EnumerateDeviceExtensions = std::int32_t (*)(
+            void*, const char*, std::uint32_t*, ExtensionProperties*);
+        const auto get_device_proc = reinterpret_cast<GetDeviceProcAddr>(
+            GetProcAddress(vulkan, "vkGetDeviceProcAddr"));
+        const auto get_instance_proc = reinterpret_cast<GetInstanceProcAddr>(
+            GetProcAddress(vulkan, "vkGetInstanceProcAddr"));
+        if (get_device_proc != nullptr) {
+            constexpr std::array<const char*, 5> kCommands{
+                "vkGetMemoryWin32HandleKHR",
+                "vkGetSemaphoreWin32HandleKHR",
+                "vkImportSemaphoreWin32HandleKHR",
+                "vkGetSemaphoreCounterValueKHR",
+                "vkGetSemaphoreCounterValue",
+            };
+            std::uint64_t live = 0;
+            for (std::size_t index = 0; index < kCommands.size(); ++index) {
+                if (get_device_proc(binding.device, kCommands[index]) != nullptr) {
+                    live |= 1ULL << index;
+                }
+            }
+            log_vulkan_negotiation(11, live);
+        }
+        if (get_instance_proc != nullptr && binding.instance != nullptr &&
+            binding.physicalDevice != nullptr) {
+            const auto enumerate = reinterpret_cast<EnumerateDeviceExtensions>(
+                get_instance_proc(
+                    binding.instance, "vkEnumerateDeviceExtensionProperties"));
+            std::uint32_t extension_count = 0;
+            if (enumerate != nullptr &&
+                enumerate(binding.physicalDevice, nullptr, &extension_count,
+                          nullptr) == 0 &&
+                extension_count > 0) {
+                std::vector<ExtensionProperties> extensions(extension_count);
+                if (enumerate(binding.physicalDevice, nullptr, &extension_count,
+                              extensions.data()) >= 0) {
+                    std::uint64_t supported = 0;
+                    for (std::uint32_t index = 0; index < extension_count; ++index) {
+                        supported |= vulkan_interop_extension_bit(
+                            extensions[index].extensionName);
+                    }
+                    log_vulkan_negotiation(12, supported, extension_count);
+                }
+            }
+        }
+    } catch (...) {
+    }
+}
+
 struct Dispatch {
     PFN_xrGetInstanceProcAddr get_instance_proc_addr{};
     PFN_xrDestroyInstance destroy_instance{};
@@ -328,6 +588,9 @@ struct Dispatch {
     // and never consumes one; it records session state transitions so a
     // capture can say whether the runtime stopped asking for frames, and why.
     PFN_xrPollEvent poll_event{};
+    // Vulkan negotiation, forwarded unchanged and only recorded: see
+    // BridgeFlightOperation::vulkan_negotiation.
+    VulkanNegotiationDispatch vulkan{};
     bool steamvr_runtime{};
     XrVersion runtime_version{};
     std::string runtime_name;
@@ -2473,6 +2736,251 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_create_swapchain(
     XrSwapchain* swapchain);
 XRAPI_ATTR XrResult XRAPI_CALL layer_destroy_swapchain(XrSwapchain swapchain);
 XRAPI_ATTR XrResult XRAPI_CALL layer_destroy_space(XrSpace space);
+// The runtime's list with the sharing extensions a D3D12 interop needs added
+// where it lacks them. SteamVR asks for external memory and timeline
+// semaphores but not for exporting a semaphore to D3D12, so a list from it
+// gains VK_KHR_external_semaphore_win32 (device) and
+// VK_KHR_external_semaphore_capabilities (instance). Every Windows driver
+// that implements external memory implements these too.
+[[nodiscard]] std::string augment_vulkan_extension_list(
+    std::string_view list,
+    bool device_list,
+    std::uint64_t* appended_bits) {
+    std::string augmented(list);
+    const VulkanExtensionSummary present =
+        summarize_vulkan_extension_string(list);
+    const auto append = [&](std::string_view name) {
+        const std::uint64_t bit = vulkan_interop_extension_bit(name);
+        if ((present.bits & bit) != 0) {
+            return;
+        }
+        if (!augmented.empty()) {
+            augmented.push_back(' ');
+        }
+        augmented.append(name);
+        *appended_bits |= bit;
+    };
+    if (device_list) {
+        append("VK_KHR_external_semaphore_win32");
+    } else {
+        append("VK_KHR_external_semaphore_capabilities");
+    }
+    return augmented;
+}
+
+XrResult get_vulkan_extensions_recorded(
+    PFN_GetVulkanExtensions next,
+    std::int64_t selector,
+    XrInstance instance,
+    XrSystemId system_id,
+    std::uint32_t capacity,
+    std::uint32_t* count,
+    char* buffer) {
+    if (next == nullptr) {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+    if (count == nullptr) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    // Read the runtime's whole list whatever the application asked for, so
+    // the size query and the fill call both answer for the augmented list.
+    std::uint32_t runtime_count = 0;
+    XrResult result = next(instance, system_id, 0, &runtime_count, nullptr);
+    if (XR_FAILED(result) || runtime_count == 0) {
+        return next(instance, system_id, capacity, count, buffer);
+    }
+    std::string runtime_list(runtime_count, '\0');
+    result = next(
+        instance, system_id, runtime_count, &runtime_count, runtime_list.data());
+    if (XR_FAILED(result)) {
+        return next(instance, system_id, capacity, count, buffer);
+    }
+    runtime_list.resize(runtime_count > 0 ? runtime_count - 1 : 0);
+    std::uint64_t appended_bits = 0;
+    const std::string augmented = augment_vulkan_extension_list(
+        runtime_list, selector == 3, &appended_bits);
+    *count = static_cast<std::uint32_t>(augmented.size() + 1);
+    if (capacity == 0) {
+        return XR_SUCCESS;
+    }
+    if (buffer == nullptr || capacity < *count) {
+        return XR_ERROR_SIZE_INSUFFICIENT;
+    }
+    std::memcpy(buffer, augmented.c_str(), augmented.size() + 1);
+    // Only the call that fills the buffer is recorded; the size query before
+    // it would record the same list twice.
+    const VulkanExtensionSummary summary =
+        summarize_vulkan_extension_string(runtime_list);
+    log_vulkan_negotiation(
+        selector, summary.count, summary.bits, runtime_list.size());
+    log_vulkan_negotiation(10, static_cast<std::uint64_t>(selector), appended_bits);
+    return XR_SUCCESS;
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL layer_get_vulkan_instance_extensions(
+    XrInstance instance,
+    XrSystemId system_id,
+    std::uint32_t capacity,
+    std::uint32_t* count,
+    char* buffer) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        const auto dispatch = find_dispatch(instance);
+        return get_vulkan_extensions_recorded(
+            dispatch ? dispatch->vulkan.get_instance_extensions : nullptr,
+            2, instance, system_id, capacity, count, buffer);
+    });
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL layer_get_vulkan_device_extensions(
+    XrInstance instance,
+    XrSystemId system_id,
+    std::uint32_t capacity,
+    std::uint32_t* count,
+    char* buffer) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        const auto dispatch = find_dispatch(instance);
+        return get_vulkan_extensions_recorded(
+            dispatch ? dispatch->vulkan.get_device_extensions : nullptr,
+            3, instance, system_id, capacity, count, buffer);
+    });
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL layer_create_vulkan_instance(
+    XrInstance instance,
+    const XrVulkanInstanceCreateInfoMirror* create_info,
+    void** vulkan_instance,
+    std::int32_t* vulkan_result) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        const auto dispatch = find_dispatch(instance);
+        if (!dispatch || dispatch->vulkan.create_instance == nullptr) {
+            return XR_ERROR_FUNCTION_UNSUPPORTED;
+        }
+        const XrResult result = dispatch->vulkan.create_instance(
+            instance, create_info, vulkan_instance, vulkan_result);
+        VulkanExtensionSummary summary{};
+        if (create_info != nullptr && create_info->vulkanCreateInfo != nullptr) {
+            summary = summarize_vulkan_extension_array(
+                create_info->vulkanCreateInfo->ppEnabledExtensionNames,
+                create_info->vulkanCreateInfo->enabledExtensionCount);
+        }
+        log_vulkan_negotiation(
+            4, summary.count, summary.bits,
+            pack_negotiation_results(
+                result, vulkan_result != nullptr ? *vulkan_result : 0));
+        return result;
+    });
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL layer_create_vulkan_device(
+    XrInstance instance,
+    const XrVulkanDeviceCreateInfoMirror* create_info,
+    void** vulkan_device,
+    std::int32_t* vulkan_result) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        const auto dispatch = find_dispatch(instance);
+        if (!dispatch || dispatch->vulkan.create_device == nullptr) {
+            return XR_ERROR_FUNCTION_UNSUPPORTED;
+        }
+        const XrResult result = dispatch->vulkan.create_device(
+            instance, create_info, vulkan_device, vulkan_result);
+        const VulkanDeviceCreateInfoMirror* device_info =
+            create_info != nullptr ? create_info->vulkanCreateInfo : nullptr;
+        VulkanExtensionSummary summary{};
+        if (device_info != nullptr) {
+            summary = summarize_vulkan_extension_array(
+                device_info->ppEnabledExtensionNames,
+                device_info->enabledExtensionCount);
+        }
+        log_vulkan_negotiation(
+            5, summary.count, summary.bits,
+            pack_negotiation_results(
+                result, vulkan_result != nullptr ? *vulkan_result : 0));
+        if (device_info != nullptr && device_info->pQueueCreateInfos != nullptr) {
+            for (std::uint32_t index = 0;
+                 index < device_info->queueCreateInfoCount;
+                 ++index) {
+                const auto& queue = device_info->pQueueCreateInfos[index];
+                log_vulkan_negotiation(
+                    6, queue.queueFamilyIndex, queue.queueCount);
+            }
+        }
+        return result;
+    });
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL layer_get_vulkan_graphics_device(
+    XrInstance instance,
+    XrSystemId system_id,
+    void* vulkan_instance,
+    void** physical_device) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        const auto dispatch = find_dispatch(instance);
+        if (!dispatch || dispatch->vulkan.get_graphics_device == nullptr) {
+            return XR_ERROR_FUNCTION_UNSUPPORTED;
+        }
+        log_vulkan_negotiation(7, 1);
+        return dispatch->vulkan.get_graphics_device(
+            instance, system_id, vulkan_instance, physical_device);
+    });
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL layer_get_vulkan_graphics_device2(
+    XrInstance instance,
+    const void* get_info,
+    void** physical_device) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        const auto dispatch = find_dispatch(instance);
+        if (!dispatch || dispatch->vulkan.get_graphics_device2 == nullptr) {
+            return XR_ERROR_FUNCTION_UNSUPPORTED;
+        }
+        log_vulkan_negotiation(7, 2);
+        return dispatch->vulkan.get_graphics_device2(
+            instance, get_info, physical_device);
+    });
+}
+
+XrResult get_vulkan_requirements_recorded(
+    PFN_GetVulkanGraphicsRequirements next,
+    std::uint64_t which,
+    XrInstance instance,
+    XrSystemId system_id,
+    XrGraphicsRequirementsVulkanMirror* requirements) {
+    if (next == nullptr) {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+    const XrResult result = next(instance, system_id, requirements);
+    if (XR_SUCCEEDED(result) && requirements != nullptr) {
+        log_vulkan_negotiation(
+            8, which, requirements->minApiVersionSupported,
+            requirements->maxApiVersionSupported);
+    }
+    return result;
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL layer_get_vulkan_graphics_requirements(
+    XrInstance instance,
+    XrSystemId system_id,
+    XrGraphicsRequirementsVulkanMirror* requirements) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        const auto dispatch = find_dispatch(instance);
+        return get_vulkan_requirements_recorded(
+            dispatch ? dispatch->vulkan.get_graphics_requirements : nullptr,
+            1, instance, system_id, requirements);
+    });
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL layer_get_vulkan_graphics_requirements2(
+    XrInstance instance,
+    XrSystemId system_id,
+    XrGraphicsRequirementsVulkanMirror* requirements) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        const auto dispatch = find_dispatch(instance);
+        return get_vulkan_requirements_recorded(
+            dispatch ? dispatch->vulkan.get_graphics_requirements2 : nullptr,
+            2, instance, system_id, requirements);
+    });
+}
+
 XRAPI_ATTR XrResult XRAPI_CALL layer_poll_event(
     XrInstance instance,
     XrEventDataBuffer* event_data);
@@ -2591,6 +3099,46 @@ XrResult layer_get_instance_proc_addr_impl(
             function);
     }
 
+    // Vulkan negotiation: recorded, then forwarded unchanged. Only offered
+    // where the runtime has the function, so the application sees exactly
+    // the extensions it would without the layer.
+    const struct {
+        const char* name;
+        PFN_xrVoidFunction next;
+        PFN_xrVoidFunction layer;
+    } vulkan_intercepts[] = {
+        {"xrGetVulkanInstanceExtensionsKHR",
+         reinterpret_cast<PFN_xrVoidFunction>(dispatch->vulkan.get_instance_extensions),
+         reinterpret_cast<PFN_xrVoidFunction>(layer_get_vulkan_instance_extensions)},
+        {"xrGetVulkanDeviceExtensionsKHR",
+         reinterpret_cast<PFN_xrVoidFunction>(dispatch->vulkan.get_device_extensions),
+         reinterpret_cast<PFN_xrVoidFunction>(layer_get_vulkan_device_extensions)},
+        {"xrCreateVulkanInstanceKHR",
+         reinterpret_cast<PFN_xrVoidFunction>(dispatch->vulkan.create_instance),
+         reinterpret_cast<PFN_xrVoidFunction>(layer_create_vulkan_instance)},
+        {"xrCreateVulkanDeviceKHR",
+         reinterpret_cast<PFN_xrVoidFunction>(dispatch->vulkan.create_device),
+         reinterpret_cast<PFN_xrVoidFunction>(layer_create_vulkan_device)},
+        {"xrGetVulkanGraphicsDeviceKHR",
+         reinterpret_cast<PFN_xrVoidFunction>(dispatch->vulkan.get_graphics_device),
+         reinterpret_cast<PFN_xrVoidFunction>(layer_get_vulkan_graphics_device)},
+        {"xrGetVulkanGraphicsDevice2KHR",
+         reinterpret_cast<PFN_xrVoidFunction>(dispatch->vulkan.get_graphics_device2),
+         reinterpret_cast<PFN_xrVoidFunction>(layer_get_vulkan_graphics_device2)},
+        {"xrGetVulkanGraphicsRequirementsKHR",
+         reinterpret_cast<PFN_xrVoidFunction>(dispatch->vulkan.get_graphics_requirements),
+         reinterpret_cast<PFN_xrVoidFunction>(layer_get_vulkan_graphics_requirements)},
+        {"xrGetVulkanGraphicsRequirements2KHR",
+         reinterpret_cast<PFN_xrVoidFunction>(dispatch->vulkan.get_graphics_requirements2),
+         reinterpret_cast<PFN_xrVoidFunction>(layer_get_vulkan_graphics_requirements2)},
+    };
+    for (const auto& intercept : vulkan_intercepts) {
+        if (std::strcmp(name, intercept.name) == 0 && intercept.next != nullptr) {
+            *function = intercept.layer;
+            return XR_SUCCESS;
+        }
+    }
+
     return dispatch->get_instance_proc_addr(instance, name, function);
 }
 
@@ -2706,6 +3254,47 @@ XrResult layer_create_api_layer_instance_impl(
         dispatch->runtime_version,
         dispatch->runtime_name.size(),
         runtime_name_hash(dispatch->runtime_name));
+
+    // Which graphics API the application asked the runtime for, and the
+    // runtime's Vulkan entry points, recorded before the layer supports
+    // Vulkan. A function the application did not enable fails to load and is
+    // simply not intercepted.
+    {
+        std::uint64_t graphics_extensions = 0;
+        for (std::uint32_t index = 0;
+             index < create_info->enabledExtensionCount;
+             ++index) {
+            const char* const extension =
+                create_info->enabledExtensionNames[index];
+            if (extension == nullptr) {
+                continue;
+            }
+            const std::string_view name(extension);
+            if (name == "XR_KHR_vulkan_enable") graphics_extensions |= 1ULL;
+            if (name == "XR_KHR_vulkan_enable2") graphics_extensions |= 2ULL;
+            if (name == "XR_KHR_D3D11_enable") graphics_extensions |= 4ULL;
+            if (name == "XR_KHR_D3D12_enable") graphics_extensions |= 8ULL;
+            if (name == "XR_KHR_opengl_enable") graphics_extensions |= 16ULL;
+        }
+        log_vulkan_negotiation(1, graphics_extensions);
+        auto& vulkan = dispatch->vulkan;
+        static_cast<void>(load_function(next_get_instance_proc_addr, created_instance,
+            "xrGetVulkanInstanceExtensionsKHR", vulkan.get_instance_extensions));
+        static_cast<void>(load_function(next_get_instance_proc_addr, created_instance,
+            "xrGetVulkanDeviceExtensionsKHR", vulkan.get_device_extensions));
+        static_cast<void>(load_function(next_get_instance_proc_addr, created_instance,
+            "xrCreateVulkanInstanceKHR", vulkan.create_instance));
+        static_cast<void>(load_function(next_get_instance_proc_addr, created_instance,
+            "xrCreateVulkanDeviceKHR", vulkan.create_device));
+        static_cast<void>(load_function(next_get_instance_proc_addr, created_instance,
+            "xrGetVulkanGraphicsDeviceKHR", vulkan.get_graphics_device));
+        static_cast<void>(load_function(next_get_instance_proc_addr, created_instance,
+            "xrGetVulkanGraphicsDevice2KHR", vulkan.get_graphics_device2));
+        static_cast<void>(load_function(next_get_instance_proc_addr, created_instance,
+            "xrGetVulkanGraphicsRequirementsKHR", vulkan.get_graphics_requirements));
+        static_cast<void>(load_function(next_get_instance_proc_addr, created_instance,
+            "xrGetVulkanGraphicsRequirements2KHR", vulkan.get_graphics_requirements2));
+    }
 
     try {
         std::scoped_lock lock(g_state_mutex);
@@ -2840,6 +3429,14 @@ XrResult layer_create_session_impl(
             if (next->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR) {
                 state->graphics_binding = SessionGraphicsBinding::vulkan;
                 binding_structure_type = next->type;
+                const auto* binding =
+                    reinterpret_cast<const XrGraphicsBindingVulkanMirror*>(next);
+                log_vulkan_negotiation(
+                    9,
+                    reinterpret_cast<std::uintptr_t>(binding->device),
+                    binding->queueFamilyIndex,
+                    binding->queueIndex);
+                probe_vulkan_interop_support(*binding);
                 break;
             }
             if (next->type == XR_TYPE_GRAPHICS_BINDING_OPENGL_WIN32_KHR) {

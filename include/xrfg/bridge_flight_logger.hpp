@@ -126,6 +126,37 @@ enum class BridgeFlightOperation : std::uint32_t {
     // several frames, so a reason raised on a frame we did not land on would
     // otherwise go unseen.
     presenter_frame_presented,
+    // How the application negotiates Vulkan with the runtime, recorded before
+    // the layer supports Vulkan so the interop can be designed against what
+    // real titles do. result is a selector:
+    //   1  xrCreateInstance: a= graphics extensions enabled, bit 0
+    //      XR_KHR_vulkan_enable, 1 XR_KHR_vulkan_enable2, 2 D3D11, 3 D3D12,
+    //      4 OpenGL
+    //   2  xrGetVulkanInstanceExtensionsKHR returned its list: a= names,
+    //      b= interop extension bits (below), c= string length
+    //   3  xrGetVulkanDeviceExtensionsKHR, the same fields
+    //   4  xrCreateVulkanInstanceKHR: a= extensions enabled, b= bits,
+    //      c= XrResult in the high half, VkResult in the low
+    //   5  xrCreateVulkanDeviceKHR: a= extensions enabled, b= bits,
+    //      c= XrResult in the high half, VkResult in the low
+    //   6  one queue family that device created: a= family, b= queue count
+    //   7  xrGetVulkanGraphicsDevice(2)KHR: a= 1 or 2
+    //   8  xrGetVulkanGraphicsRequirements(2)KHR: a= 1 or 2, b= minimum and
+    //      c= maximum Vulkan version supported
+    //   9  a Vulkan session: a= the VkDevice, b= queue family, c= queue index
+    //  10  the layer appended to a list: a= 2 instance or 3 device list,
+    //      b= the interop extension bits it added
+    //  11  the session's device, asked which interop commands it exposes
+    //  12  what the physical device supports; see
+    //      probe_vulkan_interop_support for both
+    // Interop extension bits: 0 VK_KHR_external_memory_win32,
+    // 1 VK_KHR_external_semaphore_win32, 2 VK_KHR_external_memory,
+    // 3 VK_KHR_external_semaphore, 4 VK_KHR_timeline_semaphore,
+    // 5 VK_KHR_dedicated_allocation, 6 VK_KHR_get_memory_requirements2,
+    // 7 VK_KHR_win32_keyed_mutex, 8 VK_KHR_external_memory_capabilities,
+    // 9 VK_KHR_external_semaphore_capabilities,
+    // 10 VK_KHR_get_physical_device_properties2.
+    vulkan_negotiation,
 };
 
 struct BridgeFlightToken {
