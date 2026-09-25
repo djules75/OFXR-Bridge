@@ -620,6 +620,20 @@ struct SessionState {
     bool pipelined_presenter_mode{};
     bool pipelined_presenter_start_requested{};
     bool steamvr_presenter_start_requested{};
+    // The application's D3D11 device was created
+    // D3D11_CREATE_DEVICE_SINGLETHREADED - Unity's default. D3D11 then does
+    // no locking of its own, and the runtime uses that device inside the
+    // frame calls: SteamVR flushes the application's immediate context in
+    // them. Made from a presenter thread, those calls race the application's
+    // render thread on the device and deadlock inside the driver (seen on The
+    // Forest through OpenComposite: the presenter in a SteamVR frame call
+    // flushing the context while Unity's render thread sat in CreateBuffer,
+    // both waiting on the same driver lock). The multithread protection the
+    // interop turns on covers the immediate context, not the device, so it
+    // cannot help. Such a session never promotes a presenter: every runtime
+    // call stays on the application's own thread, and frames the application
+    // pipelines pass through ungenerated. Fixed for the session.
+    bool single_threaded_d3d11{};
     XrFrameState last_inline_frame_state{XR_TYPE_FRAME_STATE};
     bool last_inline_frame_state_valid{};
     std::mutex mutex;
@@ -2802,6 +2816,11 @@ XrResult layer_create_session_impl(
                     if (SUCCEEDED(state->d3d11_device.As(&device5))) {
                         state->graphics_binding_capabilities |= 1ULL;
                     }
+                    if ((state->d3d11_device->GetCreationFlags() &
+                         D3D11_CREATE_DEVICE_SINGLETHREADED) != 0) {
+                        state->single_threaded_d3d11 = true;
+                        state->graphics_binding_capabilities |= 32ULL;
+                    }
                     Microsoft::WRL::ComPtr<ID3D11DeviceContext4> context4;
                     if (state->d3d11_context &&
                         SUCCEEDED(state->d3d11_context.As(&context4))) {
@@ -3132,7 +3151,8 @@ XrResult layer_wait_frame_impl(
             ++state->pipelined_wait_streak;
         }
         if (state->pipelined_wait_streak >= 2 &&
-            state->last_inline_frame_state_valid) {
+            state->last_inline_frame_state_valid &&
+            !state->single_threaded_d3d11) {
             // The current runtime frame is still owned by the render thread,
             // so the transition cannot start its presenter until xrEndFrame
             // closes that boundary. Return the first virtual wait now and
@@ -7238,6 +7258,9 @@ enum class GenerationPrepareReason : std::int64_t {
     manual_disarmed = 17,
     structural_quarantine_active = 18,
     synthesis_busy = 19,
+    // A frame the application pipelined on a single-threaded D3D11 device;
+    // see SessionState::single_threaded_d3d11.
+    single_threaded_pipelined = 20,
 };
 
 [[nodiscard]] constexpr GenerationPrepareReason classify_synthesis_failure(
@@ -8441,6 +8464,15 @@ XrResult layer_end_frame_impl(
             }
         }
     }
+    // Generating a frame the application pipelined needs the presenter, and a
+    // single-threaded D3D11 session must not have one. The frame goes to the
+    // runtime unchanged, on this thread, exactly as it would without the
+    // layer, and the next one does not pair across it.
+    if (state->single_threaded_d3d11 && frame_had_overlapping_wait) {
+        clear_generation_continuity(state);
+        return bypass_generation(
+            GenerationPrepareReason::single_threaded_pipelined);
+    }
     if (generation_cooling_down || manually_disarmed || !state->menu_enabled) {
         return bypass_generation(
             manually_disarmed
@@ -9048,11 +9080,12 @@ XrResult layer_end_frame_impl(
         // continuity reset; treating it as a structural resize would retain a
         // private image in an uncertain ownership phase for the whole timeout.
         clear_generation_continuity(state);
-    } else if (steamvr_wait_requires_continuous_presenter(
-                   state,
-                   current_cycle) ||
-               runtime_wait_lacks_pacing(state) ||
-               inline_pair_lands_in_one_scanout(state, inline_pair_gap)) {
+    } else if (!state->single_threaded_d3d11 &&
+               (steamvr_wait_requires_continuous_presenter(
+                    state,
+                    current_cycle) ||
+                runtime_wait_lacks_pacing(state) ||
+                inline_pair_lands_in_one_scanout(state, inline_pair_gap))) {
         // Request the promotion; do not perform it here. submit_current_cycle
         // has already submitted this frame, so seeding a freshly started
         // presenter thread with it handed a second owner to composition layers

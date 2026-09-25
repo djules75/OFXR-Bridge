@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.312.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.313.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -547,6 +547,13 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
                 "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-d3d11-interop-test.log"
                 d3d11-interop)
+
+        add_test(
+            NAME xrfg_layer_d3d11_single_threaded
+            COMMAND xrfg_layer_call_chain
+                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
+                "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-d3d11-single-threaded-test.log"
+                d3d11-single-threaded)
 
         add_test(
             NAME xrfg_layer_d3d11_double_wide

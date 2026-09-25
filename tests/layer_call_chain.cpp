@@ -82,12 +82,27 @@ bool g_steamvr_presenter_mode = false;
 // exactly what a throttling SteamVR configuration slows down, so this tells
 // the two waits apart by what is happening rather than by counting calls.
 std::atomic<bool> g_application_in_end_frame{false};
+// d3d11-single-threaded: the application's D3D11 device is created
+// D3D11_CREATE_DEVICE_SINGLETHREADED, as Unity does by default, and the fake
+// SteamVR runtime throttles the inline second cycle the way that promotes a
+// presenter thread on any other session. No frame call may reach the runtime
+// from a thread other than the application's: the runtime uses that device
+// inside them, and D3D11 does no locking of its own on such a device.
+bool g_single_threaded_mode = false;
+std::atomic<std::uint32_t> g_off_thread_frame_calls{0};
+
 bool g_flight_simulator_mode = false;
 bool g_destroy_pending_swapchain = false;
 bool g_destroy_pending_space = false;
 std::atomic<bool> g_swapchain_destroyed{false};
 std::atomic<unsigned> g_submission_after_destroy{0};
 DWORD g_test_application_thread_id{};
+void record_frame_call_thread() noexcept {
+    if (g_single_threaded_mode &&
+        GetCurrentThreadId() != g_test_application_thread_id) {
+        g_off_thread_frame_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+}
 std::atomic<bool> g_concurrent_acquire_mode{false};
 std::atomic<int> g_concurrent_acquire_count{0};
 std::atomic<bool> g_first_concurrent_acquire_entered{false};
@@ -290,6 +305,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
     }
     const std::uint32_t wait_call =
         g_wait_frame_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    record_frame_call_thread();
     // A SteamVR configuration that paces the application: the wait blocks for
     // most of a display period, so the layer's pacing measurement finds
     // nothing to correct and this mode stays on the inline path. The internal
@@ -297,6 +313,12 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
     // the steamvr-presenter mode covers it.
     if (g_steamvr_runtime_mode && !g_steamvr_presenter_mode &&
         !g_application_in_end_frame.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(7));
+    }
+    // The throttled inline cycle, as in steamvr-presenter: on any other
+    // session this promotes a presenter thread.
+    if (g_single_threaded_mode &&
+        g_application_in_end_frame.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(7));
     }
     if (g_steamvr_presenter_mode) {
@@ -367,6 +389,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_properties(
 
 XRAPI_ATTR XrResult XRAPI_CALL fake_begin_frame(XrSession, const XrFrameBeginInfo*) {
     g_begin_frame_calls.fetch_add(1, std::memory_order_relaxed);
+    record_frame_call_thread();
     if (g_throw_from_begin_frame) {
         throw std::runtime_error("intentional fake-runtime exception");
     }
@@ -391,6 +414,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_end_frame(
     XrSession,
     const XrFrameEndInfo* end_info) {
     g_end_frame_calls.fetch_add(1, std::memory_order_relaxed);
+    record_frame_call_thread();
     {
         std::scoped_lock lock(g_frame_loop_mutex);
         if (!g_begun_display_time || end_info == nullptr ||
@@ -1025,7 +1049,8 @@ template <typename Function>
             nullptr,
             D3D_DRIVER_TYPE_HARDWARE,
             nullptr,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT |
+                (g_single_threaded_mode ? D3D11_CREATE_DEVICE_SINGLETHREADED : 0U),
             nullptr,
             0,
             D3D11_SDK_VERSION,
@@ -1138,7 +1163,7 @@ int main(int argc, char** argv) {
             "[split-eye|cropped-split-eye|double-wide|d3d11-interop|"
             "d3d11-double-wide|steamvr-inline|steamvr-presenter|"
             "flight-simulator|uevr-pipelined-time|inverted-fov|"
-            "d3d11-inverted-fov]\n";
+            "d3d11-inverted-fov|d3d11-single-threaded]\n";
         return EXIT_FAILURE;
     }
     g_cropped_subimage_mode =
@@ -1149,7 +1174,10 @@ int main(int argc, char** argv) {
         argc == 4 && std::strcmp(argv[3], "steamvr-destroy-space") == 0;
     g_steamvr_presenter_mode = g_destroy_pending_space ||
         (argc == 4 && std::strcmp(argv[3], "steamvr-presenter") == 0);
+    g_single_threaded_mode =
+        argc == 4 && std::strcmp(argv[3], "d3d11-single-threaded") == 0;
     g_steamvr_runtime_mode = g_steamvr_presenter_mode ||
+        g_single_threaded_mode ||
         (argc == 4 && std::strcmp(argv[3], "steamvr-inline") == 0);
     g_destroy_pending_swapchain =
         argc == 4 && std::strcmp(argv[3], "flight-destroy-swapchain") == 0;
@@ -1162,7 +1190,7 @@ int main(int argc, char** argv) {
     g_d3d11_interop_mode = argc == 4 &&
         (std::strcmp(argv[3], "d3d11-interop") == 0 ||
          std::strcmp(argv[3], "d3d11-inverted-fov") == 0 ||
-         d3d11_double_wide_mode);
+         d3d11_double_wide_mode || g_single_threaded_mode);
     g_uevr_pipelined_display_time_mode =
         argc == 4 && std::strcmp(argv[3], "uevr-pipelined-time") == 0;
     g_double_wide_mode = argc == 4 &&
@@ -2054,6 +2082,50 @@ int main(int argc, char** argv) {
             return EXIT_FAILURE;
         }
         std::cout << "OpenXR pipelined continuous-presenter test passed\n";
+        return EXIT_SUCCESS;
+    }
+
+    if (g_single_threaded_mode) {
+        // Every frame from this one thread, as an application with a
+        // single-threaded device must. The inline second cycle is throttled,
+        // which promotes a presenter on any other session; here the layer has
+        // to keep generating inline and make every runtime frame call from
+        // this thread.
+        bool frame_sequence_succeeded = true;
+        XrFrameState application_frame{XR_TYPE_FRAME_STATE};
+        for (int index = 0; index < 10; ++index) {
+            frame_sequence_succeeded = frame_sequence_succeeded &&
+                XR_SUCCEEDED(wait_frame(
+                    session, &frame_wait_info, &application_frame)) &&
+                application_frame.predictedDisplayPeriod == kFakeDisplayPeriod &&
+                XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
+                capture_fresh_application_image() &&
+                submit_frame(application_frame.predictedDisplayTime);
+        }
+        const bool teardown_succeeded =
+            XR_SUCCEEDED(end_session(session)) &&
+            XR_SUCCEEDED(destroy_swapchain(swapchain)) &&
+            XR_SUCCEEDED(destroy_session(session)) &&
+            XR_SUCCEEDED(destroy_instance(instance));
+        FreeLibrary(module);
+        const std::uint32_t off_thread =
+            g_off_thread_frame_calls.load(std::memory_order_relaxed);
+        const std::uint32_t synthetic_acquires =
+            g_synthetic_acquire_calls.load(std::memory_order_relaxed);
+        const bool valid = frame_sequence_succeeded && teardown_succeeded &&
+            off_thread == 0 &&
+            // Generation still runs, inline: all but the arming frame and
+            // the first frame, which primes, submit a synthetic.
+            synthetic_acquires >= 7 &&
+            g_waited_display_times.empty() && !g_begun_display_time;
+        if (!valid) {
+            std::cerr << "single-threaded D3D11 validation failed: sequence="
+                      << frame_sequence_succeeded << " teardown="
+                      << teardown_succeeded << " off-thread=" << off_thread
+                      << " synthetic=" << synthetic_acquires << '\n';
+            return EXIT_FAILURE;
+        }
+        std::cout << "OpenXR single-threaded D3D11 test passed\n";
         return EXIT_SUCCESS;
     }
 
