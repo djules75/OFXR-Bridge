@@ -1173,8 +1173,9 @@ int main(int argc, char** argv) {
     {
         std::filesystem::path ini = std::filesystem::path(argv[1]).parent_path() /
             L"ofxr_bridge.ini";
+        // Same default as the layer: on unless the ini says 0.
         g_deep_pipeline = GetPrivateProfileIntW(
-            L"ofxr", L"deep_pipeline", 0, ini.wstring().c_str()) == 1;
+            L"ofxr", L"deep_pipeline", 1, ini.wstring().c_str()) != 0;
     }
     if (argc == 4 && !g_split_eye_mode && !g_double_wide_mode &&
         !g_d3d11_interop_mode && !g_steamvr_runtime_mode &&

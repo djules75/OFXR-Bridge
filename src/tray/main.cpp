@@ -1098,6 +1098,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         return EXIT_FAILURE;
     }
 
+    // Arm straight away: launching the tray is the user asking for the
+    // bridge. A failure leaves it disarmed with the reason shown, exactly as
+    // the menu item would; the menu can retry.
+    {
+        std::wstring arm_error;
+        if (!arm_bridge(state, &arm_error)) {
+            show_error(window, arm_error);
+        }
+    }
+
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
         TranslateMessage(&message);

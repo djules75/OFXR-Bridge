@@ -71,7 +71,7 @@ struct ConfiguredNvidiaOptions {
     const std::filesystem::path& module_directory) noexcept;
 
 // `[ofxr] deep_pipeline`: one display period of extra depth, bought with one
-// display period of latency. Off unless set to 1. Read once per session, at
+// display period of latency. On unless set to 0. Read once per session, at
 // xrCreateSession; the tray calls it "Prefer FPS over latency".
 [[nodiscard]] bool read_deep_pipeline(
     const std::filesystem::path& module_directory) noexcept;

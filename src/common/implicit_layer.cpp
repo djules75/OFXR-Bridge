@@ -213,13 +213,13 @@ bool read_deep_pipeline(
     const std::filesystem::path& module_directory) noexcept {
     try {
         if (module_directory.empty()) {
-            return false;
+            return true;
         }
         const auto ini_path = module_directory / L"ofxr_bridge.ini";
         return GetPrivateProfileIntW(
-                   L"ofxr", L"deep_pipeline", 0, ini_path.c_str()) == 1;
+                   L"ofxr", L"deep_pipeline", 1, ini_path.c_str()) != 0;
     } catch (...) {
-        return false;
+        return true;
     }
 }
 

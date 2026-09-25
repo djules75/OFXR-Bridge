@@ -2775,9 +2775,9 @@ XrResult layer_create_session_impl(
         initial_control.desired.backward};
     // One display period of extra depth, bought with one display period of
     // latency: every synthetic is held until it is a period old, so synthesis
-    // gets a period to finish instead of the gap the game leaves. Off by
-    // default, because the latency is a cost the user is the one to accept;
-    // the tray's "Prefer FPS over latency". Fixed for the session - it sets
+    // gets a period to finish instead of the gap the game leaves. On by
+    // default; the tray's "Prefer FPS over latency" turns it off for anyone
+    // who would rather not pay the latency. Fixed for the session - it sets
     // the private swapchain rings and the admission bounds.
     state->deep_pipeline =
         xrfg::implicit_layer::read_deep_pipeline(current_layer_directory());
