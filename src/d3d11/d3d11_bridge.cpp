@@ -162,6 +162,9 @@ struct D3D11BridgeSwapchain::Impl {
         description.SampleDesc.Count = 1;
         description.SampleDesc.Quality = 0;
         description.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+        if (path == D3D11BridgePath::mip_copy) {
+            description.MipLevels = 1;
+        }
         if (path == D3D11BridgePath::depth_copy) {
             // D3D11 opens a shared texture only when it can bind it to
             // something; a typeless texture with no flags at all is refused
@@ -210,6 +213,11 @@ struct D3D11BridgeSwapchain::Impl {
         description.BindFlags = requested.depth_stencil
             ? D3D11_BIND_DEPTH_STENCIL
             : (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+        // A game that asks for mips may fill them with GenerateMips, which
+        // needs this flag; a runtime's own mipmapped D3D11 images carry it.
+        if (description.MipLevels > 1 && !requested.depth_stencil) {
+            description.MiscFlags |= D3D11_RESOURCE_MISC_GENERATE_MIPS;
+        }
         if (requested.unordered_access && requested.requested_sample_count == 1) {
             description.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
         }
@@ -301,8 +309,12 @@ struct D3D11BridgeSwapchain::Impl {
         // The path. Multisampling can never be shared, so it resolves.
         // Depth is tried shared first; the driver decides, and the copy
         // path takes over if it refuses.
+        const bool mipmapped = runtime_images.front()->GetDesc().MipLevels > 1;
         if (requested.requested_sample_count > 1) {
             path = D3D11BridgePath::resolve;
+            result = create_images(input_runtime_images, requested, failure_stage);
+        } else if (mipmapped && !requested.depth_stencil) {
+            path = D3D11BridgePath::mip_copy;
             result = create_images(input_runtime_images, requested, failure_stage);
         } else if (requested.depth_stencil) {
             path = D3D11BridgePath::direct;
@@ -417,6 +429,17 @@ struct D3D11BridgeSwapchain::Impl {
             d3d11_context4->CopyResource(shared, own);
             return;
         }
+        if (path == D3D11BridgePath::mip_copy) {
+            D3D11_TEXTURE2D_DESC own_description{};
+            own->GetDesc(&own_description);
+            for (UINT slice = 0; slice < own_description.ArraySize; ++slice) {
+                d3d11_context4->CopySubresourceRegion(
+                    shared, D3D11CalcSubresource(0, slice, 1), 0, 0, 0,
+                    own, D3D11CalcSubresource(0, slice, own_description.MipLevels),
+                    nullptr);
+            }
+            return;
+        }
         D3D11_TEXTURE2D_DESC description{};
         own->GetDesc(&description);
         for (UINT slice = 0; slice < description.ArraySize; ++slice) {
@@ -464,7 +487,25 @@ struct D3D11BridgeSwapchain::Impl {
         barrier.Transition.StateBefore = resting;
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
         copy->list->ResourceBarrier(1, &barrier);
-        copy->list->CopyResource(runtime_image, shared_images[index].Get());
+        const D3D12_RESOURCE_DESC runtime_description = runtime_image->GetDesc();
+        if (path == D3D11BridgePath::mip_copy) {
+            // The single-mip shared texture into mip 0 of each slice.
+            for (UINT slice = 0; slice < runtime_description.DepthOrArraySize; ++slice) {
+                D3D12_TEXTURE_COPY_LOCATION destination{};
+                destination.pResource = runtime_image;
+                destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                // Mip 0 of the slice: mip + slice * mip count, plane 0.
+                destination.SubresourceIndex =
+                    slice * static_cast<UINT>(runtime_description.MipLevels);
+                D3D12_TEXTURE_COPY_LOCATION source{};
+                source.pResource = shared_images[index].Get();
+                source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                source.SubresourceIndex = slice;
+                copy->list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+            }
+        } else {
+            copy->list->CopyResource(runtime_image, shared_images[index].Get());
+        }
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
         barrier.Transition.StateAfter = resting;
         copy->list->ResourceBarrier(1, &barrier);

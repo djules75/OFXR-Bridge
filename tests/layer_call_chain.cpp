@@ -1256,7 +1256,10 @@ template <typename Function>
     texture_description.Height = 4;
     texture_description.DepthOrArraySize =
         (g_split_eye_mode || g_double_wide_mode) ? 1 : 2;
-    texture_description.MipLevels = 1;
+    // d3d11-bridge: mipmapped, as Cyberpunk 2077 asks for, so the bridge's
+    // mip_copy path runs end to end - D3D11 will not open a shared texture
+    // with more than one mip.
+    texture_description.MipLevels = g_d3d11_bridge_mode ? 3 : 1;
     texture_description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     texture_description.SampleDesc.Count = 1;
     texture_description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
@@ -1273,6 +1276,15 @@ template <typename Function>
              &g_current_swapchain_right_b_images,
              &g_synthetic_swapchain_right_images,
              &g_synthetic_swapchain_right_b_images}) {
+        // Only the game's own images are mipmapped: the layer asks for one
+        // mip on a bridged session's private swapchains, and a runtime
+        // creates what it is asked for.
+        texture_description.MipLevels =
+            g_d3d11_bridge_mode &&
+                    (images == &g_application_swapchain_images ||
+                     images == &g_application_swapchain_right_images)
+                ? 3
+                : 1;
         for (auto& image : *images) {
             image.Reset();
             if (FAILED(g_device->CreateCommittedResource(
@@ -2198,8 +2210,7 @@ int main(int argc, char** argv) {
     swapchain_info.faceCount = 1;
     swapchain_info.arraySize =
         (g_split_eye_mode || g_double_wide_mode) ? 1 : 2;
-    swapchain_info.mipCount =
-        ((g_d3d11_interop_mode && !g_d3d11_bridge_mode) || g_vulkan_mode) ? 3 : 1;
+    swapchain_info.mipCount = (g_d3d11_interop_mode || g_vulkan_mode) ? 3 : 1;
 
     if (g_split_eye_mode) {
         XrSwapchain left_swapchain = XR_NULL_HANDLE;

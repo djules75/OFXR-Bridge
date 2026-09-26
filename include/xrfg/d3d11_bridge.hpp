@@ -23,6 +23,14 @@ enum class D3D11BridgePath : std::uint32_t {
     // release it is resolved into the single-sample shared texture. The
     // runtime's swapchain is single-sample.
     resolve = 2,
+    // The application renders into a mipmapped texture of its own; at
+    // release mip 0 of each slice is copied into a single-mip shared texture
+    // and from there into mip 0 of the runtime's image. D3D11 will not open
+    // a shared D3D12 texture with more than one mip in any combination of
+    // format, flags or array size (measured with Cyberpunk 2077's four-mip
+    // swapchains). The runtime's lower mips are not written, as on the
+    // direct D3D11 path, where the synthesis also carries mip 0 only.
+    mip_copy = 3,
 };
 
 struct D3D11BridgeSwapchainDescription {

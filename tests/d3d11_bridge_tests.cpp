@@ -64,7 +64,8 @@ struct Devices {
 // A runtime image: what XR_KHR_D3D12_enable hands out, resting in
 // RENDER_TARGET or DEPTH_WRITE.
 [[nodiscard]] ComPtr<ID3D12Resource> create_runtime_image(
-    ID3D12Device* device, DXGI_FORMAT format, bool depth, UINT array_size) {
+    ID3D12Device* device, DXGI_FORMAT format, bool depth, UINT array_size,
+    UINT mip_levels = 1) {
     D3D12_HEAP_PROPERTIES heap{};
     heap.Type = D3D12_HEAP_TYPE_DEFAULT;
     D3D12_RESOURCE_DESC description{};
@@ -72,7 +73,7 @@ struct Devices {
     description.Width = 8;
     description.Height = 8;
     description.DepthOrArraySize = static_cast<UINT16>(array_size);
-    description.MipLevels = 1;
+    description.MipLevels = static_cast<UINT16>(mip_levels);
     description.Format = format;
     description.SampleDesc.Count = 1;
     description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
@@ -228,6 +229,48 @@ void test_direct(const Devices& devices) {
     expect(!bytes.empty() && bytes[0] == 0, "direct: an unreleased image is untouched");
 }
 
+// Cyberpunk 2077 asks for four mip levels on its colour swapchains, and
+// D3D11 refused to open the first build's shared texture for it.
+void test_mipmapped(const Devices& devices) {
+    ComPtr<ID3D12Resource> runtime = create_runtime_image(
+        devices.d3d12.Get(), DXGI_FORMAT_R8G8B8A8_TYPELESS, false, 2, 4);
+    expect(runtime != nullptr, "mips: runtime image created");
+    if (!runtime) return;
+    std::vector<ID3D12Resource*> images{runtime.Get()};
+    xrfg::D3D11BridgeSwapchain bridge;
+    xrfg::D3D11BridgeSwapchainDescription requested{};
+    requested.requested_format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    requested.requested_sample_count = 1;
+    std::uint32_t stage = 0;
+    const HRESULT init = bridge.initialize(
+        devices.d3d11.Get(), devices.context.Get(), devices.d3d12.Get(),
+        devices.queue.Get(), images, requested, &stage);
+    expect(SUCCEEDED(init), "mips: bridge initialised");
+    if (FAILED(init)) {
+        std::cerr << "  stage " << stage << " hr 0x" << std::hex << init << std::dec << '\n';
+        return;
+    }
+    std::cout << "mip path: " << static_cast<unsigned>(bridge.path()) << '\n';
+    ID3D11Texture2D* const texture = bridge.d3d11_images()[0];
+    D3D11_TEXTURE2D_DESC description{};
+    texture->GetDesc(&description);
+    expect(description.MipLevels == 4, "mips: the application's texture has four mips");
+    std::vector<std::uint8_t> pixels(8 * 8 * 4, 0);
+    for (std::size_t index = 0; index < pixels.size(); index += 4) {
+        pixels[index] = 90;
+        pixels[index + 3] = 255;
+    }
+    expect(SUCCEEDED(bridge.before_write(0)), "mips: before_write");
+    devices.context->UpdateSubresource(texture, 0, nullptr, pixels.data(), 8 * 4, 0);
+    expect(SUCCEEDED(bridge.release(0)), "mips: release");
+    expect(SUCCEEDED(bridge.mark_read(0)), "mips: mark_read");
+    expect(SUCCEEDED(bridge.wait_for_idle()), "mips: idle");
+    std::vector<std::uint8_t> bytes;
+    UINT pitch = 0;
+    expect(read_back(devices, runtime.Get(), false, &bytes, &pitch), "mips: readback");
+    expect(!bytes.empty() && bytes[0] == 90, "mips: the runtime image holds mip 0");
+}
+
 void test_depth(const Devices& devices) {
     ComPtr<ID3D12Resource> runtime =
         create_runtime_image(devices.d3d12.Get(), DXGI_FORMAT_D32_FLOAT, true, 1);
@@ -338,6 +381,7 @@ int main() {
         return 0;
     }
     test_direct(devices);
+    test_mipmapped(devices);
     test_depth(devices);
     test_resolve(devices);
     if (g_failures != 0) {

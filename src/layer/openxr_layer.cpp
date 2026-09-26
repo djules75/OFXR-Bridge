@@ -2265,6 +2265,15 @@ create_d3d12_frame_generation_swapchains(
         private_info.next = nullptr;
         private_info.usageFlags |=
             XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+        // A bridged D3D11 game's mipmapped swapchain (Cyberpunk 2077 asks for
+        // four): the synthesizer writes mip 0 and takes single-mip outputs
+        // only, and the bridge carries mip 0 only, so the private swapchains
+        // have one. The direct D3D11 path never met this, because synthesis
+        // wrote to the interop's own single-mip textures; a native D3D12
+        // game keeps what it asked for.
+        if (state->session->d3d11_bridge) {
+            private_info.mipCount = 1;
+        }
         XrResult refusal = XR_SUCCESS;
         if (!create_private_ring(
                 state, private_info, kCurrentSlotCount, &current, &refusal)) {
