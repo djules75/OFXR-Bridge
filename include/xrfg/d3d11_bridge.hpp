@@ -31,6 +31,17 @@ enum class D3D11BridgePath : std::uint32_t {
     // swapchains). The runtime's lower mips are not written, as on the
     // direct D3D11 path, where the synthesis also carries mip 0 only.
     mip_copy = 3,
+    // Depth the driver will share in no form: the packed depth-stencil
+    // families, where D3D11 opens neither a depth-flagged nor a bare
+    // typeless shared texture (measured with Ready or Not's
+    // D32_FLOAT_S8X24_UINT and with D24_UNORM_S8_UINT on the same GPU).
+    // The application renders into a depth texture of the layer's and
+    // nothing reaches the runtime's image; the layer strips
+    // the depth information naming this swapchain from every submission, so
+    // the runtime composes without depth, as it does for the many titles
+    // that never submit any. The alternative was failing the creation, which
+    // a title may not survive.
+    depth_private = 4,
 };
 
 struct D3D11BridgeSwapchainDescription {

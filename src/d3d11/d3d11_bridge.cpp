@@ -265,6 +265,28 @@ struct D3D11BridgeSwapchain::Impl {
         return S_OK;
     }
 
+    // depth_private: the application's textures only; the runtime's images
+    // are never written and never submitted.
+    [[nodiscard]] HRESULT create_private_depth_images(
+        std::span<ID3D12Resource* const> input_runtime_images,
+        const D3D11BridgeSwapchainDescription& requested,
+        std::uint32_t* failure_stage) noexcept {
+        shared_images.clear();
+        d3d11_shared.clear();
+        d3d11_own.clear();
+        for (ID3D12Resource* image : input_runtime_images) {
+            ComPtr<ID3D11Texture2D> own;
+            const HRESULT result = create_own_texture(
+                image->GetDesc(), requested, &own, failure_stage);
+            if (FAILED(result)) {
+                return result;
+            }
+            d3d11_own.push_back(std::move(own));
+        }
+        shared_format = DXGI_FORMAT_UNKNOWN;
+        return S_OK;
+    }
+
     [[nodiscard]] HRESULT initialize(
         ID3D11Device* input_d3d11_device,
         ID3D11DeviceContext* input_d3d11_context,
@@ -322,6 +344,11 @@ struct D3D11BridgeSwapchain::Impl {
             if (FAILED(result)) {
                 path = D3D11BridgePath::depth_copy;
                 result = create_images(input_runtime_images, requested, failure_stage);
+            }
+            if (FAILED(result)) {
+                path = D3D11BridgePath::depth_private;
+                result = create_private_depth_images(
+                    input_runtime_images, requested, failure_stage);
             }
         } else {
             path = D3D11BridgePath::direct;
@@ -453,6 +480,9 @@ struct D3D11BridgeSwapchain::Impl {
         if (!enabled || index >= runtime_images.size()) {
             return E_INVALIDARG;
         }
+        if (path == D3D11BridgePath::depth_private) {
+            return S_OK;
+        }
         move_own_to_shared(index);
         // The application's rendering into the shared texture, complete on
         // its context, before the layer's queue reads it.
@@ -531,6 +561,9 @@ struct D3D11BridgeSwapchain::Impl {
         if (!enabled || index >= runtime_images.size()) {
             return E_INVALIDARG;
         }
+        if (path == D3D11BridgePath::depth_private) {
+            return S_OK;
+        }
         const std::uint64_t value = allocate();
         const HRESULT result = d3d12_queue->Signal(d3d12_fence.Get(), value);
         if (FAILED(result)) {
@@ -546,7 +579,7 @@ struct D3D11BridgeSwapchain::Impl {
         if (!enabled || index >= runtime_images.size()) {
             return E_INVALIDARG;
         }
-        if (last_read[index] == 0) {
+        if (path == D3D11BridgePath::depth_private || last_read[index] == 0) {
             return S_OK;
         }
         const HRESULT result =

@@ -322,6 +322,57 @@ void test_depth(const Devices& devices) {
         "depth: the runtime's depth image holds the cleared value");
 }
 
+// The packed depth-stencil family D3D11 will not open shared in any form:
+// the bridge keeps the depth on the application's side and the runtime's
+// image is left alone (depth_private). Should a driver ever share it, the
+// copy path is just as acceptable; the test only requires that the creation
+// succeeds and the application can render depth into what it is given.
+void test_packed_depth(const Devices& devices) {
+    ComPtr<ID3D12Resource> runtime = create_runtime_image(
+        devices.d3d12.Get(), DXGI_FORMAT_D24_UNORM_S8_UINT, true, 2);
+    expect(runtime != nullptr, "packed depth: runtime image created");
+    if (!runtime) return;
+    std::vector<ID3D12Resource*> images{runtime.Get()};
+
+    xrfg::D3D11BridgeSwapchain bridge;
+    xrfg::D3D11BridgeSwapchainDescription requested{};
+    requested.requested_format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    requested.requested_sample_count = 1;
+    requested.depth_stencil = true;
+    std::uint32_t stage = 0;
+    const HRESULT init = bridge.initialize(
+        devices.d3d11.Get(), devices.context.Get(), devices.d3d12.Get(),
+        devices.queue.Get(), images, requested, &stage);
+    expect(SUCCEEDED(init), "packed depth: the creation never fails");
+    if (FAILED(init)) {
+        std::cerr << "  stage " << stage << " hr 0x" << std::hex << init << std::dec << '\n';
+        return;
+    }
+    std::cout << "packed depth path: " << static_cast<unsigned>(bridge.path()) << '\n';
+    expect(bridge.d3d11_images().size() == 1, "packed depth: one application texture");
+    if (bridge.d3d11_images().empty()) return;
+
+    ID3D11Texture2D* const texture = bridge.d3d11_images()[0];
+    D3D11_TEXTURE2D_DESC description{};
+    texture->GetDesc(&description);
+    expect(description.ArraySize == 2, "packed depth: the application's texture keeps the array size");
+    D3D11_DEPTH_STENCIL_VIEW_DESC view_description{};
+    view_description.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    view_description.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+    view_description.Texture2DArray.ArraySize = 2;
+    ComPtr<ID3D11DepthStencilView> view;
+    expect(SUCCEEDED(devices.d3d11->CreateDepthStencilView(
+        texture, &view_description, view.GetAddressOf())),
+        "packed depth: the application can create its depth-stencil view");
+    if (!view) return;
+    expect(SUCCEEDED(bridge.before_write(0)), "packed depth: before_write");
+    devices.context->ClearDepthStencilView(
+        view.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 0.5F, 1);
+    expect(SUCCEEDED(bridge.release(0)), "packed depth: release");
+    expect(SUCCEEDED(bridge.mark_read(0)), "packed depth: mark_read");
+    expect(SUCCEEDED(bridge.wait_for_idle()), "packed depth: idle");
+}
+
 void test_resolve(const Devices& devices) {
     ComPtr<ID3D12Resource> runtime =
         create_runtime_image(devices.d3d12.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, false, 2);
@@ -383,6 +434,7 @@ int main() {
     test_direct(devices);
     test_mipmapped(devices);
     test_depth(devices);
+    test_packed_depth(devices);
     test_resolve(devices);
     if (g_failures != 0) {
         std::cerr << g_failures << " D3D11 bridge check(s) failed\n";

@@ -767,6 +767,10 @@ struct SessionState {
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
     };
     std::unique_ptr<D3D11Bridge> d3d11_bridge;
+    // Set once a bridged swapchain took D3D11BridgePath::depth_private, so
+    // xrEndFrame knows to look for depth information naming one. Never
+    // cleared: a strip on a frame that names none is a cheap walk.
+    std::atomic<bool> has_private_depth_swapchain{false};
     // Application frames submitted on this session, counted only until the
     // delivery connection is released. Guarded by frame_call_mutex.
     std::uint32_t application_frames_submitted{};
@@ -5010,6 +5014,9 @@ XrResult layer_create_swapchain_impl(
             (static_cast<std::uint64_t>(bridge->path()) << 32) | runtime_count,
             (static_cast<std::uint64_t>(bridge->shared_format()) << 32) |
                 static_cast<std::uint64_t>(static_cast<std::uint32_t>(create_info->format)));
+        if (bridge->path() == xrfg::D3D11BridgePath::depth_private) {
+            state->has_private_depth_swapchain.store(true, std::memory_order_release);
+        }
         std::scoped_lock lock(swapchain_state->mutex);
         swapchain_state->bridge = std::move(bridge);
     }
@@ -10080,6 +10087,103 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
         result, control.revision, optical_flow_configuration_code(backend, options), state->menu_enabled ? 1 : 0);
 }
 
+// A bridged depth swapchain on D3D11BridgePath::depth_private has runtime
+// images nothing ever writes, so depth information naming it must not reach
+// the runtime. The application's end-frame data is read-only, so the
+// projection layers whose views carry such a node are copied with the node
+// unlinked; every other layer pointer is forwarded as it came. The storage
+// lives for the xrEndFrame call, which is as long as anything downstream
+// reads the application's data: an owned frame copies what it keeps, a
+// borrowed one is waited for before this call returns.
+struct PrivateDepthStrip {
+    XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
+    std::vector<const XrCompositionLayerBaseHeader*> layers;
+    std::deque<ProjectionLayerCopy> projections;
+};
+
+[[nodiscard]] bool names_private_depth_swapchain(const void* next) noexcept {
+    const auto* header = static_cast<const XrBaseInStructure*>(next);
+    if (header == nullptr ||
+        header->type != XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR) {
+        return false;
+    }
+    const auto* depth = reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(header);
+    const auto swapchain_state = find_swapchain(depth->subImage.swapchain);
+    if (!swapchain_state) {
+        return false;
+    }
+    std::scoped_lock lock(swapchain_state->mutex);
+    return swapchain_state->bridge &&
+           swapchain_state->bridge->path() == xrfg::D3D11BridgePath::depth_private;
+}
+
+// Returns the end info to submit: the application's own unless a projection
+// view's chain starts with depth information naming a private depth
+// swapchain, in which case a copy without those nodes. Only a leading run
+// of such nodes is unlinked: the chain's other structures are of types this
+// layer does not know the size of, so a node behind one of them stays.
+[[nodiscard]] const XrFrameEndInfo* strip_private_depth(
+    const SessionState& state,
+    const XrFrameEndInfo* end_info,
+    PrivateDepthStrip& storage) {
+    if (end_info == nullptr || end_info->layers == nullptr ||
+        !state.has_private_depth_swapchain.load(std::memory_order_acquire)) {
+        return end_info;
+    }
+    bool any = false;
+    for (std::uint32_t layer_index = 0; layer_index < end_info->layerCount && !any; ++layer_index) {
+        const auto* layer = end_info->layers[layer_index];
+        if (layer == nullptr || layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+            continue;
+        }
+        const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+        for (std::uint32_t view_index = 0;
+             projection->views != nullptr && view_index < projection->viewCount; ++view_index) {
+            if (names_private_depth_swapchain(projection->views[view_index].next)) {
+                any = true;
+                break;
+            }
+        }
+    }
+    if (!any) {
+        return end_info;
+    }
+    storage.info = *end_info;
+    storage.layers.assign(end_info->layers, end_info->layers + end_info->layerCount);
+    for (std::uint32_t layer_index = 0; layer_index < end_info->layerCount; ++layer_index) {
+        const auto* layer = end_info->layers[layer_index];
+        if (layer == nullptr || layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+            continue;
+        }
+        const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+        if (projection->views == nullptr) {
+            continue;
+        }
+        bool affected = false;
+        for (std::uint32_t view_index = 0; view_index < projection->viewCount; ++view_index) {
+            affected = affected ||
+                names_private_depth_swapchain(projection->views[view_index].next);
+        }
+        if (!affected) {
+            continue;
+        }
+        ProjectionLayerCopy& copy = storage.projections.emplace_back();
+        copy.layer_index = layer_index;
+        copy.layer = *projection;
+        copy.views.assign(projection->views, projection->views + projection->viewCount);
+        for (XrCompositionLayerProjectionView& view : copy.views) {
+            while (names_private_depth_swapchain(view.next)) {
+                view.next = static_cast<const XrBaseInStructure*>(view.next)->next;
+            }
+        }
+        copy.layer.views = copy.views.data();
+        storage.layers[layer_index] =
+            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&copy.layer);
+    }
+    storage.info.layers = storage.layers.data();
+    return &storage.info;
+}
+
 XrResult layer_end_frame_impl(
     XrSession session,
     const XrFrameEndInfo* end_info) {
@@ -10087,6 +10191,8 @@ XrResult layer_end_frame_impl(
     if (!state || state->dispatch->end_frame == nullptr) {
         return XR_ERROR_HANDLE_INVALID;
     }
+    PrivateDepthStrip private_depth_strip;
+    end_info = strip_private_depth(*state, end_info, private_depth_strip);
 
     // Releasable, because the once-per-pair hold at the end of this function
     // must not keep the application's other thread out of xrWaitFrame while it

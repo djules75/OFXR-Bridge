@@ -51,6 +51,12 @@ XrSwapchain g_application_swapchain = fake_handle<XrSwapchain>(0x303);
 XrSwapchain g_current_swapchain = fake_handle<XrSwapchain>(0x304);
 XrSwapchain g_synthetic_swapchain = fake_handle<XrSwapchain>(0x305);
 XrSwapchain g_application_swapchain_right = fake_handle<XrSwapchain>(0x306);
+// d3d11-bridge: the application's depth swapchain, in the packed
+// depth-stencil format D3D11 will not open shared. The layer keeps its depth
+// private and must strip the depth information naming it from every
+// submission; the fake counts the ones that reach it.
+XrSwapchain g_application_depth_swapchain = fake_handle<XrSwapchain>(0x30d);
+std::atomic<std::uint32_t> g_private_depth_submissions{0};
 XrSwapchain g_current_swapchain_right = fake_handle<XrSwapchain>(0x307);
 XrSwapchain g_synthetic_swapchain_right = fake_handle<XrSwapchain>(0x308);
 // The layer alternates its current output between two private swapchains so a
@@ -296,6 +302,7 @@ std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_current_swapchain_b_images;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_synthetic_swapchain_images;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_synthetic_swapchain_b_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_application_swapchain_images;
+std::array<ComPtr<ID3D12Resource>, 3> g_application_depth_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_current_swapchain_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_current_swapchain_b_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_images;
@@ -651,6 +658,15 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_end_frame(
             }
             for (std::uint32_t view_index = 0; view_index < projection->viewCount; ++view_index) {
                 saw_projection = true;
+                for (const auto* chained = static_cast<const XrBaseInStructure*>(
+                         projection->views[view_index].next);
+                     chained != nullptr; chained = chained->next) {
+                    if (chained->type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR &&
+                        reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(chained)
+                                ->subImage.swapchain == g_application_depth_swapchain) {
+                        g_private_depth_submissions.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
                 const XrSwapchain handle = projection->views[view_index].subImage.swapchain;
                 const SubmittedTarget view_target =
                     is_application_swapchain(handle)
@@ -777,6 +793,13 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
     XrSession,
     const XrSwapchainCreateInfo* create_info,
     XrSwapchain* swapchain) {
+    // The depth swapchain sits outside the call numbering the private slots
+    // are routed by.
+    if (g_d3d11_bridge_mode && create_info != nullptr &&
+        (create_info->usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0) {
+        *swapchain = g_application_depth_swapchain;
+        return XR_SUCCESS;
+    }
     const std::uint32_t call =
         g_create_swapchain_calls.fetch_add(1, std::memory_order_relaxed);
     if (g_split_eye_mode) {
@@ -998,6 +1021,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_swapchain_images(
     std::uint32_t* image_count_output,
     XrSwapchainImageBaseHeader* images) {
     if (!is_application_swapchain(swapchain) &&
+        swapchain != g_application_depth_swapchain &&
         !is_current_swapchain(swapchain) &&
         !is_synthetic_swapchain(swapchain)) {
         return XR_ERROR_HANDLE_INVALID;
@@ -1063,6 +1087,9 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_swapchain_images(
             return XR_ERROR_VALIDATION_FAILURE;
         }
         const auto* selected_images = &g_application_swapchain_images;
+        if (swapchain == g_application_depth_swapchain) {
+            selected_images = &g_application_depth_images;
+        }
         if (swapchain == g_current_swapchain) {
             selected_images = &g_current_swapchain_images;
         } else if (swapchain == g_current_swapchain_b) {
@@ -1338,6 +1365,26 @@ template <typename Function>
             }
         }
     }
+    if (g_d3d11_bridge_mode) {
+        // The depth swapchain, in the packed format (Ready or Not's).
+        D3D12_RESOURCE_DESC depth_description = texture_description;
+        depth_description.MipLevels = 1;
+        depth_description.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        depth_description.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        for (auto& image : g_application_depth_images) {
+            image.Reset();
+            if (FAILED(g_device->CreateCommittedResource(
+                    &heap_properties,
+                    D3D12_HEAP_FLAG_NONE,
+                    &depth_description,
+                    D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                    nullptr,
+                    IID_PPV_ARGS(image.GetAddressOf())))) {
+                std::cerr << "failed to create a fake runtime depth image\n";
+                return false;
+            }
+        }
+    }
     return true;
 }
 
@@ -1348,7 +1395,10 @@ template <typename Function>
             D3D_DRIVER_TYPE_HARDWARE,
             nullptr,
             D3D11_CREATE_DEVICE_BGRA_SUPPORT |
-                (g_single_threaded_mode ? D3D11_CREATE_DEVICE_SINGLETHREADED : 0U),
+                (g_single_threaded_mode ? D3D11_CREATE_DEVICE_SINGLETHREADED : 0U) |
+                // XRFG_D3D11_DEBUG=1: the debug layer, whose messages the
+                // depth-swapchain check prints when the layer refuses one.
+                (std::getenv("XRFG_D3D11_DEBUG") != nullptr ? D3D11_CREATE_DEVICE_DEBUG : 0U),
             nullptr,
             0,
             D3D11_SDK_VERSION,
@@ -2551,6 +2601,58 @@ int main(int argc, char** argv) {
     if (XR_FAILED(create_swapchain(session, &swapchain_info, &swapchain))) {
         return EXIT_FAILURE;
     }
+    // d3d11-bridge: a depth swapchain in the packed format, which the
+    // bridge cannot share. The creation must succeed, the application must
+    // get D3D11 textures it can bind as depth, and the depth information
+    // it chains into its views must never reach the runtime.
+    XrSwapchain depth_swapchain = XR_NULL_HANDLE;
+    std::array<XrSwapchainImageD3D11KHR, 3> d3d11_depth_images{};
+    if (g_d3d11_bridge_mode && !g_acquire_ahead_mode) {
+        XrSwapchainCreateInfo depth_info = swapchain_info;
+        depth_info.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        depth_info.format = static_cast<std::int64_t>(DXGI_FORMAT_D24_UNORM_S8_UINT);
+        for (auto& image : d3d11_depth_images) {
+            image.type = XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
+        }
+        std::uint32_t depth_count = 0;
+        if (XR_FAILED(create_swapchain(session, &depth_info, &depth_swapchain)) ||
+            depth_swapchain != g_application_depth_swapchain ||
+            XR_FAILED(enumerate_images(
+                depth_swapchain,
+                static_cast<std::uint32_t>(d3d11_depth_images.size()),
+                &depth_count,
+                reinterpret_cast<XrSwapchainImageBaseHeader*>(d3d11_depth_images.data()))) ||
+            depth_count != 3) {
+            std::cerr << "d3d11-bridge: the packed depth swapchain was refused\n";
+            ComPtr<ID3D11InfoQueue> info_queue;
+            if (SUCCEEDED(g_d3d11_device.As(&info_queue))) {
+                const UINT64 count = info_queue->GetNumStoredMessages();
+                for (UINT64 message_index = 0; message_index < count; ++message_index) {
+                    SIZE_T length = 0;
+                    if (FAILED(info_queue->GetMessage(message_index, nullptr, &length)) || length == 0) {
+                        continue;
+                    }
+                    std::vector<char> bytes(length);
+                    auto* message = reinterpret_cast<D3D11_MESSAGE*>(bytes.data());
+                    if (SUCCEEDED(info_queue->GetMessage(message_index, message, &length))) {
+                        std::cerr << "  D3D11: " << message->pDescription << '\n';
+                    }
+                }
+            }
+            return EXIT_FAILURE;
+        }
+        D3D11_DEPTH_STENCIL_VIEW_DESC view_description{};
+        view_description.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        view_description.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+        view_description.Texture2DArray.ArraySize = 2;
+        ComPtr<ID3D11DepthStencilView> depth_view;
+        if (d3d11_depth_images[0].texture == nullptr ||
+            FAILED(g_d3d11_device->CreateDepthStencilView(
+                d3d11_depth_images[0].texture, &view_description, depth_view.GetAddressOf()))) {
+            std::cerr << "d3d11-bridge: the application cannot bind the depth texture\n";
+            return EXIT_FAILURE;
+        }
+    }
 
     std::uint32_t image_count = 0;
     XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
@@ -2716,6 +2818,20 @@ int main(int argc, char** argv) {
         projection_view.subImage.imageRect.extent = {4, 4};
         projection_view.subImage.imageArrayIndex =
             g_double_wide_mode ? 0 : index;
+    }
+    std::array<XrCompositionLayerDepthInfoKHR, 2> depth_infos{};
+    if (depth_swapchain != XR_NULL_HANDLE) {
+        for (std::uint32_t index = 0; index < depth_infos.size(); ++index) {
+            auto& depth = depth_infos[index];
+            depth.type = XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR;
+            depth.subImage = projection_views[index].subImage;
+            depth.subImage.swapchain = depth_swapchain;
+            depth.minDepth = 0.0F;
+            depth.maxDepth = 1.0F;
+            depth.nearZ = 0.1F;
+            depth.farZ = 100.0F;
+            projection_views[index].next = &depth;
+        }
     }
     XrSpace application_space = g_space;
     XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
@@ -3028,6 +3144,7 @@ int main(int argc, char** argv) {
         // mirror of the runtime's queue has to survive all of that, because
         // on the bridge it decides which texture reaches the runtime.
         std::uint32_t ahead_index = 0;
+        std::uint32_t depth_index = 0;
         if (g_acquire_ahead_mode) {
             g_acquire_ahead_active.store(true, std::memory_order_release);
             if (XR_FAILED(acquire_image(swapchain, &acquire_info, &ahead_index)) ||
@@ -3064,6 +3181,10 @@ int main(int argc, char** argv) {
                 XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
                 wait_for_queue_idle() &&
                 render_application_image(red) &&
+                (depth_swapchain == XR_NULL_HANDLE ||
+                 (XR_SUCCEEDED(acquire_image(depth_swapchain, &acquire_info, &depth_index)) &&
+                  XR_SUCCEEDED(wait_image(depth_swapchain, &image_wait_info)) &&
+                  XR_SUCCEEDED(release_image(depth_swapchain, &release_info)))) &&
                 XR_SUCCEEDED(release_image(swapchain, &release_info)) &&
                 submit_frame(application_frame.predictedDisplayTime) &&
                 wait_for_queue_idle();
@@ -3086,9 +3207,13 @@ int main(int argc, char** argv) {
         const bool teardown_succeeded =
             XR_SUCCEEDED(end_session(session)) &&
             XR_SUCCEEDED(destroy_swapchain(swapchain)) &&
+            (depth_swapchain == XR_NULL_HANDLE ||
+             XR_SUCCEEDED(destroy_swapchain(depth_swapchain))) &&
             XR_SUCCEEDED(destroy_session(session)) &&
             XR_SUCCEEDED(destroy_instance(instance));
         FreeLibrary(module);
+        const std::uint32_t private_depth =
+            g_private_depth_submissions.load(std::memory_order_relaxed);
         const std::uint32_t off_thread =
             g_off_thread_frame_calls.load(std::memory_order_relaxed);
         const std::uint32_t synthetic_acquires =
@@ -3107,6 +3232,9 @@ int main(int argc, char** argv) {
             budget_valid &&
             (!g_d3d11_bridge_mode ||
              g_bridge_session_bound.load(std::memory_order_acquire)) &&
+            // The private depth swapchain's information never reaches the
+            // runtime, on any of the layer's submissions.
+            private_depth == 0 &&
             // Generation still runs, inline: all but the arming frame and
             // the first frame, which primes, submit a synthetic.
             synthetic_acquires >= 7 &&
@@ -3121,6 +3249,7 @@ int main(int argc, char** argv) {
                       << teardown_succeeded << " off-thread=" << off_thread
                       << " synthetic=" << synthetic_acquires
                       << " stale-pixels=" << pixel_failures
+                      << " private-depth=" << private_depth
                       << " budget-refusals=" << refusals
                       << " creates=" << g_create_swapchain_calls.load()
                       << " destroys=" << g_destroy_swapchain_calls.load() << '\n';
