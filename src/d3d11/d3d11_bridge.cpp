@@ -34,6 +34,24 @@ struct UniqueHandle {
     }
 }
 
+// The typeless family of a depth format: what a shared texture takes when
+// the depth format itself cannot be shared, and what the application's own
+// depth texture is made of so it can create its depth view on it.
+[[nodiscard]] DXGI_FORMAT depth_typeless_format(DXGI_FORMAT format) noexcept {
+    switch (format) {
+        case DXGI_FORMAT_D16_UNORM:
+            return DXGI_FORMAT_R16_TYPELESS;
+        case DXGI_FORMAT_D24_UNORM_S8_UINT:
+            return DXGI_FORMAT_R24G8_TYPELESS;
+        case DXGI_FORMAT_D32_FLOAT:
+            return DXGI_FORMAT_R32_TYPELESS;
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+            return DXGI_FORMAT_R32G8X24_TYPELESS;
+        default:
+            return format;
+    }
+}
+
 constexpr std::size_t kCopyListCount = 4;
 
 } // namespace
@@ -55,14 +73,21 @@ struct D3D11BridgeSwapchain::Impl {
     HANDLE fence_event{};
     std::uint64_t next_fence_value{1};
     std::uint64_t last_signalled{};
+    D3D11BridgePath path{D3D11BridgePath::direct};
+    DXGI_FORMAT shared_format{DXGI_FORMAT_UNKNOWN};
+    DXGI_FORMAT resolve_format{DXGI_FORMAT_UNKNOWN};
+    bool runtime_depth{};
     std::vector<ComPtr<ID3D12Resource>> runtime_images;
     std::vector<ComPtr<ID3D12Resource>> shared_images;
-    std::vector<ComPtr<ID3D11Texture2D>> d3d11_images;
+    std::vector<ComPtr<ID3D11Texture2D>> d3d11_shared;
+    // The application's own textures on the copy and resolve paths; empty
+    // on the direct path.
+    std::vector<ComPtr<ID3D11Texture2D>> d3d11_own;
     std::vector<ID3D12Resource*> shared_views;
-    std::vector<ID3D11Texture2D*> d3d11_views;
+    std::vector<ID3D11Texture2D*> application_views;
     // The fence value the layer's queue signalled after its last read of
     // each shared texture; the application's context waits on it before
-    // rendering into that texture again.
+    // writing that texture again.
     std::vector<std::uint64_t> last_read;
     std::array<CopyList, kCopyListCount> copy_lists{};
     std::size_t next_copy_list{};
@@ -82,35 +107,14 @@ struct D3D11BridgeSwapchain::Impl {
     }
 
     [[nodiscard]] HRESULT create_shared_texture(
-        ID3D12Resource* runtime_image,
-        D3D12_RESOURCE_FLAGS extra_flags,
+        const D3D12_RESOURCE_DESC& description,
         ComPtr<ID3D12Resource>* shared,
         ComPtr<ID3D11Texture2D>* opened,
         std::uint32_t* failure_stage) noexcept {
-        const D3D12_RESOURCE_DESC runtime_description =
-            runtime_image->GetDesc();
         D3D12_HEAP_PROPERTIES heap_properties{};
         heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
         heap_properties.CreationNodeMask = 1;
         heap_properties.VisibleNodeMask = 1;
-        // The runtime image's own format, exactly: the copy into it is then
-        // between identical formats on every runtime, and the synthesizer
-        // sees the same format on the application's images as on the
-        // private swapchains the runtime creates for the layer. Runtimes
-        // hand a D3D11 session TYPELESS images for a typed request, and are
-        // expected to do the same here; a runtime that hands out the typed
-        // format gives the application a typed D3D11 texture, which a game
-        // creating views of another type in the family would refuse.
-        D3D12_RESOURCE_DESC description = runtime_description;
-        description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-        description.Flags = extra_flags;
-        if ((extra_flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) == 0) {
-            description.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-        }
-        // Both devices write and read the texture with no state
-        // transitions between them; simultaneous access is what makes a
-        // D3D12 resource legal to use that way.
-        description.Flags |= D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
         HRESULT result = d3d12_device->CreateCommittedResource(
             &heap_properties,
             D3D12_HEAP_FLAG_SHARED,
@@ -143,18 +147,129 @@ struct D3D11BridgeSwapchain::Impl {
         return result;
     }
 
+    // The shared texture's description for one runtime image on a path.
+    // Both devices write and read it with no state transitions between
+    // them; simultaneous access is what makes a D3D12 resource legal to use
+    // that way. On the depth-copy path the shared texture is the typeless
+    // family of the depth format and carries no render or depth flag: it is
+    // only ever a copy source and destination.
+    [[nodiscard]] static D3D12_RESOURCE_DESC shared_description(
+        const D3D12_RESOURCE_DESC& runtime_description,
+        D3D11BridgePath path,
+        const D3D11BridgeSwapchainDescription& requested) noexcept {
+        D3D12_RESOURCE_DESC description = runtime_description;
+        description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        description.SampleDesc.Count = 1;
+        description.SampleDesc.Quality = 0;
+        description.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+        if (path == D3D11BridgePath::depth_copy) {
+            // D3D11 opens a shared texture only when it can bind it to
+            // something; a typeless texture with no flags at all is refused
+            // (E_INVALIDARG from OpenSharedResource1, measured). The R32 and
+            // R16 families have a render-target member, so they carry the
+            // flag; the packed depth-stencil families have none and are left
+            // to the driver.
+            description.Format = depth_typeless_format(runtime_description.Format);
+            if (description.Format == DXGI_FORMAT_R32_TYPELESS ||
+                description.Format == DXGI_FORMAT_R16_TYPELESS) {
+                description.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            }
+            return description;
+        }
+        if (requested.depth_stencil) {
+            description.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        } else {
+            description.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        }
+        if (requested.unordered_access) {
+            description.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        }
+        return description;
+    }
+
+    // The application's own D3D11 texture on the copy and resolve paths:
+    // the shape the application asked for, in the typeless family so it can
+    // create any view of its own on it, as a runtime's D3D11 session would
+    // have given it.
+    [[nodiscard]] HRESULT create_own_texture(
+        const D3D12_RESOURCE_DESC& runtime_description,
+        const D3D11BridgeSwapchainDescription& requested,
+        ComPtr<ID3D11Texture2D>* output,
+        std::uint32_t* failure_stage) noexcept {
+        D3D11_TEXTURE2D_DESC description{};
+        description.Width = static_cast<UINT>(runtime_description.Width);
+        description.Height = runtime_description.Height;
+        description.MipLevels = runtime_description.MipLevels;
+        description.ArraySize = runtime_description.DepthOrArraySize;
+        description.Format = requested.depth_stencil
+            ? depth_typeless_format(runtime_description.Format)
+            : runtime_description.Format;
+        description.SampleDesc.Count = requested.requested_sample_count;
+        description.SampleDesc.Quality = 0;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.BindFlags = requested.depth_stencil
+            ? D3D11_BIND_DEPTH_STENCIL
+            : (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+        if (requested.unordered_access && requested.requested_sample_count == 1) {
+            description.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
+        }
+        if (requested.depth_stencil && requested.requested_sample_count == 1) {
+            description.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+        }
+        const HRESULT result = d3d11_device->CreateTexture2D(
+            &description, nullptr, output->GetAddressOf());
+        if (FAILED(result)) {
+            *failure_stage = 14;
+        }
+        return result;
+    }
+
+    [[nodiscard]] HRESULT create_images(
+        std::span<ID3D12Resource* const> input_runtime_images,
+        const D3D11BridgeSwapchainDescription& requested,
+        std::uint32_t* failure_stage) noexcept {
+        shared_images.clear();
+        d3d11_shared.clear();
+        d3d11_own.clear();
+        for (ID3D12Resource* image : input_runtime_images) {
+            const D3D12_RESOURCE_DESC runtime_description = image->GetDesc();
+            ComPtr<ID3D12Resource> shared;
+            ComPtr<ID3D11Texture2D> opened;
+            HRESULT result = create_shared_texture(
+                shared_description(runtime_description, path, requested),
+                &shared, &opened, failure_stage);
+            if (FAILED(result)) {
+                return result;
+            }
+            if (path != D3D11BridgePath::direct) {
+                ComPtr<ID3D11Texture2D> own;
+                result = create_own_texture(
+                    runtime_description, requested, &own, failure_stage);
+                if (FAILED(result)) {
+                    return result;
+                }
+                d3d11_own.push_back(std::move(own));
+            }
+            shared_format = shared->GetDesc().Format;
+            shared_images.push_back(std::move(shared));
+            d3d11_shared.push_back(std::move(opened));
+        }
+        return S_OK;
+    }
+
     [[nodiscard]] HRESULT initialize(
         ID3D11Device* input_d3d11_device,
         ID3D11DeviceContext* input_d3d11_context,
         ID3D12Device* input_d3d12_device,
         ID3D12CommandQueue* input_d3d12_queue,
         std::span<ID3D12Resource* const> input_runtime_images,
-        D3D12_RESOURCE_FLAGS extra_flags,
+        const D3D11BridgeSwapchainDescription& requested,
         std::uint32_t* failure_stage) noexcept {
         *failure_stage = 0;
         if (input_d3d11_device == nullptr || input_d3d11_context == nullptr ||
             input_d3d12_device == nullptr || input_d3d12_queue == nullptr ||
-            input_runtime_images.empty()) {
+            input_runtime_images.empty() ||
+            requested.requested_sample_count == 0) {
             *failure_stage = 1;
             return E_INVALIDARG;
         }
@@ -178,19 +293,37 @@ struct D3D11BridgeSwapchain::Impl {
                 *failure_stage = 4;
                 return E_INVALIDARG;
             }
-            ComPtr<ID3D12Resource> shared;
-            ComPtr<ID3D11Texture2D> opened;
-            result = create_shared_texture(
-                image, extra_flags, &shared, &opened, failure_stage);
-            if (FAILED(result)) {
-                return result;
-            }
             runtime_images.emplace_back(image);
-            shared_images.push_back(std::move(shared));
-            d3d11_images.push_back(std::move(opened));
+        }
+        runtime_depth = is_depth_format(runtime_images.front()->GetDesc().Format);
+        resolve_format = requested.requested_format;
+
+        // The path. Multisampling can never be shared, so it resolves.
+        // Depth is tried shared first; the driver decides, and the copy
+        // path takes over if it refuses.
+        if (requested.requested_sample_count > 1) {
+            path = D3D11BridgePath::resolve;
+            result = create_images(input_runtime_images, requested, failure_stage);
+        } else if (requested.depth_stencil) {
+            path = D3D11BridgePath::direct;
+            result = create_images(input_runtime_images, requested, failure_stage);
+            if (FAILED(result)) {
+                path = D3D11BridgePath::depth_copy;
+                result = create_images(input_runtime_images, requested, failure_stage);
+            }
+        } else {
+            path = D3D11BridgePath::direct;
+            result = create_images(input_runtime_images, requested, failure_stage);
+        }
+        if (FAILED(result)) {
+            return result;
         }
         for (const auto& image : shared_images) shared_views.push_back(image.Get());
-        for (const auto& image : d3d11_images) d3d11_views.push_back(image.Get());
+        if (path == D3D11BridgePath::direct) {
+            for (const auto& image : d3d11_shared) application_views.push_back(image.Get());
+        } else {
+            for (const auto& image : d3d11_own) application_views.push_back(image.Get());
+        }
         last_read.assign(runtime_images.size(), 0);
 
         result = d3d12_device->CreateFence(
@@ -272,10 +405,32 @@ struct D3D11BridgeSwapchain::Impl {
         return S_OK;
     }
 
+    // The application's own texture into the shared one, on its context,
+    // before the signal that hands the shared texture to the layer's queue.
+    void move_own_to_shared(std::uint32_t index) noexcept {
+        if (path == D3D11BridgePath::direct) {
+            return;
+        }
+        ID3D11Texture2D* const own = d3d11_own[index].Get();
+        ID3D11Texture2D* const shared = d3d11_shared[index].Get();
+        if (path == D3D11BridgePath::depth_copy) {
+            d3d11_context4->CopyResource(shared, own);
+            return;
+        }
+        D3D11_TEXTURE2D_DESC description{};
+        own->GetDesc(&description);
+        for (UINT slice = 0; slice < description.ArraySize; ++slice) {
+            const UINT subresource = D3D11CalcSubresource(0, slice, description.MipLevels);
+            d3d11_context4->ResolveSubresource(
+                shared, subresource, own, subresource, resolve_format);
+        }
+    }
+
     [[nodiscard]] HRESULT release(std::uint32_t index) noexcept {
         if (!enabled || index >= runtime_images.size()) {
             return E_INVALIDARG;
         }
+        move_own_to_shared(index);
         // The application's rendering into the shared texture, complete on
         // its context, before the layer's queue reads it.
         const std::uint64_t rendered = allocate();
@@ -299,8 +454,7 @@ struct D3D11BridgeSwapchain::Impl {
         // XR_KHR_D3D12_enable: the runtime hands images out in and expects
         // them back in RENDER_TARGET (DEPTH_WRITE for depth). The shared
         // texture is a simultaneous-access resource and needs no barrier.
-        const bool depth = is_depth_format(runtime_image->GetDesc().Format);
-        const D3D12_RESOURCE_STATES resting = depth
+        const D3D12_RESOURCE_STATES resting = runtime_depth
             ? D3D12_RESOURCE_STATE_DEPTH_WRITE
             : D3D12_RESOURCE_STATE_RENDER_TARGET;
         D3D12_RESOURCE_BARRIER barrier{};
@@ -387,7 +541,7 @@ HRESULT D3D11BridgeSwapchain::initialize(
     ID3D12Device* d3d12_device,
     ID3D12CommandQueue* d3d12_queue,
     std::span<ID3D12Resource* const> runtime_images,
-    D3D12_RESOURCE_FLAGS extra_flags,
+    const D3D11BridgeSwapchainDescription& description,
     std::uint32_t* failure_stage) noexcept {
     std::uint32_t stage = 0;
     HRESULT result = E_FAIL;
@@ -395,7 +549,7 @@ HRESULT D3D11BridgeSwapchain::initialize(
         std::scoped_lock lock(impl_->mutex);
         result = impl_->initialize(
             d3d11_device, d3d11_context, d3d12_device, d3d12_queue,
-            runtime_images, extra_flags, &stage);
+            runtime_images, description, &stage);
     } catch (...) {
         stage = 99;
         result = E_FAIL;
@@ -406,8 +560,16 @@ HRESULT D3D11BridgeSwapchain::initialize(
     return result;
 }
 
+D3D11BridgePath D3D11BridgeSwapchain::path() const noexcept {
+    return impl_->path;
+}
+
+DXGI_FORMAT D3D11BridgeSwapchain::shared_format() const noexcept {
+    return impl_->shared_format;
+}
+
 std::span<ID3D11Texture2D* const> D3D11BridgeSwapchain::d3d11_images() const noexcept {
-    return impl_->d3d11_views;
+    return impl_->application_views;
 }
 
 std::span<ID3D12Resource* const> D3D11BridgeSwapchain::shared_images() const noexcept {

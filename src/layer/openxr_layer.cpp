@@ -4004,6 +4004,15 @@ XrResult layer_create_session_impl(
     // D3D12 binding on the layer's device. Anything that fails leaves the
     // D3D11 binding as the application made it.
     XrGraphicsBindingD3D12KHR bridge_binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
+    const void* d3d11_binding_next = nullptr;
+    if (create_info != nullptr) {
+        for (auto* next = static_cast<const XrBaseInStructure*>(create_info->next);
+             next != nullptr; next = next->next) {
+            if (next->type == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR) {
+                d3d11_binding_next = next->next;
+            }
+        }
+    }
     if (dispatch->d3d11_bridge &&
         dispatch->get_d3d12_graphics_requirements != nullptr &&
         state->graphics_binding == SessionGraphicsBinding::d3d11 &&
@@ -4037,6 +4046,9 @@ XrResult layer_create_session_impl(
             state->graphics_binding_capabilities |= 128ULL;
             bridge_binding.device = state->d3d12_device.Get();
             bridge_binding.queue = state->d3d12_queue.Get();
+            // Whatever the application chained after its binding stays
+            // chained, after ours.
+            bridge_binding.next = d3d11_binding_next;
             substituted_info = *create_info;
             substituted_info.next = &bridge_binding;
             forwarded_info = &substituted_info;
@@ -4730,11 +4742,22 @@ XrResult layer_create_swapchain_impl(
         (create_info->usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) != 0 &&
         (create_info->usageFlags &
          XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0;
-    auto swapchain_state = std::make_shared<SwapchainState>(state, *create_info);
+    // Bridged and multisampled: the runtime gets a single-sample swapchain
+    // and the application a multisampled texture of its own, resolved at
+    // release (D3D11BridgePath::resolve). Every path below sees the
+    // single-sample create info, which is what the runtime's images are.
+    XrSwapchainCreateInfo bridged_create_info{};
+    const XrSwapchainCreateInfo* runtime_create_info = create_info;
+    if (state->d3d11_bridge && create_info->sampleCount > 1) {
+        bridged_create_info = *create_info;
+        bridged_create_info.sampleCount = 1;
+        runtime_create_info = &bridged_create_info;
+    }
+    auto swapchain_state = std::make_shared<SwapchainState>(state, *runtime_create_info);
     XrSwapchain created_swapchain = XR_NULL_HANDLE;
     const XrResult result = state->dispatch->create_swapchain(
         session,
-        create_info,
+        runtime_create_info,
         &created_swapchain);
     if (XR_FAILED(result)) {
         // The application losing a swapchain of its own is the shape a layer
@@ -4813,20 +4836,21 @@ XrResult layer_create_swapchain_impl(
             for (const XrSwapchainImageD3D12KHR& image : runtime_images) {
                 resources.push_back(image.texture);
             }
-            D3D12_RESOURCE_FLAGS extra_flags = D3D12_RESOURCE_FLAG_NONE;
-            if ((create_info->usageFlags & XR_SWAPCHAIN_USAGE_UNORDERED_ACCESS_BIT) != 0) {
-                extra_flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-            }
-            if ((create_info->usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0) {
-                extra_flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-            }
+            xrfg::D3D11BridgeSwapchainDescription requested{};
+            requested.requested_format =
+                static_cast<DXGI_FORMAT>(create_info->format);
+            requested.requested_sample_count = create_info->sampleCount;
+            requested.unordered_access =
+                (create_info->usageFlags & XR_SWAPCHAIN_USAGE_UNORDERED_ACCESS_BIT) != 0;
+            requested.depth_stencil =
+                (create_info->usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
             shared_result = bridge->initialize(
                 state->d3d11_bridge->device.Get(),
                 state->d3d11_bridge->context.Get(),
                 state->d3d12_device.Get(),
                 state->d3d12_queue.Get(),
                 resources,
-                extra_flags,
+                requested,
                 &failure_stage);
         }
         if (XR_FAILED(bridge_result) || FAILED(shared_result)) {
@@ -4845,12 +4869,16 @@ XrResult layer_create_swapchain_impl(
             state->dispatch->destroy_swapchain(created_swapchain);
             return XR_ERROR_RUNTIME_FAILURE;
         }
+        // 2: bridged. b the image count and, in the high half, the path
+        // (D3D11BridgePath); c the requested format and, in the high half,
+        // the format the shared textures took from the runtime's images.
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::d3d11_bridge,
             2,
             handle_value(created_swapchain),
-            runtime_count,
-            static_cast<std::uint64_t>(create_info->format));
+            (static_cast<std::uint64_t>(bridge->path()) << 32) | runtime_count,
+            (static_cast<std::uint64_t>(bridge->shared_format()) << 32) |
+                static_cast<std::uint64_t>(static_cast<std::uint32_t>(create_info->format)));
         std::scoped_lock lock(swapchain_state->mutex);
         swapchain_state->bridge = std::move(bridge);
     }

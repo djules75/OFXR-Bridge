@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.329.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.330.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -705,6 +705,23 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 "-DENABLED_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_logging_enabled.ini"
                 "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/d3d11-interop-logging-contract"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_d3d11_interop_logging.cmake")
+
+        add_executable(xrfg_d3d11_bridge_tests tests/d3d11_bridge_tests.cpp)
+        target_include_directories(xrfg_d3d11_bridge_tests PRIVATE include)
+        target_link_libraries(xrfg_d3d11_bridge_tests PRIVATE
+            xrfg_d3d12_history
+            d3d11
+            d3d12
+            dxgi)
+        target_compile_features(xrfg_d3d11_bridge_tests PRIVATE cxx_std_20)
+        if(MSVC)
+            target_compile_options(xrfg_d3d11_bridge_tests PRIVATE
+                /W4 /permissive- /EHsc)
+            target_compile_definitions(xrfg_d3d11_bridge_tests PRIVATE
+                NOMINMAX
+                WIN32_LEAN_AND_MEAN)
+        endif()
+        add_test(NAME xrfg_d3d11_bridge_tests COMMAND xrfg_d3d11_bridge_tests)
 
         add_executable(xrfg_d3d12_history_tests tests/d3d12_history_tests.cpp)
         target_include_directories(xrfg_d3d12_history_tests PRIVATE include)
