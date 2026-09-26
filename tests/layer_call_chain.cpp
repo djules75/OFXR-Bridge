@@ -1153,6 +1153,34 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_release_swapchain_image(
 XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_proc_addr(
     XrInstance,
     const char* name,
+    PFN_xrVoidFunction* function);
+
+// The test executable also stands in for the loader: the layer finds the
+// loader by the module that exports xrGetInstanceProcAddr and
+// xrEnumerateApiLayerProperties without negotiating as a layer or a
+// runtime, and takes the global functions from it when a layer above asks
+// for them with XR_NULL_HANDLE before any instance exists.
+extern "C" XRAPI_ATTR XrResult XRAPI_CALL fake_loader_get_instance_proc_addr(
+    XrInstance instance,
+    const char* name,
+    PFN_xrVoidFunction* function) {
+    return fake_get_instance_proc_addr(instance, name, function);
+}
+
+extern "C" XRAPI_ATTR XrResult XRAPI_CALL fake_loader_enumerate_api_layer_properties(
+    std::uint32_t,
+    std::uint32_t* count,
+    XrApiLayerProperties*) {
+    *count = 0;
+    return XR_SUCCESS;
+}
+
+#pragma comment(linker, "/export:xrGetInstanceProcAddr=fake_loader_get_instance_proc_addr")
+#pragma comment(linker, "/export:xrEnumerateApiLayerProperties=fake_loader_enumerate_api_layer_properties")
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_proc_addr(
+    XrInstance,
+    const char* name,
     PFN_xrVoidFunction* function) {
     *function = nullptr;
 #define XRFG_FAKE_FUNCTION(openxr_name, implementation)                         \
@@ -2114,6 +2142,33 @@ int main(int argc, char** argv) {
     if (g_d3d11_interop_mode) {
         instance_info.enabledExtensionNames = d3d11_extensions;
         instance_info.enabledExtensionCount = 1;
+    }
+
+    // A layer above this one (Cheeky Foveated DLSS) probes the extension
+    // list through this layer's xrGetInstanceProcAddr with XR_NULL_HANDLE
+    // before creating the instance, and enables eye tracking only if the
+    // answer lists what it needs. The answer has to be the runtime's list.
+    {
+        PFN_xrVoidFunction probe = nullptr;
+        if (XR_FAILED(request.getInstanceProcAddr(
+                XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", &probe)) ||
+            probe == nullptr) {
+            std::cerr << "null-instance xrEnumerateInstanceExtensionProperties not resolved\n";
+            return EXIT_FAILURE;
+        }
+        std::uint32_t count = 0;
+        const auto enumerate = reinterpret_cast<PFN_xrEnumerateInstanceExtensionProperties>(probe);
+        if (XR_FAILED(enumerate(nullptr, 0, &count, nullptr)) ||
+            count != (g_d3d11_bridge_mode ? 2U : 1U)) {
+            std::cerr << "null-instance extension enumeration did not reach the runtime\n";
+            return EXIT_FAILURE;
+        }
+        PFN_xrVoidFunction unknown = nullptr;
+        if (request.getInstanceProcAddr(XR_NULL_HANDLE, "xrCreateSession", &unknown) !=
+                XR_ERROR_FUNCTION_UNSUPPORTED || unknown != nullptr) {
+            std::cerr << "null-instance query for an instance function must stay unsupported\n";
+            return EXIT_FAILURE;
+        }
     }
 
     XrInstance instance = XR_NULL_HANDLE;

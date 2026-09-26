@@ -3507,6 +3507,74 @@ XrResult expose_intercept(
     return XR_SUCCESS;
 }
 
+// The loader is the module that exports the two global entry points
+// without negotiating as a layer or a runtime. Looked up by name first,
+// then by exports, for the applications that carry it under another name.
+[[nodiscard]] PFN_xrGetInstanceProcAddr find_loader_get_instance_proc_addr() noexcept {
+    const auto loader_entry = [](HMODULE module) noexcept -> PFN_xrGetInstanceProcAddr {
+        using optiscaler_bootstrap::find_export;
+        if (module == nullptr ||
+            find_export(module, "xrNegotiateLoaderApiLayerInterface") != nullptr ||
+            find_export(module, "xrNegotiateLoaderRuntimeInterface") != nullptr ||
+            find_export(module, "xrEnumerateApiLayerProperties") == nullptr) {
+            return nullptr;
+        }
+        return reinterpret_cast<PFN_xrGetInstanceProcAddr>(
+            find_export(module, "xrGetInstanceProcAddr"));
+    };
+    if (const auto entry = loader_entry(GetModuleHandleW(L"openxr_loader.dll"))) {
+        return entry;
+    }
+    std::vector<HMODULE> modules(256);
+    DWORD bytes = 0;
+    using optiscaler_bootstrap::enumerate_modules;
+    if (!enumerate_modules(
+            modules.data(), static_cast<DWORD>(modules.size() * sizeof(HMODULE)), &bytes)) {
+        return nullptr;
+    }
+    if (bytes > modules.size() * sizeof(HMODULE)) {
+        modules.resize(bytes / sizeof(HMODULE));
+        if (!enumerate_modules(
+                modules.data(), static_cast<DWORD>(modules.size() * sizeof(HMODULE)), &bytes)) {
+            return nullptr;
+        }
+    }
+    const std::size_t count = std::min(modules.size(), static_cast<std::size_t>(bytes / sizeof(HMODULE)));
+    for (std::size_t index = 0; index < count; ++index) {
+        if (const auto entry = loader_entry(modules[index])) {
+            return entry;
+        }
+    }
+    return nullptr;
+}
+
+// A layer above this one may ask for the global functions before any
+// instance exists. Cheeky Foveated DLSS's layer probes
+// xrEnumerateInstanceExtensionProperties through the next
+// xrGetInstanceProcAddr with XR_NULL_HANDLE, the way the loader probes a
+// runtime, to decide whether to enable XR_EXT_eye_gaze_interaction; a
+// runtime answers, and answering "unsupported" here made it conclude the
+// headset had no eye tracking whenever this layer sat beneath it. There is
+// no next entry point to forward to yet - the loader hands one over only
+// with xrCreateApiLayerInstance - so the global functions come from the
+// loader itself, which is what the application reaches with the same call.
+XrResult resolve_global_function(const char* name, PFN_xrVoidFunction* function) noexcept {
+    if (std::strcmp(name, "xrEnumerateInstanceExtensionProperties") != 0 &&
+        std::strcmp(name, "xrEnumerateApiLayerProperties") != 0) {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+    const PFN_xrGetInstanceProcAddr loader = find_loader_get_instance_proc_addr();
+    if (loader == nullptr) {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+    const XrResult result = loader(XR_NULL_HANDLE, name, function);
+    if (XR_FAILED(result) || *function == nullptr) {
+        *function = nullptr;
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+    return XR_SUCCESS;
+}
+
 XrResult layer_get_instance_proc_addr_impl(
     XrInstance instance,
     const char* name,
@@ -3521,9 +3589,12 @@ XrResult layer_get_instance_proc_addr_impl(
         return XR_SUCCESS;
     }
 
+    if (instance == XR_NULL_HANDLE) {
+        return resolve_global_function(name, function);
+    }
     const auto dispatch = find_dispatch(instance);
     if (!dispatch) {
-        return instance == XR_NULL_HANDLE ? XR_ERROR_FUNCTION_UNSUPPORTED : XR_ERROR_HANDLE_INVALID;
+        return XR_ERROR_HANDLE_INVALID;
     }
 
     if (std::strcmp(name, "xrDestroyInstance") == 0) {
