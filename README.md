@@ -3,8 +3,8 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current release: **v0.2.5 (internal build V324)**.
-See the [release notes](docs/releases/0.2.5.md).
+Current release: **v0.2.6 (internal build V334)**.
+See the [release notes](docs/releases/0.2.6.md).
 
 > [!WARNING]
 > This is experimental software. It may not work with your game, VR mod, GPU or OpenXR
@@ -19,9 +19,11 @@ See the [release notes](docs/releases/0.2.5.md).
 > GTX 10 series are not supported. FidelityFX remains available on other GPUs.
 
 > [!TIP]
-> A typical real-world result is a **30–50% frame-rate increase** when using
-> FidelityFX, or NVIDIA Medium with optical flow resolution at 50%. Actual results
-> vary by game, GPU, resolution and base frame rate.
+> A game that holds about half your headset's refresh rate can reach the full
+> rate: a game at 45–50 FPS on a 90 Hz headset typically delivers 90, a
+> **frame-rate increase of up to 100%**, with NVIDIA Medium at 50% optical-flow
+> resolution or FidelityFX. Actual results vary by game, GPU, resolution and
+> base frame rate; the bridge cannot recover frames the game does not render.
 
 The current build provides:
 
@@ -33,8 +35,13 @@ The current build provides:
 - **Prefer FPS over latency** (on by default): one frame of extra latency in
   exchange for reaching full frame rate from half, with smoother dips
 - a pipeline built specifically for SteamVR's compositor
+- a **D3D11 bridge** (on by default): D3D11 games run on the same pipeline
+  as native D3D12 games, and the OpenXR runtime never touches the game's
+  D3D11 device. DCS World, Assetto Corsa, SkyrimVR and Cyberpunk 2077 run
+  through it
 - **Vulkan support (experimental, off by default)**: frame generation for
   Vulkan games, tested with No Man's Sky through OpenComposite
+- eye tracking that keeps working alongside Cheeky Foveated DLSS
 - an optional transparent in-headset FPS number with four corner positions;
   green means recent synthetic submissions and red means inactive generation
 - an optional bridge flight recorder for diagnostics
@@ -103,6 +110,34 @@ finish instead of the gap the game leaves between frames.
 
 The change applies the next time the game starts.
 
+### D3D11 games
+
+D3D11 games go through the **D3D11 bridge**, on by default since 0.2.6. The
+bridge creates the OpenXR runtime's session on its own D3D12 device; the game
+keeps rendering in D3D11, into textures shared between the two devices, and
+generation, pacing and submission then follow the D3D12 path that UEVR games
+use. The runtime never works the game's D3D11 device, which is what crashed
+NVIDIA's D3D11 driver in DCS World and SkyrimVR, and D3D11 games get the
+SteamVR pacing described below. A runtime that does not offer D3D12 keeps the
+previous path automatically.
+
+There is no menu entry. To turn the bridge off for diagnosis, close the tray,
+set `d3d11_bridge=0` under `[tray]` in `%LOCALAPPDATA%\OFXR Bridge\tray.ini`
+and start the tray again. Editing the `ofxr_bridge.ini` beside the tray does
+nothing: the tray rewrites the layer's settings from `tray.ini` each time it
+arms.
+
+### Cheeky Foveated DLSS
+
+The bridge works alongside [Cheeky Foveated DLSS](https://github.com/ClarkCheekyKent/CheekyFoveatedDLSS),
+including its eye-tracked foveation, since 0.2.6. Cheeky's OpenXR layer sits
+above the bridge and reads the game's frames before the bridge submits
+anything, so its calibration and gaze are unaffected. If Cheeky shows a
+flashing grid of small white coded squares at high resolutions, that is its
+own eye calibration failing to lock, with or without the bridge; its
+**Standard corners** calibration method avoids it, and setting the resolution
+before launching the game helps, since every change restarts the calibration.
+
 ### Vulkan games (experimental)
 
 **Vulkan support** in the tray is **off by default**. Turn it on for a game
@@ -132,9 +167,10 @@ SteamVR headsets (Pimax and others) get a pipeline built specifically for
 SteamVR's compositor. The bridge sends two frames for every game frame, and
 they must arrive one display refresh apart. Other runtimes, such as Virtual
 Desktop, pace this by themselves. SteamVR does not, so the bridge times each
-frame against SteamVR's compositor directly. For D3D12 games, the bridge also
-gives SteamVR a GPU queue of its own, so the game's next frame can no longer
-make a finished generated frame look unready.
+frame against SteamVR's compositor directly. The bridge also gives SteamVR a
+GPU queue of its own, so the game's next frame can no longer make a finished
+generated frame look unready; with the D3D11 bridge, D3D11 games get this
+too.
 
 For the best results on SteamVR:
 
