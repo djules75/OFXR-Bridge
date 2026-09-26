@@ -406,15 +406,20 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_instance_extension_properties(
     std::uint32_t capacity,
     std::uint32_t* count,
     XrExtensionProperties* properties) {
+    // D3D12 only in d3d11-bridge mode. With the bridge on by default, every
+    // other D3D11 mode then runs the direct D3D11 path - the one a runtime
+    // without D3D12 gets, and the one d3d11_bridge=0 selects - so both stay
+    // covered.
     constexpr const char* kNames[] = {"XR_KHR_D3D11_enable", "XR_KHR_D3D12_enable"};
-    *count = 2;
+    const std::uint32_t listed = g_d3d11_bridge_mode ? 2U : 1U;
+    *count = listed;
     if (capacity == 0 || properties == nullptr) {
         return XR_SUCCESS;
     }
-    if (capacity < 2) {
+    if (capacity < listed) {
         return XR_ERROR_SIZE_INSUFFICIENT;
     }
-    for (std::uint32_t index = 0; index < 2; ++index) {
+    for (std::uint32_t index = 0; index < listed; ++index) {
         std::strncpy(properties[index].extensionName, kNames[index], XR_MAX_EXTENSION_NAME_SIZE - 1);
         properties[index].extensionName[XR_MAX_EXTENSION_NAME_SIZE - 1] = '\0';
         properties[index].extensionVersion = 1;

@@ -231,7 +231,7 @@ bool read_d3d11_bridge(
         }
         const auto ini_path = module_directory / L"ofxr_bridge.ini";
         return GetPrivateProfileIntW(
-                   L"ofxr", L"d3d11_bridge", 0, ini_path.c_str()) == 1;
+                   L"ofxr", L"d3d11_bridge", 1, ini_path.c_str()) == 1;
     } catch (...) {
         return false;
     }

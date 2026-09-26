@@ -47,7 +47,6 @@ enum MenuCommand : UINT {
     nvidia_scale_half = 117,
     toggle_deep_pipeline = 118,
     toggle_vulkan_support = 119,
-    toggle_d3d11_bridge = 126,
     toggle_diagnostics = 120,
     overlay_off = 121,
     overlay_upper_left = 122,
@@ -766,11 +765,6 @@ void show_context_menu(AppState& state) {
         L"Vulkan support (experimental)");
     AppendMenuW(
         menu,
-        MF_STRING | (state.settings.d3d11_bridge ? MF_CHECKED : MF_UNCHECKED),
-        toggle_d3d11_bridge,
-        L"D3D11 bridge (experimental)");
-    AppendMenuW(
-        menu,
         MF_STRING | (state.settings.diagnostics ? MF_CHECKED : MF_UNCHECKED),
         toggle_diagnostics,
         L"Bridge flight recorder");
@@ -901,32 +895,6 @@ void handle_command(AppState& state, UINT command) {
                   L"game starts."
                 : L"Vulkan games are passed through unchanged and the Vulkan "
                   L"layer is no longer registered.");
-        break;
-    }
-    case toggle_d3d11_bridge: {
-        state.settings.d3d11_bridge = !state.settings.d3d11_bridge;
-        save_settings(state);
-        // The layer reads the key from the runtime ini, which is written at
-        // arm, so an armed bridge re-arms to rewrite it.
-        if (state.armed) {
-            std::wstring error;
-            if (!arm_bridge(state, &error)) {
-                show_error(state.window, error);
-            }
-        }
-        refresh_tray_icon(state);
-        show_balloon(
-            state,
-            state.settings.d3d11_bridge
-                ? L"D3D11 bridge: on"
-                : L"D3D11 bridge: off",
-            state.settings.d3d11_bridge
-                ? L"D3D11 games are given to the runtime as D3D12 sessions on "
-                  L"the bridge's own device, so the runtime never touches the "
-                  L"game's D3D11 device from a second thread. Experimental. "
-                  L"Takes effect the next time the game starts."
-                : L"D3D11 games bind the runtime directly again. Takes effect "
-                  L"the next time the game starts.");
         break;
     }
     case overlay_off:

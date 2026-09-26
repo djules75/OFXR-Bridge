@@ -90,9 +90,10 @@ struct ConfiguredNvidiaOptions {
 // layer registered beside this one, which the tray does only with its
 // "Vulkan support" option on, and without it the presenter's submissions
 // race the game's on its queue.
-// [ofxr] d3d11_bridge=1: a D3D11 session is given to the runtime as a D3D12
-// one, with the application's images bridged through shared textures. Off by
-// default while it is a first try.
+// [ofxr] d3d11_bridge: a D3D11 session is given to the runtime as a D3D12
+// one, with the application's images bridged through shared textures. On
+// unless the key says 0; kept as a switch for diagnosing a title against the
+// direct D3D11 path.
 [[nodiscard]] bool read_d3d11_bridge(
     const std::filesystem::path& module_directory) noexcept;
 [[nodiscard]] bool read_vulkan_support(

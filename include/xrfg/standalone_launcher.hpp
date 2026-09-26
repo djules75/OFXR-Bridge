@@ -39,11 +39,13 @@ struct LauncherSettings {
     // queue-serialising Vulkan layer while armed. Off by default: an
     // implicit Vulkan layer loads into every Vulkan process on the machine.
     bool vulkan_support{};
-    // "D3D11 bridge": a D3D11 game's session is given to the runtime as a
+    // The D3D11 bridge: a D3D11 game's session is given to the runtime as a
     // D3D12 one on the layer's own device, so the runtime never works the
-    // game's D3D11 device from the presenter thread. Off by default while
-    // it is a first try; the ini key is what the layer reads.
-    bool d3d11_bridge{};
+    // game's D3D11 device from the presenter thread. On by default and not
+    // in the menu: the runtime ini is rewritten from this at every arm, so
+    // d3d11_bridge=0 in tray.ini is the one place to turn it off, for
+    // diagnosing a title against the direct D3D11 path.
+    bool d3d11_bridge{true};
     bool diagnostics{};
     FpsOverlayPosition overlay_position{FpsOverlayPosition::upper_right};
 };
