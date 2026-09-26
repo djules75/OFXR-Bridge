@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.334.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.335.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -687,6 +687,20 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 "-DMODE=d3d11-bridge"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
         set_tests_properties(xrfg_layer_d3d11_bridge PROPERTIES TIMEOUT 60)
+
+        # The same bridge with an application that keeps one image acquired
+        # ahead and restarts the session with it outstanding: the runtime
+        # image has to receive what was painted, every frame.
+        add_test(
+            NAME xrfg_layer_d3d11_bridge_acquire_ahead
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_d3d11_bridge.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/d3d11-bridge-acquire-ahead"
+                "-DMODE=d3d11-bridge-acquire-ahead"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
+        set_tests_properties(xrfg_layer_d3d11_bridge_acquire_ahead PROPERTIES TIMEOUT 60)
 
         # NVIDIA optical flow cannot initialise on the fake runtime's WARP
         # device, so an ini asking for it exercises the layer's fallback to

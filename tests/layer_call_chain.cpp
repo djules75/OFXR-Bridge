@@ -84,6 +84,12 @@ bool g_d3d11_interop_mode = false;
 // application then renders into D3D11 textures the layer gave it, and what
 // it rendered has to arrive in the runtime's D3D12 images.
 bool g_d3d11_bridge_mode = false;
+// d3d11-bridge-acquire-ahead: the application keeps one image acquired
+// ahead of the one it renders, and the first acquire is outstanding across
+// a session restart (Ready or Not's VR mod acquires before xrBeginSession).
+bool g_acquire_ahead_mode = false;
+std::atomic<bool> g_acquire_ahead_active{false};
+std::atomic<std::uint32_t> g_acquire_ahead_calls{0};
 std::atomic<bool> g_bridge_session_bound{false};
 [[nodiscard]] bool create_fake_d3d12_images();
 // vulkan: the application binds a real Vulkan device, so the layer's Vulkan
@@ -1106,6 +1112,11 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_acquire_swapchain_image(
         }
         return XR_SUCCESS;
     }
+    if (g_acquire_ahead_active.load(std::memory_order_acquire)) {
+        // A real ring: the application holds two images at once.
+        *index = g_acquire_ahead_calls.fetch_add(1, std::memory_order_relaxed) % 3U;
+        return XR_SUCCESS;
+    }
     *index = 2;
     return XR_SUCCESS;
 }
@@ -1995,11 +2006,14 @@ int main(int argc, char** argv) {
             "d3d11-double-wide|steamvr-inline|steamvr-presenter|"
             "flight-simulator|uevr-pipelined-time|inverted-fov|"
             "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget|"
-            "dcs|dcs-d3d11|d3d11-bridge]\n";
+            "dcs|dcs-d3d11|d3d11-bridge|d3d11-bridge-acquire-ahead]\n";
         return EXIT_FAILURE;
     }
     g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
-    g_d3d11_bridge_mode = argc == 4 && std::strcmp(argv[3], "d3d11-bridge") == 0;
+    g_acquire_ahead_mode =
+        argc == 4 && std::strcmp(argv[3], "d3d11-bridge-acquire-ahead") == 0;
+    g_d3d11_bridge_mode = g_acquire_ahead_mode ||
+        (argc == 4 && std::strcmp(argv[3], "d3d11-bridge") == 0);
     g_dcs_mode = g_dcs_d3d11_mode ||
         (argc == 4 && std::strcmp(argv[3], "dcs") == 0);
     g_cropped_subimage_mode =
@@ -3007,6 +3021,40 @@ int main(int argc, char** argv) {
         // back, through every wait between the two APIs.
         int pixel_failures = 0;
         XrFrameState application_frame{XR_TYPE_FRAME_STATE};
+        // d3d11-bridge-acquire-ahead: one image is acquired before the
+        // frames start and stays acquired across a session restart, then
+        // every frame waits on the image acquired the frame before, renders
+        // it, acquires the next and releases the rendered one. The layer's
+        // mirror of the runtime's queue has to survive all of that, because
+        // on the bridge it decides which texture reaches the runtime.
+        std::uint32_t ahead_index = 0;
+        if (g_acquire_ahead_mode) {
+            g_acquire_ahead_active.store(true, std::memory_order_release);
+            if (XR_FAILED(acquire_image(swapchain, &acquire_info, &ahead_index)) ||
+                XR_FAILED(end_session(session)) ||
+                XR_FAILED(begin_session(session, &session_begin_info))) {
+                std::cerr << "acquire-ahead: session restart with an image acquired failed\n";
+                return EXIT_FAILURE;
+            }
+        }
+        auto render_application_image = [&](std::uint8_t red) {
+            if (g_acquire_ahead_mode) {
+                acquired_index = ahead_index;
+                return XR_SUCCEEDED(wait_image(swapchain, &image_wait_info)) &&
+                       paint_d3d11_image(
+                           d3d11_swapchain_images[acquired_index].texture, red) &&
+                       XR_SUCCEEDED(acquire_image(swapchain, &acquire_info, &ahead_index)) &&
+                       ahead_index != acquired_index;
+            }
+            return XR_SUCCEEDED(acquire_image(swapchain, &acquire_info, &acquired_index)) &&
+                   XR_SUCCEEDED(wait_image(swapchain, &image_wait_info)) &&
+                   (!g_vulkan_mode ||
+                    paint_vulkan_image(
+                        g_vulkan_application_swapchain_images[acquired_index], red)) &&
+                   (!g_d3d11_bridge_mode ||
+                    paint_d3d11_image(
+                        d3d11_swapchain_images[acquired_index].texture, red));
+        };
         for (int index = 0; index < 10; ++index) {
             const auto red = static_cast<std::uint8_t>(40 + index * 20);
             frame_sequence_succeeded = frame_sequence_succeeded &&
@@ -3015,14 +3063,7 @@ int main(int argc, char** argv) {
                 application_frame.predictedDisplayPeriod == kFakeDisplayPeriod &&
                 XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
                 wait_for_queue_idle() &&
-                XR_SUCCEEDED(acquire_image(swapchain, &acquire_info, &acquired_index)) &&
-                XR_SUCCEEDED(wait_image(swapchain, &image_wait_info)) &&
-                (!g_vulkan_mode ||
-                 paint_vulkan_image(
-                     g_vulkan_application_swapchain_images[acquired_index], red)) &&
-                (!g_d3d11_bridge_mode ||
-                 paint_d3d11_image(
-                     d3d11_swapchain_images[acquired_index].texture, red)) &&
+                render_application_image(red) &&
                 XR_SUCCEEDED(release_image(swapchain, &release_info)) &&
                 submit_frame(application_frame.predictedDisplayTime) &&
                 wait_for_queue_idle();
@@ -3072,6 +3113,7 @@ int main(int argc, char** argv) {
             g_waited_display_times.empty() && !g_begun_display_time;
         if (!valid) {
             std::cerr << (g_vulkan_mode ? "Vulkan"
+                          : g_acquire_ahead_mode ? "D3D11 bridge, acquire ahead"
                           : g_d3d11_bridge_mode ? "D3D11 bridge"
                                                 : "single-threaded D3D11")
                       << " validation failed: sequence="

@@ -1628,7 +1628,16 @@ struct SwapchainState {
     std::mutex call_mutex;
     std::mutex mutex;
     std::deque<std::uint32_t> acquired_indices;
-    bool front_waited{};
+    // How many of acquired_indices, from the front, the application has
+    // waited on. A release always takes the front, and only a waited one.
+    // This mirrors the runtime's own queue exactly as long as every
+    // acquire, wait and release passes through here, which they do; so it
+    // is never cleared behind the application's back, because on the D3D11
+    // bridge it also decides which shared texture is copied into the
+    // runtime's image at release, and losing it shows the runtime images
+    // nothing was ever written into (Ready or Not's VR mod acquires its
+    // first image before xrBeginSession and keeps one acquired ahead).
+    std::size_t waited_count{};
     bool ownership_tracking_valid{true};
     std::optional<std::uint32_t> last_released_index;
     std::shared_ptr<xrfg::D3D12SwapchainHistory> d3d12_history;
@@ -4417,10 +4426,10 @@ void reset_swapchain_bookkeeping(const std::shared_ptr<SessionState>& session) n
             std::shared_ptr<FrameGenerationSwapchainState> generation;
             {
                 std::scoped_lock lock(state->mutex);
-                state->acquired_indices.clear();
-                state->front_waited = false;
-                state->ownership_tracking_valid = true;
-                state->last_released_index.reset();
+                // Neither xrBeginSession nor xrEndSession releases an image
+                // at the runtime, so what the application has acquired and
+                // waited stays acquired and waited across them; only the
+                // history side starts over.
                 state->last_released_capture.reset();
                 state->last_released_motion_vectors.reset();
                 history = state->d3d12_history;
@@ -5559,7 +5568,7 @@ XrResult layer_acquire_swapchain_image_impl(
                 state->acquired_indices.push_back(*index);
             } catch (...) {
                 state->acquired_indices.clear();
-                state->front_waited = false;
+                state->waited_count = 0;
                 state->last_released_index.reset();
                 state->last_released_capture.reset();
                 state->ownership_tracking_valid = false;
@@ -5587,23 +5596,17 @@ XrResult layer_wait_swapchain_image_impl(
         // the application writes it on its own.
         carry_reacquire_to_application(state->session.get());
         std::scoped_lock lock(state->mutex);
-        if (state->bridge && state->ownership_tracking_valid &&
-            !state->front_waited && !state->acquired_indices.empty()) {
-            // Bridged: the application is about to render into the shared
-            // texture, and the layer's queue may still be reading it.
-            static_cast<void>(state->bridge->before_write(
-                state->acquired_indices.front()));
-        }
-        if (state->ownership_tracking_valid) {
-            if (!state->front_waited && !state->acquired_indices.empty()) {
-                state->front_waited = true;
-            } else {
-                state->acquired_indices.clear();
-                state->front_waited = false;
-                state->last_released_index.reset();
-                state->last_released_capture.reset();
-                state->ownership_tracking_valid = false;
+        if (state->ownership_tracking_valid &&
+            state->waited_count < state->acquired_indices.size()) {
+            const std::uint32_t waited_index =
+                state->acquired_indices[state->waited_count];
+            if (state->bridge) {
+                // Bridged: the application is about to render into the
+                // shared texture, and the layer's queue may still be
+                // reading it.
+                static_cast<void>(state->bridge->before_write(waited_index));
             }
+            ++state->waited_count;
         }
     }
     return result;
@@ -5625,7 +5628,7 @@ XrResult layer_release_swapchain_image_impl(
     {
         std::scoped_lock lock(state->mutex);
         bridge = state->bridge;
-        if (state->ownership_tracking_valid && state->front_waited &&
+        if (state->ownership_tracking_valid && state->waited_count > 0 &&
             !state->acquired_indices.empty()) {
             candidate_index = state->acquired_indices.front();
             history = state->d3d12_history;
@@ -5734,19 +5737,22 @@ XrResult layer_release_swapchain_image_impl(
         bool commit_capture = false;
         {
             std::scoped_lock lock(state->mutex);
-            if (state->ownership_tracking_valid && state->front_waited &&
+            if (state->ownership_tracking_valid && state->waited_count > 0 &&
                 !state->acquired_indices.empty()) {
                 const std::uint32_t released_index = state->acquired_indices.front();
                 state->acquired_indices.pop_front();
-                state->front_waited = false;
+                --state->waited_count;
                 state->last_released_index = released_index;
                 state->last_released_capture.reset();
                 state->last_released_motion_vectors.reset();
                 commit_capture = pending_capture &&
                                  pending_capture->source_index == released_index;
             } else if (state->ownership_tracking_valid) {
+                // A release the runtime accepted with nothing waited here:
+                // the mirror has diverged and nothing can say which image
+                // went out, so it stops guessing.
                 state->acquired_indices.clear();
-                state->front_waited = false;
+                state->waited_count = 0;
                 state->last_released_index.reset();
                 state->last_released_capture.reset();
                 state->last_released_motion_vectors.reset();
