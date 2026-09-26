@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.328.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.329.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -186,6 +186,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
 
     add_library(xrfg_d3d12_history STATIC
         src/d3d11/d3d11_d3d12_interop.cpp
+        src/d3d11/d3d11_bridge.cpp
         src/vulkan/vulkan_d3d12_interop.cpp
         src/d3d12/d3d12_history.cpp
         src/d3d12/d3d12_frame_synthesizer.cpp
@@ -672,6 +673,20 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
             set_tests_properties(xrfg_layer_vulkan_${depth} PROPERTIES TIMEOUT 60)
         endforeach()
+
+        # The D3D11 bridge needs d3d11_bridge=1, which the shipped ini
+        # leaves off: the application binds a real D3D11 device and the fake
+        # runtime takes the D3D12 session the layer hands it.
+        add_test(
+            NAME xrfg_layer_d3d11_bridge
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_d3d11_bridge.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/d3d11-bridge"
+                "-DMODE=d3d11-bridge"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
+        set_tests_properties(xrfg_layer_d3d11_bridge PROPERTIES TIMEOUT 60)
 
         add_test(
             NAME xrfg_layer_flight_logging

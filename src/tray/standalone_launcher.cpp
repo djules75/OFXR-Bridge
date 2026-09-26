@@ -164,6 +164,9 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "vulkan_support") {
                     settings.vulkan_support = value == "1" ||
                         lower_ascii(value) == "true";
+                } else if (key == "d3d11_bridge") {
+                    settings.d3d11_bridge = value == "1" ||
+                        lower_ascii(value) == "true";
                 } else if (key == "overlay_position") {
                     settings.overlay_position = parse_overlay_position(lower_ascii(value));
                 } else if (key == "diagnostics") {
@@ -190,6 +193,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            (settings.nvidia_bidirectional ? "1" : "0") +
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
            "\r\nvulkan_support=" + (settings.vulkan_support ? "1" : "0") +
+           "\r\nd3d11_bridge=" + (settings.d3d11_bridge ? "1" : "0") +
            "\r\ndiagnostics=" + (settings.diagnostics ? "1" : "0") +
            "\r\noverlay_position=" + overlay_position_name(settings.overlay_position) +
            "\r\n";
@@ -259,6 +263,7 @@ std::string build_runtime_ini(
            (settings.nvidia_bidirectional ? "1" : "0") +
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
            "\r\nvulkan_support=" + (settings.vulkan_support ? "1" : "0") +
+           "\r\nd3d11_bridge=" + (settings.d3d11_bridge ? "1" : "0") +
            "\r\n\r\n[diagnostics]\r\nlogging_enabled=" +
            (settings.diagnostics ? "1" : "0") +
            "\r\nmax_file_mb=" + std::to_string(max_file_mb) +

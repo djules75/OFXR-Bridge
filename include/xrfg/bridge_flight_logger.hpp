@@ -169,6 +169,9 @@ enum class BridgeFlightOperation : std::uint32_t {
     // moving a with a still b says the D3D12 leg is stale from Vulkan's
     // side; both moving says the runtime is not showing what it was given.
     vulkan_interop,
+    // A D3D11 session bridged to a D3D12 runtime session: result is a stage
+    // or a failure code (see the layer's D3D11 bridge).
+    d3d11_bridge,
 };
 
 struct BridgeFlightToken {

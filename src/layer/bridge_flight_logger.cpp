@@ -92,6 +92,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
         return "vulkan_negotiation";
     case BridgeFlightOperation::vulkan_interop:
         return "vulkan_interop";
+    case BridgeFlightOperation::d3d11_bridge:
+        return "d3d11_bridge";
     case BridgeFlightOperation::synthesis_frame_start_wait:
         return "synthesis_frame_start_wait";
     case BridgeFlightOperation::embedded_configuration: return "embedded_configuration";

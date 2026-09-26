@@ -77,6 +77,15 @@ bool g_cropped_subimage_mode = false;
 bool g_double_wide_mode = false;
 bool g_uevr_pipelined_display_time_mode = false;
 bool g_d3d11_interop_mode = false;
+// d3d11-bridge: the application binds a real D3D11 device with the bridge
+// on, and the fake runtime is what a D3D12-capable runtime is to it: it
+// lists XR_KHR_D3D12_enable, answers the D3D12 requirements call, and expects
+// a D3D12 binding at xrCreateSession, on which it creates its images. The
+// application then renders into D3D11 textures the layer gave it, and what
+// it rendered has to arrive in the runtime's D3D12 images.
+bool g_d3d11_bridge_mode = false;
+std::atomic<bool> g_bridge_session_bound{false};
+[[nodiscard]] bool create_fake_d3d12_images();
 // vulkan: the application binds a real Vulkan device, so the layer's Vulkan
 // interop runs against the driver rather than a stand-in. Importing the D3D12
 // textures and the shared fence is the part no fake can vouch for.
@@ -362,9 +371,75 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_destroy_instance(XrInstance) {
 
 XRAPI_ATTR XrResult XRAPI_CALL fake_create_session(
     XrInstance,
-    const XrSessionCreateInfo*,
+    const XrSessionCreateInfo* create_info,
     XrSession* session) {
+    if (g_d3d11_bridge_mode) {
+        // The bridge hands the runtime a D3D12 binding on the layer's own
+        // device. A runtime creates its images on that device; so does the
+        // fake, here, since it cannot know the device before this call.
+        const XrGraphicsBindingD3D12KHR* binding = nullptr;
+        for (auto* next = create_info
+                 ? static_cast<const XrBaseInStructure*>(create_info->next)
+                 : nullptr;
+             next != nullptr; next = next->next) {
+            if (next->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
+                binding = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(next);
+            }
+        }
+        if (binding == nullptr || binding->device == nullptr ||
+            binding->queue == nullptr) {
+            return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+        }
+        g_device = binding->device;
+        g_queue = binding->queue;
+        if (!create_fake_d3d12_images()) {
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
+        g_bridge_session_bound.store(true, std::memory_order_release);
+    }
     *session = g_session;
+    return XR_SUCCESS;
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_instance_extension_properties(
+    const char*,
+    std::uint32_t capacity,
+    std::uint32_t* count,
+    XrExtensionProperties* properties) {
+    constexpr const char* kNames[] = {"XR_KHR_D3D11_enable", "XR_KHR_D3D12_enable"};
+    *count = 2;
+    if (capacity == 0 || properties == nullptr) {
+        return XR_SUCCESS;
+    }
+    if (capacity < 2) {
+        return XR_ERROR_SIZE_INSUFFICIENT;
+    }
+    for (std::uint32_t index = 0; index < 2; ++index) {
+        std::strncpy(properties[index].extensionName, kNames[index], XR_MAX_EXTENSION_NAME_SIZE - 1);
+        properties[index].extensionName[XR_MAX_EXTENSION_NAME_SIZE - 1] = '\0';
+        properties[index].extensionVersion = 1;
+    }
+    return XR_SUCCESS;
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_get_d3d12_graphics_requirements(
+    XrInstance,
+    XrSystemId,
+    XrGraphicsRequirementsD3D12KHR* requirements) {
+    if (requirements == nullptr) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    // The adapter the application's D3D11 device lives on.
+    ComPtr<IDXGIDevice> dxgi_device;
+    ComPtr<IDXGIAdapter> adapter;
+    DXGI_ADAPTER_DESC description{};
+    if (g_d3d11_device &&
+        SUCCEEDED(g_d3d11_device.As(&dxgi_device)) &&
+        SUCCEEDED(dxgi_device->GetAdapter(adapter.GetAddressOf())) &&
+        SUCCEEDED(adapter->GetDesc(&description))) {
+        requirements->adapterLuid = description.AdapterLuid;
+    }
+    requirements->minFeatureLevel = D3D_FEATURE_LEVEL_11_0;
     return XR_SUCCESS;
 }
 
@@ -948,7 +1023,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_swapchain_images(
         return XR_SUCCESS;
     }
 
-    if (g_d3d11_interop_mode) {
+    if (g_d3d11_interop_mode && !g_d3d11_bridge_mode) {
         auto* d3d11_images =
             reinterpret_cast<XrSwapchainImageD3D11KHR*>(images);
         const auto* selected_images = &g_d3d11_application_swapchain_images;
@@ -1083,6 +1158,8 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_proc_addr(
     XRFG_FAKE_FUNCTION("xrDestroyInstance", fake_destroy_instance)
     XRFG_FAKE_FUNCTION("xrGetInstanceProperties", fake_get_instance_properties)
     XRFG_FAKE_FUNCTION("xrCreateSession", fake_create_session)
+    XRFG_FAKE_FUNCTION("xrEnumerateInstanceExtensionProperties", fake_enumerate_instance_extension_properties)
+    XRFG_FAKE_FUNCTION("xrGetD3D12GraphicsRequirementsKHR", fake_get_d3d12_graphics_requirements)
     XRFG_FAKE_FUNCTION("xrDestroySession", fake_destroy_session)
     XRFG_FAKE_FUNCTION("xrBeginSession", fake_begin_session)
     XRFG_FAKE_FUNCTION("xrEndSession", fake_end_session)
@@ -1156,6 +1233,13 @@ template <typename Function>
         return false;
     }
 
+    return create_fake_d3d12_images();
+}
+
+// The runtime's images, on whichever device the runtime has: the WARP device
+// the fake makes for itself, or, in d3d11-bridge mode, the device the layer
+// bound the session with.
+[[nodiscard]] bool create_fake_d3d12_images() {
     D3D12_HEAP_PROPERTIES heap_properties{};
     heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
     heap_properties.CreationNodeMask = 1;
@@ -1185,6 +1269,7 @@ template <typename Function>
              &g_synthetic_swapchain_right_images,
              &g_synthetic_swapchain_right_b_images}) {
         for (auto& image : *images) {
+            image.Reset();
             if (FAILED(g_device->CreateCommittedResource(
                     &heap_properties,
                     D3D12_HEAP_FLAG_NONE,
@@ -1701,6 +1786,111 @@ template <typename Record>
     return false;
 }
 
+// d3d11-bridge: paint mip 0, slice 0 of a D3D11 texture the layer handed the
+// application, on the application's own context.
+[[nodiscard]] bool paint_d3d11_image(ID3D11Texture2D* texture, std::uint8_t red) {
+    if (texture == nullptr) {
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC description{};
+    texture->GetDesc(&description);
+    std::vector<std::uint8_t> pixels(
+        static_cast<std::size_t>(description.Width) * description.Height * 4, 0);
+    for (std::size_t index = 0; index < pixels.size(); index += 4) {
+        pixels[index] = red;
+        pixels[index + 3] = 255;
+    }
+    g_d3d11_context->UpdateSubresource(
+        texture, 0, nullptr, pixels.data(), description.Width * 4, 0);
+    return true;
+}
+
+// d3d11-bridge: the first byte of mip 0, slice 0 of one of the runtime's
+// D3D12 images, read back on the queue the layer bound the session with.
+// The runtime holds its images in RENDER_TARGET between frames.
+[[nodiscard]] bool d3d12_image_first_red(ID3D12Resource* image, std::uint8_t* red) {
+    if (image == nullptr || !g_device || !g_queue) {
+        return false;
+    }
+    const D3D12_RESOURCE_DESC description = image->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT64 total = 0;
+    g_device->GetCopyableFootprints(&description, 0, 1, 0, &footprint, nullptr, nullptr, &total);
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC buffer{};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = total;
+    buffer.Height = 1;
+    buffer.DepthOrArraySize = 1;
+    buffer.MipLevels = 1;
+    buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> readback;
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    ComPtr<ID3D12Fence> fence;
+    if (FAILED(g_device->CreateCommittedResource(
+            &heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr, IID_PPV_ARGS(readback.GetAddressOf()))) ||
+        FAILED(g_device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(allocator.GetAddressOf()))) ||
+        FAILED(g_device->CreateCommandList(
+            0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+            IID_PPV_ARGS(list.GetAddressOf()))) ||
+        FAILED(g_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf())))) {
+        return false;
+    }
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = image;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    list->ResourceBarrier(1, &barrier);
+    D3D12_TEXTURE_COPY_LOCATION source{};
+    source.pResource = image;
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    source.SubresourceIndex = 0;
+    D3D12_TEXTURE_COPY_LOCATION destination{};
+    destination.pResource = readback.Get();
+    destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    destination.PlacedFootprint = footprint;
+    list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    list->ResourceBarrier(1, &barrier);
+    if (FAILED(list->Close())) {
+        return false;
+    }
+    ID3D12CommandList* const lists[] = {list.Get()};
+    g_queue->ExecuteCommandLists(1, lists);
+    if (FAILED(g_queue->Signal(fence.Get(), 1))) {
+        return false;
+    }
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (event == nullptr) {
+        return false;
+    }
+    bool completed = false;
+    if (SUCCEEDED(fence->SetEventOnCompletion(1, event))) {
+        completed = WaitForSingleObject(event, 5000) == WAIT_OBJECT_0;
+    }
+    CloseHandle(event);
+    if (!completed) {
+        return false;
+    }
+    void* mapped = nullptr;
+    const D3D12_RANGE range{0, static_cast<SIZE_T>(total)};
+    if (FAILED(readback->Map(0, &range, &mapped))) {
+        return false;
+    }
+    *red = static_cast<const std::uint8_t*>(mapped)[0];
+    const D3D12_RANGE none{0, 0};
+    readback->Unmap(0, &none);
+    return true;
+}
+
 [[nodiscard]] bool wait_for_queue_idle() {
     if (g_vulkan_mode) {
         return g_vulkan.queue_wait_idle(g_vulkan.queue) == VK_SUCCESS;
@@ -1760,10 +1950,11 @@ int main(int argc, char** argv) {
             "d3d11-double-wide|steamvr-inline|steamvr-presenter|"
             "flight-simulator|uevr-pipelined-time|inverted-fov|"
             "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget|"
-            "dcs|dcs-d3d11]\n";
+            "dcs|dcs-d3d11|d3d11-bridge]\n";
         return EXIT_FAILURE;
     }
     g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
+    g_d3d11_bridge_mode = argc == 4 && std::strcmp(argv[3], "d3d11-bridge") == 0;
     g_dcs_mode = g_dcs_d3d11_mode ||
         (argc == 4 && std::strcmp(argv[3], "dcs") == 0);
     g_cropped_subimage_mode =
@@ -1794,7 +1985,7 @@ int main(int argc, char** argv) {
         (std::strcmp(argv[3], "d3d11-interop") == 0 ||
          std::strcmp(argv[3], "d3d11-inverted-fov") == 0 ||
          d3d11_double_wide_mode || g_single_threaded_mode ||
-         g_dcs_d3d11_mode);
+         g_dcs_d3d11_mode || g_d3d11_bridge_mode);
     g_uevr_pipelined_display_time_mode =
         argc == 4 && std::strcmp(argv[3], "uevr-pipelined-time") == 0;
     g_double_wide_mode = argc == 4 &&
@@ -1900,6 +2091,13 @@ int main(int argc, char** argv) {
     strcpy_s(instance_info.applicationInfo.applicationName, "XRFG fake runtime test");
     strcpy_s(instance_info.applicationInfo.engineName, "XRFG tests");
     instance_info.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
+    // A D3D11 application enables the D3D11 extension, and the D3D11 bridge
+    // keys on that to add the D3D12 one for the runtime.
+    const char* const d3d11_extensions[] = {"XR_KHR_D3D11_enable"};
+    if (g_d3d11_interop_mode) {
+        instance_info.enabledExtensionNames = d3d11_extensions;
+        instance_info.enabledExtensionCount = 1;
+    }
 
     XrInstance instance = XR_NULL_HANDLE;
     if (XR_FAILED(request.createApiLayerInstance(&instance_info, &layer_info, &instance)) ||
@@ -1995,7 +2193,8 @@ int main(int argc, char** argv) {
     swapchain_info.faceCount = 1;
     swapchain_info.arraySize =
         (g_split_eye_mode || g_double_wide_mode) ? 1 : 2;
-    swapchain_info.mipCount = (g_d3d11_interop_mode || g_vulkan_mode) ? 3 : 1;
+    swapchain_info.mipCount =
+        ((g_d3d11_interop_mode && !g_d3d11_bridge_mode) || g_vulkan_mode) ? 3 : 1;
 
     if (g_split_eye_mode) {
         XrSwapchain left_swapchain = XR_NULL_HANDLE;
@@ -2720,7 +2919,8 @@ int main(int argc, char** argv) {
         return EXIT_SUCCESS;
     }
 
-    if (g_single_threaded_mode || g_vulkan_mode || g_swapchain_budget_mode) {
+    if (g_single_threaded_mode || g_vulkan_mode || g_swapchain_budget_mode ||
+        g_d3d11_bridge_mode) {
         // Every frame from this one thread, as an application with a
         // single-threaded device must and a Vulkan application always does:
         // the runtime submits on the queue the application handed it. In the
@@ -2749,6 +2949,9 @@ int main(int argc, char** argv) {
                 (!g_vulkan_mode ||
                  paint_vulkan_image(
                      g_vulkan_application_swapchain_images[acquired_index], red)) &&
+                (!g_d3d11_bridge_mode ||
+                 paint_d3d11_image(
+                     d3d11_swapchain_images[acquired_index].texture, red)) &&
                 XR_SUCCEEDED(release_image(swapchain, &release_info)) &&
                 submit_frame(application_frame.predictedDisplayTime) &&
                 wait_for_queue_idle();
@@ -2756,6 +2959,16 @@ int main(int argc, char** argv) {
             if (g_vulkan_mode && frame_sequence_succeeded && index >= 2 &&
                 !vulkan_current_images_contain(red)) {
                 ++pixel_failures;
+            }
+            // d3d11-bridge: what the application painted into the D3D11
+            // texture is in the runtime's D3D12 image after the release.
+            if (g_d3d11_bridge_mode && frame_sequence_succeeded) {
+                std::uint8_t found = 0;
+                if (!d3d12_image_first_red(
+                        g_application_swapchain_images[acquired_index].Get(), &found) ||
+                    found != red) {
+                    ++pixel_failures;
+                }
             }
         }
         const bool teardown_succeeded =
@@ -2780,12 +2993,16 @@ int main(int argc, char** argv) {
         const bool valid = frame_sequence_succeeded && teardown_succeeded &&
             (off_thread == 0 || g_vulkan_mode) && pixel_failures == 0 &&
             budget_valid &&
+            (!g_d3d11_bridge_mode ||
+             g_bridge_session_bound.load(std::memory_order_acquire)) &&
             // Generation still runs, inline: all but the arming frame and
             // the first frame, which primes, submit a synthetic.
             synthetic_acquires >= 7 &&
             g_waited_display_times.empty() && !g_begun_display_time;
         if (!valid) {
-            std::cerr << (g_vulkan_mode ? "Vulkan" : "single-threaded D3D11")
+            std::cerr << (g_vulkan_mode ? "Vulkan"
+                          : g_d3d11_bridge_mode ? "D3D11 bridge"
+                                                : "single-threaded D3D11")
                       << " validation failed: sequence="
                       << frame_sequence_succeeded << " teardown="
                       << teardown_succeeded << " off-thread=" << off_thread
@@ -2800,7 +3017,9 @@ int main(int argc, char** argv) {
                           ? "OpenXR Vulkan interop test passed\n"
                           : g_swapchain_budget_mode
                               ? "OpenXR swapchain-budget fallback test passed\n"
-                              : "OpenXR single-threaded D3D11 test passed\n");
+                              : g_d3d11_bridge_mode
+                                  ? "OpenXR D3D11 bridge test passed\n"
+                                  : "OpenXR single-threaded D3D11 test passed\n");
         return EXIT_SUCCESS;
     }
 
