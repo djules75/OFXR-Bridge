@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.332.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.333.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -687,6 +687,21 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 "-DMODE=d3d11-bridge"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
         set_tests_properties(xrfg_layer_d3d11_bridge PROPERTIES TIMEOUT 60)
+
+        # NVIDIA optical flow cannot initialise on the fake runtime's WARP
+        # device, so an ini asking for it exercises the layer's fallback to
+        # FidelityFX: the default scenario's exact expectations only hold if
+        # generation still runs.
+        add_test(
+            NAME xrfg_layer_nvidia_fallback
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_nvidia_fallback.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/nvidia-fallback"
+                "-DMODE=default"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
+        set_tests_properties(xrfg_layer_nvidia_fallback PROPERTIES TIMEOUT 60)
 
         add_test(
             NAME xrfg_layer_flight_logging

@@ -29,7 +29,10 @@ enum class NvidiaInputScale {
 };
 
 struct LauncherSettings {
-    FlowBackend backend{FlowBackend::fidelity_fx};
+    // NVIDIA optical flow, medium, is the default: the layer falls back to
+    // FidelityFX on its own where NVIDIA cannot initialise, so the default
+    // can be the better backend without a GPU check here.
+    FlowBackend backend{FlowBackend::nvidia};
     NvidiaPerformancePreset nvidia_preset{NvidiaPerformancePreset::medium};
     NvidiaInputScale nvidia_input_scale{NvidiaInputScale::half};
     bool nvidia_bidirectional{};

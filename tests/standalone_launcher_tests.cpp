@@ -32,7 +32,7 @@ int main() {
             !contains(build_runtime_ini(option), std::string("[overlay]\r\nposition=") +
                 xrfg::overlay_position_name(position))) return 1;
     }
-    if (release_defaults.backend != FlowBackend::fidelity_fx ||
+    if (release_defaults.backend != FlowBackend::nvidia ||
         release_defaults.nvidia_preset != NvidiaPerformancePreset::medium ||
         release_defaults.nvidia_input_scale != NvidiaInputScale::half ||
         release_defaults.nvidia_bidirectional || release_defaults.diagnostics ||
@@ -42,7 +42,7 @@ int main() {
         !release_defaults.d3d11_bridge ||
         !contains(default_runtime_ini, "vulkan_support=0") ||
         !contains(default_runtime_ini, "d3d11_bridge=1") ||
-        !contains(default_runtime_ini, "[ofxr]\r\nbackend=fidelityfx") ||
+        !contains(default_runtime_ini, "[ofxr]\r\nbackend=nvidia") ||
         !contains(default_runtime_ini, "motion_vectors=dlss") ||
         !contains(default_runtime_ini, "nvidia_preset=medium") ||
         !contains(default_runtime_ini, "nvidia_input_scale=50") ||
@@ -68,7 +68,8 @@ int main() {
     }
 
     LauncherSettings settings;
-    settings.backend = FlowBackend::nvidia;
+    // Every value away from its default, so the round trip proves parsing.
+    settings.backend = FlowBackend::fidelity_fx;
     settings.nvidia_preset = NvidiaPerformancePreset::slow;
     settings.nvidia_input_scale = NvidiaInputScale::half;
     settings.nvidia_bidirectional = true;
@@ -78,7 +79,7 @@ int main() {
     settings.diagnostics = true;
     const std::string serialized = serialize_settings(settings);
     const LauncherSettings parsed = parse_settings(serialized);
-    if (parsed.backend != FlowBackend::nvidia ||
+    if (parsed.backend != FlowBackend::fidelity_fx ||
         parsed.nvidia_preset != NvidiaPerformancePreset::slow ||
         parsed.nvidia_input_scale != NvidiaInputScale::half ||
         !parsed.nvidia_bidirectional || parsed.deep_pipeline ||
@@ -103,7 +104,7 @@ int main() {
     }
 
     const std::string runtime_ini = build_runtime_ini(settings);
-    if (!contains(runtime_ini, "[ofxr]\r\nbackend=nvidia") ||
+    if (!contains(runtime_ini, "[ofxr]\r\nbackend=fidelityfx") ||
         !contains(runtime_ini, "nvidia_preset=slow") ||
         !contains(runtime_ini, "nvidia_input_scale=50") ||
         !contains(runtime_ini, "nvidia_bidirectional=1") ||

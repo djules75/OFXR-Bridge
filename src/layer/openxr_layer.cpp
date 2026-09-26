@@ -880,6 +880,13 @@ struct SessionState {
     std::uint32_t generation_failure_streak{};
     xrfg::D3D12OpticalFlowBackend optical_flow_backend{
         xrfg::D3D12OpticalFlowBackend::fidelity_fx};
+    // NVIDIA optical flow failed to initialise on this session - no
+    // nvofapi64.dll on an AMD or Intel machine, or an NVIDIA GPU without the
+    // optical-flow hardware - and FidelityFX took over. Latched: later
+    // swapchains and later menu changes to NVIDIA go straight to FidelityFX
+    // instead of loading the DLL again. The tray is not told; the flight
+    // recorder is (synthesis_initialize, phase I).
+    bool nvidia_backend_unavailable{};
     // Fixed for the session. A depth that engaged on load would re-phase the
     // whole pipeline whenever the scene got heavy, costing a repeated frame
     // each time, and where it settled would depend on what the player did.
@@ -2211,6 +2218,63 @@ void adopt_synthetic_ring(
 // How many synthetic slots this session needs. See the comment above
 // kCurrentSlotCount: the deeper pipeline admits the application while the
 // previous pair's synthetic is still un-retired, so it cannot share one.
+// The synthesizer's backend for this session as it stands, and the
+// initialisation with the fallback: NVIDIA first when configured, FidelityFX
+// when NVIDIA cannot initialise here. `initialize` runs one attempt for the
+// backend it is given and returns its HRESULT; the record either side of it
+// is the synthesis_initialize B/E pair the creation paths always wrote, and
+// the phase-I record between two attempts carries the NVIDIA failure. The
+// fallback is silent towards the tray, which keeps showing what the user
+// picked; a log always says which backend ran.
+struct SynthesisInitializeRecord {
+    std::uint32_t width{};
+    std::uint32_t height{};
+    std::uint64_t current_count{};
+    std::uint64_t synthetic_count{};
+    std::uint32_t array_size{};
+};
+
+template <typename Initialize>
+[[nodiscard]] HRESULT initialize_synthesis_with_fallback(
+    SessionState& session,
+    const SynthesisInitializeRecord& record,
+    Initialize&& initialize) {
+    xrfg::D3D12OpticalFlowBackend backend = session.optical_flow_backend;
+    if (backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
+        session.nvidia_backend_unavailable) {
+        backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
+    }
+    const auto attempt = [&](xrfg::D3D12OpticalFlowBackend candidate) {
+        const auto token = xrfg::bridge_flight_logger().begin(
+            xrfg::BridgeFlightOperation::synthesis_initialize,
+            handle_value(session.handle),
+            (static_cast<std::uint64_t>(record.width) << 32) | record.height,
+            optical_flow_configuration_code(candidate, session.nvidia_options));
+        const HRESULT result = initialize(candidate);
+        xrfg::bridge_flight_logger().end(
+            token,
+            xrfg::BridgeFlightOperation::synthesis_initialize,
+            result,
+            record.current_count,
+            record.synthetic_count,
+            record.array_size);
+        return result;
+    };
+    HRESULT result = attempt(backend);
+    if (FAILED(result) && backend == xrfg::D3D12OpticalFlowBackend::nvidia) {
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::synthesis_initialize,
+            result,
+            handle_value(session.handle),
+            1,
+            optical_flow_configuration_code(backend, session.nvidia_options));
+        session.nvidia_backend_unavailable = true;
+        session.optical_flow_backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
+        result = attempt(xrfg::D3D12OpticalFlowBackend::fidelity_fx);
+    }
+    return result;
+}
+
 [[nodiscard]] std::size_t synthetic_slot_count_for(
     const SessionState& session) noexcept {
     return session.deep_pipeline ? kSyntheticSlotCountDeep
@@ -2308,16 +2372,16 @@ create_d3d12_frame_generation_swapchains(
         }
 
         auto synthesizer = std::make_shared<xrfg::D3D12FrameSynthesizer>();
-        const xrfg::D3D12OpticalFlowBackend backend =
-            state->session->optical_flow_backend;
-        const auto initialize_token = xrfg::bridge_flight_logger().begin(
-            xrfg::BridgeFlightOperation::synthesis_initialize,
-            handle_value(state->session->handle),
-            (static_cast<std::uint64_t>(state->create_info.width) << 32) |
-                state->create_info.height,
-            optical_flow_configuration_code(
-                backend, state->session->nvidia_options));
-        const HRESULT gpu_result = synthesizer->initialize(
+        const SynthesisInitializeRecord initialize_record{
+            state->create_info.width,
+            state->create_info.height,
+            current.d3d12_resources.size(),
+            synthetic.d3d12_resources.size(),
+            state->create_info.arraySize};
+        const HRESULT gpu_result = initialize_synthesis_with_fallback(
+            *state->session, initialize_record,
+            [&](xrfg::D3D12OpticalFlowBackend backend) {
+        return synthesizer->initialize(
             state->session->d3d12_device.Get(),
             state->session->d3d12_synthesis_queue
                 ? state->session->d3d12_synthesis_queue.Get()
@@ -2355,15 +2419,7 @@ create_d3d12_frame_generation_swapchains(
             backend,
             state->session->nvidia_options,
             xrfg::bridge_flight_logger().enabled());
-        if (SUCCEEDED(gpu_result)) {
-        }
-        xrfg::bridge_flight_logger().end(
-            initialize_token,
-            xrfg::BridgeFlightOperation::synthesis_initialize,
-            gpu_result,
-            current.d3d12_resources.size(),
-            synthetic.d3d12_resources.size(),
-            state->create_info.arraySize);
+            });
         if (FAILED(gpu_result)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
@@ -2542,35 +2598,27 @@ create_d3d11_frame_generation_swapchains(
         }
 
         auto synthesizer = std::make_shared<xrfg::D3D12FrameSynthesizer>();
-        const xrfg::D3D12OpticalFlowBackend backend =
-            session->optical_flow_backend;
-        const auto initialize_token = xrfg::bridge_flight_logger().begin(
-            xrfg::BridgeFlightOperation::synthesis_initialize,
-            handle_value(session->handle),
-            (static_cast<std::uint64_t>(state->create_info.width) << 32) |
-                state->create_info.height,
-            optical_flow_configuration_code(
-                backend, session->nvidia_options));
-        gpu_result = synthesizer->initialize(
-            session->d3d12_device.Get(),
-            session->d3d12_queue.Get(),
-            history,
-            interop->current_destination_images(),
-            interop->synthetic_destination_images(),
-            static_cast<DXGI_FORMAT>(state->create_info.format),
-            D3D12_RESOURCE_STATE_COMMON,
-            backend,
-            session->nvidia_options,
-            xrfg::bridge_flight_logger().enabled());
-        if (SUCCEEDED(gpu_result)) {
-        }
-        xrfg::bridge_flight_logger().end(
-            initialize_token,
-            xrfg::BridgeFlightOperation::synthesis_initialize,
-            gpu_result,
+        const SynthesisInitializeRecord initialize_record{
+            state->create_info.width,
+            state->create_info.height,
             interop->current_destination_images().size(),
             interop->synthetic_destination_images().size(),
-            state->create_info.arraySize);
+            state->create_info.arraySize};
+        gpu_result = initialize_synthesis_with_fallback(
+            *session, initialize_record,
+            [&](xrfg::D3D12OpticalFlowBackend backend) {
+                return synthesizer->initialize(
+                    session->d3d12_device.Get(),
+                    session->d3d12_queue.Get(),
+                    history,
+                    interop->current_destination_images(),
+                    interop->synthetic_destination_images(),
+                    static_cast<DXGI_FORMAT>(state->create_info.format),
+                    D3D12_RESOURCE_STATE_COMMON,
+                    backend,
+                    session->nvidia_options,
+                    xrfg::bridge_flight_logger().enabled());
+            });
         if (FAILED(gpu_result)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
@@ -2821,33 +2869,27 @@ create_vulkan_frame_generation_swapchains(
         }
 
         auto synthesizer = std::make_shared<xrfg::D3D12FrameSynthesizer>();
-        const xrfg::D3D12OpticalFlowBackend backend =
-            session->optical_flow_backend;
-        const auto initialize_token = xrfg::bridge_flight_logger().begin(
-            xrfg::BridgeFlightOperation::synthesis_initialize,
-            handle_value(session->handle),
-            (static_cast<std::uint64_t>(state->create_info.width) << 32) |
-                state->create_info.height,
-            optical_flow_configuration_code(
-                backend, session->nvidia_options));
-        gpu_result = synthesizer->initialize(
-            session->d3d12_device.Get(),
-            session->d3d12_queue.Get(),
-            history,
-            interop->current_destination_images(),
-            interop->synthetic_destination_images(),
-            dxgi_format,
-            D3D12_RESOURCE_STATE_COMMON,
-            backend,
-            session->nvidia_options,
-            xrfg::bridge_flight_logger().enabled());
-        xrfg::bridge_flight_logger().end(
-            initialize_token,
-            xrfg::BridgeFlightOperation::synthesis_initialize,
-            gpu_result,
+        const SynthesisInitializeRecord initialize_record{
+            state->create_info.width,
+            state->create_info.height,
             interop->current_destination_images().size(),
             interop->synthetic_destination_images().size(),
-            state->create_info.arraySize);
+            state->create_info.arraySize};
+        gpu_result = initialize_synthesis_with_fallback(
+            *session, initialize_record,
+            [&](xrfg::D3D12OpticalFlowBackend backend) {
+                return synthesizer->initialize(
+                    session->d3d12_device.Get(),
+                    session->d3d12_queue.Get(),
+                    history,
+                    interop->current_destination_images(),
+                    interop->synthetic_destination_images(),
+                    dxgi_format,
+                    D3D12_RESOURCE_STATE_COMMON,
+                    backend,
+                    session->nvidia_options,
+                    xrfg::bridge_flight_logger().enabled());
+            });
         if (FAILED(gpu_result)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
@@ -9822,7 +9864,11 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
     for (const auto& chain : swapchains) capture_locks.emplace_back(chain->call_mutex);
     std::scoped_lock gpu_lock(state->gpu_mutex);
     HRESULT result = S_OK;
-    const auto backend = static_cast<xrfg::D3D12OpticalFlowBackend>(control.desired.backend);
+    auto backend = static_cast<xrfg::D3D12OpticalFlowBackend>(control.desired.backend);
+    if (backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
+        state->nvidia_backend_unavailable) {
+        backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
+    }
     const xrfg::D3D12NvidiaOpticalFlowOptions options{
         static_cast<xrfg::D3D12NvidiaPerformancePreset>(control.desired.preset),
         static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward};
@@ -9909,6 +9955,21 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
             result = synthesis->wait_for_idle();
             if (SUCCEEDED(result) && changed) {
                 result = synthesis->reconfigure(backend, options);
+                if (FAILED(result) &&
+                    backend == xrfg::D3D12OpticalFlowBackend::nvidia) {
+                    // The menu switched to NVIDIA on a machine without it.
+                    // Same fallback as at creation, and the tray is told the
+                    // change applied: generation carries on, on FidelityFX.
+                    xrfg::bridge_flight_logger().event(
+                        xrfg::BridgeFlightOperation::synthesis_initialize,
+                        result,
+                        handle_value(state->handle),
+                        2,
+                        optical_flow_configuration_code(backend, options));
+                    state->nvidia_backend_unavailable = true;
+                    backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
+                    result = synthesis->reconfigure(backend, options);
+                }
             }
         }
         if (SUCCEEDED(result) && chain->d3d12_history) result = chain->d3d12_history->wait_for_idle();

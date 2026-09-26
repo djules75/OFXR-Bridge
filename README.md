@@ -25,8 +25,8 @@ See the [release notes](docs/releases/0.2.5.md).
 
 The current build provides:
 
-- AMD FidelityFX Optical Flow (default)
-- NVIDIA Optical Flow with Fast (test), Medium and Slow presets
+- AMD FidelityFX Optical Flow (the fallback: used automatically on GPUs where NVIDIA optical flow is unavailable)
+- NVIDIA Optical Flow with Fast (test), Medium and Slow presets (the default, Medium)
 - 100%, 75% and 50% NVIDIA optical-flow calculation scales
 - a tray icon that arms the bridge as soon as it starts, with manual
   Arm/Disarm

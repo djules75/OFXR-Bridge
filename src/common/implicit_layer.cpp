@@ -195,7 +195,7 @@ ConfiguredFlowBackend read_flow_backend(
         const DWORD length = GetPrivateProfileStringW(
             L"ofxr",
             L"backend",
-            L"fidelityfx",
+            L"nvidia",
             value.data(),
             static_cast<DWORD>(value.size()),
             ini_path.c_str());
@@ -204,9 +204,15 @@ ConfiguredFlowBackend read_flow_backend(
              _wcsicmp(value.data(), L"nvof") == 0)) {
             return ConfiguredFlowBackend::nvidia;
         }
+        if (length > 0 && length < value.size() &&
+            _wcsicmp(value.data(), L"fidelityfx") == 0) {
+            return ConfiguredFlowBackend::fidelity_fx;
+        }
     } catch (...) {
     }
-    return ConfiguredFlowBackend::fidelity_fx;
+    // No key, or an unreadable file: the default, which the layer falls
+    // back from on its own where NVIDIA cannot initialise.
+    return ConfiguredFlowBackend::nvidia;
 }
 
 bool read_deep_pipeline(
