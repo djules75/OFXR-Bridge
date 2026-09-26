@@ -96,6 +96,11 @@ std::atomic<bool> g_application_in_end_frame{false};
 // from a thread other than the application's: the runtime uses that device
 // inside them, and D3D11 does no locking of its own on such a device.
 bool g_single_threaded_mode = false;
+// dcs-d3d11: the dcs shape on a D3D11 device. Such a session never takes a
+// presenter (a driver workaround; see presenter_forbidden in the layer), so
+// no frame call may reach the runtime from any thread but the application's
+// own two: its render thread and its wait thread.
+bool g_dcs_d3d11_mode = false;
 std::atomic<DWORD> g_application_wait_thread_id{0};
 std::atomic<std::uint32_t> g_off_thread_frame_calls{0};
 // swapchain-budget: the runtime allows three private swapchains beside the
@@ -126,7 +131,7 @@ std::atomic<unsigned> g_submission_after_destroy{0};
 DWORD g_test_application_thread_id{};
 void record_frame_call_thread() noexcept {
     const DWORD thread = GetCurrentThreadId();
-    if ((g_single_threaded_mode || g_vulkan_mode) &&
+    if ((g_single_threaded_mode || g_vulkan_mode || g_dcs_d3d11_mode) &&
         thread != g_test_application_thread_id &&
         thread != g_application_wait_thread_id.load(std::memory_order_acquire)) {
         g_off_thread_frame_calls.fetch_add(1, std::memory_order_relaxed);
@@ -520,8 +525,12 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_end_frame(
     {
         std::scoped_lock lock(g_frame_loop_mutex);
         if (!g_begun_display_time || end_info == nullptr ||
+            // dcs-d3d11: after the inline cycle adopts the application's
+            // held wait, the application labels its frame with the wait it
+            // was given while the runtime begun the replacement; a runtime
+            // accepts any displayTime, and so does the fake here.
             (!g_flight_simulator_mode &&
-             !g_uevr_pipelined_display_time_mode &&
+             !g_uevr_pipelined_display_time_mode && !g_dcs_d3d11_mode &&
              end_info->displayTime != *g_begun_display_time)) {
             return XR_ERROR_CALL_ORDER_INVALID;
         }
@@ -1751,10 +1760,12 @@ int main(int argc, char** argv) {
             "d3d11-double-wide|steamvr-inline|steamvr-presenter|"
             "flight-simulator|uevr-pipelined-time|inverted-fov|"
             "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget|"
-            "dcs]\n";
+            "dcs|dcs-d3d11]\n";
         return EXIT_FAILURE;
     }
-    g_dcs_mode = argc == 4 && std::strcmp(argv[3], "dcs") == 0;
+    g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
+    g_dcs_mode = g_dcs_d3d11_mode ||
+        (argc == 4 && std::strcmp(argv[3], "dcs") == 0);
     g_cropped_subimage_mode =
         argc == 4 && std::strcmp(argv[3], "cropped-split-eye") == 0;
     const bool d3d11_double_wide_mode =
@@ -1782,7 +1793,8 @@ int main(int argc, char** argv) {
     g_d3d11_interop_mode = argc == 4 &&
         (std::strcmp(argv[3], "d3d11-interop") == 0 ||
          std::strcmp(argv[3], "d3d11-inverted-fov") == 0 ||
-         d3d11_double_wide_mode || g_single_threaded_mode);
+         d3d11_double_wide_mode || g_single_threaded_mode ||
+         g_dcs_d3d11_mode);
     g_uevr_pipelined_display_time_mode =
         argc == 4 && std::strcmp(argv[3], "uevr-pipelined-time") == 0;
     g_double_wide_mode = argc == 4 &&
@@ -2917,27 +2929,46 @@ int main(int argc, char** argv) {
             g_presenter_begun_application_waits.load(std::memory_order_relaxed);
         const std::uint32_t violations =
             g_waits_while_unbegun.load(std::memory_order_relaxed);
-        // Every overlapping frame under the presenter but the first has
-        // a previous frame to pair with; a run that primes instead
-        // submits the current copy alone.
-        const bool valid = sequence_succeeded && teardown_succeeded &&
-            promoted_during_pattern && adopted >= 1 && violations == 0 &&
-            synthetic_after + 2 >=
-                static_cast<std::size_t>(kOverlappingFrames) &&
-            g_submission_after_destroy.load() == 0 &&
-            g_waited_display_times.empty() && !g_begun_display_time;
+        const std::uint32_t off_thread =
+            g_off_thread_frame_calls.load(std::memory_order_relaxed);
+        bool valid = false;
+        if (g_dcs_d3d11_mode) {
+            // The D3D11 shape never takes the presenter: no virtual period,
+            // no frame begun by a presenter, nothing to the runtime off the
+            // application's two threads. Every frame after the first still
+            // generates inline, the overlapping ones by the cycle adopting
+            // the held wait: 32 frames in the run, so well over 20 synthetics
+            // where passing the overlapping frames through left about 8.
+            valid = sequence_succeeded && teardown_succeeded &&
+                !promoted_during_pattern && adopted == 0 && off_thread == 0 &&
+                violations == 0 && synthetic_total >= 20 &&
+                g_waited_display_times.empty() && !g_begun_display_time;
+        } else {
+            // Every overlapping frame under the presenter but the first has
+            // a previous frame to pair with; a run that primes instead
+            // submits the current copy alone.
+            valid = sequence_succeeded && teardown_succeeded &&
+                promoted_during_pattern && adopted >= 1 && violations == 0 &&
+                synthetic_after + 2 >=
+                    static_cast<std::size_t>(kOverlappingFrames) &&
+                g_submission_after_destroy.load() == 0 &&
+                g_waited_display_times.empty() && !g_begun_display_time;
+        }
         if (!valid) {
             std::cerr << "DCS pipelined-wait validation failed: sequence="
                       << sequence_succeeded << " teardown="
                       << teardown_succeeded << " promoted="
                       << promoted_during_pattern << " adopted=" << adopted
+                      << " off-thread=" << off_thread
                       << " violations=" << violations << " synthetic="
                       << synthetic_after << " synthetic-total="
                       << synthetic_total << " current=" << current_after
                       << '\n';
             return EXIT_FAILURE;
         }
-        std::cout << "OpenXR DCS pipelined-wait pairing test passed\n";
+        std::cout << (g_dcs_d3d11_mode
+                          ? "OpenXR DCS D3D11 inline-only test passed\n"
+                          : "OpenXR DCS pipelined-wait pairing test passed\n");
         return EXIT_SUCCESS;
     }
 

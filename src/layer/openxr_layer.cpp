@@ -827,6 +827,12 @@ struct SessionState {
     // pipelines pass through ungenerated. Fixed for the session. A Vulkan
     // session is the same case by construction; see presenter_forbidden.
     bool single_threaded_d3d11{};
+    // The application's frame loop runs on two threads: xrWaitFrame has been
+    // seen on a thread other than the one that calls xrEndFrame. Latched at
+    // the first such wait, under frame_call_mutex. DCS World's shape. On a
+    // D3D11 session it forbids the presenter; see presenter_forbidden.
+    bool split_frame_loop{};
+    DWORD application_end_thread_id{};
     XrFrameState last_inline_frame_state{XR_TYPE_FRAME_STATE};
     bool last_inline_frame_state_valid{};
     std::mutex mutex;
@@ -1263,8 +1269,36 @@ void signal_join_probe(
 // SteamVR stop advancing the predicted time after the first inline pair and
 // return every wait at once, until the compositor showed one frame pinned
 // in space. The presenter is what handles that shape on every other API.
+//
+// The second D3D11 case is a driver workaround, not a rule of the API: a
+// D3D11 session whose frame loop is split across two threads
+// (split_frame_loop) - xrWaitFrame from one, xrBeginFrame/xrEndFrame from
+// another. DCS World. With a presenter, the NVIDIA D3D11 user-mode driver
+// (nvwgf2umx, seen on 616.92 and 617.14, September 2026) faults on its own
+// worker thread in SetDependencyInfo: at mission start on this rig, four
+// runs out of four, and mid-flight for a reporter on a 4060 Ti, on SteamVR
+// and on VDXR alike. The runtime-entry gate (RuntimeEntry) was held when it
+// faulted, and so was the context's own ID3D11Multithread section in an
+// interim build that held it across the runtime's begin and end - measured
+// holding, in a debugger, at the fault - so serialising the calls, against
+// the layer and against the game, does not reach whatever the driver keeps
+// per thread. That section was removed again. Inline, the same sessions
+// ran. The cost is on
+// SteamVR only, where the inline second cycle can be throttled to half
+// rate, and for this shape only: every other D3D11 title keeps its
+// presenter.
+//
+// To retire it: on a driver newer than 617.14, drop the split_frame_loop
+// clause below, run DCS World through several mission starts on SteamVR and
+// on VDXR with the flight recorder on, and read DCS's own
+// Saved Games\DCS\Logs\dcs.log for a "C0000005 ACCESS_VIOLATION ...
+// nvwgf2umx ... SetDependencyInfo" block. One clean start proves nothing;
+// one mission ran 27 s before faulting. The dcs-d3d11 call-chain mode
+// asserts the refusal and retires with it.
 [[nodiscard]] bool presenter_forbidden(const SessionState& state) noexcept {
-    return state.single_threaded_d3d11;
+    return state.single_threaded_d3d11 ||
+        (state.graphics_binding == SessionGraphicsBinding::d3d11 &&
+         state.split_frame_loop);
 }
 
 // Inside xrEndFrame, and inside each swapchain image call, the runtime drives
@@ -1273,7 +1307,9 @@ void signal_join_probe(
 // one of those OpenXR calls issues interleaves with the sequence another
 // issues on the other thread, and the driver's dependency tracking walks a
 // chain that has moved. That is what kills nvwgf2umx when a presenter thread
-// runs beside the application thread on a D3D11 session.
+// runs beside the application thread on a D3D11 session. Necessary, and not
+// sufficient for every title: DCS World faulted the driver with the gate
+// held, so its shape never takes the presenter (presenter_forbidden).
 //
 // Holding the layer's own device section could not cover it and recorded no
 // contention at all: that guards the layer's D3D11 work, while the work that
@@ -4023,6 +4059,8 @@ void reset_frame_bookkeeping(const std::shared_ptr<SessionState>& state) {
         state->steamvr_presenter_start_requested = false;
         state->runtime_frame_waited_unbegun = false;
         state->application_begin_needs_wait = false;
+        state->split_frame_loop = false;
+        state->application_end_thread_id = 0;
         state->last_inline_frame_state = XrFrameState{XR_TYPE_FRAME_STATE};
         state->last_inline_frame_state_valid = false;
         state->generation_steady_state_established = false;
@@ -4137,6 +4175,19 @@ XrResult layer_wait_frame_impl(
     state->frame_call_condition.wait(frame_call_lock, [&] {
         return !state->application_wait_pending_begin;
     });
+    if (!state->split_frame_loop && state->application_end_thread_id != 0 &&
+        state->application_end_thread_id != GetCurrentThreadId()) {
+        state->split_frame_loop = true;
+        // 600: the frame loop is split across threads. a the wait thread, b
+        // the end thread, c the graphics binding - on D3D11 this is what
+        // keeps the session inline (presenter_forbidden).
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::presenter_transition,
+            600,
+            GetCurrentThreadId(),
+            state->application_end_thread_id,
+            static_cast<std::uint64_t>(state->graphics_binding));
+    }
     XrResult result = XR_SUCCESS;
     const bool use_continuous_presenter = continuous_presenter_active(state);
     bool use_provisional_pipelined_wait = false;
@@ -9536,6 +9587,7 @@ XrResult layer_end_frame_impl(
     // must not keep the application's other thread out of xrWaitFrame while it
     // waits. Everything this mutex protects is finished by then.
     std::unique_lock frame_call_lock(state->frame_call_mutex);
+    state->application_end_thread_id = GetCurrentThreadId();
     const auto application_end_now = std::chrono::steady_clock::now();
     // Every image of the application's that this frame names was released
     // before this call, so the counter as it stands now covers them all.

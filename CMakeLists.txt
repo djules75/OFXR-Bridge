@@ -631,13 +631,20 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-dcs-pipelined-wait-test.log"
                 dcs)
 
+        add_test(
+            NAME xrfg_layer_dcs_d3d11_inline_only
+            COMMAND xrfg_layer_call_chain
+                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
+                "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-dcs-d3d11-inline-only-test.log"
+                dcs-d3d11)
+
         # The same scenarios with the deeper pipeline off ("Prefer FPS over
         # latency" unticked), which the shipped ini turns on: each runs from a
         # scratch directory whose ofxr_bridge.ini turns it off.
         foreach(mode default split-eye cropped-split-eye double-wide
                 d3d11-interop steamvr-presenter flight-simulator
                 uevr-pipelined-time flight-destroy-swapchain
-                steamvr-destroy-space dcs)
+                steamvr-destroy-space dcs dcs-d3d11)
             add_test(
                 NAME xrfg_layer_shallow_${mode}
                 COMMAND "${CMAKE_COMMAND}"
