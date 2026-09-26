@@ -96,6 +96,7 @@ std::atomic<bool> g_application_in_end_frame{false};
 // from a thread other than the application's: the runtime uses that device
 // inside them, and D3D11 does no locking of its own on such a device.
 bool g_single_threaded_mode = false;
+std::atomic<DWORD> g_application_wait_thread_id{0};
 std::atomic<std::uint32_t> g_off_thread_frame_calls{0};
 // swapchain-budget: the runtime allows three private swapchains beside the
 // application's, one short of the deeper pipeline's four, and refuses the
@@ -108,6 +109,15 @@ bool g_swapchain_budget_mode = false;
 std::atomic<std::uint32_t> g_budget_live_privates{0};
 std::atomic<std::uint32_t> g_budget_refusals{0};
 
+// dcs: DCS World's frame loop on a throttling SteamVR. One thread calls
+// xrWaitFrame and keeps two waits in flight - the next is issued before the
+// render thread has begun the current frame and returns once it has - and
+// the render thread labels each xrEndFrame with the older of the two. Once
+// the session has taken the presenter the application's waits are answered
+// virtually and nothing marks them as overlapping, so the label lookup alone
+// decides whether the frame pairs, and it has to accept the older pending
+// frame. The fake runtime behaves exactly as in steamvr-presenter.
+bool g_dcs_mode = false;
 bool g_flight_simulator_mode = false;
 bool g_destroy_pending_swapchain = false;
 bool g_destroy_pending_space = false;
@@ -115,8 +125,10 @@ std::atomic<bool> g_swapchain_destroyed{false};
 std::atomic<unsigned> g_submission_after_destroy{0};
 DWORD g_test_application_thread_id{};
 void record_frame_call_thread() noexcept {
+    const DWORD thread = GetCurrentThreadId();
     if ((g_single_threaded_mode || g_vulkan_mode) &&
-        GetCurrentThreadId() != g_test_application_thread_id) {
+        thread != g_test_application_thread_id &&
+        thread != g_application_wait_thread_id.load(std::memory_order_acquire)) {
         g_off_thread_frame_calls.fetch_add(1, std::memory_order_relaxed);
     }
 }
@@ -167,6 +179,18 @@ std::atomic<bool> g_synthetic_create_info_valid{false};
 std::mutex g_frame_loop_mutex;
 std::deque<XrTime> g_waited_display_times;
 std::optional<XrTime> g_begun_display_time;
+// The frame-loop rule: a runtime blocks xrWaitFrame while an earlier waited
+// frame has not been begun, and SteamVR hung DCS World on exactly that when
+// the layer's presenter issued its first wait over the application's. A
+// blocking fake would hang the suite, so the fake fails the call instead
+// and counts it; a scenario that provokes one has found a deadlock.
+std::atomic<std::uint32_t> g_waits_while_unbegun{0};
+// Who waited each queued frame, so a begin can be told apart by thread: the
+// application's (its render or wait thread) against the layer's presenter.
+// A frame waited by the application and begun by the presenter is one the
+// presenter adopted at its start.
+std::deque<DWORD> g_waited_by_thread;
+std::atomic<std::uint32_t> g_presenter_begun_application_waits{0};
 
 enum class SubmittedTarget {
     none,
@@ -416,7 +440,17 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
         : 100;
     {
         std::scoped_lock lock(g_frame_loop_mutex);
+        if (!g_waited_display_times.empty()) {
+            g_waits_while_unbegun.fetch_add(1, std::memory_order_relaxed);
+            if (!g_log_path.empty()) {
+                std::ofstream stream(g_log_path, std::ios::out | std::ios::app);
+                stream << "[XRFG-FAKE] wait frame while a waited frame is "
+                          "not begun\n";
+            }
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
         g_waited_display_times.push_back(frame_state->predictedDisplayTime);
+        g_waited_by_thread.push_back(GetCurrentThreadId());
     }
     if (!g_log_path.empty()) {
         std::ofstream stream(g_log_path, std::ios::out | std::ios::app);
@@ -457,6 +491,19 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_begin_frame(XrSession, const XrFrameBeginInf
         begun_time = g_waited_display_times.front();
         g_waited_display_times.pop_front();
         g_begun_display_time = begun_time;
+        const DWORD waited_by = g_waited_by_thread.front();
+        g_waited_by_thread.pop_front();
+        const DWORD beginner = GetCurrentThreadId();
+        const auto is_application_thread = [](DWORD thread) {
+            return thread == g_test_application_thread_id ||
+                thread == g_application_wait_thread_id.load(
+                              std::memory_order_acquire);
+        };
+        if (is_application_thread(waited_by) &&
+            !is_application_thread(beginner)) {
+            g_presenter_begun_application_waits.fetch_add(
+                1, std::memory_order_relaxed);
+        }
     }
     if (!g_log_path.empty()) {
         std::ofstream stream(g_log_path, std::ios::out | std::ios::app);
@@ -1703,16 +1750,18 @@ int main(int argc, char** argv) {
             "[split-eye|cropped-split-eye|double-wide|d3d11-interop|"
             "d3d11-double-wide|steamvr-inline|steamvr-presenter|"
             "flight-simulator|uevr-pipelined-time|inverted-fov|"
-            "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget]\n";
+            "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget|"
+            "dcs]\n";
         return EXIT_FAILURE;
     }
+    g_dcs_mode = argc == 4 && std::strcmp(argv[3], "dcs") == 0;
     g_cropped_subimage_mode =
         argc == 4 && std::strcmp(argv[3], "cropped-split-eye") == 0;
     const bool d3d11_double_wide_mode =
         argc == 4 && std::strcmp(argv[3], "d3d11-double-wide") == 0;
     g_destroy_pending_space =
         argc == 4 && std::strcmp(argv[3], "steamvr-destroy-space") == 0;
-    g_steamvr_presenter_mode = g_destroy_pending_space ||
+    g_steamvr_presenter_mode = g_destroy_pending_space || g_dcs_mode ||
         (argc == 4 && std::strcmp(argv[3], "steamvr-presenter") == 0);
     g_single_threaded_mode =
         argc == 4 && std::strcmp(argv[3], "d3d11-single-threaded") == 0;
@@ -2740,6 +2789,155 @@ int main(int argc, char** argv) {
                           : g_swapchain_budget_mode
                               ? "OpenXR swapchain-budget fallback test passed\n"
                               : "OpenXR single-threaded D3D11 test passed\n");
+        return EXIT_SUCCESS;
+    }
+
+    if (g_dcs_mode) {
+        // DCS's shape from the first frame, on the throttling fake SteamVR,
+        // so the presenter arrives by the SteamVR route in the middle of it -
+        // as it did in the session that hung. Two kinds of frame:
+        //
+        //   overlapping: the wait thread issues the next wait before the
+        //     render thread begins this frame; the layer holds it until that
+        //     begin, then forwards it, and the runtime holds the returned
+        //     frame un-begun while this frame is ended. Nothing the layer
+        //     does inside that xrEndFrame may wait on the runtime again.
+        //   plain: the next wait comes after this frame has ended.
+        //
+        // DCS alternates between them with load, which is why it never
+        // reaches the pipelined route's two consecutive overlaps. The pattern
+        // here is plain, plain, overlapping: the two plain frames give the
+        // throttled inline cycle its pair, and whichever pair requests the
+        // promotion, the frame that starts the presenter is an overlapping
+        // one with the runtime holding the application's wait. The presenter
+        // has to begin that frame instead of waiting for its own.
+        bool sequence_succeeded = true;
+        bool presenter_seen = false;
+        XrFrameState pending{XR_TYPE_FRAME_STATE};
+        sequence_succeeded =
+            XR_SUCCEEDED(wait_frame(session, &frame_wait_info, &pending));
+        // Ends the pending frame, having issued the next wait either before
+        // (overlapping) or after (plain) the begin. Leaves the next frame
+        // pending.
+        auto run_frame = [&](bool overlapping) {
+            XrFrameState next{XR_TYPE_FRAME_STATE};
+            XrResult next_wait_result = XR_ERROR_RUNTIME_FAILURE;
+            std::atomic<bool> wait_started{false};
+            auto wait_next = [&] {
+                g_application_wait_thread_id.store(
+                    GetCurrentThreadId(), std::memory_order_release);
+                wait_started.store(true, std::memory_order_release);
+                next_wait_result = wait_frame(session, &frame_wait_info, &next);
+            };
+            bool ok = true;
+            if (overlapping) {
+                std::thread wait_thread(wait_next);
+                while (!wait_started.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                ok = XR_SUCCEEDED(begin_frame(session, &frame_begin_info));
+                wait_thread.join();
+                ok = ok && XR_SUCCEEDED(next_wait_result) &&
+                    capture_fresh_application_image() &&
+                    submit_frame(pending.predictedDisplayTime) &&
+                    wait_for_queue_idle();
+            } else {
+                ok = XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
+                    capture_fresh_application_image() &&
+                    submit_frame(pending.predictedDisplayTime) &&
+                    wait_for_queue_idle();
+                std::thread wait_thread(wait_next);
+                wait_thread.join();
+                ok = ok && XR_SUCCEEDED(next_wait_result);
+            }
+            presenter_seen = presenter_seen ||
+                pending.predictedDisplayPeriod == kFakeDisplayPeriod * 2;
+            ok = ok && next.predictedDisplayTime > pending.predictedDisplayTime;
+            pending = next;
+            return ok;
+        };
+        constexpr int kPromotionCycles = 8;
+        for (int cycle = 0; sequence_succeeded && cycle < kPromotionCycles;
+             ++cycle) {
+            sequence_succeeded = run_frame(false) && run_frame(false) &&
+                run_frame(true);
+        }
+        const bool promoted_during_pattern = presenter_seen;
+        // Under the presenter, every frame overlapping: the label the
+        // application ends with is the older of two pending waits, and the
+        // lookup has to accept it for the frame to pair.
+        std::size_t records_before_overlapping_frames = 0;
+        {
+            std::scoped_lock lock(g_end_records_mutex);
+            records_before_overlapping_frames = g_end_records.size();
+        }
+        constexpr int kOverlappingFrames = 8;
+        for (int index = 0; sequence_succeeded && index < kOverlappingFrames;
+             ++index) {
+            sequence_succeeded = run_frame(true);
+        }
+        sequence_succeeded = sequence_succeeded &&
+            XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
+            capture_fresh_application_image() &&
+            submit_frame(pending.predictedDisplayTime) &&
+            wait_for_queue_idle();
+
+        const bool teardown_succeeded =
+            XR_SUCCEEDED(end_session(session)) &&
+            XR_SUCCEEDED(destroy_swapchain(swapchain)) &&
+            XR_SUCCEEDED(destroy_session(session)) &&
+            XR_SUCCEEDED(destroy_instance(instance));
+        FreeLibrary(module);
+
+        std::size_t synthetic_after = 0;
+        std::size_t current_after = 0;
+        {
+            std::scoped_lock lock(g_end_records_mutex);
+            for (std::size_t index = records_before_overlapping_frames;
+                 index < g_end_records.size(); ++index) {
+                if (g_end_records[index].target == SubmittedTarget::synthetic) {
+                    ++synthetic_after;
+                } else if (g_end_records[index].target ==
+                           SubmittedTarget::current) {
+                    ++current_after;
+                }
+            }
+        }
+        std::size_t synthetic_total = 0;
+        {
+            std::scoped_lock lock(g_end_records_mutex);
+            for (const EndFrameRecord& record : g_end_records) {
+                if (record.target == SubmittedTarget::synthetic) {
+                    ++synthetic_total;
+                }
+            }
+        }
+        const std::uint32_t adopted =
+            g_presenter_begun_application_waits.load(std::memory_order_relaxed);
+        const std::uint32_t violations =
+            g_waits_while_unbegun.load(std::memory_order_relaxed);
+        // Every overlapping frame under the presenter but the first has
+        // a previous frame to pair with; a run that primes instead
+        // submits the current copy alone.
+        const bool valid = sequence_succeeded && teardown_succeeded &&
+            promoted_during_pattern && adopted >= 1 && violations == 0 &&
+            synthetic_after + 2 >=
+                static_cast<std::size_t>(kOverlappingFrames) &&
+            g_submission_after_destroy.load() == 0 &&
+            g_waited_display_times.empty() && !g_begun_display_time;
+        if (!valid) {
+            std::cerr << "DCS pipelined-wait validation failed: sequence="
+                      << sequence_succeeded << " teardown="
+                      << teardown_succeeded << " promoted="
+                      << promoted_during_pattern << " adopted=" << adopted
+                      << " violations=" << violations << " synthetic="
+                      << synthetic_after << " synthetic-total="
+                      << synthetic_total << " current=" << current_after
+                      << '\n';
+            return EXIT_FAILURE;
+        }
+        std::cout << "OpenXR DCS pipelined-wait pairing test passed\n";
         return EXIT_SUCCESS;
     }
 

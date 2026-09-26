@@ -792,6 +792,22 @@ struct SessionState {
     // later physical frame cycles.
     bool application_frame_in_progress{};
     bool application_frame_has_overlapping_wait{};
+    // A forwarded application xrWaitFrame has returned and the matching
+    // xrBeginFrame has not reached the runtime. The runtime holds that frame
+    // open and blocks every further xrWaitFrame until it is begun - SteamVR
+    // did exactly that - so while this is set the layer must not issue a wait
+    // of its own: not the inline second cycle, and not a presenter's first.
+    // Only an inline session forwards waits; under the presenter every
+    // application wait is virtual and this stays clear.
+    bool runtime_frame_waited_unbegun{};
+    // The inline second cycle took the application's held runtime frame for
+    // itself (see submit_current_cycle's adopted frame), so the application's
+    // next xrBeginFrame has to take a fresh xrWaitFrame from the runtime
+    // first. Sessions that never take a presenter pipeline this way instead
+    // of passing the frame through: DCS World issues its next wait before
+    // the render thread begins, on every frame, and passing those through
+    // meant generating nothing.
+    bool application_begin_needs_wait{};
     std::uint32_t pipelined_wait_streak{};
     bool pipelined_presenter_mode{};
     bool pipelined_presenter_start_requested{};
@@ -1051,6 +1067,15 @@ struct SessionState {
     std::uint64_t next_presenter_sequence{1};
     std::size_t outstanding_presenter_submissions{};
     bool presenter_frame_state_valid{};
+    // The frame the presenter's first cycle adopts instead of waiting: an
+    // application wait the runtime still holds un-begun when the presenter
+    // starts (DCS World issues its next wait from another thread before the
+    // render thread ends the frame). The runtime would block the presenter's
+    // own wait until that frame is begun, and the application's begin, which
+    // would have done it, has just become virtual. So the presenter begins
+    // it. Set at start, consumed by the first cycle.
+    XrFrameState presenter_adopted_frame_state{XR_TYPE_FRAME_STATE};
+    bool presenter_adopted_frame_state_valid{};
     // The presenter's frame counter, and the count the application was last
     // released at. The application is handed a doubled period, so it has to be
     // released once per pair, and the validity flag above cannot do that: it is
@@ -1699,7 +1724,8 @@ template <typename Function>
 [[nodiscard]] bool start_continuous_presenter(
     const std::shared_ptr<SessionState>& state,
     std::shared_ptr<GeneratedFrameEndInfo> seed_frame = nullptr,
-    bool preserve_virtual_timeline = false) noexcept;
+    bool preserve_virtual_timeline = false,
+    std::optional<XrFrameState> adopted_frame_state = std::nullopt) noexcept;
 void stop_continuous_presenter(
     const std::shared_ptr<SessionState>& state) noexcept;
 [[nodiscard]] bool continuous_presenter_active(
@@ -3995,6 +4021,8 @@ void reset_frame_bookkeeping(const std::shared_ptr<SessionState>& state) {
         state->pipelined_presenter_mode = false;
         state->pipelined_presenter_start_requested = false;
         state->steamvr_presenter_start_requested = false;
+        state->runtime_frame_waited_unbegun = false;
+        state->application_begin_needs_wait = false;
         state->last_inline_frame_state = XrFrameState{XR_TYPE_FRAME_STATE};
         state->last_inline_frame_state_valid = false;
         state->generation_steady_state_established = false;
@@ -4002,6 +4030,7 @@ void reset_frame_bookkeeping(const std::shared_ptr<SessionState>& state) {
     state->frame_call_condition.notify_all();
     {
         std::scoped_lock presenter_lock(state->presenter_mutex);
+        state->presenter_adopted_frame_state_valid = false;
         state->last_virtual_display_time = 0;
     }
     {
@@ -4303,6 +4332,7 @@ XrResult layer_wait_frame_impl(
             state->last_inline_frame_state_valid = true;
             state->last_application_wait_elapsed = application_wait_elapsed;
             forwarded_application_wait = true;
+            state->runtime_frame_waited_unbegun = true;
         }
     }
     if (XR_SUCCEEDED(result) && frame_state != nullptr) {
@@ -4382,9 +4412,42 @@ XrResult layer_begin_frame_impl(
         } else if (state->pipelined_presenter_mode) {
             result = XR_ERROR_RUNTIME_FAILURE;
         } else {
-            result = with_runtime_entry(state, [&] {
-                return state->dispatch->begin_frame(session, begin_info);
-            });
+            XrResult replacement_wait = XR_SUCCESS;
+            if (state->application_begin_needs_wait) {
+                // The inline cycle begun the frame this application's wait
+                // returned; take it another before its begin, on its own
+                // thread. See application_begin_needs_wait.
+                state->application_begin_needs_wait = false;
+                XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+                XrFrameState replacement{XR_TYPE_FRAME_STATE};
+                const auto wait_token = xrfg::bridge_flight_logger().begin(
+                    xrfg::BridgeFlightOperation::internal_wait_frame,
+                    handle_value(session));
+                replacement_wait = with_runtime_entry_for_wait(state, [&] {
+                    return state->dispatch->wait_frame(
+                        session, &wait_info, &replacement);
+                });
+                xrfg::bridge_flight_logger().end(
+                    wait_token,
+                    xrfg::BridgeFlightOperation::internal_wait_frame,
+                    replacement_wait,
+                    static_cast<std::uint64_t>(replacement.predictedDisplayTime),
+                    static_cast<std::uint64_t>(replacement.predictedDisplayPeriod),
+                    replacement.shouldRender);
+                if (XR_SUCCEEDED(replacement_wait)) {
+                    state->last_inline_frame_state = replacement;
+                    state->last_inline_frame_state.next = nullptr;
+                    state->last_inline_frame_state_valid = true;
+                }
+            }
+            result = XR_FAILED(replacement_wait)
+                ? replacement_wait
+                : with_runtime_entry(state, [&] {
+                      return state->dispatch->begin_frame(session, begin_info);
+                  });
+            if (XR_SUCCEEDED(result)) {
+                state->runtime_frame_waited_unbegun = false;
+            }
         }
     } catch (...) {
         if (state->application_wait_pending_begin) {
@@ -5905,20 +5968,43 @@ void continuous_presenter_main(
 
         XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
         XrFrameState frame_state{XR_TYPE_FRAME_STATE};
-        const auto wait_token = xrfg::bridge_flight_logger().begin(
-            xrfg::BridgeFlightOperation::internal_wait_frame,
-            handle_value(state->handle));
-        const XrResult wait_result = with_runtime_entry_for_wait(state, [&] {
-            return state->dispatch->wait_frame(
-                state->handle, &wait_info, &frame_state);
-        });
-        xrfg::bridge_flight_logger().end(
-            wait_token,
-            xrfg::BridgeFlightOperation::internal_wait_frame,
-            wait_result,
-            static_cast<std::uint64_t>(frame_state.predictedDisplayTime),
-            static_cast<std::uint64_t>(frame_state.predictedDisplayPeriod),
-            frame_state.shouldRender);
+        XrResult wait_result = XR_SUCCESS;
+        std::optional<XrFrameState> adopted_frame_state;
+        {
+            std::scoped_lock lock(state->presenter_mutex);
+            if (state->presenter_adopted_frame_state_valid) {
+                adopted_frame_state = state->presenter_adopted_frame_state;
+                state->presenter_adopted_frame_state_valid = false;
+            }
+        }
+        if (adopted_frame_state) {
+            // The application's wait the runtime still holds un-begun; see
+            // presenter_adopted_frame_state. Asking the runtime for another
+            // frame here blocked until this one was begun, which nothing
+            // was going to do.
+            frame_state = *adopted_frame_state;
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::presenter_transition,
+                500,
+                static_cast<std::uint64_t>(frame_state.predictedDisplayTime),
+                static_cast<std::uint64_t>(frame_state.predictedDisplayPeriod),
+                frame_state.shouldRender);
+        } else {
+            const auto wait_token = xrfg::bridge_flight_logger().begin(
+                xrfg::BridgeFlightOperation::internal_wait_frame,
+                handle_value(state->handle));
+            wait_result = with_runtime_entry_for_wait(state, [&] {
+                return state->dispatch->wait_frame(
+                    state->handle, &wait_info, &frame_state);
+            });
+            xrfg::bridge_flight_logger().end(
+                wait_token,
+                xrfg::BridgeFlightOperation::internal_wait_frame,
+                wait_result,
+                static_cast<std::uint64_t>(frame_state.predictedDisplayTime),
+                static_cast<std::uint64_t>(frame_state.predictedDisplayPeriod),
+                frame_state.shouldRender);
+        }
         if (XR_FAILED(wait_result)) {
             std::scoped_lock lock(state->presenter_mutex);
             fail_pending_presenter_submissions_locked(*state, wait_result);
@@ -7401,11 +7487,18 @@ void continuous_presenter_main(
 [[nodiscard]] bool start_continuous_presenter(
     const std::shared_ptr<SessionState>& state,
     std::shared_ptr<GeneratedFrameEndInfo> seed_frame,
-    bool preserve_virtual_timeline) noexcept {
+    bool preserve_virtual_timeline,
+    std::optional<XrFrameState> adopted_frame_state) noexcept {
     try {
         std::scoped_lock lock(state->presenter_mutex);
         if (state->presenter_active) {
             return true;
+        }
+        state->presenter_adopted_frame_state_valid =
+            adopted_frame_state.has_value();
+        if (adopted_frame_state) {
+            state->presenter_adopted_frame_state = *adopted_frame_state;
+            state->presenter_adopted_frame_state.next = nullptr;
         }
         state->presenter_submissions.clear();
         state->presenter_last_frame.reset();
@@ -8371,9 +8464,15 @@ enum class GenerationPrepareReason : std::int64_t {
     manual_disarmed = 17,
     structural_quarantine_active = 18,
     synthesis_busy = 19,
-    // A frame the application pipelined on a session that never takes a
-    // presenter; see presenter_forbidden.
+    // Retired in V328: a session that never takes a presenter now generates
+    // a pipelined frame by adopting the held wait (submit_current_cycle).
+    // Kept so the flight-log value stays unique.
     inline_only_pipelined = 20,
+    // The application's next wait was forwarded and the runtime still holds
+    // it un-begun, so the inline second cycle's own wait would block until
+    // a begin that cannot come before this call returns. Passed through;
+    // see SessionState::runtime_frame_waited_unbegun.
+    inline_wait_outstanding = 21,
 };
 
 [[nodiscard]] constexpr GenerationPrepareReason classify_synthesis_failure(
@@ -8891,14 +8990,23 @@ struct PreparedProjectionFrame {
         if (state->pending_frames.size() == 1) {
             return state->pending_frames.front().display_period;
         }
+        // With more than one outstanding, the label has to name one of them,
+        // and any of them will do. DCS World waits from its own thread and
+        // keeps two waits in flight, so the frame it ends is always the older
+        // of the two - inline that shows up as an overlapping wait and is
+        // consumed in submission order, but under the presenter the wait is
+        // answered virtually and nothing marks the overlap, so this lookup is
+        // what decides whether the frame pairs. Requiring the newest pending
+        // frame here left every DCS frame primed and none generated.
+        // consume_application_frame drops everything up to the match, so the
+        // two stay in step.
         const auto frame = std::find_if(
             state->pending_frames.begin(),
             state->pending_frames.end(),
             [display_time](const PendingApplicationFrame& candidate) {
                 return candidate.display_time == display_time;
             });
-        if (frame == state->pending_frames.end() ||
-            std::next(frame) != state->pending_frames.end()) {
+        if (frame == state->pending_frames.end()) {
             return std::nullopt;
         }
         return frame->display_period;
@@ -9011,9 +9119,16 @@ struct InternalCycleResult {
     bool completed{};
 };
 
+// adopted_frame_state: the application's forwarded wait the runtime still
+// holds un-begun. Asking the runtime for another frame would block until that
+// one is begun, which the application cannot do before this call returns, so
+// the cycle begins it instead and the application's next xrBeginFrame takes
+// a fresh wait (application_begin_needs_wait). Same pacing - one runtime
+// wait per application frame - moved from here to the application's begin.
 [[nodiscard]] InternalCycleResult submit_current_cycle(
     const std::shared_ptr<SessionState>& state,
-    const XrFrameEndInfo& current_end_info) {
+    const XrFrameEndInfo& current_end_info,
+    std::optional<XrFrameState> adopted_frame_state = std::nullopt) {
     InternalCycleResult output{};
     if (state->dispatch->wait_frame == nullptr ||
         state->dispatch->begin_frame == nullptr ||
@@ -9023,25 +9138,37 @@ struct InternalCycleResult {
 
     XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState frame_state{XR_TYPE_FRAME_STATE};
-    const auto wait_token = xrfg::bridge_flight_logger().begin(
-        xrfg::BridgeFlightOperation::internal_wait_frame,
-        handle_value(state->handle));
-    const auto wait_started = std::chrono::steady_clock::now();
-    const XrResult wait_result = with_runtime_entry_for_wait(state, [&] {
-        return state->dispatch->wait_frame(
-            state->handle, &wait_info, &frame_state);
-    });
-    output.wait_elapsed = std::chrono::steady_clock::now() - wait_started;
-    output.predicted_display_period = frame_state.predictedDisplayPeriod;
-    xrfg::bridge_flight_logger().end(
-        wait_token,
-        xrfg::BridgeFlightOperation::internal_wait_frame,
-        wait_result,
-        static_cast<std::uint64_t>(frame_state.predictedDisplayTime),
-        static_cast<std::uint64_t>(frame_state.predictedDisplayPeriod),
-        frame_state.shouldRender);
-    if (XR_FAILED(wait_result)) {
-        return output;
+    if (adopted_frame_state) {
+        frame_state = *adopted_frame_state;
+        frame_state.next = nullptr;
+        output.predicted_display_period = frame_state.predictedDisplayPeriod;
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::presenter_transition,
+            501,
+            static_cast<std::uint64_t>(frame_state.predictedDisplayTime),
+            static_cast<std::uint64_t>(frame_state.predictedDisplayPeriod),
+            frame_state.shouldRender);
+    } else {
+        const auto wait_token = xrfg::bridge_flight_logger().begin(
+            xrfg::BridgeFlightOperation::internal_wait_frame,
+            handle_value(state->handle));
+        const auto wait_started = std::chrono::steady_clock::now();
+        const XrResult wait_result = with_runtime_entry_for_wait(state, [&] {
+            return state->dispatch->wait_frame(
+                state->handle, &wait_info, &frame_state);
+        });
+        output.wait_elapsed = std::chrono::steady_clock::now() - wait_started;
+        output.predicted_display_period = frame_state.predictedDisplayPeriod;
+        xrfg::bridge_flight_logger().end(
+            wait_token,
+            xrfg::BridgeFlightOperation::internal_wait_frame,
+            wait_result,
+            static_cast<std::uint64_t>(frame_state.predictedDisplayTime),
+            static_cast<std::uint64_t>(frame_state.predictedDisplayPeriod),
+            frame_state.shouldRender);
+        if (XR_FAILED(wait_result)) {
+            return output;
+        }
     }
 
     XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
@@ -9427,6 +9554,7 @@ XrResult layer_end_frame_impl(
         state->steamvr_presenter_start_requested;
     const bool consume_in_submission_order =
         pipelined_presenter_mode || frame_had_overlapping_wait;
+    const bool runtime_wait_outstanding = state->runtime_frame_waited_unbegun;
     state->application_frame_in_progress = false;
     state->application_frame_has_overlapping_wait = false;
     if (state->steamvr_delivery &&
@@ -9493,11 +9621,22 @@ XrResult layer_end_frame_impl(
             if (!pipelined_presenter_start_requested) {
                 return XR_SUCCESS;
             }
+            // frame_call_mutex is held here, so the wait flag and the frame
+            // it names are stable; the presenter takes the frame over.
+            std::optional<XrFrameState> adopted_frame_state;
+            if (runtime_wait_outstanding &&
+                state->last_inline_frame_state_valid) {
+                adopted_frame_state = state->last_inline_frame_state;
+            }
             if (!start_continuous_presenter(
                     state,
                     std::move(seed_frame),
-                    true)) {
+                    true,
+                    adopted_frame_state)) {
                 return XR_ERROR_RUNTIME_FAILURE;
+            }
+            if (adopted_frame_state) {
+                state->runtime_frame_waited_unbegun = false;
             }
             state->pipelined_presenter_start_requested = false;
             state->steamvr_presenter_start_requested = false;
@@ -9584,16 +9723,6 @@ XrResult layer_end_frame_impl(
             }
         }
     }
-    // Generating a frame the application pipelined needs the presenter, and
-    // a session that must not have one (presenter_forbidden) passes it
-    // through instead: to the runtime unchanged, on this thread, exactly as
-    // it would go without the layer, and the next frame does not pair
-    // across it.
-    if (presenter_forbidden(*state) && frame_had_overlapping_wait) {
-        clear_generation_continuity(state);
-        return bypass_generation(
-            GenerationPrepareReason::inline_only_pipelined);
-    }
     if (generation_cooling_down || manually_disarmed || !state->menu_enabled) {
         return bypass_generation(
             manually_disarmed
@@ -9670,6 +9799,26 @@ XrResult layer_end_frame_impl(
             release_session_generation_budget(state);
         }
         return passthrough_result;
+    }
+    // An inline session whose next wait the runtime already holds: the inline
+    // second cycle's own wait would block until the held frame is begun,
+    // which the render thread can only do after this call returns. DCS World
+    // deadlocked there with the presenter's first wait. A session that can
+    // take a presenter passes the frame through - a promotion pending at this
+    // end still happens, and the presenter begins the held frame. One that
+    // never takes a presenter (presenter_forbidden) generates anyway: its
+    // cycle adopts the held frame (submit_current_cycle), because for DCS's
+    // shape this is every frame, and passing them all through meant no
+    // generation at all. After arming, so a session that starts this way
+    // still arms on its first frame.
+    const bool adopt_outstanding_wait = !use_continuous_presenter &&
+        runtime_wait_outstanding && presenter_forbidden(*state) &&
+        state->last_inline_frame_state_valid;
+    if (!use_continuous_presenter && runtime_wait_outstanding &&
+        !adopt_outstanding_wait) {
+        clear_generation_continuity(state);
+        return bypass_generation(
+            GenerationPrepareReason::inline_wait_outstanding);
     }
     const std::optional<XrDuration> application_display_period =
         latest_pending_application_period(
@@ -10189,8 +10338,18 @@ XrResult layer_end_frame_impl(
                 pending.fence_value));
         }
     }
-    const InternalCycleResult current_cycle =
-        submit_current_cycle(state, current_generated.info);
+    const InternalCycleResult current_cycle = submit_current_cycle(
+        state,
+        current_generated.info,
+        adopt_outstanding_wait
+            ? std::optional<XrFrameState>(state->last_inline_frame_state)
+            : std::nullopt);
+    if (adopt_outstanding_wait) {
+        // frame_call_mutex is held on the inline path, so these are seen in
+        // order by the application's next begin.
+        state->runtime_frame_waited_unbegun = false;
+        state->application_begin_needs_wait = true;
+    }
     // How far apart the runtime actually received the two frames of this
     // pair: from the synthetic's hand-over completing to the real frame's.
     const auto inline_pair_gap = std::chrono::steady_clock::now() -
