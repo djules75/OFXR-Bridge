@@ -659,7 +659,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         endforeach()
         # The Vulkan scenarios need vulkan_support on, which the shipped ini
         # leaves off, and run with the queue layer in the chain, at both
-        # depths.
+        # depths. A machine without any Vulkan implementation (a GPU-less
+        # build runner) cannot run them at all; the call chain says so with
+        # one marker and CTest reports the scenario as skipped, not failed.
+        # Any other Vulkan setup failure, including the queue layer being
+        # refused at instance creation, is still a failure.
         foreach(depth deep shallow)
             add_test(
                 NAME xrfg_layer_vulkan_${depth}
@@ -671,7 +675,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                     "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/vulkan-${depth}"
                     "-DMODE=vulkan"
                     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
-            set_tests_properties(xrfg_layer_vulkan_${depth} PROPERTIES TIMEOUT 60)
+            set_tests_properties(xrfg_layer_vulkan_${depth} PROPERTIES
+                TIMEOUT 60
+                SKIP_REGULAR_EXPRESSION "SKIP: no Vulkan implementation on this machine")
         endforeach()
 
         # The D3D11 bridge needs d3d11_bridge=1, which the shipped ini

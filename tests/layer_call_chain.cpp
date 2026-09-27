@@ -1461,11 +1461,22 @@ template <typename Function>
 // images a Vulkan runtime hands out: in COLOR_ATTACHMENT_OPTIMAL, the layout
 // OpenXR requires of a released colour image and the one the layer's copies
 // assume.
+// A machine with no Vulkan implementation at all - no loader, no driver, no
+// device with a graphics queue - cannot run the vulkan scenario, and that is a
+// property of the machine, not of the layer. CTest matches this marker
+// (SKIP_REGULAR_EXPRESSION on the vulkan tests) and reports the scenario as
+// skipped instead of failed, which is what a GPU-less build runner hits.
+// Every other way Vulkan setup can fail stays a failure, in particular
+// instance creation refusing the queue layer the harness puts in the chain.
+[[nodiscard]] bool skip_without_vulkan(const char* reason) {
+    std::cerr << "SKIP: no Vulkan implementation on this machine: " << reason << '\n';
+    return false;
+}
+
 [[nodiscard]] bool initialize_vulkan() {
     g_vulkan.module = LoadLibraryW(L"vulkan-1.dll");
     if (g_vulkan.module == nullptr) {
-        std::cerr << "vulkan-1.dll is not available\n";
-        return false;
+        return skip_without_vulkan("vulkan-1.dll is not available");
     }
     g_vulkan.get_instance_proc_addr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
         GetProcAddress(g_vulkan.module, "vkGetInstanceProcAddr"));
@@ -1494,8 +1505,13 @@ template <typename Function>
     instance_info.enabledExtensionCount =
         static_cast<std::uint32_t>(instance_extensions.size());
     instance_info.ppEnabledExtensionNames = instance_extensions.data();
-    if (create_instance(&instance_info, nullptr, &g_vulkan.instance) != VK_SUCCESS) {
-        std::cerr << "failed to create the Vulkan instance\n";
+    const VkResult instance_result =
+        create_instance(&instance_info, nullptr, &g_vulkan.instance);
+    if (instance_result == VK_ERROR_INCOMPATIBLE_DRIVER) {
+        return skip_without_vulkan("the loader found no Vulkan driver");
+    }
+    if (instance_result != VK_SUCCESS) {
+        std::cerr << "failed to create the Vulkan instance (" << instance_result << ")\n";
         return false;
     }
     // The test harness puts the bridge's queue-serialising layer in the
@@ -1523,8 +1539,7 @@ template <typename Function>
     std::uint32_t physical_device_count = 0;
     if (enumerate_physical_devices(g_vulkan.instance, &physical_device_count, nullptr) != VK_SUCCESS ||
         physical_device_count == 0) {
-        std::cerr << "no Vulkan physical device\n";
-        return false;
+        return skip_without_vulkan("no Vulkan physical device");
     }
     std::vector<VkPhysicalDevice> physical_devices(physical_device_count);
     if (enumerate_physical_devices(
@@ -1559,8 +1574,7 @@ template <typename Function>
         }
     }
     if (!found) {
-        std::cerr << "no Vulkan device with a graphics queue\n";
-        return false;
+        return skip_without_vulkan("no Vulkan device with a graphics queue");
     }
     const float priority = 1.0F;
     VkDeviceQueueCreateInfo queue_info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
