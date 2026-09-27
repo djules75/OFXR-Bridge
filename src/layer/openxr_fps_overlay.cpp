@@ -329,7 +329,7 @@ struct OpenXrFpsOverlay::Impl {
         auto snapshot = counter.snapshot(now);
         if (delivery) {
             if (const auto received = delivery->delivered_fps(now)) {
-                snapshot.submitted_fps = *received;
+                snapshot.submitted_fps = delivered_new_images(*received, snapshot);
             }
         }
         upload(snapshot);

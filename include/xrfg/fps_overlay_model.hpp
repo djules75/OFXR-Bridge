@@ -14,7 +14,22 @@ enum class FpsOverlayPosition { off, upper_left, upper_right, lower_left, lower_
 struct FpsSnapshot {
     float submitted_fps{};
     bool active{};
+    // Share of the window's submissions that carried a new image; 1 when none
+    // were repeats or nothing was submitted.
+    float new_content_share{1.0f};
 };
+
+// The compositor's delivered rate, less the share of it that was repeats.
+//
+// Each source sees one loss the other cannot. The compositor counts every
+// submission it scanned out on time, and a repeat is one, so below half the
+// display rate it reads the refresh rate: Callisto Protocol at 36.6 frames a
+// second on a 90 Hz display delivered 89.3 by the compositor's count while 16.8
+// of those were repeats and 73 new images reached the eye. The counter sees
+// the repeats but not a frame the compositor showed on the wrong vsync.
+// Scaling one by the other assumes a mispresent is as likely to hit a repeat as
+// a new image; where it favours repeats this reads slightly low, never high.
+[[nodiscard]] float delivered_new_images(float delivered, const FpsSnapshot& snapshot) noexcept;
 
 // Caller serializes access. Fixed storage, monotonic wall-clock measurements;
 // successful downstream submissions are NOT evidence of physical scanout.
@@ -28,9 +43,10 @@ struct FpsSnapshot {
 // distinct images actually reaching the eye. The reporter saw 144 and a
 // picture that visibly was not.
 //
-// On SteamVR the figure is replaced by the compositor's own delivered count
-// before it is displayed, which is why this only ever showed on runtimes where
-// no such source exists.
+// On SteamVR the displayed figure is the compositor's own delivered count
+// instead, scaled by this counter's new-content share (delivered_new_images).
+// Before that scaling the fix above never applied there, and fpsVR, which
+// reads the same compositor counters, cannot apply it at all.
 class FpsCounter {
 public:
     // `new_content` is false for a repeat.
@@ -41,6 +57,7 @@ private:
     struct Bucket {
         std::int64_t epoch{-1};
         std::uint32_t output{};
+        std::uint32_t submissions{};
     };
     Bucket& bucket(std::int64_t now_ns) noexcept;
     std::array<Bucket, 12> buckets_{};

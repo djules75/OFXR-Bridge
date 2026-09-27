@@ -3,8 +3,8 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current release: **v0.2.7 (internal build V336)**.
-See the [release notes](docs/releases/0.2.7.md).
+Current release: **v0.2.7.2 (internal build V337)**.
+See the [release notes](docs/releases/0.2.7.2.md).
 
 > [!WARNING]
 > This is experimental software. It may not work with your game, VR mod, GPU or OpenXR
@@ -12,11 +12,15 @@ See the [release notes](docs/releases/0.2.7.md).
 > or cause a crash. Use it at your own risk.
 
 > [!IMPORTANT]
-> The NVIDIA backend requires an NVIDIA Turing-generation GPU or newer with
-> Optical Flow hardware support. TU117-based cards, including the GTX 1650,
-> are not supported. RTX 20/30/40-series cards and GTX 1660-family cards are
-> supported with a compatible NVIDIA driver. Older Pascal cards such as the
-> GTX 10 series are not supported. FidelityFX remains available on other GPUs.
+> The bridge runs on any Direct3D 12 GPU with Shader Model 6 support - GTX
+> 10-series and newer NVIDIA cards, AMD GCN and RDNA, Intel Arc - through one
+> of two optical-flow backends. The NVIDIA backend uses the Optical Flow hardware
+> engine of Turing-generation GPUs and newer (RTX 20/30/40/50-series and the
+> GTX 1660 family, with a compatible driver; not TU117 cards such as the
+> GTX 1650). On every other GPU - AMD, Intel, and older NVIDIA cards such as
+> the GTX 10 series - the bridge uses the AMD FidelityFX backend automatically.
+> FidelityFX computes the flow on the same GPU that renders the game, so it
+> costs more frame time than the NVIDIA engine and leaves less headroom.
 
 > [!TIP]
 > A game that holds about half your headset's refresh rate can reach the full
@@ -71,14 +75,24 @@ performance boost with minimal visual-quality loss. Running the optical flow at
 negligible net performance gain, so it is not recommended for normal use.
 
 > [!NOTE]
-> Some FPS counters, including xrFPS in certain setups, measure the original
-> application frames upstream of OFXR. While frame generation is active, they
-> may therefore display roughly half the frames actually being submitted to
-> the headset. This does not necessarily mean that OFXR is inactive.
+> **Use the OFXR FPS number, not other FPS tools, while the bridge is active.**
+> Other counters can be wrong in either direction:
+>
+> - **fpsVR, SteamVR's frame timing and other compositor-side tools** count
+>   every frame the bridge hands over. When the game runs below half the
+>   refresh rate, the bridge repeats frames to fill the gaps, and these tools
+>   count the repeats as new frames. They can show 90 on a 90 Hz headset while
+>   far fewer new frames reach your eyes.
+> - **Counters inside the game or the VR mod**, and xrFPS in some setups,
+>   count the game's own frames before the bridge adds any. While frame
+>   generation is active they show about half of what reaches the headset.
+>   This does not mean OFXR is inactive.
 
-The bridge's own optional FPS number counts accepted nonempty OpenXR
-submissions. It is a diagnostic indicator rather than proof of physical headset
-scanout; see [FPS overlay details](docs/FPS_OVERLAY.md).
+The bridge's own optional FPS number counts only new frames: real and
+generated, but not repeats. On SteamVR it starts from what the compositor
+reports it actually showed, so frames SteamVR shows late are left out too.
+On other runtimes it counts the new frames the bridge submits. See
+[FPS overlay details](docs/FPS_OVERLAY.md).
 
 When both the **Bridge flight recorder** and an FPS overlay position are
 enabled, OFXR draws a small purple rectangle into synthetic frames near the FPS
@@ -153,8 +167,9 @@ before it can be on by default, so please report results either way.
   layer loads into every Vulkan application while registered, browsers
   included; that is why the option is off by default.
 - **No FPS number in Vulkan games** for now: the overlay has no Vulkan path.
-  The diagnostic squares still show generation running; read the rate in
-  fpsVR or the Virtual Desktop overlay.
+  The diagnostic squares still show generation running. fpsVR or the Virtual
+  Desktop overlay give a rough rate, but they count repeated frames as new
+  ones, so they read high whenever the game is below half the refresh rate.
 - On SteamVR, turn off the game's **fixed frame rate at half** and Motion
   Smoothing in the per-application video settings, or SteamVR holds the game
   to half rate and the bridge can only deliver half.

@@ -38,6 +38,7 @@ void FpsCounter::submitted(std::int64_t now, bool synthetic, bool new_content) n
     // A repeat is a submission and not a frame. See the header for what
     // counting them cost.
     if (new_content) ++entry.output;
+    ++entry.submissions;
     if (synthetic) last_synthetic_ns_ = now;
 }
 
@@ -47,15 +48,24 @@ FpsSnapshot FpsCounter::snapshot(std::int64_t now) const noexcept {
     const auto epoch = now / 100'000'000;
     const auto window_start = std::max(start_ns_, (epoch - 9) * 100'000'000);
     const float seconds = std::max(0.1f, static_cast<float>(now - window_start) * 1e-9f);
+    std::uint32_t output = 0, submissions = 0;
     for (const auto& entry : buckets_) {
         if (entry.epoch < 0 || entry.epoch > epoch || entry.epoch < epoch - 9) continue;
-        result.submitted_fps += static_cast<float>(entry.output) / seconds;
+        output += entry.output;
+        submissions += entry.submissions;
     }
+    result.submitted_fps = static_cast<float>(output) / seconds;
+    if (submissions != 0)
+        result.new_content_share = static_cast<float>(output) / static_cast<float>(submissions);
     // Hysteresis across alternating S/B slots; no green merely because armed,
     // initialized, primed, repeated, or because an attempted S failed.
     result.active = last_synthetic_ns_ >= 0 && now >= last_synthetic_ns_ &&
         now - last_synthetic_ns_ < 500'000'000;
     return result;
+}
+
+float delivered_new_images(float delivered, const FpsSnapshot& snapshot) noexcept {
+    return delivered * std::clamp(snapshot.new_content_share, 0.0f, 1.0f);
 }
 
 OverlayPlacement overlay_placement(

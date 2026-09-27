@@ -29,8 +29,18 @@ loaded DLL; a disarmed tray does not update its runtime configuration.
 
 ## Reading the number
 
-The value counts nonempty downstream `xrEndFrame` submissions returning
-`XR_SUCCESS`, including originals, fresh synthetics and any presenter repeats.
+The value counts **new images**: originals and fresh synthetics from nonempty
+downstream `xrEndFrame` submissions that returned `XR_SUCCESS`. Presenter
+repeats are left out. The presenter repeats the last image whenever the game
+runs below half the refresh rate, and a repeat carries nothing new.
+
+On SteamVR the value starts instead from the compositor's own count of frames
+it showed on time (`Compositor_FrameTiming`), then scales it by the share of
+submissions that were new images. The compositor cannot tell a repeat from a
+new image and the bridge cannot see a frame shown on the wrong vsync, so each
+source covers the other's blind spot. fpsVR reads the same compositor counters
+without that correction, so it shows the full refresh rate below half rate.
+
 It is rounded to a whole number (0-999), using a roughly one-second rolling
 window and refreshing at most four times per second.
 
@@ -39,9 +49,10 @@ none did. This short hold prevents color flicker between original and synthetic
 frames. Prime copies, repeats and failed/empty synthetic submissions never
 activate green. Intermittent generation can remain green during that hold.
 
-The number measures accepted submissions, **not physical headset scanout**, compositor
-reprojection, GPU completion or frame quality. The runtime may drop frames even
-after accepting them. A frozen game/runtime can leave the last panel frozen;
+Off SteamVR the number measures accepted submissions, **not physical headset
+scanout**, compositor reprojection, GPU completion or frame quality; the
+runtime may drop frames even after accepting them. No reading measures frame
+quality. A frozen game/runtime can leave the last panel frozen;
 the panel is not an independent watchdog. No panel can be shown if the DLL was
 never loaded, the session is not rendering, the runtime has no spare composition
 layer or the optional overlay cannot initialize. Use the flight recorder to

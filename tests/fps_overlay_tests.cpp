@@ -48,6 +48,21 @@ int main(int argc, char** argv) {
         require(std::abs(padded.submitted_fps - 78) < 0.5f,
                 "repeats must not be counted as frames");
         require(padded.active, "synthetics still mark the overlay active");
+        // The compositor scans every one of those 144 submissions out on time,
+        // so its delivered count is the refresh rate. What reaches the eye is
+        // the new-content share of it.
+        require(std::abs(padded.new_content_share - 78.0f / 144.0f) < 0.01f,
+                "new-content share must exclude repeats");
+        require(std::abs(delivered_new_images(144, padded) - 78) < 0.5f,
+                "delivered count must not credit repeats");
+        // A compositor-side loss stays visible alongside the repeats: 90
+        // delivered of 100 submitted with a fifth of them repeats.
+        FpsSnapshot mixed;
+        mixed.new_content_share = 0.8f;
+        require(std::abs(delivered_new_images(90, mixed) - 72) < 0.01f,
+                "repeats and compositor loss must compound");
+        require(delivered_new_images(90, FpsSnapshot{}) == 90,
+                "no repeats must leave the delivered count unchanged");
         for (auto position : {FpsOverlayPosition::off, FpsOverlayPosition::upper_left,
             FpsOverlayPosition::upper_right, FpsOverlayPosition::lower_left, FpsOverlayPosition::lower_right}) {
             require(parse_overlay_position(overlay_position_name(position)) == position, "position round trip");
