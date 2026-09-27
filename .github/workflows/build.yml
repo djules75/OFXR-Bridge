@@ -1,0 +1,202 @@
+# Builds the layer, the tray and the tests on a clean Windows runner, runs the
+# suite on WARP, and uploads the same file set the release zips carry.
+#
+# The two dependencies docs/BUILDING.md keeps out of the repository are fetched
+# here at their pinned revisions and verified: the FidelityFX SDK by commit
+# hash (its Optical Flow + DX12 static libraries are cached across runs), and
+# openvr.h by SHA-256. A mismatch fails the job rather than building against
+# something unpinned.
+#
+# Code signing: once the SignPath Foundation application is approved, the
+# `sign` job submits the uploaded artifact to SignPath. It only runs when the
+# repository variable SIGNPATH_ORGANIZATION_ID is set, so the workflow is
+# complete without it.
+
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*', '[0-9]+.[0-9]+.[0-9]+*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FFX_TAG: v1.1.4
+  FFX_COMMIT: c6efa6bf7f2027b3ec94f28578bb5965eabb9e55
+  FFX_ROOT: external/FidelityFX-SDK-v1.1.4
+  OPENVR_TAG: v2.5.1
+  OPENVR_SHA256: 94E5545370159C85F87CD6E15DD3739F7C919FC7A6E869F5E4ED463533A07ED0
+
+jobs:
+  build:
+    name: Build and test (Windows x64)
+    runs-on: windows-2022
+    timeout-minutes: 90
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-name: ${{ steps.meta.outputs.artifact-name }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Read the version stamp
+        id: meta
+        shell: pwsh
+        run: |
+          $line = Select-String -Path CMakeLists.txt -Pattern 'project\(\S+\s+VERSION\s+(\d+)\.(\d+)\.(\d+)' | Select-Object -First 1
+          if (-not $line) { throw 'project(... VERSION x.y.z) not found in CMakeLists.txt' }
+          $minor = $line.Matches[0].Groups[2].Value
+          $ref = "${{ github.ref_name }}" -replace '[^A-Za-z0-9._-]', '-'
+          $name = "OFXR-Bridge-V$minor-$ref-$('${{ github.sha }}'.Substring(0, 8))"
+          "build-number=V$minor" >> $env:GITHUB_OUTPUT
+          "artifact-name=$name" >> $env:GITHUB_OUTPUT
+          Write-Host "Build $('V' + $minor), artifact $name"
+
+      # --- FidelityFX SDK v1.1.4: headers + the two static libraries ---------
+
+      - name: Restore the FidelityFX SDK build
+        id: ffx-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.FFX_ROOT }}/sdk/include
+            ${{ env.FFX_ROOT }}/sdk/bin/ffx_sdk
+          key: ffx-${{ env.FFX_COMMIT }}-of-dx12-static-vs2022-x64-v1
+
+      - name: Build the FidelityFX SDK (Optical Flow, DX12, static)
+        if: steps.ffx-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          git clone --branch $env:FFX_TAG --depth 1 `
+            https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git $env:FFX_ROOT
+          $head = (git -C $env:FFX_ROOT rev-parse HEAD).Trim()
+          if ($head -ne $env:FFX_COMMIT) {
+            throw "FidelityFX $env:FFX_TAG resolved to $head; docs/BUILDING.md pins $env:FFX_COMMIT"
+          }
+          cmake -S "$env:FFX_ROOT/sdk" -B build-fidelityfx -G "Visual Studio 17 2022" -A x64 `
+            -DFFX_ALL=OFF -DFFX_OF=ON -DFFX_API_BACKEND=DX12_X64 -DFFX_BUILD_AS_DLL=OFF
+          cmake --build build-fidelityfx --config Release --parallel
+          foreach ($lib in 'ffx_backend_dx12_x64.lib', 'ffx_opticalflow_x64.lib') {
+            if (-not (Test-Path "$env:FFX_ROOT/sdk/bin/ffx_sdk/$lib")) { throw "FidelityFX build did not produce $lib" }
+          }
+
+      # --- openvr.h at the pinned tag, verified ------------------------------
+
+      - name: Fetch openvr.h
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force external/openvr | Out-Null
+          curl.exe -sSL -o external/openvr/openvr.h `
+            "https://raw.githubusercontent.com/ValveSoftware/openvr/$env:OPENVR_TAG/headers/openvr.h"
+          $hash = (Get-FileHash external/openvr/openvr.h -Algorithm SHA256).Hash
+          if ($hash -ne $env:OPENVR_SHA256) {
+            throw "openvr.h SHA-256 $hash does not match the pinned $env:OPENVR_SHA256"
+          }
+
+      # --- Configure, build, test --------------------------------------------
+
+      - name: Locate fxc.exe
+        id: fxc
+        shell: pwsh
+        run: |
+          # CMake hints at one SDK version; the runner's may differ, so pass the newest one explicitly.
+          $fxc = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\10.*\x64\fxc.exe' |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw 'fxc.exe not found in any installed Windows 10 SDK' }
+          "path=$($fxc.FullName)" >> $env:GITHUB_OUTPUT
+          Write-Host "fxc: $($fxc.FullName)"
+
+      - name: Configure
+        shell: pwsh
+        run: >
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          -DXRFG_FXC_EXECUTABLE="${{ steps.fxc.outputs.path }}"
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        shell: pwsh
+        run: ctest --test-dir build -C Release --output-on-failure --timeout 300
+
+      # --- Stage the release file set ----------------------------------------
+
+      - name: Stage the distributable
+        shell: pwsh
+        run: |
+          $out = "dist/${{ steps.meta.outputs.artifact-name }}"
+          New-Item -ItemType Directory -Force "$out/ofxr", "$out/licenses", "$out/external/OpenXR-SDK/LICENSES", "$out/external/Vulkan-Headers" | Out-Null
+          Copy-Item build/Release/OFXRBridgeTray.exe $out
+          Copy-Item build/Release/ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll,
+                    build/Release/ofxr/OFXR_vulkan_queue_layer.dll,
+                    build/Release/ofxr/ofxr_bridge.ini "$out/ofxr"
+          Copy-Item README.md, LICENSE, THIRD_PARTY.md $out
+          Copy-Item licenses/* "$out/licenses"
+          Copy-Item external/OpenXR-SDK/LICENSES/* "$out/external/OpenXR-SDK/LICENSES"
+          Copy-Item external/Vulkan-Headers/LICENSE.md "$out/external/Vulkan-Headers"
+          $notes = "docs/releases/${{ github.ref_name }}.md"
+          if (Test-Path $notes) { Copy-Item $notes "$out/RELEASE_NOTES.md" }
+          Write-Host "Staged:"
+          Get-ChildItem $out -Recurse -File | ForEach-Object {
+            '{0,9}  {1}' -f $_.Length, $_.FullName.Substring((Resolve-Path $out).Path.Length + 1)
+          }
+
+      - name: Upload the distributable
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact-name }}
+          path: dist/${{ steps.meta.outputs.artifact-name }}
+          if-no-files-found: error
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact-name }}-test-logs
+          path: |
+            build/Testing/Temporary/LastTest.log
+            build/Testing/Temporary/*.log
+          if-no-files-found: ignore
+
+  # Submits the unsigned artifact to SignPath and downloads the signed copy.
+  # Fill the repository variables (Settings > Secrets and variables > Actions)
+  # from the SignPath project once the application is approved:
+  #   SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG, SIGNPATH_POLICY_SLUG,
+  #   SIGNPATH_ARTIFACT_CONFIGURATION_SLUG (optional), and the secret
+  #   SIGNPATH_API_TOKEN. Files to sign inside the zip: OFXRBridgeTray.exe,
+  #   ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll, ofxr/OFXR_vulkan_queue_layer.dll.
+  sign:
+    name: Sign with SignPath
+    needs: build
+    if: github.event_name != 'pull_request' && vars.SIGNPATH_ORGANIZATION_ID != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Submit the signing request
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ needs.build.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Upload the signed distributable
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact-name }}-signed
+          path: signed
+          if-no-files-found: error

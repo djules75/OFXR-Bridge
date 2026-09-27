@@ -54,6 +54,18 @@ ofxr/
 
 Do not distribute PDBs, static libraries, test executables or the NVIDIA SDK.
 
+## Continuous integration
+
+`.github/workflows/build.yml` runs the same steps on a clean `windows-2022`
+runner for every push to `main`, every pull request and every tag: it fetches
+the FidelityFX SDK at the pinned commit and `openvr.h` at the pinned SHA-256
+(a mismatch fails the job), builds, runs `ctest` on WARP, and uploads the file
+set the release zips carry, named after the version stamp and the commit. The
+FidelityFX libraries are cached between runs, so only the first run after a
+pin change pays for that build. Tag builds are the input to code signing
+through the SignPath Foundation; the `sign` job is inert until the repository
+variables it names are set.
+
 ## OpenVR header
 
 **Required for the layer.** The overlay reports what the headset actually
