@@ -46,7 +46,6 @@ enum MenuCommand : UINT {
     nvidia_scale_three_quarter = 116,
     nvidia_scale_half = 117,
     toggle_deep_pipeline = 118,
-    toggle_vulkan_support = 119,
     toggle_diagnostics = 120,
     overlay_off = 121,
     overlay_upper_left = 122,
@@ -760,11 +759,6 @@ void show_context_menu(AppState& state) {
         L"Prefer FPS over latency");
     AppendMenuW(
         menu,
-        MF_STRING | (state.settings.vulkan_support ? MF_CHECKED : MF_UNCHECKED),
-        toggle_vulkan_support,
-        L"Vulkan support (experimental)");
-    AppendMenuW(
-        menu,
         MF_STRING | (state.settings.diagnostics ? MF_CHECKED : MF_UNCHECKED),
         toggle_diagnostics,
         L"Bridge flight recorder");
@@ -870,33 +864,6 @@ void handle_command(AppState& state, UINT command) {
             L"(about 11 ms at 90 Hz). Leave off if the game already runs "
             L"comfortably. Takes effect the next time the game starts.");
         break;
-    case toggle_vulkan_support: {
-        state.settings.vulkan_support = !state.settings.vulkan_support;
-        save_settings(state);
-        // The Vulkan layer is registered at arm, so an armed bridge re-arms
-        // to add or remove it; the runtime ini is rewritten on the way.
-        if (state.armed) {
-            std::wstring error;
-            if (!arm_bridge(state, &error)) {
-                show_error(state.window, error);
-            }
-        }
-        refresh_tray_icon(state);
-        show_balloon(
-            state,
-            state.settings.vulkan_support
-                ? L"Vulkan support: on"
-                : L"Vulkan support: off",
-            state.settings.vulkan_support
-                ? L"Frame generation for Vulkan games (No Man's Sky through "
-                  L"OpenComposite). While the bridge is armed a small Vulkan "
-                  L"layer is registered that serialises queue submissions; it "
-                  L"is removed when you disarm. Takes effect the next time the "
-                  L"game starts."
-                : L"Vulkan games are passed through unchanged and the Vulkan "
-                  L"layer is no longer registered.");
-        break;
-    }
     case overlay_off:
     case overlay_upper_left:
     case overlay_upper_right:

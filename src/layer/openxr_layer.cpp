@@ -897,7 +897,7 @@ struct SessionState {
     // The one change allowed is downward, while arming, before anything has
     // been generated: see fall_back_to_shallow_pipeline.
     bool deep_pipeline{};
-    // `[ofxr] vulkan_support`: off, a Vulkan session passes through. See
+    // `[ofxr] vulkan_bridge`: off, a Vulkan session passes through. See
     // implicit_layer::read_vulkan_support for why it is a choice.
     bool vulkan_support{};
     xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options{};

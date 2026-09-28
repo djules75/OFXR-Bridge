@@ -38,10 +38,14 @@ struct LauncherSettings {
     bool nvidia_bidirectional{};
     // "Prefer FPS over latency": the layer's deeper pipeline. On by default.
     bool deep_pipeline{true};
-    // "Vulkan support": generate for Vulkan sessions and register the
-    // queue-serialising Vulkan layer while armed. Off by default: an
-    // implicit Vulkan layer loads into every Vulkan process on the machine.
-    bool vulkan_support{};
+    // Vulkan support: generate for Vulkan sessions and register the
+    // queue-serialising Vulkan layer while armed. On by default and not in
+    // the menu, like d3d11_bridge: vulkan_bridge=0 in tray.ini turns it off. The
+    // key was vulkan_support while the option was off by default, and a
+    // stored vulkan_support=0 is ignored (see parse_settings).
+    // While armed, the implicit Vulkan layer loads into every Vulkan process
+    // on the machine; it is removed at disarm.
+    bool vulkan_support{true};
     // The D3D11 bridge: a D3D11 game's session is given to the runtime as a
     // D3D12 one on the layer's own device, so the runtime never works the
     // game's D3D11 device from the presenter thread. On by default and not

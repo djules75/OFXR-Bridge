@@ -85,11 +85,11 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_deep_pipeline(
     const std::filesystem::path& module_directory) noexcept;
 
-// `[ofxr] vulkan_support`: whether the layer generates for Vulkan sessions.
-// Off unless set to 1: a Vulkan session needs the queue-serialising Vulkan
-// layer registered beside this one, which the tray does only with its
-// "Vulkan support" option on, and without it the presenter's submissions
-// race the game's on its queue.
+// `[ofxr] vulkan_bridge`: whether the layer generates for Vulkan sessions.
+// On unless the key says 0. A Vulkan session needs the queue-serialising
+// Vulkan layer registered beside this one, which the tray does at every arm
+// unless tray.ini says vulkan_bridge=0; without it the presenter's
+// submissions race the game's on its queue.
 // [ofxr] d3d11_bridge: a D3D11 session is given to the runtime as a D3D12
 // one, with the application's images bridged through shared textures. On
 // unless the key says 0; kept as a switch for diagnosing a title against the

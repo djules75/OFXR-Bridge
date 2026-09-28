@@ -3,7 +3,7 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current release: **v0.2.7.2 (internal build V337)**.
+Current release: **v0.2.7.2 (internal build V337)**. Current development build: **V365** (Vulkan support on by default; NVIDIA backend: grayscale flow input, pose-compensated input).
 See the [release notes](docs/releases/0.2.7.2.md).
 
 > [!WARNING]
@@ -43,8 +43,8 @@ The current build provides:
   as native D3D12 games, and the OpenXR runtime never touches the game's
   D3D11 device. DCS World, Assetto Corsa, SkyrimVR and Cyberpunk 2077 run
   through it
-- **Vulkan support (experimental, off by default)**: frame generation for
-  Vulkan games, tested with No Man's Sky through OpenComposite
+- **Vulkan support (on by default)**: frame generation for Vulkan games,
+  tested with No Man's Sky through OpenComposite
 - eye tracking that keeps working alongside Cheeky Foveated DLSS
 - an optional transparent in-headset FPS number with four corner positions;
   green means recent synthetic submissions and red means inactive generation
@@ -154,18 +154,19 @@ before launching the game helps, since every change restarts the calibration.
 
 ### Vulkan games (experimental)
 
-**Vulkan support** in the tray is **off by default**. Turn it on for a game
-that renders through Vulkan — No Man's Sky through
+Vulkan support is **on by default** and no longer has a tray menu entry.
+It covers games that render through Vulkan — No Man's Sky through
 [OpenComposite](https://www.nexusmods.com/nomanssky/mods/4363) is the one it
-has been tested with. It is experimental: it needs more testing and feedback
-before it can be on by default, so please report results either way.
+has been tested with. To turn it off, quit the tray, set `vulkan_bridge=0` in
+`%LOCALAPPDATA%\OFXR Bridge\tray.ini`, and start the tray again. An older
+`vulkan_support=0` line there is ignored: it was written automatically while
+the option was off by default.
 
-- While the bridge is armed with the option on, it registers a small Vulkan
-  layer of its own (`OFXR_vulkan_queue_layer.dll`) that serialises GPU queue
-  submissions, which the bridge's second thread otherwise races the game
-  for. It is removed when you disarm or close the tray. A Vulkan implicit
-  layer loads into every Vulkan application while registered, browsers
-  included; that is why the option is off by default.
+- While the bridge is armed, it registers a small Vulkan layer of its own
+  (`OFXR_vulkan_queue_layer.dll`) that serialises GPU queue submissions,
+  which the bridge's second thread otherwise races the game for. It is
+  removed when you disarm or close the tray. A Vulkan implicit layer loads
+  into every Vulkan application while registered, browsers included.
 - **No FPS number in Vulkan games** for now: the overlay has no Vulkan path.
   The diagnostic squares still show generation running. fpsVR or the Virtual
   Desktop overlay give a rough rate, but they count repeated frames as new

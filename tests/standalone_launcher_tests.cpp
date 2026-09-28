@@ -38,9 +38,9 @@ int main() {
         release_defaults.nvidia_bidirectional || release_defaults.diagnostics ||
         !release_defaults.deep_pipeline ||
         !contains(default_runtime_ini, "deep_pipeline=1") ||
-        release_defaults.vulkan_support ||
+        !release_defaults.vulkan_support ||
         !release_defaults.d3d11_bridge ||
-        !contains(default_runtime_ini, "vulkan_support=0") ||
+        !contains(default_runtime_ini, "vulkan_bridge=1") ||
         !contains(default_runtime_ini, "d3d11_bridge=1") ||
         !contains(default_runtime_ini, "[ofxr]\r\nbackend=nvidia") ||
         !contains(default_runtime_ini, "motion_vectors=dlss") ||
@@ -74,7 +74,7 @@ int main() {
     settings.nvidia_input_scale = NvidiaInputScale::half;
     settings.nvidia_bidirectional = true;
     settings.deep_pipeline = false;
-    settings.vulkan_support = true;
+    settings.vulkan_support = false;
     settings.d3d11_bridge = false;
     settings.diagnostics = true;
     const std::string serialized = serialize_settings(settings);
@@ -83,8 +83,20 @@ int main() {
         parsed.nvidia_preset != NvidiaPerformancePreset::slow ||
         parsed.nvidia_input_scale != NvidiaInputScale::half ||
         !parsed.nvidia_bidirectional || parsed.deep_pipeline ||
-        !parsed.vulkan_support || parsed.d3d11_bridge || !parsed.diagnostics) {
+        parsed.vulkan_support || parsed.d3d11_bridge || !parsed.diagnostics) {
         std::cerr << "standalone settings round-trip failed\n";
+        return 1;
+    }
+
+    // A tray.ini from before Vulkan support was on by default carries the
+    // vulkan_support=0 every save wrote; it must not keep the option off.
+    // Only the new key, set by hand, turns it off.
+    if (!parse_settings("[tray]\r\nvulkan_support=0\r\n").vulkan_support ||
+        parse_settings("[tray]\r\nvulkan_bridge=0\r\n").vulkan_support ||
+        !parse_settings("[tray]\r\nvulkan_bridge=1\r\n").vulkan_support ||
+        !contains(serialize_settings(LauncherSettings{}), "\r\nvulkan_bridge=1\r\n") ||
+        contains(serialize_settings(LauncherSettings{}), "vulkan_support")) {
+        std::cerr << "vulkan setting migration failed\n";
         return 1;
     }
 
@@ -109,7 +121,7 @@ int main() {
         !contains(runtime_ini, "nvidia_input_scale=50") ||
         !contains(runtime_ini, "nvidia_bidirectional=1") ||
         !contains(runtime_ini, "deep_pipeline=0") ||
-        !contains(runtime_ini, "vulkan_support=1") ||
+        !contains(runtime_ini, "vulkan_bridge=0") ||
         !contains(runtime_ini, "d3d11_bridge=0") ||
         !contains(runtime_ini, "[diagnostics]\r\nlogging_enabled=1") ||
         contains(runtime_ini, "one_shot") ||

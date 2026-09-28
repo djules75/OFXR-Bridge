@@ -251,7 +251,7 @@ bool read_vulkan_support(
         }
         const auto ini_path = module_directory / L"ofxr_bridge.ini";
         return GetPrivateProfileIntW(
-                   L"ofxr", L"vulkan_support", 0, ini_path.c_str()) == 1;
+                   L"ofxr", L"vulkan_bridge", 1, ini_path.c_str()) != 0;
     } catch (...) {
         return false;
     }

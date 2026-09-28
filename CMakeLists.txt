@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.337.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.365.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -128,6 +128,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     set(XRFG_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/synthesize_midpoint_pixel_shader.hpp")
     set(XRFG_GAME_MOTION_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/game_motion_synthesize_midpoint_pixel_shader.hpp")
     set(XRFG_NVIDIA_PACK_INPUT_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_pack_flow_input_shader.hpp")
+    set(XRFG_NVIDIA_PACK_LUMA_INPUT_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_pack_luma_input_shader.hpp")
     set(XRFG_NVIDIA_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_synthesize_midpoint_pixel_shader.hpp")
     set(XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp")
     set(XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_fast_synthesize_midpoint_pixel_shader.hpp")
@@ -139,6 +140,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_SYNTHESIZE_PIXEL_HEADER}"
             "${XRFG_GAME_MOTION_SYNTHESIZE_PIXEL_HEADER}"
             "${XRFG_NVIDIA_PACK_INPUT_HEADER}"
+            "${XRFG_NVIDIA_PACK_LUMA_INPUT_HEADER}"
             "${XRFG_NVIDIA_SYNTHESIZE_PIXEL_HEADER}"
             "${XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
             "${XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"
@@ -163,6 +165,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E PackNvidiaFlowInput
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_NVIDIA_PACK_INPUT_HEADER}" /Vn g_xrfg_nvidia_pack_flow_input_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E PackNvidiaFlowInput
+            /D XRFG_NVIDIA_LUMA_INPUT=1
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_NVIDIA_PACK_LUMA_INPUT_HEADER}" /Vn g_xrfg_nvidia_pack_luma_input_shader
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeNvidiaMidpointPS
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
@@ -196,6 +203,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_FULLSCREEN_VERTEX_HEADER}"
         "${XRFG_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_NVIDIA_PACK_INPUT_HEADER}"
+        "${XRFG_NVIDIA_PACK_LUMA_INPUT_HEADER}"
         "${XRFG_NVIDIA_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"
@@ -657,8 +665,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
             set_tests_properties(xrfg_layer_shallow_${mode} PROPERTIES TIMEOUT 60)
         endforeach()
-        # The Vulkan scenarios need vulkan_support on, which the shipped ini
-        # leaves off, and run with the queue layer in the chain, at both
+        # The Vulkan scenarios need vulkan_bridge on, which their inis say
+        # explicitly, and run with the queue layer in the chain, at both
         # depths. A machine without any Vulkan implementation (a GPU-less
         # build runner) cannot run them at all; the call chain says so with
         # one marker and CTest reports the scenario as skipped, not failed.
