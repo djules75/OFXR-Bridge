@@ -242,13 +242,6 @@ constexpr XrDuration kGenerationCooldownDuration = 1'000'000'000;
 // anyway drives a feedback loop - see the comments at both correction sites.
 // Eight is a quarter of a second at 90 Hz.
 constexpr std::uint32_t kPhaseCorrectionGridStreak = 8;
-// Consecutive presenter cycles shorter than half a display period before a
-// runtime other than SteamVR is judged not to pace its xrWaitFrame, and the
-// presenter goes back to holding its own grid. A runtime that paces never
-// produces more than one or two in a row - it returns early once when the
-// presenter arrives late for a scanout, then blocks again - while one that does
-// not pace produces nothing else. Thirty is a third of a second at 90 Hz.
-constexpr std::uint32_t kUnpacedPresenterWaitStreak = 30;
 constexpr auto kStructuralQuarantineDuration = std::chrono::seconds(1);
 // Application frames after which a session counts as established even though
 // no XR_SESSION_STATE_VISIBLE was ever seen, so the delivery connection may
@@ -518,11 +511,6 @@ struct Dispatch {
     // BridgeFlightOperation::vulkan_negotiation.
     VulkanNegotiationDispatch vulkan{};
     bool steamvr_runtime{};
-    // Pimax's own runtime ("Pimax OpenXR", and PimaxXR before it). Named
-    // because, like SteamVR, it judges a frame's completion by the D3D12
-    // queue it was given at session creation; see the binding-queue
-    // substitution in layer_create_session_impl.
-    bool pimax_runtime{};
     XrVersion runtime_version{};
     std::string runtime_name;
 };
@@ -991,13 +979,11 @@ struct SessionState {
     // the runtime queued there to keep the image safe to write still holds
     // the application's writes.
     //
-    // SteamVR and Pimax's runtime only. Virtual Desktop measured a slight
-    // loss with it and has the application's queue back. Pimax measured the
-    // same shape as SteamVR before the fix: MSFS 2024 at 72 Hz, an isolated
-    // two-period xrWaitFrame about twice a second after an on-time hand-over
-    // whose pixels existed, and three times as often after the real frame as
-    // after the synthetic - the real frame's hand-over is the moment the
-    // application is released and fills its queue with its next frame.
+    // SteamVR only. Virtual Desktop measured a slight loss with it and has
+    // the application's queue back. Pimax's runtime measured no difference
+    // either way - MSFS 2024 at 72 Hz, 1.44 two-period waits a second on the
+    // application's queue against 1.43 on the layer's - so it keeps the
+    // application's queue as well.
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> binding_queue;
     Microsoft::WRL::ComPtr<ID3D12Fence> app_release_fence;
     Microsoft::WRL::ComPtr<ID3D12Fence> reacquire_fence;
@@ -1108,29 +1094,29 @@ struct SessionState {
     // condition, and the delta is the error. Guarded by presenter_mutex.
     XrTime presenter_last_predicted_display{};
     bool presenter_last_predicted_valid{};
-    // Whether the runtime's own xrWaitFrame paces the presenter, so the
-    // steady_clock grid above is not held at all. Only ever cleared, and only
-    // on a runtime other than SteamVR; SteamVR is paced by
-    // measured_pace_active or by the grid, never by its wait.
+    // When the presenter's previous xrEndFrame returned.
     //
-    // A runtime that paces its wait has already said when the frame should
-    // start: its return is the deadline signal. Holding a grid on top of it
-    // puts a second clock that knows nothing of the runtime's deadline between
-    // that return and xrEndFrame. Measured on Pimax OpenXR, MSFS 2024, 72 Hz:
-    // the wait blocked a median 3.7 ms and the grid then held 9.5 ms, so wait
-    // and hold filled 12.7-13.1 ms of a 13.8 ms period before each skipped
-    // scanout. The runtime's next wait then blocked 15.4 ms, the grid counted
-    // itself behind and submitted back to back, and the runtime returned the
-    // same predictedDisplayTime twice - one missed and one doubled scanout,
-    // 8.5% and 6.4% of submissions, where the same title on SteamVR had 0.6%
-    // and 0%.
+    // On a runtime other than SteamVR the steady_clock grid is not held at
+    // all: such a runtime paces the presenter with its own xrWaitFrame, and
+    // its return is the deadline signal. Holding a grid on top of it put a
+    // second clock that knew nothing of the runtime's deadline between that
+    // return and xrEndFrame. Measured on Pimax OpenXR, MSFS 2024, 72 Hz: the
+    // wait blocked a median 3.7 ms and the grid then held 9.5 ms, the
+    // runtime's next wait blocked two periods, the grid counted itself behind
+    // and submitted back to back - 8.5% of scanouts missed and 6.4% doubled,
+    // where the same title on SteamVR had 0.6% and none. Without the hold,
+    // 0.8% and 0.1%.
     //
-    // Cleared when kUnpacedPresenterWaitStreak consecutive cycles come back in
-    // under half a period: that runtime is not pacing, and the grid is what
-    // keeps a pair from landing in one scanout. Guarded by presenter_mutex.
-    bool presenter_runtime_paces{true};
-    std::chrono::steady_clock::time_point presenter_wait_returned_at{};
-    std::uint32_t presenter_unpaced_cycle_streak{};
+    // What is kept is a floor of half a period between hand-overs, measured
+    // from this timestamp. Virtual Desktop returns the wait instantly while
+    // the application is behind, and with nothing spacing them two frames
+    // went out 2 ms apart: 12% of submissions at 144 Hz with the game at
+    // 55 fps, against 1-2% under the grid, and 83% of them straight after a
+    // wait that returned in under half a millisecond. A floor from the
+    // previous call cannot drift the way a grid could, and in the paced
+    // steady state, where hand-overs are a period apart, it never fires.
+    // Presenter thread only.
+    std::chrono::steady_clock::time_point presenter_last_end_returned_at{};
     // Where the application's frames complete within the presenter's cycle,
     // and the release delay that keeps that away from the pop.
     //
@@ -3966,9 +3952,6 @@ XrResult layer_create_api_layer_instance_impl(
             dispatch->steamvr_runtime =
                 std::string_view(dispatch->runtime_name).find("SteamVR") !=
                 std::string_view::npos;
-            dispatch->pimax_runtime =
-                std::string_view(dispatch->runtime_name).find("Pimax") !=
-                std::string_view::npos;
         }
     }
     xrfg::bridge_flight_logger().event(
@@ -4284,7 +4267,7 @@ XrResult layer_create_session_impl(
                 0);
         }
     }
-    if ((dispatch->steamvr_runtime || dispatch->pimax_runtime) &&
+    if (dispatch->steamvr_runtime &&
         state->graphics_binding == SessionGraphicsBinding::d3d12 &&
         create_info != nullptr && state->d3d12_device && state->d3d12_queue) {
         const auto* first = state->d3d11_bridge
@@ -6280,18 +6263,59 @@ void pace_presenter_submission(
         std::chrono::nanoseconds remaining{0};
         // -1 pulled earlier off the ceiling, +1 pushed later off the floor.
         int pace_band_correction = 0;
-        // The runtime's xrWaitFrame is the clock; see presenter_runtime_paces.
-        // Recorded as result=5, after the lock, so a capture shows the grid was
-        // not held rather than a zero-length hold.
-        bool runtime_paced = false;
-        {
-            std::scoped_lock lock(state->presenter_mutex);
-            runtime_paced = !state->dispatch->steamvr_runtime &&
-                state->presenter_runtime_paces;
-        }
-        if (runtime_paced) {
+        // A runtime other than SteamVR paces the presenter with its own
+        // xrWaitFrame and the grid is not held; what remains is the floor
+        // between hand-overs. See presenter_last_end_returned_at. Recorded as
+        // result=5, after the lock: a the hold in microseconds, b 1 where the
+        // floor held, so a capture tells a paced cycle from a spaced one.
+        if (!state->dispatch->steamvr_runtime) {
+            std::chrono::nanoseconds floor_remaining{0};
+            {
+                std::scoped_lock lock(state->presenter_mutex);
+                if (state->presenter_display_period > 0 &&
+                    state->presenter_last_end_returned_at !=
+                        std::chrono::steady_clock::time_point{}) {
+                    const auto period = std::chrono::nanoseconds(
+                        static_cast<std::int64_t>(
+                            state->presenter_display_period));
+                    floor_remaining = std::chrono::duration_cast<
+                        std::chrono::nanoseconds>(
+                        state->presenter_last_end_returned_at + period / 2 -
+                        entered);
+                }
+            }
+            if (floor_remaining > std::chrono::nanoseconds::zero()) {
+                if (state->presenter_pace_timer == nullptr) {
+                    state->presenter_pace_timer = CreateWaitableTimerExW(
+                        nullptr,
+                        nullptr,
+                        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                        TIMER_ALL_ACCESS);
+                    if (state->presenter_pace_timer == nullptr) {
+                        state->presenter_pace_timer = CreateWaitableTimerExW(
+                            nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+                    }
+                }
+                if (state->presenter_pace_timer != nullptr) {
+                    LARGE_INTEGER due{};
+                    due.QuadPart = -(floor_remaining.count() / 100);
+                    if (SetWaitableTimer(
+                            state->presenter_pace_timer,
+                            &due, 0, nullptr, nullptr, FALSE)) {
+                        static_cast<void>(WaitForSingleObject(
+                            state->presenter_pace_timer, INFINITE));
+                    }
+                }
+            }
             xrfg::bridge_flight_logger().event(
-                xrfg::BridgeFlightOperation::presenter_pace, 5, 0, 0, 0);
+                xrfg::BridgeFlightOperation::presenter_pace,
+                5,
+                static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - entered)
+                        .count()),
+                floor_remaining > std::chrono::nanoseconds::zero() ? 1u : 0u,
+                0);
             return;
         }
         {
@@ -6650,44 +6674,8 @@ void continuous_presenter_main(
             break;
         }
 
-        // Set when this cycle proves the runtime does not pace its wait, and
-        // recorded after presenter_mutex is released.
-        std::optional<std::chrono::nanoseconds> unpaced_cycle;
         {
             std::scoped_lock lock(state->presenter_mutex);
-            // Whether the runtime's wait is pacing this loop: with the grid
-            // not held, one cycle is one wait to the next, so a paced runtime
-            // gives about a period and one that does not gives the loop's own
-            // cost. An adopted frame state was not waited for and says nothing.
-            if (!adopted_frame_state && !state->dispatch->steamvr_runtime &&
-                state->presenter_runtime_paces) {
-                const auto returned = std::chrono::steady_clock::now();
-                const auto period = std::chrono::nanoseconds(
-                    static_cast<std::int64_t>(state->presenter_display_period));
-                if (period > std::chrono::nanoseconds::zero() &&
-                    state->presenter_wait_returned_at !=
-                        std::chrono::steady_clock::time_point{}) {
-                    const auto cycle =
-                        returned - state->presenter_wait_returned_at;
-                    if (cycle < period / 2) {
-                        ++state->presenter_unpaced_cycle_streak;
-                    } else {
-                        state->presenter_unpaced_cycle_streak = 0;
-                    }
-                    if (state->presenter_unpaced_cycle_streak >=
-                        kUnpacedPresenterWaitStreak) {
-                        // The grid starts from here, as it would have at
-                        // promotion; a deadline left from before would be
-                        // long past and cost a burst of catch-up submissions.
-                        state->presenter_runtime_paces = false;
-                        state->presenter_next_submit = returned + period;
-                        unpaced_cycle =
-                            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                cycle);
-                    }
-                }
-                state->presenter_wait_returned_at = returned;
-            }
             state->presenter_frame_state = frame_state;
             state->presenter_frame_state.next = nullptr;
             state->presenter_frame_state_valid = true;
@@ -6780,14 +6768,6 @@ void continuous_presenter_main(
                     state->presenter_display_period = scanout->count();
                 }
             }
-        }
-        if (unpaced_cycle) {
-            xrfg::bridge_flight_logger().event(
-                xrfg::BridgeFlightOperation::presenter_transition,
-                700,
-                kUnpacedPresenterWaitStreak,
-                static_cast<std::uint64_t>(unpaced_cycle->count()),
-                static_cast<std::uint64_t>(frame_state.predictedDisplayPeriod));
         }
         state->presenter_condition.notify_all();
 
@@ -7237,6 +7217,8 @@ void continuous_presenter_main(
                           &submitted, fresh_synthetic, request != nullptr)
                     : state->dispatch->end_frame(state->handle, &submitted);
             });
+            state->presenter_last_end_returned_at =
+                std::chrono::steady_clock::now();
             // The synthetic has reached the runtime, so its current copy can
             // go to the queue now rather than ahead of it. It has a display
             // period before the current frame that reads it is submitted.
@@ -8376,10 +8358,31 @@ void wait_for_presenter_pair(
                 auto sorted = ring;
                 std::sort(sorted.begin(), sorted.end());
                 const auto median = sorted[sorted.size() / 2];
+                // Only a phase the samples agree on is worth stepping to. An
+                // application that cannot make half rate completes anywhere
+                // in the cycle, and a step taken from such a median is noise
+                // that the next eight samples undo: 97 steps in 23 s at
+                // 144 Hz with the game at 55 fps. The spread is taken around
+                // the median, because a phase on the boundary straddles zero
+                // and the period.
+                auto spread = std::chrono::nanoseconds::zero();
+                for (const auto sample : sorted) {
+                    auto offset = sample - median;
+                    if (offset > period / 2) {
+                        offset -= period;
+                    } else if (offset < -(period / 2)) {
+                        offset += period;
+                    }
+                    if (offset < std::chrono::nanoseconds::zero()) {
+                        offset = -offset;
+                    }
+                    spread = std::max(spread, offset);
+                }
                 constexpr auto kCompletionPhaseBand =
                     std::chrono::nanoseconds(2'500'000);
-                if (median < kCompletionPhaseBand ||
-                    median > period - kCompletionPhaseBand) {
+                if (spread < period / 4 &&
+                    (median < kCompletionPhaseBand ||
+                     median > period - kCompletionPhaseBand)) {
                     auto step = period / 4 - median;
                     while (step < std::chrono::nanoseconds::zero()) {
                         step += period;
