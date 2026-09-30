@@ -6,6 +6,21 @@ generated frame between two rendered frames.
 Current release: **v0.2.8.2 (internal build V377)**.
 See the [release notes](docs/releases/0.2.8.2.md).
 
+> [!IMPORTANT]
+> **OpenXR games only.** The bridge works only with games that talk to your
+> headset through **OpenXR**. Games built on **OpenVR**, SteamVR's older
+> system, are not supported, even though they run on SteamVR: the bridge
+> never loads in them and changes nothing.
+>
+> It doesn't matter which headset you have or which VR software it runs
+> through (SteamVR, Pimax, Virtual Desktop): what matters is whether the game
+> itself uses OpenXR. Examples of OpenXR games: Microsoft Flight Simulator
+> 2020 and 2024, DCS World, Assetto Corsa EVO, and Unreal games played through
+> **UEVR with its OpenXR option selected** (not OpenVR). Some OpenVR-only
+> games can be run through OpenXR with
+> [OpenComposite](https://gitlab.com/znixian/OpenOVR), for example Elite
+> Dangerous, Skyrim VR and No Man's Sky.
+
 > [!WARNING]
 > This is experimental software. It may not work with your game, VR mod, GPU or OpenXR
 > runtime. It may produce visual artifacts, fail to activate, freeze the game
@@ -67,6 +82,20 @@ rotation are still possible.
 
 If arming fails at start-up, the tray shows the reason and stays disarmed;
 select **Arm bridge until manual disarm** to retry.
+
+> [!IMPORTANT]
+> **Never run the game as administrator.** The bridge is registered for your
+> Windows user, and the OpenXR loader deliberately ignores per-user layers in a
+> program running as administrator. An elevated game runs in VR as normal but
+> never loads the bridge, with no error, no FPS number and no flight log.
+> Check the game's `.exe` and any shortcut or launcher you start it from
+> (Properties → Compatibility → "Run this program as an administrator").
+>
+> The same applies to anything that *starts* the game: a launcher or mod
+> manager running as administrator passes that on to the game. The UEVR
+> injector is fine as administrator, since it injects into a game you already
+> started normally; only a front-end that launches the game for you must not
+> run elevated.
 
 For supported NVIDIA GPUs, the suggested starting configuration is **NVIDIA
 Medium** with **50% optical flow resolution**. It should provide a decent
