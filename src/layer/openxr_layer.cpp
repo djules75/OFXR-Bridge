@@ -1023,9 +1023,6 @@ struct SessionState {
     // When the previous submission actually went out, so the phase controller
     // can tell whether a lead was achieved on the grid or by overshooting it.
     std::chrono::steady_clock::time_point presenter_last_submitted_at{};
-    // What the schedule expected the last interval to be. The pair is biased,
-    // so "on grid" is not always one period - see the comment at the advance.
-    std::chrono::nanoseconds presenter_expected_interval{};
     // Consecutive submissions that landed one scanout apart. Phase only means
     // anything once the rate is right, so the correction waits for a run of
     // them - see the comment at the controller.
@@ -1039,24 +1036,8 @@ struct SessionState {
     // elsewhere. Diagnostic: nothing schedules on these.
     std::chrono::nanoseconds presenter_synthetic_call_mean{};
     std::chrono::nanoseconds presenter_real_call_mean{};
-    // Uneven pair spacing, restored in V196 after being removed in V187.
-    //
-    // What it buys is production time, not margin: shortening the interval
-    // after the synthetic lengthens the one before the *next* synthetic, so
-    // each step gives that synthetic more age before its slot arrives. Without
-    // it, a title whose synthesis does not finish inside a period hands the
-    // runtime a synthetic with unfinished pixels, SteamVR blocks inside
-    // xrEndFrame waiting for them, and that block lands between the two
-    // hand-overs and costs the *real* frame.
-    //
-    // V187 deleted it on a capture where it was pinned at its ceiling with
-    // nothing to buy - 2.78 ms of bias against a 0.67 ms synthetic call - and
-    // delivery measured 61.8 frames a second against 82.3 without it. That was
-    // evidence about the decay rate, not the mechanism: at period/2048 an
-    // unwind from the ceiling takes about eighty-five seconds against a climb
-    // of two milliseconds a second, so once it climbed it never came back.
-    std::chrono::nanoseconds presenter_pair_bias{};
-    std::uint32_t presenter_bias_tick{};
+    // Reported every kCallReportFrames submissions as presenter_transition
+    // 301, with the pair gaps below.
     std::uint32_t presenter_call_report_tick{};
     // The interval between the two hand-overs of a pair, measured where it
     // matters - between the calls, so it already carries whatever the runtime
@@ -1140,8 +1121,12 @@ struct SessionState {
     // offset wraps at one period: a whole cycle of delay buys nothing. Costs
     // up to a period of the application's latency, about a third of one on
     // the measured scene, and only while its completion sits on the boundary.
-    // Not on SteamVR, whose completion already sits mid-cycle. Guarded by
-    // presenter_mutex.
+    // Not on SteamVR, whose completion already sits mid-cycle - held on a
+    // fast application too: Cyberpunk 2077 finishing in 13 ms and held 8-10
+    // ms per pair completed 2.3 ms after the real submission, sd 0.4, in
+    // every window of a session that delivered 77 frames a second, and V375
+    // running the steering there stepped 0.7 ms and changed nothing. Guarded
+    // by presenter_mutex.
     std::chrono::steady_clock::time_point presenter_pop_at{};
     std::array<std::chrono::nanoseconds, 8> application_completion_phase{};
     std::uint32_t application_completion_samples{};
@@ -6415,12 +6400,7 @@ void pace_presenter_submission(
                 // Both were clean grids: Callisto parked at the ceiling for
                 // 47 s with no skips at all, and The Witcher 3 walked to the
                 // floor with 0.0-0.4 skips a second.
-                // Carries the bias: the pair is unevenly spaced, so the hold
-                // before a synthetic is longer by exactly that much, and
-                // against a bare three quarters the band reads it as a grid
-                // that has walked to the end and pulls against it.
-                const auto band_ceiling =
-                    period * 3 / 4 + state->presenter_pair_bias;
+                const auto band_ceiling = period * 3 / 4;
                 if (state->presenter_vsync_offset_valid) {
                     // The measured pace owns the schedule wherever there is a
                     // compositor to ask. A valid offset means exactly that: it
@@ -7056,9 +7036,10 @@ void continuous_presenter_main(
                             state->presenter_vsync_offset.count()),
                         (fresh_synthetic ? 2u : 1u) | (remaining << 8));
                     // Only the real frame is measured against the offset. The
-                    // synthetic is deliberately spaced away from it by the pair
-                    // bias, so holding both to one phase would be asking the
-                    // schedule to close a gap that is there on purpose.
+                    // two halves of a pair are not interchangeable - the
+                    // synthetic's call costs the runtime more, and it is the
+                    // real frame's scanout that delivery is judged on - so one
+                    // reference phase is held, by the half that matters.
                     if (state->presenter_vsync_offset_valid &&
                         !fresh_synthetic) {
                         auto error = landed - state->presenter_vsync_offset;
@@ -7095,11 +7076,8 @@ void continuous_presenter_main(
                     // happened; and the half of the pair is known here, which
                     // it is not when the pace runs. Only the real frame drives
                     // this, for the same reason the offset above measures only
-                    // the real frame: the synthetic is deliberately spaced
-                    // away by the pair bias, so correcting both towards one
-                    // target asks the schedule to close a gap that is there on
-                    // purpose, and would leave the two halves fighting at a
-                    // sixteenth of the bias every frame.
+                    // the real frame: correcting both halves towards one
+                    // target would leave them fighting over it every frame.
                     //
                     // A quarter of the error per pair, so a worst-case half
                     // scanout is consumed in about a quarter of a second, and
@@ -7108,25 +7086,20 @@ void continuous_presenter_main(
                     // Every SteamVR session, both graphics APIs.
                     //
                     // This ran D3D11-only for one build, after a D3D12 UEVR
-                    // title drove the pair bias to its period/4 ceiling with
-                    // mispresents going from 0.1% to 60% and delivery from 90
-                    // to 46 over a minute. The correction was blamed, because
-                    // it was firing on 60-76% of real frames with a standing
-                    // error of +0.6 to +0.8 ms instead of acquiring once and
-                    // falling silent.
+                    // title lost delivery from 90 to 46 over a minute with
+                    // mispresents going from 0.1% to 60% (the pair bias of the
+                    // day, since retired, wound to its ceiling alongside). The
+                    // correction was blamed, because it was firing on 60-76%
+                    // of real frames with a standing error of +0.6 to +0.8 ms
+                    // instead of acquiring once and falling silent.
                     //
                     // That standing error was the wrapped remnant of a whole
                     // scanout - see the reading's two clusters below. The same
                     // capture reads +11.96 ms of true error where the
-                    // controller saw +0.85. So the correction was not a
-                    // disturbance the bias loop had to absorb; it was never
-                    // converging, because it was aiming at a target the
-                    // arithmetic had hidden from it.
-                    //
-                    // With the fold removed it converges and goes quiet, so
-                    // there is nothing left for the bias loop to answer. If
-                    // that title winds to its ceiling again, the interaction
-                    // is real and separate, and this gate comes back.
+                    // controller saw +0.85. It was never converging, because
+                    // it was aiming at a target the arithmetic had hidden
+                    // from it. With the fold removed it converges and goes
+                    // quiet.
                     if (measured_pace_active(state) && !fresh_synthetic &&
                         remaining != 0) {
                         constexpr auto kAcquireDeadBand =
@@ -7283,9 +7256,10 @@ void continuous_presenter_main(
                     // so the phase set here is the phase for the session.
                     //
                     // Before placing it deliberately, note what constrains the
-                    // choice. A fixed quarter period collides with the pair
-                    // bias, whose ceiling is also a quarter period: at full
-                    // bias the real frame sits exactly on a vsync boundary, and
+                    // choice. A fixed quarter period collided with the pair
+                    // bias of the day (retired V377), whose ceiling was also a
+                    // quarter period: at full bias the real frame sat exactly
+                    // on a vsync boundary, and
                     // which compositor frame it belongs to then follows the
                     // prediction depth - synthetic 28.8% presented against real
                     // 86.9% at depth 0, and 92.3% against 36.8% at depth 1,
@@ -7312,39 +7286,40 @@ void continuous_presenter_main(
                     }
                 } else {
                     // The two frames of a pair do not cost the runtime the
-                    // same, so spacing them evenly gives them unequal margin.
-                    // Measured in Atomic Heart across 1479 pairs, with the
-                    // submission record finally carrying which half of the
-                    // pair it was: the synthetic's xrEndFrame takes 2.12 ms
-                    // against the current's 0.68, and the synthetic lands
-                    // 2.36 ms closer to its own scanout. (V163 asserted the
-                    // opposite from a capture anchored on the enqueue, which
-                    // labels the previous pair's current as this pair's
-                    // synthetic. It was wrong by exactly that swap.)
+                    // same. Measured in Atomic Heart across 1479 pairs, with
+                    // the submission record carrying which half of the pair
+                    // it was: the synthetic's xrEndFrame took 2.12 ms against
+                    // the current's 0.68, so an even deadline spacing produced
+                    // an uneven arrival spacing (9.67 / 12.55 ms), and two
+                    // arrivals 9.67 ms apart can share one scanout. (V163
+                    // asserted the opposite from a capture anchored on the
+                    // enqueue, which labels the previous pair's current as
+                    // this pair's synthetic.)
                     //
-                    // That 1.44 ms of extra call time falls *between* the two
-                    // submissions, so an even deadline spacing produces an
-                    // uneven arrival spacing:
+                    // V172-V185 and V196-V376 answered that with an adaptive
+                    // pair bias: the schedule advanced by period - bias after
+                    // the synthetic and period + bias after the current, the
+                    // bias climbing whenever the synthetic's call cost more
+                    // than the real frame's. Both halves sum to two periods,
+                    // so any bias puts one gap under a period, and the
+                    // controller judged itself on the call cost - a reading
+                    // upstream of xrEndFrame - never on what the compositor
+                    // scanned out. On Cyberpunk 2077 (R.E.A.L. VR, SteamVR
+                    // 90 Hz) the synthetic's call sat at 1.7 ms for 80 s
+                    // without ever shrinking, the bias held its 2.78 ms
+                    // ceiling, the pair went out 13.3 / 9.4 ms and the headset
+                    // received 77 frames a second against 90.0 with the bias
+                    // at zero; with the climb off the block was still there
+                    // and cost nothing. Skyrim VR through OpenComposite, the
+                    // one session where zeroing the bias had once made the
+                    // real frame block the runtime's one-second timeout, ran
+                    // at 90.0 on the same build with a worst call of 11.7 ms:
+                    // that case belonged to the shallow pipeline. So the pair
+                    // advances evenly, and the pace owns where each half lands.
                     //
-                    //   synthetic -> current   11.11 + 0.68 - 2.12 =  9.67 ms
-                    //   current -> synthetic   11.11 + 2.12 - 0.68 = 12.55 ms
-                    //
-                    // Two arrivals 9.67 ms apart can land in one scanout
-                    // window, and the compositor keeps one of them. Every
-                    // metric the layer owns still reads 45 in, 90 out, two
-                    // submissions per pair - which is why ten builds of pace
-                    // work moved this around without fixing it. Moving the
-                    // grid carries the asymmetry with it.
-                    //
-                    // So bias the pair, not the grid, and give the room to the
-                    // frame whose call is long: an eighth of a period after
-                    // the synthetic, the same back after the current. The two
-                    // sum to exactly two periods, so the schedule does not
-                    // drift, and both frames arrive one period apart. A repeat
-                    // is not part of a pair and advances plainly.
                     // What the pair cost and how far apart it landed. Both are
-                    // recorded per submission and smoothed; see the note at the
-                    // report below for why nothing acts on them.
+                    // recorded per submission and smoothed; nothing schedules
+                    // on them.
                     if (request) {
                         const auto call = now - downstream_end_started;
                         auto& mean = fresh_synthetic
@@ -7397,209 +7372,34 @@ void continuous_presenter_main(
                             state->presenter_real_returned_at = now;
                         }
                     }
-                    // The call means and the arrival gap are recorded here and
-                    // nothing acts on them. A long synthetic xrEndFrame is the
-                    // runtime holding the call while the pixels finish; read it
-                    // as load, not as a fault to correct.
-                    //
-                    // V172-V185 did correct it, by spacing the pair unevenly to
-                    // give the synthetic more age. That cost about a third of
-                    // the frames that actually reached the headset while every
-                    // instrument here read healthy - they all sit upstream of
-                    // xrEndFrame and none of them can see what the compositor
-                    // scanned out. Do not close a loop on these three again
-                    // without measuring delivery alongside;
-                    // xrfg_steamvr_delivery_probe reads it from the compositor
-                    // on SteamVR.
+                    // A long synthetic xrEndFrame is the runtime holding the
+                    // call while the pixels finish; read it as load, not as a
+                    // fault to correct. V172-V185 corrected it by spacing the
+                    // pair unevenly and cost about a third of the frames that
+                    // reached the headset while every instrument here read
+                    // healthy; V196-V376 did it adaptively and cost the same
+                    // third on Cyberpunk 2077. Every instrument here sits
+                    // upstream of xrEndFrame and none can see what the
+                    // compositor scanned out. Do not close a loop on these
+                    // three again without measuring delivery alongside;
+                    // steamvr_delivery records it from the compositor on
+                    // SteamVR, and xrfg_steamvr_delivery_probe reads it live.
                     constexpr std::uint32_t kCallReportFrames = 15;
-                    if (++state->presenter_bias_tick >= kCallReportFrames) {
-                        state->presenter_bias_tick = 0;
-                        // The block the bias exists to buy out: the synthetic's
-                        // downstream call costs more than the real frame's
-                        // exactly when the runtime is waiting on pixels that
-                        // are not finished.
-                        constexpr auto kBlockThreshold =
-                            std::chrono::microseconds(500);
-                        constexpr auto kSuppressedThreshold =
-                            std::chrono::microseconds(200);
-                        const auto excess =
-                            state->presenter_synthetic_call_mean -
-                            state->presenter_real_call_mean;
-                        auto climb = excess / 4;
-                        const auto climb_floor = period / 128;
-                        const auto climb_cap = period / 32;
-                        if (climb < climb_floor) climb = climb_floor;
-                        if (climb > climb_cap) climb = climb_cap;
-                        // Fast enough to release. The original period/2048 took
-                        // about eighty-five seconds to unwind from the ceiling
-                        // against a climb of two milliseconds a second, so a
-                        // bias earned during one heavy stretch was still being
-                        // paid for a minute and a half later with no block left
-                        // to buy out - which is the whole of why V187 measured
-                        // this mechanism as harmful and removed it. period/256
-                        // unwinds in about ten seconds, still eight times
-                        // slower than the climb, so the asymmetry that stopped
-                        // V175 hunting is kept without becoming a latch.
-                        const auto decay = period / 256;
-                        const auto ceiling = period / 4;
-                        const bool steamvr = state->dispatch &&
-                            state->dispatch->steamvr_runtime;
-                        // Order matters: while the block is present the gap is
-                        // compressed by the block, not by the bias, so the
-                        // block is dealt with first and the gap only governs
-                        // once it is suppressed.
-                        // The interval before the synthetic, short, with no
-                        // block to explain it. That is the arithmetic case:
-                        //
-                        //   lead = period + bias + synCall - realCall
-                        //
-                        // so when the *real* frame is the dearer call the lead
-                        // collapses below one period and the synthetic shares a
-                        // scanout with the frame in front of it. A positive bias
-                        // is the correction, and the controller could not reach
-                        // it: excess is negative here, so the block test fails
-                        // and a short interval only ever appeared as a reason to
-                        // decay.
-                        //
-                        // Ordered after the block deliberately. That case - the
-                        // synthetic blocked on unfinished pixels - has a *long*
-                        // lead, not a short one, so this never fires there and
-                        // the production-time behaviour is unchanged.
-                        // The lead wants a band, and the band has a hold in
-                        // the middle of it. Below one period the synthetic
-                        // shares a scanout with the frame in front of it; above
-                        // about 1.15 periods it misses its own. Measured over
-                        // 340 pairs: 4.4% dropped at a lead of 11.1-13.0 ms
-                        // against 68.2% above 13.0. Measured over 2344 with the
-                        // bias driven to zero: the lead fell to 10.87 ms, two
-                        // thirds of all leads went under one period and the real
-                        // frame's share of scanouts fell from 92.4% to 64.8%.
-                        // Both of those were a controller with a climb and two
-                        // decays and nothing in between, so the bias could only
-                        // ever be moving - which is what the hold below is for.
-                        //
-                        // Order matters: while the block is present the gap
-                        // is compressed by the block, not by the bias, so the
-                        // block is dealt with first and the gap only governs
-                        // once it is suppressed.
-                        const auto gap_floor = period * 9 / 10;
-                        const bool gap_tight =
-                            state->presenter_pair_gap_mean.count() != 0 &&
-                            state->presenter_pair_gap_mean < gap_floor;
-                        // A wide hold centred on one period.
-                        //
-                        // The two intervals are a zero-sum pair. The presenter
-                        // advances by period - bias after a synthetic and
-                        // period + bias after a real frame, and the runtime's
-                        // own call costs cancel between them, so
-                        //
-                        //   lead  = period + bias - (realCall - synCall)
-                        //   trail = period - bias + (realCall - synCall)
-                        //   lead + trail = two periods, always
-                        //
-                        // A band held *above* one period therefore guarantees a
-                        // trail below one, which is the real frame following the
-                        // synthetic inside a single scanout - the compositor
-                        // keeps the newer and the synthetic is thrown away. One
-                        // period is the only point where both intervals clear a
-                        // period at once, so that is the centre, and it is the
-                        // only centre at which a bias of zero is reachable.
-                        //
-                        // A sixteenth of a period each side. The width is not
-                        // free: a narrower band tracked realCall swinging 0.77
-                        // to 3.93 ms within seconds and hunted. Climb fast, hold
-                        // across a dead band, decay slowly.
-                        //
-                        // A band above one period was carried from the
-                        // controller's first version until now, on a comparison
-                        // that measured 21/20-23/20 at 86-90 delivered frames a
-                        // second against 48-75 for a centred band. That
-                        // comparison predates the measured pace and the phase
-                        // acquisition step entirely: the grid of the day could
-                        // not acquire a phase at all, and across eighteen
-                        // sessions its seed alone moved delivery between 58 and
-                        // 86 a second on one build, title and machine. The
-                        // difference it reported is smaller than the confound it
-                        // was measured through, so it does not decide anything.
-                        //
-                        // It is still the case that realCall is not independent
-                        // of the bias - handing the real frame over early makes
-                        // the runtime pace it back out - so any controller that
-                        // computes the bias directly from realCall minus synCall
-                        // is reading its own output. That is why this holds a
-                        // band rather than solving for a value.
-                        const auto lead_floor = period * 15 / 16;
-                        const auto lead_ceiling = period * 17 / 16;
-                        const auto lead_mean =
-                            state->presenter_pair_lead_gap_mean;
-                        const bool lead_known =
-                            steamvr && lead_mean.count() != 0 &&
-                            excess < kSuppressedThreshold;
-                        const bool lead_tight = lead_known &&
-                            lead_mean < lead_floor;
-                        const bool lead_long = lead_known &&
-                            lead_mean > lead_ceiling;
-                        const bool lead_in_band =
-                            lead_known && !lead_tight && !lead_long;
-                        if (steamvr && excess > kBlockThreshold) {
-                            state->presenter_pair_bias =
-                                state->presenter_pair_bias + climb > ceiling
-                                    ? ceiling
-                                    : state->presenter_pair_bias + climb;
-                        } else if (lead_tight) {
-                            const auto step = period / 128;
-                            state->presenter_pair_bias =
-                                state->presenter_pair_bias + step > ceiling
-                                    ? ceiling
-                                    : state->presenter_pair_bias + step;
-                        } else if (lead_in_band) {
-                            // Hold.
-                        } else if (lead_long) {
-                            const auto quick = period / 64;
-                            state->presenter_pair_bias =
-                                state->presenter_pair_bias > quick
-                                    ? state->presenter_pair_bias - quick
-                                    : std::chrono::nanoseconds::zero();
-                        } else if (gap_tight || !steamvr ||
-                                   excess < kSuppressedThreshold) {
-                            state->presenter_pair_bias =
-                                state->presenter_pair_bias > decay
-                                    ? state->presenter_pair_bias - decay
-                                    : std::chrono::nanoseconds::zero();
-                        }
+                    if (++state->presenter_call_report_tick >=
+                        kCallReportFrames) {
+                        state->presenter_call_report_tick = 0;
                         xrfg::bridge_flight_logger().event(
                             xrfg::BridgeFlightOperation::presenter_transition,
-                            300,
-                            static_cast<std::uint64_t>(
-                                state->presenter_pair_bias.count()),
+                            301,
                             static_cast<std::uint64_t>(
                                 state->presenter_synthetic_call_mean.count()),
                             static_cast<std::uint64_t>(
+                                state->presenter_real_call_mean.count()),
+                            static_cast<std::uint64_t>(
                                 state->presenter_pair_lead_gap_mean.count()));
                     }
-                    // Shorten the interval after the synthetic and lengthen
-                    // the one before it. The two sum to exactly two periods, so
-                    // the schedule does not drift, and each step gives the next
-                    // pair's synthetic more age before its slot arrives.
-                    //
-                    // Not conditional on the measured pace, though the pace
-                    // places each submission inside the compositor's own frame
-                    // and the bias moves one half of the pair off that point.
-                    // Zeroing it there was tried and cost the whole session:
-                    // in modded SkyrimVR through OpenComposite the real frame's
-                    // xrEndFrame began blocking the runtime's full one-second
-                    // timeout - 28 times in ninety seconds, every one of them
-                    // on the real frame and none on the synthetic - against a
-                    // worst case of 27 ms with the bias left in. The
-                    // application fell to one frame a second and stayed there.
-                    // Whatever the bias is doing for the pair, the pace does
-                    // not subsume it.
-                    const auto pair_bias = state->presenter_pair_bias;
-                    const auto advance = request
-                        ? (fresh_synthetic ? period - pair_bias
-                                           : period + pair_bias)
-                        : period;
-                    state->presenter_next_submit += advance;
+                    // A pair and a repeat advance alike: one period.
+                    state->presenter_next_submit += period;
                     // Cancel the drift between this schedule's clock and the
                     // display's.
                     //
@@ -7778,22 +7578,12 @@ void continuous_presenter_main(
                             std::chrono::steady_clock::time_point{}
                         ? period
                         : (now - state->presenter_last_submitted_at);
-                    // Against what the schedule asked for, not against one
-                    // period: the pair is deliberately biased above, so an
-                    // even period is the wrong expectation for both halves of
-                    // it and would read every submission as off grid.
-                    const auto expected =
-                        state->presenter_expected_interval >
-                            std::chrono::nanoseconds::zero()
-                        ? state->presenter_expected_interval
-                        : period;
                     const bool landed_on_grid =
-                        since_previous > expected - period / 10 &&
-                        since_previous < expected + period / 10;
+                        since_previous > period - period / 10 &&
+                        since_previous < period + period / 10;
                     state->presenter_on_grid_streak =
                         landed_on_grid ? state->presenter_on_grid_streak + 1 : 0;
                     state->presenter_last_submitted_at = now;
-                    state->presenter_expected_interval = advance;
 
                     // The reference follows the best phase achieved, and bleeds
                     // down about a period every four seconds so a runtime that
@@ -7992,8 +7782,8 @@ void continuous_presenter_main(
                 // The compositor's own timeline for the same frame: where its
                 // running start and its render fell, and where our submission
                 // and our wait arrived, all against the vsync it measures
-                // from. The submit margin and the pair bias both stand in for
-                // this window; recorded so it can be read instead of assumed.
+                // from. The submit margin stands in for this window; recorded
+                // so it can be read instead of assumed.
                 // Diagnostic only.
                 //
                 // Each millisecond offset is packed into 16 bits, in 10 us
