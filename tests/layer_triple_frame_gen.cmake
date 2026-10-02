@@ -19,6 +19,38 @@ file(COPY "${TRIPLE_INI}" DESTINATION "${WORK_DIR}")
 get_filename_component(triple_ini_name "${TRIPLE_INI}" NAME)
 file(RENAME "${WORK_DIR}/${triple_ini_name}" "${WORK_DIR}/ofxr_bridge.ini")
 
+# With QUEUE_LAYER_DLL, the bridge's Vulkan queue layer is put in the test
+# process's layer chain through the loader's explicit-layer path, and the
+# call chain checks that it loaded.
+if(DEFINED QUEUE_LAYER_DLL)
+    file(COPY "${QUEUE_LAYER_DLL}" DESTINATION "${WORK_DIR}")
+    get_filename_component(queue_layer_name "${QUEUE_LAYER_DLL}" NAME)
+    file(TO_NATIVE_PATH "${WORK_DIR}/${queue_layer_name}" queue_layer_native)
+    string(REPLACE "\\" "\\\\" queue_layer_json "${queue_layer_native}")
+    file(WRITE "${WORK_DIR}/VK_LAYER_OFXR_queue_serialize.json"
+"{
+  \"file_format_version\": \"1.2.0\",
+  \"layer\": {
+    \"name\": \"VK_LAYER_OFXR_queue_serialize\",
+    \"type\": \"GLOBAL\",
+    \"library_path\": \"${queue_layer_json}\",
+    \"api_version\": \"1.3.296\",
+    \"implementation_version\": \"1\",
+    \"description\": \"OFXR queue layer under test\",
+    \"functions\": {
+      \"vkNegotiateLoaderLayerInterfaceVersion\": \"OFXR_vkNegotiateLoaderLayerInterfaceVersion\",
+      \"vkGetInstanceProcAddr\": \"OFXR_vkGetInstanceProcAddr\",
+      \"vkGetDeviceProcAddr\": \"OFXR_vkGetDeviceProcAddr\"
+    }
+  }
+}
+")
+    file(TO_NATIVE_PATH "${WORK_DIR}" work_dir_native)
+    set(ENV{VK_LAYER_PATH} "${work_dir_native}")
+    set(ENV{VK_INSTANCE_LAYERS} "VK_LAYER_OFXR_queue_serialize")
+    set(ENV{OFXR_TEST_EXPECT_QUEUE_LAYER} "1")
+endif()
+
 get_filename_component(layer_name "${LAYER_DLL}" NAME)
 execute_process(
     COMMAND "${CALL_CHAIN}"
@@ -28,6 +60,13 @@ execute_process(
     RESULT_VARIABLE call_chain_result
     OUTPUT_VARIABLE call_chain_output
     ERROR_VARIABLE call_chain_error)
+# A machine with no Vulkan implementation cannot run a Vulkan scenario at
+# all; pass the call chain's marker through for SKIP_REGULAR_EXPRESSION.
+string(FIND "${call_chain_error}" "SKIP: no Vulkan implementation" skipped)
+if(NOT skipped EQUAL -1)
+    message("${call_chain_error}")
+    return()
+endif()
 if(REQUIRE_SCENARIO_PASS AND NOT call_chain_result EQUAL 0)
     message(FATAL_ERROR
         "Call chain '${MODE}' with 3X failed (${call_chain_result}):\n"

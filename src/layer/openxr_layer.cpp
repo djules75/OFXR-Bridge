@@ -908,8 +908,8 @@ struct SessionState {
     // interpolation instants all follow it. Fixed for the session like the
     // depth, and for the same reasons; the one change allowed is from three
     // to two while arming (fall_back_to_shallow_pipeline). Three always runs
-    // the shallow pipeline, and only on a session whose images the layer
-    // hands over itself - not through the D3D11 or Vulkan interop.
+    // the shallow pipeline. Not through the D3D11 interop, whose publish
+    // carries one synthetic; the Vulkan interop's carries both.
     std::uint32_t frames_per_application_frame{2};
     // `[ofxr] vulkan_bridge`: off, a Vulkan session passes through. See
     // implicit_layer::read_vulkan_support for why it is a choice.
@@ -4326,10 +4326,11 @@ XrResult layer_create_session_impl(
         }
     }
     // Decided here, once the binding is final: a D3D11 session the bridge
-    // took over is a D3D12 one by now. The interops publish one synthetic
-    // per pair and have no second image to publish into.
+    // took over is a D3D12 one by now. One left on the D3D11 interop stays
+    // at a pair, because that interop publishes one synthetic.
     if (triple_requested &&
-        state->graphics_binding == SessionGraphicsBinding::d3d12) {
+        (state->graphics_binding == SessionGraphicsBinding::d3d12 ||
+         state->graphics_binding == SessionGraphicsBinding::vulkan)) {
         state->frames_per_application_frame = 3;
         state->deep_pipeline = false;
     }
@@ -9398,7 +9399,6 @@ struct PreparedProjectionFrame {
         PrivateSwapchainState& extra_image = generation->synthetic[extra_slot];
         const bool request_extra = request_pair &&
             extra_interpolation_fraction.has_value() &&
-            generation->interop == nullptr &&
             extra_slot != synthetic_slot &&
             extra_image.handle != XR_NULL_HANDLE;
 
@@ -9566,6 +9566,10 @@ struct PreparedProjectionFrame {
                         request_pair
                             ? std::optional<std::uint32_t>(
                                   synthetic_destination_index)
+                            : std::nullopt,
+                        extra_synthetic
+                            ? std::optional<std::uint32_t>(
+                                  extra_synthetic->destination_index)
                             : std::nullopt);
                 xrfg::bridge_flight_logger().end(
                     publish_token,

@@ -1257,14 +1257,22 @@ struct VulkanD3D12SwapchainInterop::Impl {
 
     [[nodiscard]] HRESULT publish(
         std::uint32_t current_destination_index,
-        std::optional<std::uint32_t> synthetic_destination_index) noexcept {
+        std::optional<std::uint32_t> synthetic_destination_index,
+        std::optional<std::uint32_t> extra_synthetic_destination_index) noexcept {
+        const auto synthetic_in_range = [&](std::uint32_t index) {
+            return index < synthetic_destination_images.size() &&
+                index < shared_synthetic_destinations.size();
+        };
         if (!enabled ||
             current_destination_index >= current_destination_images.size() ||
             current_destination_index >= shared_current_destinations.size() ||
             (synthetic_destination_index &&
-             (*synthetic_destination_index >= synthetic_destination_images.size() ||
-              *synthetic_destination_index >=
-                  shared_synthetic_destinations.size()))) {
+             !synthetic_in_range(*synthetic_destination_index)) ||
+            (extra_synthetic_destination_index &&
+             (!synthetic_destination_index ||
+              !synthetic_in_range(*extra_synthetic_destination_index) ||
+              *extra_synthetic_destination_index ==
+                  *synthetic_destination_index))) {
             return E_INVALIDARG;
         }
         std::uint64_t ready_value = 0;
@@ -1298,6 +1306,15 @@ struct VulkanD3D12SwapchainInterop::Impl {
                 buffer,
                 shared_synthetic_destinations[*synthetic_destination_index].image,
                 synthetic_destination_images[*synthetic_destination_index]);
+        }
+        // The pair's second synthetic, in the same submission and behind the
+        // same wait: it was written by the same synthesis.
+        if (extra_synthetic_destination_index) {
+            record_publish_copy(
+                buffer,
+                shared_synthetic_destinations[*extra_synthetic_destination_index]
+                    .image,
+                synthetic_destination_images[*extra_synthetic_destination_index]);
         }
         vk_result = vk.end_command_buffer(buffer);
         if (vk_result != VK_SUCCESS) {
@@ -1452,12 +1469,16 @@ HRESULT VulkanD3D12SwapchainInterop::prepare_synthesis() noexcept {
 
 HRESULT VulkanD3D12SwapchainInterop::publish(
     std::uint32_t current_destination_index,
-    std::optional<std::uint32_t> synthetic_destination_index) noexcept {
+    std::optional<std::uint32_t> synthetic_destination_index,
+    std::optional<std::uint32_t> extra_synthetic_destination_index) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         return impl_ == nullptr
             ? E_UNEXPECTED
-            : impl_->publish(current_destination_index, synthetic_destination_index);
+            : impl_->publish(
+                  current_destination_index,
+                  synthetic_destination_index,
+                  extra_synthetic_destination_index);
     } catch (...) {
         return E_FAIL;
     }

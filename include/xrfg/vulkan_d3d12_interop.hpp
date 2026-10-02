@@ -131,7 +131,8 @@ public:
     [[nodiscard]] HRESULT prepare_synthesis() noexcept override;
     [[nodiscard]] HRESULT publish(
         std::uint32_t current_destination_index,
-        std::optional<std::uint32_t> synthetic_destination_index) noexcept
+        std::optional<std::uint32_t> synthetic_destination_index,
+        std::optional<std::uint32_t> extra_synthetic_destination_index) noexcept
         override;
     [[nodiscard]] HRESULT publication_fence(
         ID3D12Fence** fence,

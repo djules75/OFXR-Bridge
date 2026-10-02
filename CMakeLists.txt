@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.398.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.399.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -710,6 +710,22 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             xrfg_layer_triple_frame_gen_inline
             xrfg_layer_triple_frame_gen_presenter
             PROPERTIES TIMEOUT 60)
+        # And through the Vulkan interop, which publishes both synthetics.
+        # A Vulkan session never takes a presenter, so this is the inline
+        # path; the scenario's own counts are a pair's.
+        add_test(
+            NAME xrfg_layer_triple_frame_gen_vulkan
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DQUEUE_LAYER_DLL=$<TARGET_FILE:OFXR_vulkan_queue_layer>"
+                "-DTRIPLE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_vulkan_triple.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/triple-frame-gen-vulkan"
+                "-DMODE=vulkan"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_triple_frame_gen.cmake")
+        set_tests_properties(xrfg_layer_triple_frame_gen_vulkan PROPERTIES
+            TIMEOUT 60
+            SKIP_REGULAR_EXPRESSION "SKIP: no Vulkan implementation on this machine")
         # The Vulkan scenarios need vulkan_bridge on, which their inis say
         # explicitly, and run with the queue layer in the chain, at both
         # depths. A machine without any Vulkan implementation (a GPU-less
