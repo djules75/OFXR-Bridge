@@ -1176,8 +1176,10 @@ struct SessionState {
     // one held the delay far below what the title could take. A window with
     // none late raises the delay by two milliseconds, up to the ceiling. One
     // with two or more puts the ceiling three milliseconds under where that
-    // happened and holds it there for twenty windows before probing above
-    // it again, a millisecond at a time. Guarded by presenter_mutex.
+    // happened and holds it there for ten windows before probing above it
+    // again at the same two milliseconds. Late frames with no delay applied
+    // move nothing: a start-up burst once put the ceiling at zero and cost
+    // the first forty seconds of a session. Guarded by presenter_mutex.
     std::chrono::nanoseconds triple_release_delay{0};
     // Negative until the first window sets it to two periods: the
     // application needs the third to render in.
@@ -6376,7 +6378,7 @@ void observe_triple_release(
         ++state.triple_release_window_late;
     }
     constexpr std::uint32_t kWindowFrames = 30;
-    constexpr std::uint32_t kHoldWindows = 20;
+    constexpr std::uint32_t kHoldWindows = 10;
     constexpr auto kMillisecond = std::chrono::nanoseconds(1'000'000);
     if (++state.triple_release_window_frames < kWindowFrames) {
         return;
@@ -6392,17 +6394,22 @@ void observe_triple_release(
         ceiling = period * 2;
     }
     if (late >= 2) {
-        ceiling = std::max(
-            std::chrono::nanoseconds::zero(), delay - 3 * kMillisecond);
-        delay = ceiling;
-        state.triple_release_ceiling_hold = kHoldWindows;
+        // Only a delay can be blamed. Frames that are late with none
+        // applied are the title's own - a session's first second always
+        // has some - and say nothing about where the ceiling belongs.
+        if (delay > std::chrono::nanoseconds::zero()) {
+            ceiling = std::max(
+                std::chrono::nanoseconds::zero(), delay - 3 * kMillisecond);
+            delay = ceiling;
+            state.triple_release_ceiling_hold = kHoldWindows;
+        }
     } else if (late == 0) {
         if (delay < ceiling) {
             delay = std::min(ceiling, delay + 2 * kMillisecond);
         } else if (state.triple_release_ceiling_hold > 0) {
             --state.triple_release_ceiling_hold;
         } else {
-            ceiling = std::min(period * 2, ceiling + kMillisecond);
+            ceiling = std::min(period * 2, ceiling + 2 * kMillisecond);
             delay = ceiling;
         }
     }
