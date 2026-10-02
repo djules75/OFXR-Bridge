@@ -1142,6 +1142,42 @@ struct SessionState {
     std::array<std::chrono::nanoseconds, 8> application_completion_phase{};
     std::uint32_t application_completion_samples{};
     std::chrono::nanoseconds application_release_offset{0};
+    // 3X only: how long the application is kept, after its frame is handed
+    // over, before it is released to render the next one.
+    //
+    // Released at the previous real frame's hand-over, an application that
+    // needs a third of its 3-period cycle finishes two periods before its
+    // frames can start to be shown: the previous frame's two synthetics and
+    // its real frame are still in front. Measured at 90 Hz on The Callisto
+    // Protocol and MSFS 2024, the application entered xrEndFrame 10-13 ms
+    // after its release and its real frame went out 53-57 ms after that,
+    // against 31 ms for a pair in the deeper pipeline. Everything it waited
+    // was latency: its poses and its input were that much older when shown.
+    //
+    // The delay is found, not computed, because what bounds it is when the
+    // GPU finishes the frame and its synthesis, which the layer cannot see
+    // from the application's call. What it can see is whether the next
+    // frame's first synthetic is queued and written when the presenter hands
+    // over a real frame - a whole display period before that synthetic's own
+    // slot, which is the deeper pipeline's contract. It is judged over
+    // thirty real frames, a second of them, because a frame that runs long
+    // is late whatever the delay: one or two in thirty were late at every
+    // delay measured, and stepping back for each of them held the delay at
+    // 3-7 ms on a title with 15 ms to give, climbing and falling all session.
+    //
+    // A window with at most one late frame raises the delay by two
+    // milliseconds, up to the ceiling. One with three or more puts the
+    // ceiling two milliseconds under where that happened and holds it there
+    // for twenty windows before probing above it again, a millisecond at a
+    // time. So it rests just under what the title can take instead of
+    // sawing through it. Guarded by presenter_mutex.
+    std::chrono::nanoseconds triple_release_delay{0};
+    // Negative until the first window sets it to two periods: the
+    // application needs the third to render in.
+    std::chrono::nanoseconds triple_release_ceiling{-1};
+    std::uint32_t triple_release_ceiling_hold{};
+    std::uint32_t triple_release_window_frames{};
+    std::uint32_t triple_release_window_late{};
     // The application's thread only.
     HANDLE application_release_timer{};
     // A condition variable waits on the system tick, which is 15.6 ms by
@@ -6913,6 +6949,10 @@ void continuous_presenter_main(
             std::int64_t held_age_ns = -1;
             std::uint64_t held_sequence = 0;
             std::int64_t held_reason = 0;
+            // 3X release delay, recorded after the lock: -1 for nothing.
+            std::int64_t release_delay_report_us = -1;
+            std::int64_t release_delay_ceiling_us = 0;
+            std::uint32_t release_delay_late = 0;
             {
                 std::scoped_lock lock(state->presenter_mutex);
                 // The boundary the application's release is steered against;
@@ -6968,6 +7008,63 @@ void continuous_presenter_main(
                         }
                         request = front;
                         state->presenter_submissions.pop_front();
+                        // A real frame is going out: is the next frame's
+                        // first synthetic behind it already, and written?
+                        // See triple_release_delay.
+                        if (state->frames_per_application_frame > 2 &&
+                            request->owned_frame &&
+                            !request->owned_frame->synthetic &&
+                            period > std::chrono::nanoseconds::zero()) {
+                            const bool next_ready =
+                                !state->presenter_submissions.empty() &&
+                                state->presenter_submissions.front()->owned_frame &&
+                                state->presenter_submissions.front()
+                                    ->owned_frame->synthetic &&
+                                synthetic_output_ready(
+                                    *state->presenter_submissions.front()
+                                         ->owned_frame);
+                            if (!next_ready) {
+                                ++state->triple_release_window_late;
+                            }
+                            constexpr std::uint32_t kWindowFrames = 30;
+                            constexpr std::uint32_t kHoldWindows = 20;
+                            constexpr auto kMillisecond =
+                                std::chrono::nanoseconds(1'000'000);
+                            if (++state->triple_release_window_frames >=
+                                kWindowFrames) {
+                                const std::uint32_t late =
+                                    state->triple_release_window_late;
+                                state->triple_release_window_frames = 0;
+                                state->triple_release_window_late = 0;
+                                auto& delay = state->triple_release_delay;
+                                auto& ceiling = state->triple_release_ceiling;
+                                if (ceiling < std::chrono::nanoseconds::zero()) {
+                                    ceiling = period * 2;
+                                }
+                                if (late >= 3) {
+                                    ceiling = std::max(
+                                        std::chrono::nanoseconds::zero(),
+                                        delay - 2 * kMillisecond);
+                                    delay = ceiling;
+                                    state->triple_release_ceiling_hold =
+                                        kHoldWindows;
+                                } else if (late <= 1) {
+                                    if (delay < ceiling) {
+                                        delay = std::min(
+                                            ceiling, delay + 2 * kMillisecond);
+                                    } else if (state->triple_release_ceiling_hold > 0) {
+                                        --state->triple_release_ceiling_hold;
+                                    } else {
+                                        ceiling = std::min(
+                                            period * 2, ceiling + kMillisecond);
+                                        delay = ceiling;
+                                    }
+                                }
+                                release_delay_report_us = delay.count() / 1000;
+                                release_delay_late = late;
+                                release_delay_ceiling_us = ceiling.count() / 1000;
+                            }
+                        }
                     }
                 } else if (!state->presenter_stop_requested) {
                     repeated_frame = state->presenter_last_frame;
@@ -6979,6 +7076,18 @@ void continuous_presenter_main(
             // of those, handed over anyway because there was no frame to
             // repeat. a is its age in microseconds, b the display period in
             // microseconds, c its sequence.
+            // 801: the 3X release delay, every thirty real frames. a the
+            // delay in microseconds, b how many of those thirty found the
+            // next synthetic not yet queued and written, c the ceiling in
+            // microseconds.
+            if (release_delay_report_us >= 0) {
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::presenter_transition,
+                    801,
+                    static_cast<std::uint64_t>(release_delay_report_us),
+                    release_delay_late,
+                    static_cast<std::uint64_t>(release_delay_ceiling_us));
+            }
             if (held_age_ns >= 0) {
                 xrfg::bridge_flight_logger().event(
                     xrfg::BridgeFlightOperation::presenter_transition,
@@ -8186,7 +8295,11 @@ void wait_for_presenter_pair(
         std::chrono::nanoseconds release_offset{0};
         std::int64_t steer_phase_us = -1;
         std::int64_t steer_step_us = 0;
-        if (!state->dispatch->steamvr_runtime &&
+        if (state->frames_per_application_frame > 2) {
+            // 3X is steered on synthesis readiness instead, on every
+            // runtime: see triple_release_delay.
+            release_offset = state->triple_release_delay;
+        } else if (!state->dispatch->steamvr_runtime &&
             state->presenter_display_period > 0) {
             const auto period = std::chrono::nanoseconds(
                 static_cast<std::int64_t>(state->presenter_display_period));
@@ -9117,7 +9230,8 @@ struct PreparedGeneration {
     PrivateSwapchainState* deferred_current{};
     xrfg::D3D12FrameSynthesisTicket deferred_ticket{};
     // Where the pair's output becomes readable by the runtime, for the
-    // presenter's readiness hold. Set only for a pair in the deeper pipeline.
+    // presenter's readiness hold in the deeper pipeline and for the release
+    // delay in 3X. Not set otherwise.
     Microsoft::WRL::ComPtr<ID3D12Fence> ready_fence;
     std::uint64_t ready_value{};
 };
@@ -9488,7 +9602,10 @@ struct PreparedProjectionFrame {
             // the runtime reads the D3D11 images the copy writes. Both
             // accessors hand back a fence the presenter can poll without
             // either object's lock.
-            if (request_pair && state->session->deep_pipeline) {
+            // And 3X, where the release delay is steered on it.
+            if (request_pair &&
+                (state->session->deep_pipeline ||
+                 state->session->frames_per_application_frame > 2)) {
                 if (generation->interop) {
                     std::uint64_t published = 0;
                     if (SUCCEEDED(generation->interop->publication_fence(
