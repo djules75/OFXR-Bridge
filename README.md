@@ -3,7 +3,7 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current release: **v0.2.9.1 (internal build V400)**.
+Current release: **v0.2.9.1 (internal build V401)**.
 See the [release notes](docs/releases/0.2.9.1.md).
 
 > [!IMPORTANT]
@@ -167,12 +167,14 @@ reaches the full rate. If your game already holds about half the refresh
 rate, the normal 2X mode looks better: leave this off.
 
 - **Live switch:** toggle it while you play. No need to restart the game,
-  the VR session or OFXR; you will see one short hitch at the switch. This
-  needs **Prefer FPS over latency** on when the game started; otherwise the
-  switch takes effect the next time the game starts.
-- **Prefer FPS over latency** does not need turning off: it is ignored while
-  3X is on, and comes back when you switch 3X off.
-- **Artefacts:** more than OFXR's 2X mode, fewer than SteamVR's own 3X, and
+  the VR session or OFXR; you will see one short hitch at the switch.
+- **Prefer FPS over latency** is switched on with 3X and greyed out while 3X
+  is on. If the game you are playing was started with it off, 3X cannot
+  switch live: a **"game restart needed"** window opens on your desktop, and
+  3X applies the next time the game starts. Some games close and reopen
+  their VR session (on loading, for example); the new session uses the
+  settings in force at that moment.
+- **Artefacts:** more than OFXR's 2X mode, fewer than SteamVR Motion Smoothing at 3X, and
   mostly in sideways motion such as strafing or flying past something close.
 - **Latency**, at 90 Hz, from the game finishing a frame to that frame
   reaching the headset: 31 ms with 2X and Prefer FPS over latency, 39 ms with
