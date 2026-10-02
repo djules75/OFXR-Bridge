@@ -3,8 +3,8 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current release: **v0.2.8.2 (internal build V377)**.
-See the [release notes](docs/releases/0.2.8.2.md).
+Current release: **v0.9.1.1 (internal build V400)**.
+See the [release notes](docs/releases/0.9.1.1.md).
 
 > [!IMPORTANT]
 > **OpenXR games only.** The bridge works only with games that talk to your
@@ -43,6 +43,9 @@ See the [release notes](docs/releases/0.2.8.2.md).
 > **frame-rate increase of up to 100%**, with NVIDIA Medium at 50% optical-flow
 > resolution or FidelityFX. Actual results vary by game, GPU, resolution and
 > base frame rate; the bridge cannot recover frames the game does not render.
+>
+> A game that can only hold about a third of the refresh rate can reach it
+> too, with **3X Frame Gen**: 30 FPS on a 90 Hz headset delivers 90.
 
 The current build provides:
 
@@ -53,6 +56,8 @@ The current build provides:
   Arm/Disarm
 - **Prefer FPS over latency** (on by default): one frame of extra latency in
   exchange for reaching full frame rate from half, with smoother dips
+- **3X Frame Gen** (off by default): two generated frames per game frame,
+  for games at a third of your refresh rate, switchable live while you play
 - a pipeline built specifically for SteamVR's compositor
 - a **D3D11 bridge** (on by default): D3D11 games run on the same pipeline
   as native D3D12 games, and the OpenXR runtime never touches the game's
@@ -153,6 +158,32 @@ finish instead of the gap the game leaves between frames.
 
 The change applies the next time the game starts.
 
+### 3X Frame Gen
+
+Tray option **3X Frame Gen [live change]**, **off by default**. The bridge
+generates two frames for every frame the game renders instead of one, so a
+game running at a third of your headset's refresh rate (30 FPS at 90 Hz)
+reaches the full rate. If your game already holds about half the refresh
+rate, the normal 2X mode looks better: leave this off.
+
+- **Live switch:** toggle it while you play. No need to restart the game,
+  the VR session or OFXR; you will see one short hitch at the switch. This
+  needs **Prefer FPS over latency** on when the game started; otherwise the
+  switch takes effect the next time the game starts.
+- **Prefer FPS over latency** does not need turning off: it is ignored while
+  3X is on, and comes back when you switch 3X off.
+- **Artefacts:** more than OFXR's 2X mode, fewer than SteamVR's own 3X, and
+  mostly in sideways motion such as strafing or flying past something close.
+- **Latency**, at 90 Hz, from the game finishing a frame to that frame
+  reaching the headset: 31 ms with 2X and Prefer FPS over latency, 39 ms with
+  3X in a game with headroom (The Callisto Protocol), up to 49 ms in a very
+  heavy one (MSFS 2024 at very high resolution). OFXR tunes this by itself
+  over the first 15 seconds or so. Head rotation is corrected at display
+  time in every mode.
+- **Games:** D3D12, D3D11 (through the D3D11 bridge, on by default) and
+  Vulkan. Tested in MSFS 2024, The Callisto Protocol, Cyberpunk 2077 and
+  No Man's Sky.
+
 ### D3D11 games
 
 D3D11 games go through the **D3D11 bridge**, on by default since 0.2.6. The
@@ -222,9 +253,9 @@ For the best results on SteamVR:
 - Leave **Prefer FPS over latency** on, then try the same scene with it off.
   If you still hold full frame rate without it, keep it off for one frame
   less latency.
-- Pick a refresh rate close to double your game's frame rate. If double is
-  still short of the refresh rate, SteamVR fills the gap with repeated frames
-  and the image judders.
+- Pick a refresh rate close to double your game's frame rate, or triple it
+  with **3X Frame Gen**. If that is still short of the refresh rate, SteamVR
+  fills the gap with repeated frames and the image judders.
 - If you get dips, disarm the bridge and play the same scene. If the dips
   remain, lower SteamVR's per-eye resolution; the bridge cannot recover
   frames the game does not render.
