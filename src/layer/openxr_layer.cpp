@@ -905,12 +905,30 @@ struct SessionState {
     // second synthetic fills the extra display period of an application
     // running at a third of the display rate. The application's virtual
     // period, the once-per-frame hold, the synthetic ring and the
-    // interpolation instants all follow it. Fixed for the session like the
-    // depth, and for the same reasons; the one change allowed is from three
-    // to two while arming (fall_back_to_shallow_pipeline). Three always runs
-    // the shallow pipeline. Not through the D3D11 interop, whose publish
-    // carries one synthetic; the Vulkan interop's carries both.
-    std::uint32_t frames_per_application_frame{2};
+    // interpolation instants all follow it. Three always runs the shallow
+    // pipeline. Not through the D3D11 interop, whose publish carries one
+    // synthetic; the Vulkan interop's carries both.
+    //
+    // It follows the tray's switch while the session runs
+    // (apply_live_frame_multiplier), which is the one thing allowed to move
+    // the depth mid-session: the user asked for it, and it is done on an
+    // empty presenter queue, so the pipeline re-phases once, on a frame
+    // that primes. Atomic because the application's wait may run on another
+    // thread than the xrEndFrame that changes it.
+    std::atomic<std::uint32_t> frames_per_application_frame{2};
+    // The depth the ini asked for, which is what a session goes back to
+    // when 3X is switched off.
+    bool deep_pipeline_configured{};
+    // The synthetic ring has two slots - the session started in the deeper
+    // pipeline or in 3X - which both of those need and which is what lets
+    // the session move between them without making a swapchain. Cleared
+    // with the ring by fall_back_to_shallow_pipeline.
+    bool two_slot_synthetic_ring{};
+    // The switch can be followed live: a binding 3X covers, and a ring it
+    // fits in.
+    bool triple_switchable{};
+    // The application's xrEndFrame thread only.
+    std::chrono::steady_clock::time_point triple_poll_at{};
     // `[ofxr] vulkan_bridge`: off, a Vulkan session passes through. See
     // implicit_layer::read_vulkan_support for why it is a choice.
     bool vulkan_support{};
@@ -2404,9 +2422,8 @@ template <typename Initialize>
 
 [[nodiscard]] std::size_t synthetic_slot_count_for(
     const SessionState& session) noexcept {
-    return session.deep_pipeline || session.frames_per_application_frame > 2
-        ? kSyntheticSlotCountDeep
-        : kSyntheticSlotCountShallow;
+    return session.two_slot_synthetic_ring ? kSyntheticSlotCountDeep
+                                           : kSyntheticSlotCountShallow;
 }
 
 [[nodiscard]] std::shared_ptr<FrameGenerationSwapchainState>
@@ -3230,6 +3247,8 @@ create_vulkan_frame_generation_swapchains(
         }
         session->deep_pipeline = false;
         session->frames_per_application_frame = 2;
+        session->two_slot_synthetic_ring = false;
+        session->triple_switchable = false;
         for (const ProjectionResourceMapping& mapping : mappings) {
             const auto swapchain = find_swapchain(mapping.application_swapchain);
             if (!swapchain) {
@@ -4328,14 +4347,21 @@ XrResult layer_create_session_impl(
     // Decided here, once the binding is final: a D3D11 session the bridge
     // took over is a D3D12 one by now. One left on the D3D11 interop stays
     // at a pair, because that interop publishes one synthetic.
-    if (triple_requested &&
-        (state->graphics_binding == SessionGraphicsBinding::d3d12 ||
-         state->graphics_binding == SessionGraphicsBinding::vulkan)) {
+    const bool triple_binding =
+        state->graphics_binding == SessionGraphicsBinding::d3d12 ||
+        state->graphics_binding == SessionGraphicsBinding::vulkan;
+    state->deep_pipeline_configured = state->deep_pipeline;
+    if (triple_requested && triple_binding) {
         state->frames_per_application_frame = 3;
         state->deep_pipeline = false;
     }
+    state->two_slot_synthetic_ring =
+        state->deep_pipeline || state->frames_per_application_frame > 2;
+    state->triple_switchable =
+        triple_binding && state->two_slot_synthetic_ring;
     // 700: the session's shape. a frames per application frame, b the deeper
-    // pipeline, c whether 3X was asked for.
+    // pipeline, c whether 3X was asked for - or 2 when the record marks a
+    // live change rather than the session's creation.
     xrfg::bridge_flight_logger().event(
         xrfg::BridgeFlightOperation::presenter_transition,
         700,
@@ -10542,6 +10568,74 @@ struct PrivateDepthStrip {
     return &storage.info;
 }
 
+// Follows the tray's "3X Frame Gen" switch while the session runs. Called at
+// the top of the application's xrEndFrame, under frame_call_mutex, before
+// this frame is prepared.
+//
+// The two shapes share everything the session owns - two current slots and
+// two synthetic ones - so nothing is created or destroyed. What changes is
+// how many frames the presenter is given per application frame and the
+// depth, and both are read by the presenter and by the application's wait.
+// So the queue is drained first: every submission of the old shape has gone
+// to the runtime, every private image has been released, and the frame that
+// follows primes rather than pairing across the change. The application
+// sees its period step between two and three display periods at its next
+// wait, and one frame without synthetics.
+void apply_live_frame_multiplier(
+    const std::shared_ptr<SessionState>& state,
+    bool use_continuous_presenter) noexcept {
+    try {
+        if (!state->triple_switchable) {
+            return;
+        }
+        // The ini is rewritten by the tray; a read every quarter second is
+        // cheap and nothing here is urgent.
+        const auto now = std::chrono::steady_clock::now();
+        if (now < state->triple_poll_at) {
+            return;
+        }
+        state->triple_poll_at = now + std::chrono::milliseconds(250);
+        const std::uint32_t target =
+            xrfg::implicit_layer::read_triple_frame_gen(current_layer_directory())
+                ? 3U
+                : 2U;
+        if (target == state->frames_per_application_frame) {
+            return;
+        }
+        if (use_continuous_presenter &&
+            XR_FAILED(wait_for_presenter_idle(state))) {
+            return;
+        }
+        bool deep = false;
+        {
+            std::scoped_lock content_lock(state->presenter_content_mutex);
+            std::scoped_lock lock(state->presenter_mutex);
+            state->frames_per_application_frame = target;
+            state->deep_pipeline =
+                target == 2U && state->deep_pipeline_configured;
+            deep = state->deep_pipeline;
+            // The release delay belongs to the shape it was found in.
+            state->triple_release_delay = std::chrono::nanoseconds::zero();
+            state->triple_release_ceiling = std::chrono::nanoseconds(-1);
+            state->triple_release_ceiling_hold = 0;
+            state->triple_release_window_frames = 0;
+            state->triple_release_window_late = 0;
+            state->triple_release_window_unwritten = 0;
+            state->triple_release_probe_due = false;
+            // The once-per-frame hold counts from here in the new shape.
+            state->application_served_serial = state->presenter_frame_serial;
+        }
+        clear_generation_continuity(state);
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::presenter_transition,
+            700,
+            target,
+            deep ? 1u : 0u,
+            2);
+    } catch (...) {
+    }
+}
+
 XrResult layer_end_frame_impl(
     XrSession session,
     const XrFrameEndInfo* end_info) {
@@ -10631,6 +10725,7 @@ XrResult layer_end_frame_impl(
         return XR_SUCCESS;
     };
 
+    apply_live_frame_multiplier(state, use_continuous_presenter);
     apply_embedded_control(state);
     const bool manually_disarmed = state->manual_control.stop_requested();
     if (manually_disarmed && !state->manual_stop_applied) {
@@ -11245,7 +11340,9 @@ XrResult layer_end_frame_impl(
                 // With 3X the whole frame is three submissions.
                 result = wait_for_presenter_capacity(
                     state,
-                    state->deep_pipeline ? 3 : state->frames_per_application_frame);
+                    state->deep_pipeline
+                        ? 3
+                        : state->frames_per_application_frame.load());
             }
         } else if (presenter_first_frame) {
             auto request = enqueue_presenter_submission(

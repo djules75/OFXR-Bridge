@@ -764,7 +764,7 @@ void show_context_menu(AppState& state) {
         menu,
         MF_STRING | (state.settings.triple_frame_gen ? MF_CHECKED : MF_UNCHECKED),
         toggle_triple_frame_gen,
-        L"3X Frame Gen");
+        L"3X Frame Gen [live change]");
     AppendMenuW(
         menu,
         MF_STRING | (state.settings.diagnostics ? MF_CHECKED : MF_UNCHECKED),
@@ -883,7 +883,8 @@ void handle_command(AppState& state, UINT command) {
             L"Two generated frames for every frame the game renders, so the "
             L"game runs at a third of your headset's refresh rate (30 FPS at "
             L"90 Hz). \"Prefer FPS over latency\" does not apply while this "
-            L"is on. Takes effect the next time the game starts.");
+            L"is on. Switches in a running game within a moment; a game "
+            L"started with \"Prefer FPS over latency\" off needs a restart.");
         break;
     case overlay_off:
     case overlay_upper_left:

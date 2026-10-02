@@ -87,8 +87,9 @@ struct ConfiguredNvidiaOptions {
 
 // `[ofxr] triple_frame_gen`: two synthetic frames per application frame
 // instead of one, for an application running at a third of the display rate.
-// Off unless set to 1. Read once per session, at xrCreateSession, and it
-// takes the shallow pipeline whatever deep_pipeline says; the tray calls it
+// Off unless set to 1. Read at xrCreateSession and then followed while the
+// session runs, where the session can take either shape; it takes the
+// shallow pipeline whatever deep_pipeline says. The tray calls it
 // "3X Frame Gen".
 [[nodiscard]] bool read_triple_frame_gen(
     const std::filesystem::path& module_directory) noexcept;
