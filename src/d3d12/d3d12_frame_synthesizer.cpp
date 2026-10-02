@@ -778,6 +778,24 @@ struct D3D12FrameSynthesizer::Impl {
     // is only correct when the application runs at exactly half the display
     // rate; away from that the synthetic belongs somewhere else between them.
     float synthetic_fraction{0.5F};
+    // The pair's second synthetic, when the caller asked for one: set and
+    // cleared by each submit_pair alongside the fraction above. Every
+    // composition loop draws once per output, so the flow a pair computed
+    // serves both.
+    std::optional<std::uint32_t> extra_synthetic_destination;
+    float extra_synthetic_fraction{0.5F};
+
+    [[nodiscard]] UINT synthetic_output_count() const noexcept {
+        return extra_synthetic_destination ? 2U : 1U;
+    }
+    [[nodiscard]] float synthetic_output_fraction(UINT output) const noexcept {
+        return output == 0U ? synthetic_fraction : extra_synthetic_fraction;
+    }
+    [[nodiscard]] std::uint32_t synthetic_output_destination(
+        UINT output,
+        std::uint32_t first_destination) const noexcept {
+        return output == 0U ? first_destination : *extra_synthetic_destination;
+    }
     // The work slot whose current copy has been recorded and closed but not
     // yet submitted, and the fence value that submission will signal. The
     // slot cannot be recycled and the history lease cannot retire until it
@@ -2748,55 +2766,60 @@ struct D3D12FrameSynthesizer::Impl {
         }
 
         const auto rtv_start = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-        const UINT first_rtv = synthetic_destination_index * image_description.DepthOrArraySize;
-        for (UINT view_index = 0; view_index < target_views.size(); ++view_index) {
-            const UINT slice = resolved_array_slice(target_views[view_index], view_index,
-                target_views.size(), image_description.DepthOrArraySize);
-            if (slice >= guides->eye_count) return E_INVALIDARG;
-            const auto& guide = guides->eyes[slice];
-            const UINT descriptor_base = slice * kDescriptorBlockSize;
-            slot.command_list->SetGraphicsRootDescriptorTable(0,
-                offset_gpu_handle(gpu_start, descriptor_base, descriptor_increment));
-            slot.command_list->SetGraphicsRootDescriptorTable(1,
-                offset_gpu_handle(gpu_start, descriptor_base + kSrvDescriptorCount,
-                    descriptor_increment));
-            parameters.slice = slice;
-            parameters.view_index = view_index;
-            // The optical-flow fields are unused by the game-motion branch.
-            // Reuse them to carry the DLSS output rectangle associated with
-            // the stable eye stream without growing the root constants.
-            parameters.flow_width = guide->output_x;
-            parameters.flow_height = guide->output_y;
-            parameters.flow_block_size = guide->output_width;
-            parameters.game_motion_padding = guide->output_height;
-            parameters.game_motion_rect = {
-                static_cast<float>(guide->motion_x),
-                static_cast<float>(guide->motion_y),
-                static_cast<float>(guide->motion_width),
-                static_cast<float>(guide->motion_height)};
-            // DLSS low-resolution vectors are expressed in render-space pixel
-            // units after applying MV_Scale. Synthesis and pose reprojection
-            // operate in the final output rectangle's pixel space, so convert
-            // both vector components into that same coordinate system.
-            parameters.game_motion_scale = {
-                guide->scale_x * static_cast<float>(guide->output_width) /
+        for (UINT output = 0; output < synthetic_output_count(); ++output) {
+            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
+                packed_synthesis_fraction(synthetic_output_fraction(output));
+            const UINT first_rtv =
+                synthetic_output_destination(output, synthetic_destination_index) * image_description.DepthOrArraySize;
+            for (UINT view_index = 0; view_index < target_views.size(); ++view_index) {
+                const UINT slice = resolved_array_slice(target_views[view_index], view_index,
+                    target_views.size(), image_description.DepthOrArraySize);
+                if (slice >= guides->eye_count) return E_INVALIDARG;
+                const auto& guide = guides->eyes[slice];
+                const UINT descriptor_base = slice * kDescriptorBlockSize;
+                slot.command_list->SetGraphicsRootDescriptorTable(0,
+                    offset_gpu_handle(gpu_start, descriptor_base, descriptor_increment));
+                slot.command_list->SetGraphicsRootDescriptorTable(1,
+                    offset_gpu_handle(gpu_start, descriptor_base + kSrvDescriptorCount,
+                        descriptor_increment));
+                parameters.slice = slice;
+                parameters.view_index = view_index;
+                // The optical-flow fields are unused by the game-motion branch.
+                // Reuse them to carry the DLSS output rectangle associated with
+                // the stable eye stream without growing the root constants.
+                parameters.flow_width = guide->output_x;
+                parameters.flow_height = guide->output_y;
+                parameters.flow_block_size = guide->output_width;
+                parameters.game_motion_padding = guide->output_height;
+                parameters.game_motion_rect = {
+                    static_cast<float>(guide->motion_x),
+                    static_cast<float>(guide->motion_y),
                     static_cast<float>(guide->motion_width),
-                guide->scale_y * static_cast<float>(guide->output_height) /
                     static_cast<float>(guide->motion_height)};
-            parameters.game_motion_jitter_delta = guide->jittered
-                ? std::array<float, 2>{
-                      guide->jitter_x - guide->previous_jitter_x,
-                      guide->jitter_y - guide->previous_jitter_y}
-                : std::array<float, 2>{};
-            slot.command_list->SetGraphicsRoot32BitConstants(2,
-                kSynthesisConstantCount, &parameters, 0);
-            const auto rtv = offset_cpu_handle(rtv_start, first_rtv + slice, rtv_increment);
-            slot.command_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-            set_viewport_and_scissor(slot.command_list.Get(), target_views[view_index].image_rect,
-                static_cast<UINT>(image_description.Width), image_description.Height);
-            slot.command_list->DrawInstanced(3, 1, 0, 0);
-            clear_synthetic_marker(slot.command_list.Get(), rtv, target_views[view_index],
-                static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
+                // DLSS low-resolution vectors are expressed in render-space pixel
+                // units after applying MV_Scale. Synthesis and pose reprojection
+                // operate in the final output rectangle's pixel space, so convert
+                // both vector components into that same coordinate system.
+                parameters.game_motion_scale = {
+                    guide->scale_x * static_cast<float>(guide->output_width) /
+                        static_cast<float>(guide->motion_width),
+                    guide->scale_y * static_cast<float>(guide->output_height) /
+                        static_cast<float>(guide->motion_height)};
+                parameters.game_motion_jitter_delta = guide->jittered
+                    ? std::array<float, 2>{
+                          guide->jitter_x - guide->previous_jitter_x,
+                          guide->jitter_y - guide->previous_jitter_y}
+                    : std::array<float, 2>{};
+                slot.command_list->SetGraphicsRoot32BitConstants(2,
+                    kSynthesisConstantCount, &parameters, 0);
+                const auto rtv = offset_cpu_handle(rtv_start, first_rtv + slice, rtv_increment);
+                slot.command_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+                set_viewport_and_scissor(slot.command_list.Get(), target_views[view_index].image_rect,
+                    static_cast<UINT>(image_description.Width), image_description.Height);
+                slot.command_list->DrawInstanced(3, 1, 0, 0);
+                clear_synthetic_marker(slot.command_list.Get(), rtv, target_views[view_index],
+                    static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
+            }
         }
 
         std::array<D3D12_RESOURCE_BARRIER, 5> after{};
@@ -3267,47 +3290,52 @@ struct D3D12FrameSynthesizer::Impl {
 
         const D3D12_CPU_DESCRIPTOR_HANDLE rtv_start =
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
-        const UINT first_rtv = synthetic_destination_index *
-            image_description.DepthOrArraySize;
-        for (UINT view_index = 0;
-             view_index < static_cast<UINT>(target_views.size());
-             ++view_index) {
-            const UINT slice = resolved_array_slice(
-                target_views[view_index],
-                view_index,
-                target_views.size(),
-                image_description.DepthOrArraySize);
-            parameters.slice = slice;
-            parameters.view_index = view_index;
-            const D3D12_GPU_DESCRIPTOR_HANDLE block = offset_gpu_handle(
-                gpu_start,
-                slice * kDescriptorBlockSize,
-                descriptor_increment);
-            synthesis->SetGraphicsRootDescriptorTable(0, block);
-            synthesis->SetGraphicsRootDescriptorTable(
-                1,
-                offset_gpu_handle(
-                    block,
-                    kSrvDescriptorCount,
-                    descriptor_increment));
-            synthesis->SetGraphicsRoot32BitConstants(
-                2,
-                kSynthesisConstantCount,
-                &parameters,
-                0);
-            const D3D12_CPU_DESCRIPTOR_HANDLE rtv = offset_cpu_handle(
-                rtv_start,
-                first_rtv + slice,
-                rtv_increment);
-            synthesis->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-            set_viewport_and_scissor(
-                synthesis,
-                target_views[view_index].image_rect,
-                static_cast<UINT>(image_description.Width),
-                image_description.Height);
-            synthesis->DrawInstanced(3, 1, 0, 0);
-            clear_synthetic_marker(synthesis, rtv, target_views[view_index],
-                static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
+        for (UINT output = 0; output < synthetic_output_count(); ++output) {
+            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
+                packed_synthesis_fraction(synthetic_output_fraction(output));
+            const UINT first_rtv =
+                synthetic_output_destination(output, synthetic_destination_index) *
+                image_description.DepthOrArraySize;
+            for (UINT view_index = 0;
+                 view_index < static_cast<UINT>(target_views.size());
+                 ++view_index) {
+                const UINT slice = resolved_array_slice(
+                    target_views[view_index],
+                    view_index,
+                    target_views.size(),
+                    image_description.DepthOrArraySize);
+                parameters.slice = slice;
+                parameters.view_index = view_index;
+                const D3D12_GPU_DESCRIPTOR_HANDLE block = offset_gpu_handle(
+                    gpu_start,
+                    slice * kDescriptorBlockSize,
+                    descriptor_increment);
+                synthesis->SetGraphicsRootDescriptorTable(0, block);
+                synthesis->SetGraphicsRootDescriptorTable(
+                    1,
+                    offset_gpu_handle(
+                        block,
+                        kSrvDescriptorCount,
+                        descriptor_increment));
+                synthesis->SetGraphicsRoot32BitConstants(
+                    2,
+                    kSynthesisConstantCount,
+                    &parameters,
+                    0);
+                const D3D12_CPU_DESCRIPTOR_HANDLE rtv = offset_cpu_handle(
+                    rtv_start,
+                    first_rtv + slice,
+                    rtv_increment);
+                synthesis->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+                set_viewport_and_scissor(
+                    synthesis,
+                    target_views[view_index].image_rect,
+                    static_cast<UINT>(image_description.Width),
+                    image_description.Height);
+                synthesis->DrawInstanced(3, 1, 0, 0);
+                clear_synthetic_marker(synthesis, rtv, target_views[view_index],
+                    static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
+            }
         }
 
         std::array<D3D12_RESOURCE_BARRIER,
@@ -3606,36 +3634,41 @@ struct D3D12FrameSynthesizer::Impl {
 
         const D3D12_CPU_DESCRIPTOR_HANDLE rtv_start =
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
-        const UINT first_rtv = synthetic_destination_index *
-            image_description.DepthOrArraySize;
-        for (UINT view_index = 0;
-             view_index < static_cast<UINT>(target_views.size());
-             ++view_index) {
-            const UINT slice = resolved_array_slice(
-                target_views[view_index],
-                view_index,
-                target_views.size(),
-                image_description.DepthOrArraySize);
-            parameters.slice = slice;
-            parameters.view_index = view_index;
-            slot.command_list->SetGraphicsRoot32BitConstants(
-                2,
-                kSynthesisConstantCount,
-                &parameters,
-                0);
-            const D3D12_CPU_DESCRIPTOR_HANDLE rtv = offset_cpu_handle(
-                rtv_start,
-                first_rtv + slice,
-                rtv_increment);
-            slot.command_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-            set_viewport_and_scissor(
-                slot.command_list.Get(),
-                target_views[view_index].image_rect,
-                static_cast<UINT>(image_description.Width),
-                image_description.Height);
-            slot.command_list->DrawInstanced(3, 1, 0, 0);
-            clear_synthetic_marker(slot.command_list.Get(), rtv, target_views[view_index],
-                static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
+        for (UINT output = 0; output < synthetic_output_count(); ++output) {
+            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
+                packed_synthesis_fraction(synthetic_output_fraction(output));
+            const UINT first_rtv =
+                synthetic_output_destination(output, synthetic_destination_index) *
+                image_description.DepthOrArraySize;
+            for (UINT view_index = 0;
+                 view_index < static_cast<UINT>(target_views.size());
+                 ++view_index) {
+                const UINT slice = resolved_array_slice(
+                    target_views[view_index],
+                    view_index,
+                    target_views.size(),
+                    image_description.DepthOrArraySize);
+                parameters.slice = slice;
+                parameters.view_index = view_index;
+                slot.command_list->SetGraphicsRoot32BitConstants(
+                    2,
+                    kSynthesisConstantCount,
+                    &parameters,
+                    0);
+                const D3D12_CPU_DESCRIPTOR_HANDLE rtv = offset_cpu_handle(
+                    rtv_start,
+                    first_rtv + slice,
+                    rtv_increment);
+                slot.command_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+                set_viewport_and_scissor(
+                    slot.command_list.Get(),
+                    target_views[view_index].image_rect,
+                    static_cast<UINT>(image_description.Width),
+                    image_description.Height);
+                slot.command_list->DrawInstanced(3, 1, 0, 0);
+                clear_synthetic_marker(slot.command_list.Get(), rtv, target_views[view_index],
+                    static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
+            }
         }
 
         const std::array<D3D12_RESOURCE_BARRIER, 1> before_current_copy{
@@ -3827,51 +3860,56 @@ struct D3D12FrameSynthesizer::Impl {
             slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart();
         const D3D12_CPU_DESCRIPTOR_HANDLE rtv_start =
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
-        const UINT first_rtv = synthetic_destination_index *
-            image_description.DepthOrArraySize;
-        for (UINT view_index = 0;
-             view_index < static_cast<UINT>(target_views.size());
-             ++view_index) {
-            const UINT slice = resolved_array_slice(
-                target_views[view_index],
-                view_index,
-                target_views.size(),
-                image_description.DepthOrArraySize);
-            parameters.slice = slice;
-            parameters.view_index = view_index;
-            const UINT descriptor_base =
-                backend == D3D12OpticalFlowBackend::nvidia
-                    ? slice * kDescriptorBlockSize
-                    : 0;
-            const D3D12_GPU_DESCRIPTOR_HANDLE block = offset_gpu_handle(
-                gpu_start,
-                descriptor_base,
-                descriptor_increment);
-            slot.command_list->SetGraphicsRootDescriptorTable(0, block);
-            slot.command_list->SetGraphicsRootDescriptorTable(
-                1,
-                offset_gpu_handle(
-                    block,
-                    kSrvDescriptorCount,
-                    descriptor_increment));
-            slot.command_list->SetGraphicsRoot32BitConstants(
-                2,
-                kSynthesisConstantCount,
-                &parameters,
-                0);
-            const D3D12_CPU_DESCRIPTOR_HANDLE rtv = offset_cpu_handle(
-                rtv_start,
-                first_rtv + slice,
-                rtv_increment);
-            slot.command_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-            set_viewport_and_scissor(
-                slot.command_list.Get(),
-                target_views[view_index].image_rect,
-                static_cast<UINT>(image_description.Width),
-                image_description.Height);
-            slot.command_list->DrawInstanced(3, 1, 0, 0);
-            clear_synthetic_marker(slot.command_list.Get(), rtv, target_views[view_index],
-                static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
+        for (UINT output = 0; output < synthetic_output_count(); ++output) {
+            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
+                packed_synthesis_fraction(synthetic_output_fraction(output));
+            const UINT first_rtv =
+                synthetic_output_destination(output, synthetic_destination_index) *
+                image_description.DepthOrArraySize;
+            for (UINT view_index = 0;
+                 view_index < static_cast<UINT>(target_views.size());
+                 ++view_index) {
+                const UINT slice = resolved_array_slice(
+                    target_views[view_index],
+                    view_index,
+                    target_views.size(),
+                    image_description.DepthOrArraySize);
+                parameters.slice = slice;
+                parameters.view_index = view_index;
+                const UINT descriptor_base =
+                    backend == D3D12OpticalFlowBackend::nvidia
+                        ? slice * kDescriptorBlockSize
+                        : 0;
+                const D3D12_GPU_DESCRIPTOR_HANDLE block = offset_gpu_handle(
+                    gpu_start,
+                    descriptor_base,
+                    descriptor_increment);
+                slot.command_list->SetGraphicsRootDescriptorTable(0, block);
+                slot.command_list->SetGraphicsRootDescriptorTable(
+                    1,
+                    offset_gpu_handle(
+                        block,
+                        kSrvDescriptorCount,
+                        descriptor_increment));
+                slot.command_list->SetGraphicsRoot32BitConstants(
+                    2,
+                    kSynthesisConstantCount,
+                    &parameters,
+                    0);
+                const D3D12_CPU_DESCRIPTOR_HANDLE rtv = offset_cpu_handle(
+                    rtv_start,
+                    first_rtv + slice,
+                    rtv_increment);
+                slot.command_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+                set_viewport_and_scissor(
+                    slot.command_list.Get(),
+                    target_views[view_index].image_rect,
+                    static_cast<UINT>(image_description.Width),
+                    image_description.Height);
+                slot.command_list->DrawInstanced(3, 1, 0, 0);
+                clear_synthetic_marker(slot.command_list.Get(), rtv, target_views[view_index],
+                    static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
+            }
         }
 
         const D3D12_RESOURCE_BARRIER after_synthesis = transition_barrier(
@@ -4293,17 +4331,28 @@ struct D3D12FrameSynthesizer::Impl {
         const std::optional<OverlayPlacement>& debug_marker,
         std::shared_ptr<const DlssMotionVectorSet> motion_vectors,
         bool defer_current_copy,
-        float interpolation_fraction) noexcept {
+        float interpolation_fraction,
+        const std::optional<D3D12ExtraSynthetic>& extra_synthetic) noexcept {
         // A degenerate interval says the pairing is not in a steady cadence;
         // half is the safe answer there, not an extrapolation.
-        synthetic_fraction =
-            (interpolation_fraction > 0.05F && interpolation_fraction < 0.95F)
-                ? interpolation_fraction
-                : 0.5F;
+        const auto usable_fraction = [](float fraction) noexcept {
+            return fraction > 0.05F && fraction < 0.95F ? fraction : 0.5F;
+        };
+        synthetic_fraction = usable_fraction(interpolation_fraction);
+        extra_synthetic_destination.reset();
         if (output_ticket == nullptr) {
             return E_POINTER;
         }
         *output_ticket = {};
+        if (extra_synthetic) {
+            if (extra_synthetic->destination_index >= synthetic_destinations.size() ||
+                extra_synthetic->destination_index == synthetic_destination_index) {
+                return E_INVALIDARG;
+            }
+            extra_synthetic_destination = extra_synthetic->destination_index;
+            extra_synthetic_fraction =
+                usable_fraction(extra_synthetic->interpolation_fraction);
+        }
         const bool repeated_capture =
             previous.active() && current.serial == previous.ticket.serial &&
             current.fence_value == previous.ticket.fence_value &&
@@ -4384,6 +4433,16 @@ struct D3D12FrameSynthesizer::Impl {
         if (FAILED(result)) {
             return result;
         }
+        if (extra_synthetic_destination) {
+            result = destination_available(
+                synthetic_destinations[*extra_synthetic_destination]);
+            if (FAILED(result)) {
+                return result;
+            }
+        }
+        ID3D12Resource* const extra_destination = extra_synthetic_destination
+            ? synthetic_destinations[*extra_synthetic_destination].resource.Get()
+            : nullptr;
         std::uint32_t work_slot_index = 0;
         result = acquire_work_slot(&work_slot_index);
         if (FAILED(result)) {
@@ -4397,7 +4456,8 @@ struct D3D12FrameSynthesizer::Impl {
             ID3D12Resource* const current_destination =
                 current_destinations[current_destination_index].resource.Get();
             if (repeated_resource == synthetic_destination ||
-                repeated_resource == current_destination) {
+                repeated_resource == current_destination ||
+                repeated_resource == extra_destination) {
                 return E_INVALIDARG;
             }
 
@@ -4442,6 +4502,10 @@ struct D3D12FrameSynthesizer::Impl {
             previous.last_use_fence_value = fence_value;
             current_destinations[current_destination_index].fence_value = fence_value;
             synthetic_destinations[synthetic_destination_index].fence_value = fence_value;
+            if (extra_synthetic_destination) {
+                synthetic_destinations[*extra_synthetic_destination].fence_value =
+                    fence_value;
+            }
             next_work_slot = (work_slot_index + 1U) %
                 static_cast<std::uint32_t>(work_slots.size());
 
@@ -4473,7 +4537,10 @@ struct D3D12FrameSynthesizer::Impl {
             previous.resource.Get() == synthetic_destination ||
             previous.resource.Get() == current_destination ||
             next.resource.Get() == synthetic_destination ||
-            next.resource.Get() == current_destination) {
+            next.resource.Get() == current_destination ||
+            (extra_destination != nullptr &&
+             (previous.resource.Get() == extra_destination ||
+              next.resource.Get() == extra_destination))) {
             cancel_next();
             return E_INVALIDARG;
         }
@@ -4543,6 +4610,10 @@ struct D3D12FrameSynthesizer::Impl {
         previous = std::move(next);
         current_destinations[current_destination_index].fence_value = fence_value;
         synthetic_destinations[synthetic_destination_index].fence_value = fence_value;
+        if (extra_synthetic_destination) {
+            synthetic_destinations[*extra_synthetic_destination].fence_value =
+                fence_value;
+        }
         next_work_slot = (work_slot_index + 1U) %
             static_cast<std::uint32_t>(work_slots.size());
 
@@ -4722,7 +4793,8 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
     std::optional<OverlayPlacement> debug_marker,
     std::shared_ptr<const DlssMotionVectorSet> motion_vectors,
     bool defer_current_copy,
-    float interpolation_fraction) noexcept {
+    float interpolation_fraction,
+    std::optional<D3D12ExtraSynthetic> extra_synthetic) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr) {
@@ -4741,7 +4813,8 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
             debug_marker,
             std::move(motion_vectors),
             defer_current_copy,
-            interpolation_fraction);
+            interpolation_fraction,
+            extra_synthetic);
     } catch (...) {
         if (ticket != nullptr) {
             *ticket = {};

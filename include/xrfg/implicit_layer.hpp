@@ -85,6 +85,14 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_deep_pipeline(
     const std::filesystem::path& module_directory) noexcept;
 
+// `[ofxr] triple_frame_gen`: two synthetic frames per application frame
+// instead of one, for an application running at a third of the display rate.
+// Off unless set to 1. Read once per session, at xrCreateSession, and it
+// takes the shallow pipeline whatever deep_pipeline says; the tray calls it
+// "3X Frame Gen".
+[[nodiscard]] bool read_triple_frame_gen(
+    const std::filesystem::path& module_directory) noexcept;
+
 // `[ofxr] vulkan_bridge`: whether the layer generates for Vulkan sessions.
 // On unless the key says 0. A Vulkan session needs the queue-serialising
 // Vulkan layer registered beside this one, which the tray does at every arm

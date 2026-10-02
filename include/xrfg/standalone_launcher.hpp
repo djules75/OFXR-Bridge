@@ -38,6 +38,9 @@ struct LauncherSettings {
     bool nvidia_bidirectional{};
     // "Prefer FPS over latency": the layer's deeper pipeline. On by default.
     bool deep_pipeline{true};
+    // "3X Frame Gen": two synthetic frames per application frame. Off by
+    // default.
+    bool triple_frame_gen{};
     // Vulkan support: generate for Vulkan sessions and register the
     // queue-serialising Vulkan layer while armed. On by default and not in
     // the menu, like d3d11_bridge: vulkan_bridge=0 in tray.ini turns it off. The

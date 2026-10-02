@@ -79,6 +79,10 @@ bool g_split_eye_mode = false;
 // expects the ring sizes the layer will actually ask for: one synthetic slot
 // per application swapchain shallow, two deep.
 bool g_deep_pipeline = false;
+// Frames the layer hands the runtime per application frame: 3 when the ini
+// beside the layer turns "3X Frame Gen" on, and the virtual period the
+// application is served follows it.
+XrDuration g_frames_per_application_frame = 2;
 bool g_cropped_subimage_mode = false;
 bool g_double_wide_mode = false;
 bool g_uevr_pipelined_display_time_mode = false;
@@ -2122,6 +2126,13 @@ int main(int argc, char** argv) {
         // Same default as the layer: on unless the ini says 0.
         g_deep_pipeline = GetPrivateProfileIntW(
             L"ofxr", L"deep_pipeline", 1, ini.wstring().c_str()) != 0;
+        if (GetPrivateProfileIntW(
+                L"ofxr", L"triple_frame_gen", 0, ini.wstring().c_str()) != 0) {
+            // What the flag stands for in this file is the synthetic ring's
+            // two slots, and 3X takes two as well: one per synthetic.
+            g_frames_per_application_frame = 3;
+            g_deep_pipeline = true;
+        }
     }
     if (argc == 4 && !g_split_eye_mode && !g_double_wide_mode &&
         !g_d3d11_interop_mode && !g_steamvr_runtime_mode &&
@@ -3025,7 +3036,7 @@ int main(int argc, char** argv) {
             submit_flight_frame(application_frames[0]) &&
             wait_next_while_beginning_current(application_frames[2]) &&
             application_frames[2].predictedDisplayPeriod ==
-                kFakeDisplayPeriod * 2;
+                kFakeDisplayPeriod * g_frames_per_application_frame;
         const std::uint32_t downstream_waits_before_transition =
             g_wait_frame_calls.load(std::memory_order_acquire);
         sequence_succeeded = sequence_succeeded &&
@@ -3042,7 +3053,7 @@ int main(int argc, char** argv) {
         sequence_succeeded = sequence_succeeded &&
             wait_next_while_beginning_current(application_frames[3]) &&
             application_frames[3].predictedDisplayPeriod ==
-                kFakeDisplayPeriod * 2 &&
+                kFakeDisplayPeriod * g_frames_per_application_frame &&
             submit_flight_frame(application_frames[2]) &&
             // One more application frame than the pairing needs on its own:
             // the frame that arms generation passes through, so reaching the
@@ -3339,7 +3350,7 @@ int main(int argc, char** argv) {
                 ok = ok && XR_SUCCEEDED(next_wait_result);
             }
             presenter_seen = presenter_seen ||
-                pending.predictedDisplayPeriod == kFakeDisplayPeriod * 2;
+                pending.predictedDisplayPeriod == kFakeDisplayPeriod * g_frames_per_application_frame;
             ok = ok && next.predictedDisplayTime > pending.predictedDisplayTime;
             pending = next;
             return ok;
@@ -3503,7 +3514,7 @@ int main(int argc, char** argv) {
                 nullptr,
                 &application_frames[4])) &&
             application_frames[4].predictedDisplayPeriod ==
-                kFakeDisplayPeriod * 2 &&
+                kFakeDisplayPeriod * g_frames_per_application_frame &&
             application_frames[4].predictedDisplayTime >
                 application_frames[3].predictedDisplayTime &&
             XR_SUCCEEDED(begin_frame(session, nullptr)) &&
@@ -3526,7 +3537,7 @@ int main(int argc, char** argv) {
                     &frame_wait_info,
                     &application_frames[5])) &&
                 application_frames[5].predictedDisplayPeriod ==
-                    kFakeDisplayPeriod * 2 &&
+                    kFakeDisplayPeriod * g_frames_per_application_frame &&
                 application_frames[5].predictedDisplayTime >
                     application_frames[4].predictedDisplayTime &&
                 XR_SUCCEEDED(begin_frame(session, &frame_begin_info));

@@ -229,6 +229,20 @@ bool read_deep_pipeline(
     }
 }
 
+bool read_triple_frame_gen(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (module_directory.empty()) {
+            return false;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"triple_frame_gen", 0, ini_path.c_str()) != 0;
+    } catch (...) {
+        return false;
+    }
+}
+
 bool read_d3d11_bridge(
     const std::filesystem::path& module_directory) noexcept {
     try {

@@ -161,6 +161,9 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "deep_pipeline") {
                     settings.deep_pipeline = value == "1" ||
                         lower_ascii(value) == "true";
+                } else if (key == "triple_frame_gen") {
+                    settings.triple_frame_gen = value == "1" ||
+                        lower_ascii(value) == "true";
                 } else if (key == "vulkan_bridge") {
                     // Not vulkan_support: while the option was off by default
                     // every save wrote vulkan_support=0, so that key says
@@ -197,6 +200,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\nnvidia_bidirectional=" +
            (settings.nvidia_bidirectional ? "1" : "0") +
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
+           "\r\ntriple_frame_gen=" + (settings.triple_frame_gen ? "1" : "0") +
            "\r\nvulkan_bridge=" + (settings.vulkan_support ? "1" : "0") +
            "\r\nd3d11_bridge=" + (settings.d3d11_bridge ? "1" : "0") +
            "\r\ndiagnostics=" + (settings.diagnostics ? "1" : "0") +
@@ -267,6 +271,7 @@ std::string build_runtime_ini(
            "\r\nnvidia_bidirectional=" +
            (settings.nvidia_bidirectional ? "1" : "0") +
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
+           "\r\ntriple_frame_gen=" + (settings.triple_frame_gen ? "1" : "0") +
            "\r\nvulkan_bridge=" + (settings.vulkan_support ? "1" : "0") +
            "\r\nd3d11_bridge=" + (settings.d3d11_bridge ? "1" : "0") +
            "\r\n\r\n[diagnostics]\r\nlogging_enabled=" +

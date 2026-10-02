@@ -37,6 +37,8 @@ int main() {
         release_defaults.nvidia_input_scale != NvidiaInputScale::half ||
         release_defaults.nvidia_bidirectional || release_defaults.diagnostics ||
         !release_defaults.deep_pipeline ||
+        release_defaults.triple_frame_gen ||
+        !contains(default_runtime_ini, "triple_frame_gen=0") ||
         !contains(default_runtime_ini, "deep_pipeline=1") ||
         !release_defaults.vulkan_support ||
         !release_defaults.d3d11_bridge ||
@@ -74,6 +76,7 @@ int main() {
     settings.nvidia_input_scale = NvidiaInputScale::half;
     settings.nvidia_bidirectional = true;
     settings.deep_pipeline = false;
+    settings.triple_frame_gen = true;
     settings.vulkan_support = false;
     settings.d3d11_bridge = false;
     settings.diagnostics = true;
@@ -83,6 +86,7 @@ int main() {
         parsed.nvidia_preset != NvidiaPerformancePreset::slow ||
         parsed.nvidia_input_scale != NvidiaInputScale::half ||
         !parsed.nvidia_bidirectional || parsed.deep_pipeline ||
+        !parsed.triple_frame_gen ||
         parsed.vulkan_support || parsed.d3d11_bridge || !parsed.diagnostics) {
         std::cerr << "standalone settings round-trip failed\n";
         return 1;
@@ -121,6 +125,7 @@ int main() {
         !contains(runtime_ini, "nvidia_input_scale=50") ||
         !contains(runtime_ini, "nvidia_bidirectional=1") ||
         !contains(runtime_ini, "deep_pipeline=0") ||
+        !contains(runtime_ini, "triple_frame_gen=1") ||
         !contains(runtime_ini, "vulkan_bridge=0") ||
         !contains(runtime_ini, "d3d11_bridge=0") ||
         !contains(runtime_ini, "[diagnostics]\r\nlogging_enabled=1") ||

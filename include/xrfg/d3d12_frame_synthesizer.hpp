@@ -114,6 +114,17 @@ struct D3D12NvidiaOpticalFlowOptions {
     bool bidirectional{};
 };
 
+// A second synthetic produced from the same pair, for a session that hands
+// the runtime three frames per application frame. The optical flow is the
+// pair's and is computed once; this costs one more composition pass, into
+// its own destination image and at its own instant between the two captures.
+struct D3D12ExtraSynthetic {
+    std::uint32_t destination_index{};
+    // As submit_pair's interpolation_fraction: 0 at the previous capture, 1
+    // at the current one.
+    float interpolation_fraction{0.5F};
+};
+
 // Owns a rolling exclusive history lease. Each resource supports at most two
 // bounded projection views. They ordinarily map one-to-one to at most two
 // array slices, while a single slice may also contain two non-overlapping
@@ -178,7 +189,12 @@ public:
         // because only then are the two captures two display periods apart
         // and the synthetic shown one period before the current frame.
         // Clamped internally; out-of-range values fall back to half.
-        float interpolation_fraction = 0.5F) noexcept;
+        float interpolation_fraction = 0.5F,
+        // A second synthetic from the same pair, written in the same
+        // submission and complete at the same fence value. Its destination
+        // is another image of the synthetic set and must differ from
+        // synthetic_destination_index.
+        std::optional<D3D12ExtraSynthetic> extra_synthetic = std::nullopt) noexcept;
 
     // Executes the current output's copy, which submit_pair records but
     // deliberately leaves unsubmitted. The synthetic frame is handed to the

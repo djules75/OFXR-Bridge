@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.377.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.394.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -665,6 +665,51 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
             set_tests_properties(xrfg_layer_shallow_${mode} PROPERTIES TIMEOUT 60)
         endforeach()
+        # "3X Frame Gen": two synthetics per application frame. The bridged
+        # D3D11 scenario runs it inline and its own assertions hold whatever
+        # the multiplier; the SteamVR one runs it on the presenter and is
+        # checked for the hand-over order as well as its own assertions.
+        add_test(
+            NAME xrfg_layer_triple_frame_gen_inline
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DTRIPLE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_triple_frame_gen.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/triple-frame-gen-inline"
+                "-DMODE=d3d11-bridge"
+                "-DREQUIRE_SCENARIO_PASS=ON"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_triple_frame_gen.cmake")
+        add_test(
+            NAME xrfg_layer_triple_frame_gen_presenter
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DTRIPLE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_triple_frame_gen.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/triple-frame-gen-presenter"
+                "-DMODE=steamvr-presenter"
+                "-DEXPECT_PRESENTER=ON"
+                "-DREQUIRE_SCENARIO_PASS=ON"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_triple_frame_gen.cmake")
+        # The presenter scenarios hold under 3X as they stand: the call chain
+        # reads the multiplier from the same ini and expects the virtual
+        # period to follow it.
+        foreach(mode steamvr-presenter flight-simulator
+                flight-destroy-swapchain steamvr-destroy-space swapchain-budget)
+            add_test(
+                NAME xrfg_layer_triple_${mode}
+                COMMAND "${CMAKE_COMMAND}"
+                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                    "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_triple_frame_gen.ini"
+                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/triple-frame-gen-${mode}"
+                    "-DMODE=${mode}"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
+            set_tests_properties(xrfg_layer_triple_${mode} PROPERTIES TIMEOUT 60)
+        endforeach()
+        set_tests_properties(
+            xrfg_layer_triple_frame_gen_inline
+            xrfg_layer_triple_frame_gen_presenter
+            PROPERTIES TIMEOUT 60)
         # The Vulkan scenarios need vulkan_bridge on, which their inis say
         # explicitly, and run with the queue layer in the chain, at both
         # depths. A machine without any Vulkan implementation (a GPU-less

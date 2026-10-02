@@ -46,6 +46,7 @@ enum MenuCommand : UINT {
     nvidia_scale_three_quarter = 116,
     nvidia_scale_half = 117,
     toggle_deep_pipeline = 118,
+    toggle_triple_frame_gen = 119,
     toggle_diagnostics = 120,
     overlay_off = 121,
     overlay_upper_left = 122,
@@ -491,7 +492,9 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     } else {
         tooltip += L"FidelityFX";
     }
-    if (state.settings.deep_pipeline) {
+    if (state.settings.triple_frame_gen) {
+        tooltip += L" - 3X";
+    } else if (state.settings.deep_pipeline) {
         tooltip += L" - prefer FPS";
     }
     if (state.settings.vulkan_support) {
@@ -759,6 +762,11 @@ void show_context_menu(AppState& state) {
         L"Prefer FPS over latency");
     AppendMenuW(
         menu,
+        MF_STRING | (state.settings.triple_frame_gen ? MF_CHECKED : MF_UNCHECKED),
+        toggle_triple_frame_gen,
+        L"3X Frame Gen");
+    AppendMenuW(
+        menu,
         MF_STRING | (state.settings.diagnostics ? MF_CHECKED : MF_UNCHECKED),
         toggle_diagnostics,
         L"Bridge flight recorder");
@@ -863,6 +871,19 @@ void handle_command(AppState& state, UINT command) {
             L"rate hold full FPS more steadily. Adds one frame of latency "
             L"(about 11 ms at 90 Hz). Leave off if the game already runs "
             L"comfortably. Takes effect the next time the game starts.");
+        break;
+    case toggle_triple_frame_gen:
+        state.settings.triple_frame_gen = !state.settings.triple_frame_gen;
+        update_runtime_options(state);
+        show_balloon(
+            state,
+            state.settings.triple_frame_gen
+                ? L"3X Frame Gen: on"
+                : L"3X Frame Gen: off",
+            L"Two generated frames for every frame the game renders, so the "
+            L"game runs at a third of your headset's refresh rate (30 FPS at "
+            L"90 Hz). \"Prefer FPS over latency\" does not apply while this "
+            L"is on. Takes effect the next time the game starts.");
         break;
     case overlay_off:
     case overlay_upper_left:
