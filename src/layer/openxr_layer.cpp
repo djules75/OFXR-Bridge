@@ -929,6 +929,9 @@ struct SessionState {
     bool triple_switchable{};
     // The application's xrEndFrame thread only.
     std::chrono::steady_clock::time_point triple_poll_at{};
+    // Held while this session cannot follow the switch, so the tray can say
+    // a restart is needed.
+    xrfg::implicit_layer::FixedFrameMultiplierMarker fixed_frame_multiplier;
     // `[ofxr] vulkan_bridge`: off, a Vulkan session passes through. See
     // implicit_layer::read_vulkan_support for why it is a choice.
     bool vulkan_support{};
@@ -3248,6 +3251,9 @@ create_vulkan_frame_generation_swapchains(
         session->deep_pipeline = false;
         session->frames_per_application_frame = 2;
         session->two_slot_synthetic_ring = false;
+        if (session->triple_switchable) {
+            session->fixed_frame_multiplier.hold();
+        }
         session->triple_switchable = false;
         for (const ProjectionResourceMapping& mapping : mappings) {
             const auto swapchain = find_swapchain(mapping.application_swapchain);
@@ -4359,6 +4365,9 @@ XrResult layer_create_session_impl(
         state->deep_pipeline || state->frames_per_application_frame > 2;
     state->triple_switchable =
         triple_binding && state->two_slot_synthetic_ring;
+    if (triple_binding && !state->triple_switchable) {
+        state->fixed_frame_multiplier.hold();
+    }
     // 700: the session's shape. a frames per application frame, b the deeper
     // pipeline, c whether 3X was asked for - or 2 when the record marks a
     // live change rather than the session's creation.

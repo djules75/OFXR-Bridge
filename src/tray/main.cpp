@@ -755,11 +755,18 @@ void show_context_menu(AppState& state) {
         MF_POPUP,
         reinterpret_cast<UINT_PTR>(nvidia_scale_menu),
         L"Optical flow resolution");
+    // 3X needs what "Prefer FPS over latency" sets up, so it holds that on.
     AppendMenuW(
         menu,
-        MF_STRING | (state.settings.deep_pipeline ? MF_CHECKED : MF_UNCHECKED),
+        MF_STRING |
+            (state.settings.deep_pipeline || state.settings.triple_frame_gen
+                 ? MF_CHECKED
+                 : MF_UNCHECKED) |
+            (state.settings.triple_frame_gen ? MF_GRAYED : MF_ENABLED),
         toggle_deep_pipeline,
-        L"Prefer FPS over latency");
+        state.settings.triple_frame_gen
+            ? L"Prefer FPS over latency (on with 3X Frame Gen)"
+            : L"Prefer FPS over latency");
     AppendMenuW(
         menu,
         MF_STRING | (state.settings.triple_frame_gen ? MF_CHECKED : MF_UNCHECKED),
@@ -858,6 +865,9 @@ void handle_command(AppState& state, UINT command) {
         update_runtime_options(state);
         break;
     case toggle_deep_pipeline:
+        if (state.settings.triple_frame_gen) {
+            break;
+        }
         state.settings.deep_pipeline = !state.settings.deep_pipeline;
         update_runtime_options(state);
         // A menu item cannot carry a tooltip, so the explanation goes in
@@ -874,17 +884,38 @@ void handle_command(AppState& state, UINT command) {
         break;
     case toggle_triple_frame_gen:
         state.settings.triple_frame_gen = !state.settings.triple_frame_gen;
+        if (state.settings.triple_frame_gen) {
+            // 3X runs on what this sets up; it stays on afterwards.
+            state.settings.deep_pipeline = true;
+        }
         update_runtime_options(state);
-        show_balloon(
-            state,
-            state.settings.triple_frame_gen
-                ? L"3X Frame Gen: on"
-                : L"3X Frame Gen: off",
-            L"Two generated frames for every frame the game renders, so the "
-            L"game runs at a third of your headset's refresh rate (30 FPS at "
-            L"90 Hz). \"Prefer FPS over latency\" does not apply while this "
-            L"is on. Switches in a running game within a moment; a game "
-            L"started with \"Prefer FPS over latency\" off needs a restart.");
+        if (state.armed && xrfg::implicit_layer::running_session_needs_restart_for_3x()) {
+            // A notification is easy to miss - Windows holds them back
+            // while a game runs - and this one says the click did nothing,
+            // so it has to be seen.
+            MessageBoxW(
+                state.window,
+                L"Restart your game to apply this change.\n\n"
+                L"The game that is running was started with \"Prefer FPS over "
+                L"latency\" off, so 3X Frame Gen cannot be switched while it "
+                L"runs. The setting is saved: the game will use it the next "
+                L"time it starts.",
+                L"OFXR Bridge - game restart needed",
+                MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
+        } else {
+            show_balloon(
+                state,
+                state.settings.triple_frame_gen
+                    ? L"3X Frame Gen: on"
+                    : L"3X Frame Gen: off",
+                state.settings.triple_frame_gen
+                    ? L"Two generated frames for every frame the game "
+                      L"renders: the game runs at a third of your headset's "
+                      L"refresh rate (30 FPS at 90 Hz). Switches in a running "
+                      L"game within a moment."
+                    : L"Back to one generated frame per game frame. Switches "
+                      L"in a running game within a moment.");
+        }
         break;
     case overlay_off:
     case overlay_upper_left:

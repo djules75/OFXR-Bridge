@@ -243,6 +243,35 @@ bool read_triple_frame_gen(
     }
 }
 
+namespace {
+constexpr wchar_t kFixedFrameMultiplierEvent[] =
+    L"Local\\OFXRBridgeFixedFrameMultiplier";
+}
+
+FixedFrameMultiplierMarker::~FixedFrameMultiplierMarker() { release(); }
+
+void FixedFrameMultiplierMarker::hold() noexcept {
+    if (event_ == nullptr) {
+        event_ = CreateEventW(nullptr, TRUE, FALSE, kFixedFrameMultiplierEvent);
+    }
+}
+
+void FixedFrameMultiplierMarker::release() noexcept {
+    if (event_ != nullptr) {
+        CloseHandle(static_cast<HANDLE>(event_));
+        event_ = nullptr;
+    }
+}
+
+bool running_session_needs_restart_for_3x() noexcept {
+    HANDLE event = OpenEventW(SYNCHRONIZE, FALSE, kFixedFrameMultiplierEvent);
+    if (event == nullptr) {
+        return false;
+    }
+    CloseHandle(event);
+    return true;
+}
+
 bool read_d3d11_bridge(
     const std::filesystem::path& module_directory) noexcept {
     try {

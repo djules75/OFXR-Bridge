@@ -94,6 +94,28 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_triple_frame_gen(
     const std::filesystem::path& module_directory) noexcept;
 
+// Held by every running session that cannot follow the "3X Frame Gen"
+// switch live - one started with "Prefer FPS over latency" off, or one the
+// runtime's swapchain limit pushed back to a single synthetic. The tray asks
+// whether any exists to tell the user a game restart is needed. A named
+// event, so the handle count is the session count and nothing outlives the
+// last session.
+class FixedFrameMultiplierMarker {
+public:
+    FixedFrameMultiplierMarker() noexcept = default;
+    ~FixedFrameMultiplierMarker();
+    FixedFrameMultiplierMarker(const FixedFrameMultiplierMarker&) = delete;
+    FixedFrameMultiplierMarker& operator=(const FixedFrameMultiplierMarker&) = delete;
+    void hold() noexcept;
+    void release() noexcept;
+
+private:
+    void* event_{};
+};
+
+// Whether a running game holds the marker above.
+[[nodiscard]] bool running_session_needs_restart_for_3x() noexcept;
+
 // `[ofxr] vulkan_bridge`: whether the layer generates for Vulkan sessions.
 // On unless the key says 0. A Vulkan session needs the queue-serialising
 // Vulkan layer registered beside this one, which the tray does at every arm
