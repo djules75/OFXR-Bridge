@@ -6,6 +6,16 @@ generated frame between two rendered frames.
 Current release: **v0.2.9.1 (internal build V401)**.
 See the [release notes](docs/releases/0.2.9.1.md).
 
+## 🛠️ Not working, or not feeling smoother?
+
+### ➡️ [Read the troubleshooting guide first](docs/TROUBLESHOOTING.md)
+
+It checks in one step whether OFXR is running in your game, then lists the
+usual causes and fixes: OpenVR games, running as administrator, the game's
+frame rate, frame smoothing in your VR software, and running out of VRAM.
+
+---
+
 > [!IMPORTANT]
 > **OpenXR games only.** The bridge works only with games that talk to your
 > headset through **OpenXR**. Games built on **OpenVR**, SteamVR's older
@@ -261,6 +271,10 @@ For the best results on SteamVR:
 - If you get dips, disarm the bridge and play the same scene. If the dips
   remain, lower SteamVR's per-eye resolution; the bridge cannot recover
   frames the game does not render.
+
+### How much VRAM the bridge uses
+
+See the VRAM table in [Troubleshooting](docs/TROUBLESHOOTING.md#how-much-vram-ofxr-uses).
 
 ### What the tray changes on your PC
 
