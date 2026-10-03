@@ -1,5 +1,5 @@
 name: Game compatibility report
-description: Report a working, partially working or non-working game.
+description: Report a game that works, or works with minor issues, with OFXR Bridge.
 title: "[Compatibility]: "
 body:
   - type: markdown
@@ -7,15 +7,17 @@ body:
       value: |
         Thanks for testing OFXR Bridge. Please attach a bridge flight log whenever possible.
 
+        **OFXR does nothing, doesn't feel smoother, freezes or crashes?** That is a bug report, not a
+        compatibility report: go through the [troubleshooting guide](https://github.com/djules75/OFXR-Bridge/blob/main/docs/TROUBLESHOOTING.md)
+        first, then use the **Bug report** form if it didn't help.
+
   - type: dropdown
     id: status
     attributes:
       label: Compatibility status
       options:
         - Working
-        - Working with issues
-        - OFXR does not activate
-        - Freeze or crash
+        - Working with minor issues
     validations:
       required: true
 

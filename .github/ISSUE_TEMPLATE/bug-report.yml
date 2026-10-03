@@ -1,0 +1,123 @@
+name: Bug report
+description: OFXR does nothing, doesn't feel smoother, stutters, freezes or crashes.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before posting, go through the [troubleshooting guide](https://github.com/djules75/OFXR-Bridge/blob/main/docs/TROUBLESHOOTING.md).**
+        Most reports are solved there in a few minutes: an OpenVR game, a game run as administrator,
+        a game frame rate too low or too high for 2X, frame smoothing left on in your VR software,
+        or running out of VRAM.
+
+        If the guide didn't solve it, fill in this form and attach a flight log.
+
+  - type: checkboxes
+    id: troubleshooting
+    attributes:
+      label: Troubleshooting guide
+      description: Reports that skip these steps will be pointed back to the guide.
+      options:
+        - label: I read the troubleshooting guide and followed the table that matches what I see.
+          required: true
+        - label: I did Step 1 (the FPS overlay check) and report its result below.
+          required: true
+        - label: I turned off my VR software's own frame smoothing (SteamVR Motion Smoothing and "fixed frame rate at half", Virtual Desktop SSW, Pimax Smart Smoothing, Pico Frame Interpolation).
+          required: true
+        - label: I checked the VRAM table in the guide against my resolution and GPU.
+          required: true
+        - label: The game is an OpenXR game (or runs through OpenXR with OpenComposite), and neither it nor its launcher runs as administrator.
+          required: true
+
+  - type: dropdown
+    id: overlay
+    attributes:
+      label: Step 1 result - what the FPS overlay shows in the headset
+      options:
+        - No number at all
+        - A red number
+        - A green number
+        - Vulkan game, no overlay - a flight log is created
+        - Vulkan game, no overlay - no flight log is created
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: OFXR version
+      placeholder: "0.2.9.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: OFXR mode
+      options:
+        - 2X, Prefer FPS over latency on (default)
+        - 2X, Prefer FPS over latency off
+        - 3X Frame Gen
+    validations:
+      required: true
+
+  - type: input
+    id: game
+    attributes:
+      label: Game and VR mod
+      placeholder: "MSFS 2024 native, Cyberpunk 2077 with R.E.A.L. VR, Skyrim VR through OpenComposite..."
+    validations:
+      required: true
+
+  - type: input
+    id: headset_runtime
+    attributes:
+      label: Headset and VR software
+      placeholder: "Pimax Crystal Super on SteamVR, Quest 3 on Virtual Desktop, Pico 4 on Streaming Assistant..."
+    validations:
+      required: true
+
+  - type: input
+    id: refresh_resolution
+    attributes:
+      label: Refresh rate and per-eye resolution
+      placeholder: "90 Hz, 4172x3268"
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU, VRAM and driver version
+      placeholder: "RTX 4080 16 GB, NVIDIA 000.00"
+    validations:
+      required: true
+
+  - type: input
+    id: native_fps
+    attributes:
+      label: Game FPS with OFXR disarmed
+      description: Same scene and settings, OFXR disarmed from the tray. This decides whether 2X or 3X can help.
+      placeholder: "about 40 FPS"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happens
+      description: What you expected, what you see instead, and when it starts.
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Flight log
+      description: |
+        Tick **Bridge flight recorder** in the tray, start the game, reproduce the problem early, then use
+        **Open bridge logs** and drag the newest `ofxr-bridge-flight-*.log` here (zip it if GitHub refuses it).
+        The recorder keeps only the end of a long session, so start the game with it already on.
+    validations:
+      required: true
