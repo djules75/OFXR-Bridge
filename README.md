@@ -6,6 +6,19 @@ generated frame between two rendered frames.
 Current release: **v0.2.9.1 (internal build V401)**.
 See the [release notes](docs/releases/0.2.9.1.md).
 
+> [!WARNING]
+> **Pimax headsets: use SteamVR, not Pimax OpenXR.** Pimax Play's OpenXR
+> runtime keeps an extra copy in VRAM of every image it is handed, so OFXR
+> costs about **1.7 times** more on it than on SteamVR, and the copies stay
+> until the game closes. We have reported it to Pimax so they can fix their
+> runtime; there is nothing OFXR can do about it in the meantime. Until it is
+> fixed, run your Pimax through SteamVR with
+> [sboys3's native SteamVR driver](https://store.pimax.com/blogs/blogs/sboys3-native-steamvr-driver-setup-guide)
+> and make SteamVR the active OpenXR runtime (SteamVR → Settings → OpenXR).
+> This matters most in MSFS 2024, which is already close to the VRAM limit
+> at Pimax resolutions. Details in the
+> [troubleshooting guide](docs/TROUBLESHOOTING.md#how-much-vram-ofxr-uses).
+
 ## 🛠️ Not working, or not feeling smoother?
 
 ### ➡️ [Read the troubleshooting guide first](docs/TROUBLESHOOTING.md)
