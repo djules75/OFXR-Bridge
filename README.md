@@ -9,7 +9,7 @@ See the [release notes](docs/releases/0.2.9.1.md).
 > [!WARNING]
 > **Pimax headsets: use SteamVR, not Pimax OpenXR.** Pimax Play's OpenXR
 > runtime keeps an extra copy in VRAM of every image it is handed, so OFXR
-> costs about **1.7 times** more on it than on SteamVR, and the copies stay
+> costs about **1.5 times** more on it than on SteamVR, and the copies stay
 > until the game closes. We have reported it to Pimax so they can fix their
 > runtime; there is nothing OFXR can do about it in the meantime. Until it is
 > fixed, run your Pimax through SteamVR with

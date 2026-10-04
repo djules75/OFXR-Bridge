@@ -71,38 +71,42 @@ not loaded (Table A).
 ## How much VRAM OFXR uses
 
 The bridge needs extra video memory on top of what the game uses. How much
-depends on your per-eye resolution, the game's graphics API, and whether
-**Prefer FPS over latency** or **3X Frame Gen** is on. The optical-flow
-backend makes no real difference: NVIDIA and FidelityFX are within 0.01 GB of
-each other.
+depends on your per-eye resolution, the game's graphics API, and on which
+OpenXR runtime the headset runs through. Since 0.2.10.1 the mode no longer
+matters on D3D12 and D3D11: 2X, 2X with **Prefer FPS over latency** and
+**3X Frame Gen** cost the same. The optical-flow backend makes no real
+difference either: NVIDIA and FidelityFX are within 0.01 GB of each other.
 
-Total extra VRAM, both eyes:
+Total extra VRAM, both eyes, on SteamVR, Virtual Desktop and the Meta runtime:
 
-| Per-eye resolution | D3D12, 2X | D3D12, 2X Prefer FPS or 3X | D3D11, 2X | D3D11, 2X Prefer FPS or 3X | Vulkan, 2X | Vulkan, 2X Prefer FPS or 3X |
-|---|---|---|---|---|---|---|
-| 2064×2208 (4.6 Mpx, Quest 3 class) | 0.42 GB | 0.52 GB | 0.52 GB | 0.63 GB | 0.83 GB | 1.03 GB |
-| 3030×2971 (9.0 Mpx) | 0.83 GB | 1.04 GB | 1.04 GB | 1.24 GB | 1.64 GB | 2.04 GB |
-| 4172×3268 (13.6 Mpx, Crystal Super) | 1.26 GB | 1.57 GB | 1.57 GB | 1.87 GB | 2.48 GB | 3.09 GB |
-| 5040×3948 (19.9 Mpx) | 1.84 GB | 2.29 GB | 2.29 GB | 2.73 GB | 3.62 GB | 4.51 GB |
-| 5884×4608 (27.1 Mpx) | 2.51 GB | 3.12 GB | 3.12 GB | 3.72 GB | 4.94 GB | 6.15 GB |
+| Per-eye resolution | D3D12 | D3D11 | Vulkan, 2X | Vulkan, 2X Prefer FPS or 3X |
+|---|---|---|---|---|
+| 2064×2208 (4.6 Mpx, Quest 3 class) | 0.45 GB | 0.55 GB | 0.83 GB | 1.03 GB |
+| 3030×2971 (9.0 Mpx) | 0.90 GB | 1.11 GB | 1.64 GB | 2.04 GB |
+| 4172×3268 (13.6 Mpx, Crystal Super) | 1.36 GB | 1.67 GB | 2.48 GB | 3.09 GB |
+| 5040×3948 (19.9 Mpx) | 1.99 GB | 2.44 GB | 3.62 GB | 4.51 GB |
+| 5884×4608 (27.1 Mpx) | 2.72 GB | 3.32 GB | 4.94 GB | 6.15 GB |
 
-"2X" alone means **Prefer FPS over latency** off. D3D11 means through the
-D3D11 bridge, which is on by default. The figures are worked out from what
-the bridge allocates and assume a game rendering 8-bit colour; a game
-rendering 16-bit colour roughly doubles them. Measured in MSFS 2024 on
-SteamVR they hold within 10%. Above the table, count about **0.12 GB per
-megapixel per eye** (0.09 GB with Prefer FPS over latency off).
+D3D11 means through the D3D11 bridge, which is on by default. The figures
+are worked out from what the bridge allocates and assume a game rendering
+8-bit colour; a game rendering 16-bit colour roughly doubles them. Measured
+in MSFS 2024 on SteamVR they hold within 10%: 3.1 GB in 3X at 29 megapixels
+per eye. Above the table, count about **0.10 GB per megapixel of per-eye
+resolution** on D3D12, 0.12 GB on D3D11 and 0.18 to 0.23 GB on Vulkan.
+0.2.9.1 and earlier used about 15% more on D3D12 and D3D11 with Prefer FPS
+over latency or 3X on.
 
 > [!WARNING]
-> **Pimax OpenXR costs about 1.5 times the table.** Pimax Play's runtime
-> keeps an extra copy of every image it is handed, made the first time the
-> image is shown and kept until the game closes, so each of OFXR's private
-> images costs twice on it: measured **4.6 GB against 3.1 GB on SteamVR** at
-> the same 29 megapixels per eye with 0.2.10.1 (7.0 against 4.2 GB with
-> 0.2.9.1, which held twice as many images). SteamVR does not do this; the other
-> runtimes have not been measured yet. We have reported it to Pimax so they
-> can fix their runtime, and there is nothing OFXR can do about it for now:
-> run your Pimax through SteamVR with
+> **On Pimax OpenXR, add about half again.** Pimax Play's runtime keeps an
+> extra copy of every image it is handed, made the first time the image is
+> shown and kept until the game closes, so OFXR's private images cost twice
+> on it: measured **4.6 GB against 3.1 GB on SteamVR** at the same
+> 29 megapixels per eye in 3X with 0.2.10.1 (7.0 against 4.2 GB with 0.2.9.1,
+> which held twice as many images). At the Crystal Super row that is about
+> 2.0 GB instead of 1.36 on D3D12 and 2.5 instead of 1.67 on D3D11. SteamVR
+> does not do this; the other runtimes have not been measured yet. We have
+> reported it to Pimax so they can fix their runtime, and there is nothing
+> OFXR can do about it for now: run your Pimax through SteamVR with
 > [sboys3's native SteamVR driver](https://store.pimax.com/blogs/blogs/sboys3-native-steamvr-driver-setup-guide)
 > instead, especially for MSFS 2024.
 
@@ -115,9 +119,8 @@ log says what was really asked: the `view_configuration` record near the
 top holds the per-eye size.
 
 If you run out of VRAM, lower the per-eye resolution first; it moves every
-column of this table and the game's own usage with it. Turning **Prefer FPS
-over latency** off also saves about 20%, but costs the smoothness it buys.
-Since V408, OFXR stays out of **Pimax Home**, which takes the headset
+column of this table and the game's own usage with it.
+Since 0.2.10.1, OFXR stays out of **Pimax Home**, which takes the headset
 whenever a game leaves VR and used to hold OFXR's buffers at full resolution
 the whole time the game was out of VR; earlier versions let it.
 
