@@ -172,6 +172,13 @@ enum class BridgeFlightOperation : std::uint32_t {
     // A D3D11 session bridged to a D3D12 runtime session: result is a stage
     // or a failure code (see the layer's D3D11 bridge).
     d3d11_bridge,
+    // Video memory the process holds on the session's adapter, around each
+    // step that allocates it. result= the step (the layer's VideoMemoryStage),
+    // a= bytes in use, b= the budget Windows gives the process, c= the
+    // swapchain (0 for the session). Usage is the whole process - the game and
+    // a runtime that runs inside it included - so a step's cost is the change
+    // across it, and only while nothing else is allocating.
+    vram_usage,
 };
 
 struct BridgeFlightToken {
