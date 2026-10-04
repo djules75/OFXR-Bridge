@@ -7,7 +7,7 @@
 > until the game closes. We have reported it to Pimax so they can fix their
 > runtime; there is nothing OFXR can do about it in the meantime. Until it is
 > fixed, run your Pimax through SteamVR with
-> [sboys3's CustomHeadsetOpenVR driver](https://github.com/sboys3/CustomHeadsetOpenVR)
+> [sboys3's native SteamVR driver](https://store.pimax.com/blogs/blogs/sboys3-native-steamvr-driver-setup-guide)
 > and make SteamVR the active OpenXR runtime (SteamVR → Settings → OpenXR).
 > This matters most in MSFS 2024, which is already close to the VRAM limit
 > at Pimax resolutions. Details in
@@ -96,7 +96,7 @@ megapixel per eye** (0.09 GB with Prefer FPS over latency off).
 > runtimes have not been measured yet. We have reported it to Pimax so they
 > can fix their runtime, and there is nothing OFXR can do about it for now:
 > run your Pimax through SteamVR with
-> [sboys3's CustomHeadsetOpenVR driver](https://github.com/sboys3/CustomHeadsetOpenVR)
+> [sboys3's native SteamVR driver](https://store.pimax.com/blogs/blogs/sboys3-native-steamvr-driver-setup-guide)
 > instead, especially for MSFS 2024.
 
 **Know your real per-eye resolution.** It is what your VR software asks the
