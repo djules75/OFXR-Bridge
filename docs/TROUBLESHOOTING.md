@@ -1,9 +1,15 @@
 # OFXR Bridge troubleshooting
 
+> [!IMPORTANT]
+> **First, make sure you are on the latest version: 0.2.10.1.** Every
+> release fixes problems reported here, so check the
+> [releases page](https://github.com/djules75/OFXR-Bridge/releases) before
+> anything else. The tray's menu shows the version you are running.
+
 > [!WARNING]
 > **Pimax headsets: use SteamVR, not Pimax OpenXR.** Pimax Play's OpenXR
 > runtime keeps an extra copy in VRAM of every image it is handed, so OFXR
-> costs about **1.7 times** more on it than on SteamVR, and the copies stay
+> costs about **1.5 times** more on it than on SteamVR, and the copies stay
 > until the game closes. We have reported it to Pimax so they can fix their
 > runtime; there is nothing OFXR can do about it in the meantime. Until it is
 > fixed, run your Pimax through SteamVR with
@@ -88,11 +94,12 @@ SteamVR they hold within 10%. Above the table, count about **0.12 GB per
 megapixel per eye** (0.09 GB with Prefer FPS over latency off).
 
 > [!WARNING]
-> **Pimax OpenXR costs about 1.7 times the table.** Pimax Play's runtime
+> **Pimax OpenXR costs about 1.5 times the table.** Pimax Play's runtime
 > keeps an extra copy of every image it is handed, made the first time the
 > image is shown and kept until the game closes, so each of OFXR's private
-> images costs twice on it: measured **7.0 GB against 4.2 GB on SteamVR** at
-> the same 29 megapixels per eye. SteamVR does not do this; the other
+> images costs twice on it: measured **4.6 GB against 3.1 GB on SteamVR** at
+> the same 29 megapixels per eye with 0.2.10.1 (7.0 against 4.2 GB with
+> 0.2.9.1, which held twice as many images). SteamVR does not do this; the other
 > runtimes have not been measured yet. We have reported it to Pimax so they
 > can fix their runtime, and there is nothing OFXR can do about it for now:
 > run your Pimax through SteamVR with

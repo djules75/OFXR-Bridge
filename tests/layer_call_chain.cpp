@@ -79,6 +79,11 @@ bool g_split_eye_mode = false;
 // expects the ring sizes the layer will actually ask for: one synthetic slot
 // per application swapchain shallow, two deep.
 bool g_deep_pipeline = false;
+// Whether the layer runs single-swapchain rings: one private swapchain per
+// output, written at the hand-over from staging. Read from the same ini
+// (`single_swapchain_rings`, on by default), and never for the interops,
+// which keep the rings whatever the ini says.
+bool g_single_rings = true;
 // Frames the layer hands the runtime per application frame: 3 when the ini
 // beside the layer turns "3X Frame Gen" on, and the virtual period the
 // application is served follows it.
@@ -866,19 +871,35 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
             XrSwapchain handle;
             bool synthetic;
         };
-        const std::array<Route, 4> left{{
-            {g_current_swapchain, false},
-            {g_current_swapchain_b, false},
-            {g_synthetic_swapchain, true},
-            {g_synthetic_swapchain_b, true},
-        }};
-        const std::array<Route, 4> right{{
-            {g_current_swapchain_right, false},
-            {g_current_swapchain_right_b, false},
-            {g_synthetic_swapchain_right, true},
-            {g_synthetic_swapchain_right_b, true},
-        }};
-        const std::uint32_t per_eye = g_deep_pipeline ? 4U : 3U;
+        // Single-swapchain rings create one of each per eye, current first.
+        const std::array<Route, 4> left = g_single_rings
+            ? std::array<Route, 4>{{
+                  {g_current_swapchain, false},
+                  {g_synthetic_swapchain, true},
+                  {XR_NULL_HANDLE, false},
+                  {XR_NULL_HANDLE, false},
+              }}
+            : std::array<Route, 4>{{
+                  {g_current_swapchain, false},
+                  {g_current_swapchain_b, false},
+                  {g_synthetic_swapchain, true},
+                  {g_synthetic_swapchain_b, true},
+              }};
+        const std::array<Route, 4> right = g_single_rings
+            ? std::array<Route, 4>{{
+                  {g_current_swapchain_right, false},
+                  {g_synthetic_swapchain_right, true},
+                  {XR_NULL_HANDLE, false},
+                  {XR_NULL_HANDLE, false},
+              }}
+            : std::array<Route, 4>{{
+                  {g_current_swapchain_right, false},
+                  {g_current_swapchain_right_b, false},
+                  {g_synthetic_swapchain_right, true},
+                  {g_synthetic_swapchain_right_b, true},
+              }};
+        const std::uint32_t per_eye =
+            g_single_rings ? 2U : g_deep_pipeline ? 4U : 3U;
         const std::uint32_t index = g_split_eye_private_creates.fetch_add(
             1, std::memory_order_relaxed);
         if (index >= per_eye * 2U) {
@@ -887,7 +908,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
         const Route& route =
             index < per_eye ? left[index] : right[index - per_eye];
         if (route.synthetic) {
-            record_synthetic(index == 2U);
+            record_synthetic(index == (g_single_rings ? 1U : 2U));
             g_synthetic_private_creates.fetch_add(1, std::memory_order_relaxed);
         } else {
             record_current(index == 0U);
@@ -913,9 +934,14 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
         }
         return XR_SUCCESS;
     }
-    if (call == 0) {
+    // Single-swapchain rings: the second private swapchain is the synthetic,
+    // and there is no third.
+    const std::uint32_t role = g_single_rings && call >= 2
+        ? (call == 2 ? 3U : 99U)
+        : call;
+    if (role == 0) {
         *swapchain = g_application_swapchain;
-    } else if (call == 1) {
+    } else if (role == 1) {
         const std::uint32_t expected_width = g_double_wide_mode ? 8U : 4U;
         const std::uint32_t expected_array_size = g_double_wide_mode ? 1U : 2U;
         const bool valid = create_info != nullptr &&
@@ -926,7 +952,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
                            create_info->arraySize == expected_array_size;
         g_current_create_info_valid.store(valid, std::memory_order_release);
         *swapchain = g_current_swapchain;
-    } else if (call == 2) {
+    } else if (role == 2) {
         // Second current slot: same create info as the first.
         const std::uint32_t expected_width = g_double_wide_mode ? 8U : 4U;
         const std::uint32_t expected_array_size = g_double_wide_mode ? 1U : 2U;
@@ -940,7 +966,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
             g_current_create_info_valid.load(std::memory_order_acquire) && valid,
             std::memory_order_release);
         *swapchain = g_current_swapchain_b;
-    } else if (call == 3) {
+    } else if (role == 3) {
         const std::uint32_t expected_width = g_double_wide_mode ? 8U : 4U;
         const std::uint32_t expected_array_size = g_double_wide_mode ? 1U : 2U;
         const bool valid = create_info != nullptr &&
@@ -952,7 +978,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
         g_synthetic_create_info_valid.store(valid, std::memory_order_release);
         g_synthetic_private_creates.fetch_add(1, std::memory_order_relaxed);
         *swapchain = g_synthetic_swapchain;
-    } else if (call == 4) {
+    } else if (role == 4) {
         // Second synthetic slot: same create info as the first.
         const std::uint32_t expected_width = g_double_wide_mode ? 8U : 4U;
         const std::uint32_t expected_array_size = g_double_wide_mode ? 1U : 2U;
@@ -2126,6 +2152,12 @@ int main(int argc, char** argv) {
         // Same default as the layer: on unless the ini says 0.
         g_deep_pipeline = GetPrivateProfileIntW(
             L"ofxr", L"deep_pipeline", 1, ini.wstring().c_str()) != 0;
+        g_single_rings = GetPrivateProfileIntW(
+                             L"ofxr", L"single_swapchain_rings", 1,
+                             ini.wstring().c_str()) != 0 &&
+            // The bridge makes a D3D12 session, which takes the single
+            // rings; the legacy interop and Vulkan mirror the rings.
+            !(g_d3d11_interop_mode && !g_d3d11_bridge_mode) && !g_vulkan_mode;
         if (GetPrivateProfileIntW(
                 L"ofxr", L"triple_frame_gen", 0, ini.wstring().c_str()) != 0) {
             // What the flag stands for in this file is the synthetic ring's
@@ -2596,11 +2628,13 @@ int main(int argc, char** argv) {
             g_end_frame_calls.load(std::memory_order_relaxed) == 4 &&
             g_locate_views_calls.load(std::memory_order_relaxed) == 3 &&
             // Two application swapchains, each backed by two current slots
-            // and however many synthetic slots this depth needs.
+            // and however many synthetic slots this depth needs - or one of
+            // each with single-swapchain rings.
             g_synthetic_private_creates.load(std::memory_order_relaxed) ==
-                (g_deep_pipeline ? 4U : 2U) &&
+                (g_single_rings ? 2U : g_deep_pipeline ? 4U : 2U) &&
             g_create_swapchain_calls.load(std::memory_order_relaxed) ==
-                6 + g_synthetic_private_creates.load(std::memory_order_relaxed) &&
+                (g_single_rings ? 4U : 6U) +
+                    g_synthetic_private_creates.load(std::memory_order_relaxed) &&
             g_destroy_swapchain_calls.load(std::memory_order_relaxed) ==
                 g_create_swapchain_calls.load(std::memory_order_relaxed) &&
             g_application_release_calls.load(std::memory_order_relaxed) == 6 &&
@@ -4035,15 +4069,25 @@ int main(int argc, char** argv) {
         // synthetic slots this depth needs. Every private swapchain created is
         // destroyed, which is the part that must hold at either depth.
         g_synthetic_private_creates.load(std::memory_order_relaxed) ==
-            (g_deep_pipeline ? 2U : 1U) &&
+            (g_single_rings ? 1U : g_deep_pipeline ? 2U : 1U) &&
         g_create_swapchain_calls.load(std::memory_order_relaxed) ==
-            3 + g_synthetic_private_creates.load(std::memory_order_relaxed) &&
+            (g_single_rings ? 2U : 3U) +
+                g_synthetic_private_creates.load(std::memory_order_relaxed) &&
         g_destroy_swapchain_calls.load(std::memory_order_relaxed) ==
             g_create_swapchain_calls.load(std::memory_order_relaxed) &&
         g_application_release_calls.load(std::memory_order_relaxed) == 14 &&
-        g_current_acquire_calls.load(std::memory_order_relaxed) == 10 - arm_skip &&
-        g_current_wait_calls.load(std::memory_order_relaxed) == 10 - arm_skip &&
-        g_current_release_calls.load(std::memory_order_relaxed) == 10 - arm_skip &&
+        // The pair whose synthetic release the runtime refuses: the ring
+        // path has already taken its current image at prepare, while the
+        // single-swapchain hand-over never takes one for a frame that passes
+        // through. Its synthetic was taken on both paths, and both release
+        // it once more - the ring path when the swapchain is destroyed, the
+        // hand-over as the retry before the next acquire.
+        g_current_acquire_calls.load(std::memory_order_relaxed) ==
+            (g_single_rings ? 9 : 10) - arm_skip &&
+        g_current_wait_calls.load(std::memory_order_relaxed) ==
+            (g_single_rings ? 9 : 10) - arm_skip &&
+        g_current_release_calls.load(std::memory_order_relaxed) ==
+            (g_single_rings ? 9 : 10) - arm_skip &&
         g_synthetic_acquire_calls.load(std::memory_order_relaxed) == 8 - arm_skip &&
         g_synthetic_wait_calls.load(std::memory_order_relaxed) == 8 - arm_skip &&
         g_synthetic_release_calls.load(std::memory_order_relaxed) == 9 - arm_skip &&

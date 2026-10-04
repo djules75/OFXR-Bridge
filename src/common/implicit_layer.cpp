@@ -243,6 +243,20 @@ bool read_triple_frame_gen(
     }
 }
 
+bool read_single_swapchain_rings(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (module_directory.empty()) {
+            return true;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"single_swapchain_rings", 1, ini_path.c_str()) != 0;
+    } catch (...) {
+        return true;
+    }
+}
+
 std::vector<std::wstring> read_excluded_processes(
     const std::filesystem::path& module_directory) noexcept {
     std::vector<std::wstring> names;

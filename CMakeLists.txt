@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.409.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.410.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -517,11 +517,25 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 XR_USE_PLATFORM_WIN32)
         endif()
         target_link_libraries(xrfg_layer_call_chain PRIVATE d3d11 d3d12 dxgi)
-        foreach(mode inverted-fov d3d11-inverted-fov swapchain-budget)
+        foreach(mode inverted-fov d3d11-inverted-fov)
             add_test(NAME xrfg_layer_${mode} COMMAND xrfg_layer_call_chain
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
                 "${CMAKE_CURRENT_BINARY_DIR}/xrfg-${mode}.log" ${mode})
         endforeach()
+        # The budget scenario is about the private rings falling back from
+        # the deeper depth when the runtime refuses a fourth swapchain, so it
+        # runs with the rings, which the shipped ini (single-swapchain rings)
+        # no longer uses.
+        add_test(
+            NAME xrfg_layer_swapchain-budget
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_rings_deep.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/rings-swapchain-budget"
+                "-DMODE=swapchain-budget"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
+        set_tests_properties(xrfg_layer_swapchain-budget PROPERTIES TIMEOUT 60)
         add_dependencies(xrfg_layer_call_chain XR_APILAYER_XRFrameBridge_diagnostic)
         add_executable(xrfg_layer_manual_disarm_tests tests/layer_manual_disarm_tests.cpp)
         target_include_directories(xrfg_layer_manual_disarm_tests PRIVATE
@@ -693,8 +707,18 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         # The presenter scenarios hold under 3X as they stand: the call chain
         # reads the multiplier from the same ini and expects the virtual
         # period to follow it.
+        add_test(
+            NAME xrfg_layer_triple_swapchain-budget
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_rings_triple.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/rings-triple-swapchain-budget"
+                "-DMODE=swapchain-budget"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
+        set_tests_properties(xrfg_layer_triple_swapchain-budget PROPERTIES TIMEOUT 60)
         foreach(mode steamvr-presenter flight-simulator
-                flight-destroy-swapchain steamvr-destroy-space swapchain-budget)
+                flight-destroy-swapchain steamvr-destroy-space)
             add_test(
                 NAME xrfg_layer_triple_${mode}
                 COMMAND "${CMAKE_COMMAND}"

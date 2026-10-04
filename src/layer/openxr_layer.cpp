@@ -925,6 +925,10 @@ struct SessionState {
     // the session move between them without making a swapchain. Cleared
     // with the ring by fall_back_to_shallow_pipeline.
     bool two_slot_synthetic_ring{};
+    // One private swapchain per output with staging textures, where the
+    // synthesizer writes D3D12 images directly; see kStagingSlotCount.
+    // Read at xrCreateSession from `[ofxr] single_swapchain_rings`.
+    bool single_swapchain_rings{};
     // The switch can be followed live: a binding 3X covers, and a ring it
     // fits in.
     bool triple_switchable{};
@@ -1629,6 +1633,148 @@ enum class PrivateOwnershipPhase {
     release_pending,
 };
 
+// Copies a frame's staging texture into the private swapchain image the
+// runtime has just handed out, on the runtime's binding queue, immediately
+// before the release that marks the image complete. Command lists come from
+// a small ring recycled on a fence. A list still in flight eight hand-overs
+// later means the GPU is that far behind; the copy is then skipped rather
+// than waited for, and the frame shows the image's previous content, the
+// last frame of that output.
+struct HandoverCopier {
+    static constexpr std::size_t kSlots = 8;
+    struct Slot {
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list;
+        std::uint64_t fence_value{};
+    };
+    Microsoft::WRL::ComPtr<ID3D12Device> device;
+    Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+    std::array<Slot, kSlots> slots{};
+    std::size_t next_slot{};
+    std::uint64_t next_value{1};
+    std::mutex mutex;
+
+    [[nodiscard]] HRESULT initialize(ID3D12Device* input_device) noexcept {
+        try {
+            if (input_device == nullptr) {
+                return E_INVALIDARG;
+            }
+            device = input_device;
+            HRESULT result = device->CreateFence(
+                0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.ReleaseAndGetAddressOf()));
+            if (FAILED(result)) {
+                return result;
+            }
+            for (Slot& slot : slots) {
+                result = device->CreateCommandAllocator(
+                    D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    IID_PPV_ARGS(slot.allocator.ReleaseAndGetAddressOf()));
+                if (FAILED(result)) {
+                    return result;
+                }
+                result = device->CreateCommandList(
+                    0, D3D12_COMMAND_LIST_TYPE_DIRECT, slot.allocator.Get(),
+                    nullptr, IID_PPV_ARGS(slot.list.ReleaseAndGetAddressOf()));
+                if (FAILED(result)) {
+                    return result;
+                }
+                result = slot.list->Close();
+                if (FAILED(result)) {
+                    return result;
+                }
+            }
+            return S_OK;
+        } catch (...) {
+            return E_FAIL;
+        }
+    }
+
+    // Both resources rest in COMMON: the staging because the synthesizer
+    // leaves its destinations there, the runtime's image because that is
+    // the state the layer's private images are kept in.
+    [[nodiscard]] HRESULT copy(
+        ID3D12CommandQueue* queue,
+        ID3D12Resource* source,
+        ID3D12Resource* destination) noexcept {
+        try {
+            std::scoped_lock lock(mutex);
+            if (queue == nullptr || source == nullptr || destination == nullptr ||
+                !fence) {
+                return E_INVALIDARG;
+            }
+            Slot& slot = slots[next_slot];
+            if (slot.fence_value != 0 &&
+                fence->GetCompletedValue() < slot.fence_value) {
+                return HRESULT_FROM_WIN32(ERROR_BUSY);
+            }
+            next_slot = (next_slot + 1) % kSlots;
+            HRESULT result = slot.allocator->Reset();
+            if (FAILED(result)) {
+                return result;
+            }
+            result = slot.list->Reset(slot.allocator.Get(), nullptr);
+            if (FAILED(result)) {
+                return result;
+            }
+            std::array<D3D12_RESOURCE_BARRIER, 2> barriers{};
+            barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barriers[0].Transition.pResource = source;
+            barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+            barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barriers[1].Transition.pResource = destination;
+            barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+            barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+            slot.list->ResourceBarrier(
+                static_cast<UINT>(barriers.size()), barriers.data());
+            slot.list->CopyResource(destination, source);
+            std::swap(barriers[0].Transition.StateBefore, barriers[0].Transition.StateAfter);
+            std::swap(barriers[1].Transition.StateBefore, barriers[1].Transition.StateAfter);
+            slot.list->ResourceBarrier(
+                static_cast<UINT>(barriers.size()), barriers.data());
+            result = slot.list->Close();
+            if (FAILED(result)) {
+                return result;
+            }
+            ID3D12CommandList* lists[] = {slot.list.Get()};
+            queue->ExecuteCommandLists(1, lists);
+            result = queue->Signal(fence.Get(), next_value);
+            if (FAILED(result)) {
+                return result;
+            }
+            slot.fence_value = next_value++;
+            return S_OK;
+        } catch (...) {
+            return E_FAIL;
+        }
+    }
+
+    // The destroy path only: the staging and the images are about to go.
+    void wait_idle() noexcept {
+        try {
+            std::scoped_lock lock(mutex);
+            if (!fence || next_value <= 1) {
+                return;
+            }
+            const std::uint64_t target = next_value - 1;
+            if (fence->GetCompletedValue() >= target) {
+                return;
+            }
+            HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (event == nullptr) {
+                return;
+            }
+            if (SUCCEEDED(fence->SetEventOnCompletion(target, event))) {
+                WaitForSingleObject(event, 2000);
+            }
+            CloseHandle(event);
+        } catch (...) {
+        }
+    }
+};
+
 struct PrivateSwapchainState {
     XrSwapchain handle{XR_NULL_HANDLE};
     PrivateOwnershipPhase phase{PrivateOwnershipPhase::idle};
@@ -1662,6 +1808,19 @@ constexpr std::size_t kCurrentSlotCount = 2;
 constexpr std::size_t kSyntheticSlotCountShallow = 1;
 constexpr std::size_t kSyntheticSlotCountDeep = 2;
 constexpr std::size_t kPrivateRingSlotMax = 2;
+// Single-swapchain rings (SessionState::single_swapchain_rings, the default
+// where the synthesizer writes D3D12 images directly): one private swapchain
+// per output, and the synthesizer writes layer-owned staging textures
+// instead - two per output, the count of that output's frames the rings
+// above were sized to keep un-retired at once. Each hand-over acquires the
+// one swapchain, waits it, copies the frame's staging into the image and
+// releases it immediately before the xrEndFrame that names it, so the image
+// the runtime binds is always the frame being handed over and no image is
+// ever left waited across a frame boundary. Half the runtime images per
+// output, and half again on a runtime that keeps a copy of every image it
+// is handed, as Pimax's does. The interops (Vulkan, the legacy D3D11 path)
+// mirror private images by index and keep the rings.
+constexpr std::size_t kStagingSlotCount = 2;
 
 struct FrameGenerationSwapchainState {
     std::array<PrivateSwapchainState, kCurrentSlotCount> current{};
@@ -1676,6 +1835,16 @@ struct FrameGenerationSwapchainState {
     std::size_t synthetic_slot{};
     std::shared_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
     std::shared_ptr<xrfg::SwapchainInterop> interop;
+    // Single-swapchain rings: current[0] and synthetic[0] are the swapchains,
+    // the staging textures are what the synthesizer writes, indexed by
+    // current_slot / synthetic_slot, and the runtime images are what the
+    // hand-over copies into, by acquired index.
+    bool single_swapchain_rings{};
+    std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kStagingSlotCount> current_staging{};
+    std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kStagingSlotCount> synthetic_staging{};
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> current_runtime_images;
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> synthetic_runtime_images;
+    std::shared_ptr<HandoverCopier> copier;
 };
 
 void log_completed_nvidia_gpu_timings(
@@ -1746,6 +1915,8 @@ enum class VideoMemoryStage : std::int64_t {
     // The first acquire of a private swapchain: a runtime that allocates
     // on first use rather than at creation shows up here, c= the swapchain.
     private_first_use = 10,
+    // The staging textures of single-swapchain rings.
+    staging = 11,
 };
 
 void log_video_memory(
@@ -2217,6 +2388,11 @@ void destroy_frame_generation_swapchains(
         }
 
         const auto& dispatch = state->session->dispatch;
+        // A hand-over copy still running would read staging and write an
+        // image that are both about to be destroyed.
+        if (generation->copier) {
+            generation->copier->wait_idle();
+        }
         for (PrivateSwapchainState& image : generation->synthetic) {
             static_cast<void>(
                 release_private_image(state->session.get(), dispatch, image));
@@ -2607,8 +2783,10 @@ create_d3d12_frame_generation_swapchains(
             private_info.mipCount = 1;
         }
         XrResult refusal = XR_SUCCESS;
+        const bool single_rings = state->session->single_swapchain_rings;
         if (!create_private_ring(
-                state, private_info, kCurrentSlotCount, &current, &refusal)) {
+                state, private_info, single_rings ? 1 : kCurrentSlotCount,
+                &current, &refusal)) {
             if (failure_reason != nullptr) {
                 *failure_reason =
                     SwapchainEligibilityReason::current_private_swapchain_failed;
@@ -2625,7 +2803,7 @@ create_d3d12_frame_generation_swapchains(
         if (!create_private_ring(
                 state,
                 private_info,
-                synthetic_slot_count_for(*state->session),
+                single_rings ? 1 : synthetic_slot_count_for(*state->session),
                 &synthetic,
                 &refusal)) {
             if (failure_reason != nullptr) {
@@ -2643,12 +2821,71 @@ create_d3d12_frame_generation_swapchains(
 
         log_video_memory(*state->session, VideoMemoryStage::synthetic_ring,
             handle_value(state->handle));
+        // Single-swapchain rings: the synthesizer's destinations are staging
+        // textures described like the runtime's images, so a hand-over copy
+        // is a whole-resource copy.
+        std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kStagingSlotCount> current_staging{};
+        std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kStagingSlotCount> synthetic_staging{};
+        std::vector<ID3D12Resource*> current_destinations_raw;
+        std::vector<ID3D12Resource*> synthetic_destinations_raw;
+        std::shared_ptr<HandoverCopier> copier;
+        if (single_rings) {
+            D3D12_RESOURCE_DESC staging_description =
+                current.d3d12_resources.front()->GetDesc();
+            staging_description.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            D3D12_HEAP_PROPERTIES heap_properties{};
+            heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+            heap_properties.CreationNodeMask = 1;
+            heap_properties.VisibleNodeMask = 1;
+            HRESULT staging_result = S_OK;
+            for (auto* staging : {&current_staging, &synthetic_staging}) {
+                for (auto& texture : *staging) {
+                    if (FAILED(staging_result)) {
+                        break;
+                    }
+                    staging_result = state->session->d3d12_device->CreateCommittedResource(
+                        &heap_properties,
+                        D3D12_HEAP_FLAG_NONE,
+                        &staging_description,
+                        D3D12_RESOURCE_STATE_COMMON,
+                        nullptr,
+                        IID_PPV_ARGS(texture.ReleaseAndGetAddressOf()));
+                }
+            }
+            copier = std::make_shared<HandoverCopier>();
+            if (SUCCEEDED(staging_result)) {
+                staging_result = copier->initialize(state->session->d3d12_device.Get());
+            }
+            if (FAILED(staging_result)) {
+                if (failure_reason != nullptr) {
+                    *failure_reason =
+                        SwapchainEligibilityReason::synthesis_initialize_failed;
+                }
+                if (failure_detail != nullptr) {
+                    *failure_detail = static_cast<std::uint64_t>(staging_result);
+                }
+                destroy_private_ring(dispatch, &synthetic);
+                destroy_private_ring(dispatch, &current);
+                return nullptr;
+            }
+            for (const auto& texture : current_staging) {
+                current_destinations_raw.push_back(texture.Get());
+            }
+            for (const auto& texture : synthetic_staging) {
+                synthetic_destinations_raw.push_back(texture.Get());
+            }
+            log_video_memory(*state->session, VideoMemoryStage::staging,
+                handle_value(state->handle));
+        } else {
+            current_destinations_raw = current.d3d12_resources;
+            synthetic_destinations_raw = synthetic.d3d12_resources;
+        }
         auto synthesizer = std::make_shared<xrfg::D3D12FrameSynthesizer>();
         const SynthesisInitializeRecord initialize_record{
             state->create_info.width,
             state->create_info.height,
-            current.d3d12_resources.size(),
-            synthetic.d3d12_resources.size(),
+            current_destinations_raw.size(),
+            synthetic_destinations_raw.size(),
             state->create_info.arraySize};
         const HRESULT gpu_result = initialize_synthesis_with_fallback(
             *state->session, initialize_record,
@@ -2660,11 +2897,11 @@ create_d3d12_frame_generation_swapchains(
                 : state->session->d3d12_queue.Get(),
             state->d3d12_history,
             std::span<ID3D12Resource* const>(
-                current.d3d12_resources.data(),
-                current.d3d12_resources.size()),
+                current_destinations_raw.data(),
+                current_destinations_raw.size()),
             std::span<ID3D12Resource* const>(
-                synthetic.d3d12_resources.data(),
-                synthetic.d3d12_resources.size()),
+                synthetic_destinations_raw.data(),
+                synthetic_destinations_raw.size()),
             static_cast<DXGI_FORMAT>(state->create_info.format),
             // These are the layer's own private swapchains, so the layer
             // picks the state they rest in. On a private synthesis queue
@@ -2708,8 +2945,34 @@ create_d3d12_frame_generation_swapchains(
         log_video_memory(*state->session, VideoMemoryStage::synthesizer,
             handle_value(state->handle));
         auto generation = std::make_shared<FrameGenerationSwapchainState>();
+        if (single_rings) {
+            for (ID3D12Resource* image : current.d3d12_resources) {
+                generation->current_runtime_images.emplace_back(image);
+            }
+            for (ID3D12Resource* image : synthetic.d3d12_resources) {
+                generation->synthetic_runtime_images.emplace_back(image);
+            }
+        }
         adopt_current_ring(generation, current);
         adopt_synthetic_ring(generation, synthetic);
+        if (single_rings) {
+            generation->single_swapchain_rings = true;
+            generation->current_staging = std::move(current_staging);
+            generation->synthetic_staging = std::move(synthetic_staging);
+            generation->copier = std::move(copier);
+            // Destination indices are staging slots.
+            generation->current_images_per_slot = 1;
+            generation->synthetic_images_per_slot = 1;
+            generation->synthetic_slot_count = kStagingSlotCount;
+        }
+        // 703: the rings' shape. a 1 for single-swapchain rings, b the
+        // runtime images per output, c the swapchain.
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::presenter_transition,
+            703,
+            single_rings ? 1u : 0u,
+            generation->current_runtime_images.size(),
+            handle_value(state->handle));
         generation->synthesizer = std::move(synthesizer);
         if (failure_reason != nullptr) {
             *failure_reason = SwapchainEligibilityReason::ready;
@@ -4378,6 +4641,8 @@ XrResult layer_create_session_impl(
         xrfg::implicit_layer::read_deep_pipeline(current_layer_directory());
     const bool triple_requested =
         xrfg::implicit_layer::read_triple_frame_gen(current_layer_directory());
+    state->single_swapchain_rings =
+        xrfg::implicit_layer::read_single_swapchain_rings(current_layer_directory());
     state->vulkan_support =
         xrfg::implicit_layer::read_vulkan_support(current_layer_directory());
     state->menu_enabled = initial_control.desired.enabled;
@@ -6188,7 +6453,17 @@ struct PendingPrivateRelease {
     std::shared_ptr<FrameGenerationSwapchainState> generation;
     PrivateSwapchainState* image{};
     xrfg::D3D12FrameSynthesisTicket ticket{};
+    // Single-swapchain rings: the staging the frame was written to, copied
+    // into the image acquired at the hand-over. Null on the ring path, where
+    // the image was written directly and is only released here.
+    ID3D12Resource* staging{};
+    const std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>* runtime_images{};
 };
+
+[[nodiscard]] bool acquire_and_wait_private_image(
+    SessionState* session,
+    const std::shared_ptr<Dispatch>& dispatch,
+    PrivateSwapchainState& image) noexcept;
 
 struct GeneratedFrameEndInfo {
     bool synthetic{};
@@ -6249,12 +6524,77 @@ struct GeneratedFrameEndInfo {
 // runtime, in that order: the runtime orders its use of a private image
 // against the application's queue, so the join has to be on that queue ahead
 // of the release. Clears the list so a frame never releases twice.
-void run_private_releases(
+// Returns false when the runtime refused a release: the frame about to name
+// that image cannot be shown as generated.
+bool run_private_releases(
+    SessionState* session,
+    std::vector<PendingPrivateRelease>& releases) noexcept {
+    bool all_released = true;
+    if (session != nullptr) {
+        for (PendingPrivateRelease& pending : releases) {
+            if (!pending.generation || pending.image == nullptr) {
+                continue;
+            }
+            // Single-swapchain rings: the frame's image is taken now, and
+            // handed back with the frame's pixels in it. A failed acquire or
+            // copy leaves the image's previous content for the runtime to
+            // show - the last frame of this output - and records which.
+            // 704: a the step (1 acquire, 2 copy), b the HRESULT or 0, c the
+            // swapchain.
+            if (pending.staging != nullptr) {
+                if (!acquire_and_wait_private_image(
+                        session, session->dispatch, *pending.image)) {
+                    xrfg::bridge_flight_logger().event(
+                        xrfg::BridgeFlightOperation::presenter_transition,
+                        704, 1, 0, handle_value(pending.image->handle));
+                    all_released = false;
+                    continue;
+                }
+            }
+            if (session->d3d12_synthesis_queue &&
+                pending.generation->synthesizer) {
+                static_cast<void>(
+                    pending.generation->synthesizer->synchronize_consumer_queue(
+                        runtime_queue(*session),
+                        pending.ticket));
+            }
+            if (pending.staging != nullptr) {
+                ID3D12Resource* destination =
+                    pending.runtime_images != nullptr &&
+                            pending.image->acquired_index < pending.runtime_images->size()
+                        ? (*pending.runtime_images)[pending.image->acquired_index].Get()
+                        : nullptr;
+                const HRESULT copy_result = pending.generation->copier
+                    ? pending.generation->copier->copy(
+                          runtime_queue(*session), pending.staging, destination)
+                    : E_POINTER;
+                if (FAILED(copy_result)) {
+                    xrfg::bridge_flight_logger().event(
+                        xrfg::BridgeFlightOperation::presenter_transition,
+                        704, 2,
+                        static_cast<std::uint64_t>(static_cast<std::uint32_t>(copy_result)),
+                        handle_value(pending.image->handle));
+                }
+            }
+            if (!release_private_image(
+                    session, session->dispatch, *pending.image)) {
+                all_released = false;
+            }
+        }
+    }
+    releases.clear();
+    return all_released;
+}
+
+// For a frame that will not be handed over: a ring image left acquired is
+// released; a staging entry has nothing acquired and is dropped.
+void discard_private_releases(
     SessionState* session,
     std::vector<PendingPrivateRelease>& releases) noexcept {
     if (session != nullptr) {
         for (PendingPrivateRelease& pending : releases) {
-            if (!pending.generation || pending.image == nullptr) {
+            if (!pending.generation || pending.image == nullptr ||
+                pending.staging != nullptr) {
                 continue;
             }
             if (session->d3d12_synthesis_queue &&
@@ -6282,7 +6622,7 @@ struct PrivateReleaseBatch {
     PrivateReleaseBatch() = default;
     PrivateReleaseBatch(const PrivateReleaseBatch&) = delete;
     PrivateReleaseBatch& operator=(const PrivateReleaseBatch&) = delete;
-    ~PrivateReleaseBatch() { run_private_releases(session, releases); }
+    ~PrivateReleaseBatch() { discard_private_releases(session, releases); }
     [[nodiscard]] std::vector<PendingPrivateRelease> take() noexcept {
         std::vector<PendingPrivateRelease> taken;
         taken.swap(releases);
@@ -9565,6 +9905,10 @@ struct PreparedGeneration {
     PrivateSwapchainState* deferred_extra_synthetic{};
     PrivateSwapchainState* deferred_current{};
     xrfg::D3D12FrameSynthesisTicket deferred_ticket{};
+    // Single-swapchain rings: the staging each output was written to.
+    ID3D12Resource* deferred_synthetic_staging{};
+    ID3D12Resource* deferred_extra_staging{};
+    ID3D12Resource* deferred_current_staging{};
     // Where the pair's output becomes readable by the runtime, for the
     // presenter's readiness hold in the deeper pipeline and for the release
     // delay in 3X. Not set otherwise.
@@ -9619,12 +9963,16 @@ struct PreparedProjectionFrame {
             output.reason = GenerationPrepareReason::missing_capture;
             return output;
         }
+        // Single-swapchain rings: the slots index the staging textures and
+        // every output goes through its one swapchain, which nothing here
+        // acquires - the hand-over does, with the staging in hand.
+        const bool single_rings = generation->single_swapchain_rings;
         const std::size_t current_slot = generation->current_slot;
         PrivateSwapchainState& current_image =
-            generation->current[current_slot];
+            generation->current[single_rings ? 0 : current_slot];
         const std::size_t synthetic_slot = generation->synthetic_slot;
         PrivateSwapchainState& synthetic_image =
-            generation->synthetic[synthetic_slot];
+            generation->synthetic[single_rings ? 0 : synthetic_slot];
         if (current_image.handle == XR_NULL_HANDLE ||
             synthetic_image.handle == XR_NULL_HANDLE ||
             generation->current_images_per_slot == 0 ||
@@ -9636,7 +9984,8 @@ struct PreparedProjectionFrame {
         // take, the pair is an ordinary pair.
         const std::size_t extra_slot =
             (synthetic_slot + 1) % generation->synthetic_slot_count;
-        PrivateSwapchainState& extra_image = generation->synthetic[extra_slot];
+        PrivateSwapchainState& extra_image =
+            generation->synthetic[single_rings ? 0 : extra_slot];
         const bool request_extra = request_pair &&
             extra_interpolation_fraction.has_value() &&
             extra_slot != synthetic_slot &&
@@ -9651,7 +10000,8 @@ struct PreparedProjectionFrame {
             }
         }
 
-        if (!acquire_and_wait_private_image(
+        if (!single_rings &&
+            !acquire_and_wait_private_image(
                 state->session.get(),
                 state->session->dispatch,
                 current_image)) {
@@ -9663,7 +10013,7 @@ struct PreparedProjectionFrame {
             return output;
         }
 
-        if (request_pair &&
+        if (request_pair && !single_rings &&
             !acquire_and_wait_private_image(
                 state->session.get(),
                 state->session->dispatch,
@@ -9679,7 +10029,7 @@ struct PreparedProjectionFrame {
             return output;
         }
 
-        if (request_extra &&
+        if (request_extra && !single_rings &&
             !acquire_and_wait_private_image(
                 state->session.get(),
                 state->session->dispatch,
@@ -9703,27 +10053,31 @@ struct PreparedProjectionFrame {
         // write on the queue the application supplied, which is not the one
         // about to write them, so carry that guarantee across before any
         // synthesis is queued.
-        if (state->session->d3d12_synthesis_queue) {
+        if (state->session->d3d12_synthesis_queue && !single_rings) {
             std::scoped_lock gpu_lock(state->session->gpu_mutex);
             static_cast<void>(
                 generation->synthesizer->synchronize_producer_queue(
                     runtime_queue(*state->session)));
         }
 
-        const std::uint32_t current_destination_index =
-            static_cast<std::uint32_t>(current_slot) *
-                generation->current_images_per_slot +
-            current_image.acquired_index;
-        const std::uint32_t synthetic_destination_index =
-            static_cast<std::uint32_t>(synthetic_slot) *
-                generation->synthetic_images_per_slot +
-            synthetic_image.acquired_index;
+        const std::uint32_t current_destination_index = single_rings
+            ? static_cast<std::uint32_t>(current_slot)
+            : static_cast<std::uint32_t>(current_slot) *
+                    generation->current_images_per_slot +
+                current_image.acquired_index;
+        const std::uint32_t synthetic_destination_index = single_rings
+            ? static_cast<std::uint32_t>(synthetic_slot)
+            : static_cast<std::uint32_t>(synthetic_slot) *
+                    generation->synthetic_images_per_slot +
+                synthetic_image.acquired_index;
         std::optional<xrfg::D3D12ExtraSynthetic> extra_synthetic;
         if (request_extra) {
             extra_synthetic = xrfg::D3D12ExtraSynthetic{
-                static_cast<std::uint32_t>(extra_slot) *
-                        generation->synthetic_images_per_slot +
-                    extra_image.acquired_index,
+                single_rings
+                    ? static_cast<std::uint32_t>(extra_slot)
+                    : static_cast<std::uint32_t>(extra_slot) *
+                            generation->synthetic_images_per_slot +
+                        extra_image.acquired_index,
                 *extra_interpolation_fraction};
         }
 
@@ -9859,9 +10213,12 @@ struct PreparedProjectionFrame {
         // immediate context must not be driven from the presenter thread)
         // they stay here, where the mark lands before anything of the game's
         // next frame.
-        const bool release_at_handover = release_at_handover_requested &&
-            generation->interop == nullptr &&
-            SUCCEEDED(submit_result);
+        // Single-swapchain rings always hand over: nothing was acquired here
+        // and the copy into the runtime's image is the hand-over's.
+        const bool release_at_handover = single_rings ||
+            (release_at_handover_requested &&
+             generation->interop == nullptr &&
+             SUCCEEDED(submit_result));
         bool synthetic_released = true;
         bool current_released = true;
         if (!release_at_handover) {
@@ -9972,6 +10329,16 @@ struct PreparedProjectionFrame {
                 output.deferred_extra_synthetic =
                     request_extra ? &extra_image : nullptr;
                 output.deferred_ticket = ticket;
+                if (single_rings) {
+                    output.deferred_current_staging =
+                        generation->current_staging[current_slot].Get();
+                    output.deferred_synthetic_staging = request_pair
+                        ? generation->synthetic_staging[synthetic_slot].Get()
+                        : nullptr;
+                    output.deferred_extra_staging = request_extra
+                        ? generation->synthetic_staging[extra_slot].Get()
+                        : nullptr;
+                }
             }
             output.kind = request_pair ? PreparedGenerationKind::pair
                                        : PreparedGenerationKind::prime;
@@ -11356,6 +11723,8 @@ XrResult layer_end_frame_impl(
                 deferred.deferred_generation,
                 deferred.deferred_synthetic,
                 deferred.deferred_ticket,
+                deferred.deferred_synthetic_staging,
+                &deferred.deferred_generation->synthetic_runtime_images,
             });
         }
         if (deferred.deferred_extra_synthetic != nullptr) {
@@ -11363,6 +11732,8 @@ XrResult layer_end_frame_impl(
                 deferred.deferred_generation,
                 deferred.deferred_extra_synthetic,
                 deferred.deferred_ticket,
+                deferred.deferred_extra_staging,
+                &deferred.deferred_generation->synthetic_runtime_images,
             });
         }
         if (deferred.deferred_current != nullptr) {
@@ -11370,6 +11741,8 @@ XrResult layer_end_frame_impl(
                 deferred.deferred_generation,
                 deferred.deferred_current,
                 deferred.deferred_ticket,
+                deferred.deferred_current_staging,
+                &deferred.deferred_generation->current_runtime_images,
             });
         }
     }
@@ -11549,6 +11922,19 @@ XrResult layer_end_frame_impl(
                     current_releases.take();
             }
         }
+    } else if (!use_continuous_presenter &&
+               (prepared.kind == PreparedGenerationKind::prime || pair_ready)) {
+        // The inline path hands over itself, immediately before each of its
+        // downstream calls below.
+        if (pair_ready) {
+            first_generated.pending_releases = synthetic_releases.take();
+            if (extra_ready) {
+                extra_generated.pending_releases = extra_releases.take();
+            }
+            current_generated.pending_releases = current_releases.take();
+        } else {
+            first_generated.pending_releases = current_releases.take();
+        }
     }
 
     xrfg::bridge_flight_logger().event(
@@ -11578,13 +11964,13 @@ XrResult layer_end_frame_impl(
             if (XR_FAILED(result)) {
                 // Refused before anything was queued, so nothing else will
                 // ever release these.
-                run_private_releases(
+                discard_private_releases(
                     state.get(), presenter_first_frame->pending_releases);
                 if (presenter_extra_frame) {
-                    run_private_releases(
+                    discard_private_releases(
                         state.get(), presenter_extra_frame->pending_releases);
                 }
-                run_private_releases(
+                discard_private_releases(
                     state.get(), presenter_current_frame->pending_releases);
             }
             if (presenter_content_lock.owns_lock()) {
@@ -11623,7 +12009,7 @@ XrResult layer_end_frame_impl(
                 nullptr);
             if (!request->owned_frame) {
                 // Refused: the presenter never saw this frame.
-                run_private_releases(
+                discard_private_releases(
                     state.get(), presenter_first_frame->pending_releases);
             }
             if (presenter_content_lock.owns_lock()) {
@@ -11651,6 +12037,30 @@ XrResult layer_end_frame_impl(
     } else {
         join_runtime_queue_to_application(
             state.get(), state->app_end_frame_release_value);
+        if (!run_private_releases(state.get(), first_generated.pending_releases)) {
+            // The runtime refused a private image at the hand-over, so the
+            // frame naming it cannot go down as generated: the application's
+            // own frame goes instead, the pair with it is dropped, and the
+            // deferred copies are still flushed so the synthesizer's state
+            // stays in step. The ring path meets the same refusal at prepare
+            // (private_release_failed) and passes through the same way.
+            discard_private_releases(state.get(), extra_generated.pending_releases);
+            discard_private_releases(state.get(), current_generated.pending_releases);
+            for (const auto& pending : first_generated.pending_current_copies) {
+                if (pending.synthesizer) {
+                    static_cast<void>(pending.synthesizer->flush_current_copy(
+                        state->d3d12_synthesis_queue ? runtime_queue(*state) : nullptr,
+                        pending.fence_value));
+                }
+            }
+            // Continuity is kept, as the ring path keeps it: the capture
+            // this pair was made from is still the next pair's previous
+            // frame, and resetting it would invalidate that capture.
+            submitted_end_info = end_info;
+            pair_ready = false;
+            extra_ready = false;
+            prepare_reason = GenerationPrepareReason::private_release_failed;
+        }
         result = with_runtime_entry(state, [&] {
             return state->fps_overlay
                 ? state->fps_overlay->end_frame(submitted_end_info, pair_ready)
@@ -11816,6 +12226,7 @@ XrResult layer_end_frame_impl(
     // runtime's held wait with it where there is one.
     bool extra_cycle_completed = true;
     if (extra_ready) {
+        run_private_releases(state.get(), extra_generated.pending_releases);
         extra_cycle_completed = submit_current_cycle(
             state,
             extra_generated.info,
@@ -11825,6 +12236,7 @@ XrResult layer_end_frame_impl(
             true).completed;
     }
     const auto current_cycle_started = std::chrono::steady_clock::now();
+    run_private_releases(state.get(), current_generated.pending_releases);
     const InternalCycleResult current_cycle = submit_current_cycle(
         state,
         current_generated.info,

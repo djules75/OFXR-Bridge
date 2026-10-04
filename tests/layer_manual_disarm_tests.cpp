@@ -44,6 +44,9 @@ int main(int argc, char** argv) {
     g_flight_simulator_mode = mode == "flight";
     g_steamvr_runtime_mode = g_steamvr_presenter_mode = mode == "steamvr";
     g_d3d11_interop_mode = mode == "d3d11";
+    // The interop keeps the private rings; every D3D12 mode takes the
+    // single-swapchain rings the shipped ini turns on.
+    g_single_rings = mode != "d3d11";
     g_test_application_thread_id = GetCurrentThreadId();
     const auto root = std::filesystem::temp_directory_path() /
         (L"ofxr-disarm-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));

@@ -95,6 +95,13 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_triple_frame_gen(
     const std::filesystem::path& module_directory) noexcept;
 
+// `[ofxr] single_swapchain_rings`: one private swapchain per output with
+// staging textures instead of two per output, on the paths where the
+// synthesizer writes D3D12 images directly. On unless set to 0. Read at
+// xrCreateSession.
+[[nodiscard]] bool read_single_swapchain_rings(
+    const std::filesystem::path& module_directory) noexcept;
+
 // `[ofxr] excluded_processes`: executable names, separated by ';', in which
 // the layer declines to load at negotiation. Absent, it is Pimax Home: a
 // home environment is an OpenXR application like any other, takes the
