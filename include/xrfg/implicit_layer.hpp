@@ -95,6 +95,14 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_triple_frame_gen(
     const std::filesystem::path& module_directory) noexcept;
 
+// `[ofxr] vulkan_session_bridge`: a Vulkan game's session is handed to the
+// runtime as a D3D12 one on the layer's device, the game rendering into
+// Vulkan imports of the layer's shared textures, so every path downstream is
+// the native D3D12 one and nothing is mirrored. On unless set to 0; needs
+// vulkan_bridge (Vulkan support) on as well. Read at xrCreateInstance.
+[[nodiscard]] bool read_vulkan_session_bridge(
+    const std::filesystem::path& module_directory) noexcept;
+
 // `[ofxr] single_swapchain_rings`: one private swapchain per output with
 // staging textures instead of two per output, on the paths where the
 // synthesizer writes D3D12 images directly. On unless set to 0. Read at

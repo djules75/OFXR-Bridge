@@ -48,6 +48,10 @@ struct LauncherSettings {
     // One private swapchain per output (see the layer's
     // single_swapchain_rings). On by default; no menu entry.
     bool single_swapchain_rings{true};
+    // The Vulkan bridge (see the layer's vulkan_session_bridge): a Vulkan
+    // game's session is handed to the runtime as D3D12. On by default; no
+    // menu entry.
+    bool vulkan_session_bridge{true};
     // Vulkan support: generate for Vulkan sessions and register the
     // queue-serialising Vulkan layer while armed. On by default and not in
     // the menu, like d3d11_bridge: vulkan_bridge=0 in tray.ini turns it off. The

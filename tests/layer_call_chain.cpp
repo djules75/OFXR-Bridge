@@ -111,6 +111,11 @@ std::atomic<bool> g_bridge_session_bound{false};
 // interop runs against the driver rather than a stand-in. Importing the D3D12
 // textures and the shared fence is the part no fake can vouch for.
 bool g_vulkan_mode = false;
+// vulkan-bridge: a Vulkan application whose session the layer hands to the
+// runtime as a D3D12 one. The runtime side of this fake is then its D3D12
+// self; only the application side is Vulkan.
+bool g_vulkan_bridge_mode = false;
+bool g_vulkan_application = false;
 bool g_inverted_vertical_fov = false;
 bool g_steamvr_runtime_mode = false;
 bool g_steamvr_presenter_mode = false;
@@ -395,7 +400,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_session(
     XrInstance,
     const XrSessionCreateInfo* create_info,
     XrSession* session) {
-    if (g_d3d11_bridge_mode) {
+    if (g_d3d11_bridge_mode || g_vulkan_bridge_mode) {
         // The bridge hands the runtime a D3D12 binding on the layer's own
         // device. A runtime creates its images on that device; so does the
         // fake, here, since it cannot know the device before this call.
@@ -433,7 +438,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_instance_extension_properties(
     // without D3D12 gets, and the one d3d11_bridge=0 selects - so both stay
     // covered.
     constexpr const char* kNames[] = {"XR_KHR_D3D11_enable", "XR_KHR_D3D12_enable"};
-    const std::uint32_t listed = g_d3d11_bridge_mode ? 2U : 1U;
+    const std::uint32_t listed = (g_d3d11_bridge_mode || g_vulkan_bridge_mode) ? 2U : 1U;
     *count = listed;
     if (capacity == 0 || properties == nullptr) {
         return XR_SUCCESS;
@@ -2121,6 +2126,8 @@ int main(int argc, char** argv) {
     g_single_threaded_mode =
         argc == 4 && std::strcmp(argv[3], "d3d11-single-threaded") == 0;
     g_vulkan_mode = argc == 4 && std::strcmp(argv[3], "vulkan") == 0;
+    g_vulkan_bridge_mode = argc == 4 && std::strcmp(argv[3], "vulkan-bridge") == 0;
+    g_vulkan_application = g_vulkan_mode || g_vulkan_bridge_mode;
     g_swapchain_budget_mode =
         argc == 4 && std::strcmp(argv[3], "swapchain-budget") == 0;
     g_steamvr_runtime_mode = g_steamvr_presenter_mode ||
@@ -2169,7 +2176,8 @@ int main(int argc, char** argv) {
     if (argc == 4 && !g_split_eye_mode && !g_double_wide_mode &&
         !g_d3d11_interop_mode && !g_steamvr_runtime_mode &&
         !g_flight_simulator_mode && !g_uevr_pipelined_display_time_mode &&
-        !g_inverted_vertical_fov && !g_vulkan_mode && !g_swapchain_budget_mode) {
+        !g_inverted_vertical_fov && !g_vulkan_mode && !g_vulkan_bridge_mode &&
+        !g_swapchain_budget_mode) {
         std::cerr << "unknown test mode\n";
         return EXIT_FAILURE;
     }
@@ -2204,7 +2212,7 @@ int main(int argc, char** argv) {
         }
     }
     g_log_path = argv[2];
-    if (g_vulkan_mode ? !initialize_vulkan()
+    if (g_vulkan_application ? !initialize_vulkan()
         : g_d3d11_interop_mode ? !initialize_d3d11()
                                : !initialize_d3d12()) {
         return EXIT_FAILURE;
@@ -2264,6 +2272,15 @@ int main(int argc, char** argv) {
         instance_info.enabledExtensionNames = d3d11_extensions;
         instance_info.enabledExtensionCount = 1;
     }
+    // A Vulkan application enables the Vulkan extension, which the Vulkan
+    // bridge keys on the same way. Through OpenComposite it enables the
+    // D3D11 one as well (No Man's Sky), which must not keep the Vulkan
+    // bridge off; the bridge mode reproduces that.
+    const char* const vulkan_extensions[] = {"XR_KHR_vulkan_enable2", "XR_KHR_D3D11_enable"};
+    if (g_vulkan_application) {
+        instance_info.enabledExtensionNames = vulkan_extensions;
+        instance_info.enabledExtensionCount = g_vulkan_bridge_mode ? 2U : 1U;
+    }
 
     // A layer above this one (Cheeky Foveated DLSS) probes the extension
     // list through this layer's xrGetInstanceProcAddr with XR_NULL_HANDLE
@@ -2280,7 +2297,7 @@ int main(int argc, char** argv) {
         std::uint32_t count = 0;
         const auto enumerate = reinterpret_cast<PFN_xrEnumerateInstanceExtensionProperties>(probe);
         if (XR_FAILED(enumerate(nullptr, 0, &count, nullptr)) ||
-            count != (g_d3d11_bridge_mode ? 2U : 1U)) {
+            count != ((g_d3d11_bridge_mode || g_vulkan_bridge_mode) ? 2U : 1U)) {
             std::cerr << "null-instance extension enumeration did not reach the runtime\n";
             return EXIT_FAILURE;
         }
@@ -2356,7 +2373,7 @@ int main(int argc, char** argv) {
     vulkan_graphics_binding.queueFamilyIndex = g_vulkan.queue_family;
     vulkan_graphics_binding.queueIndex = 0;
     XrSessionCreateInfo session_info{XR_TYPE_SESSION_CREATE_INFO};
-    session_info.next = g_vulkan_mode
+    session_info.next = g_vulkan_application
         ? static_cast<const void*>(&vulkan_graphics_binding)
         : g_d3d11_interop_mode
             ? static_cast<const void*>(&d3d11_graphics_binding)
@@ -2373,11 +2390,11 @@ int main(int argc, char** argv) {
     XrSwapchainCreateInfo swapchain_info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     // A Vulkan application through OpenComposite copies its own texture into
     // the swapchain image and asks for nothing but TRANSFER_DST.
-    swapchain_info.usageFlags = g_vulkan_mode
+    swapchain_info.usageFlags = g_vulkan_application
         ? XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT
         : XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
     // A Vulkan session's swapchain format is a VkFormat.
-    swapchain_info.format = g_vulkan_mode
+    swapchain_info.format = g_vulkan_application
         ? static_cast<std::int64_t>(VK_FORMAT_R8G8B8A8_UNORM)
         : static_cast<std::int64_t>(DXGI_FORMAT_R8G8B8A8_UNORM);
     swapchain_info.sampleCount = 1;
@@ -2386,7 +2403,7 @@ int main(int argc, char** argv) {
     swapchain_info.faceCount = 1;
     swapchain_info.arraySize =
         (g_split_eye_mode || g_double_wide_mode) ? 1 : 2;
-    swapchain_info.mipCount = (g_d3d11_interop_mode || g_vulkan_mode) ? 3 : 1;
+    swapchain_info.mipCount = (g_d3d11_interop_mode || g_vulkan_application) ? 3 : 1;
 
     if (g_split_eye_mode) {
         XrSwapchain left_swapchain = XR_NULL_HANDLE;
@@ -2744,7 +2761,7 @@ int main(int argc, char** argv) {
         image.type = XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR;
     }
     XrSwapchainImageBaseHeader* const full_image_headers =
-        g_vulkan_mode
+        g_vulkan_application
             ? reinterpret_cast<XrSwapchainImageBaseHeader*>(
                   vulkan_swapchain_images.data())
             : g_d3d11_interop_mode
@@ -2753,7 +2770,7 @@ int main(int argc, char** argv) {
                 : reinterpret_cast<XrSwapchainImageBaseHeader*>(
                       swapchain_images.data());
     XrSwapchainImageBaseHeader* const partial_image_headers =
-        g_vulkan_mode
+        g_vulkan_application
             ? reinterpret_cast<XrSwapchainImageBaseHeader*>(
                   vulkan_partial_images.data())
             : g_d3d11_interop_mode
@@ -3180,7 +3197,7 @@ int main(int argc, char** argv) {
     }
 
     if (g_single_threaded_mode || g_vulkan_mode || g_swapchain_budget_mode ||
-        g_d3d11_bridge_mode) {
+        g_d3d11_bridge_mode || g_vulkan_bridge_mode) {
         // Every frame from this one thread, as an application with a
         // single-threaded device must and a Vulkan application always does:
         // the runtime submits on the queue the application handed it. In the
@@ -3227,6 +3244,12 @@ int main(int argc, char** argv) {
                    (!g_vulkan_mode ||
                     paint_vulkan_image(
                         g_vulkan_application_swapchain_images[acquired_index], red)) &&
+                   // vulkan-bridge: the enumerated images are the layer's
+                   // imports; paint what the runtime's D3D12 image must
+                   // then receive.
+                   (!g_vulkan_bridge_mode ||
+                    paint_vulkan_image(
+                        vulkan_swapchain_images[acquired_index].image, red)) &&
                    (!g_d3d11_bridge_mode ||
                     paint_d3d11_image(
                         d3d11_swapchain_images[acquired_index].texture, red));
@@ -3254,7 +3277,7 @@ int main(int argc, char** argv) {
             }
             // d3d11-bridge: what the application painted into the D3D11
             // texture is in the runtime's D3D12 image after the release.
-            if (g_d3d11_bridge_mode && frame_sequence_succeeded) {
+            if ((g_d3d11_bridge_mode || g_vulkan_bridge_mode) && frame_sequence_succeeded) {
                 std::uint8_t found = 0;
                 if (!d3d12_image_first_red(
                         g_application_swapchain_images[acquired_index].Get(), &found) ||
@@ -3299,7 +3322,7 @@ int main(int argc, char** argv) {
             synthetic_acquires >= 7 &&
             g_waited_display_times.empty() && !g_begun_display_time;
         if (!valid) {
-            std::cerr << (g_vulkan_mode ? "Vulkan"
+            std::cerr << (g_vulkan_bridge_mode ? "Vulkan bridge" : g_vulkan_mode ? "Vulkan"
                           : g_acquire_ahead_mode ? "D3D11 bridge, acquire ahead"
                           : g_d3d11_bridge_mode ? "D3D11 bridge"
                                                 : "single-threaded D3D11")

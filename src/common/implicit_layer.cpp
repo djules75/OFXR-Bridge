@@ -243,6 +243,20 @@ bool read_triple_frame_gen(
     }
 }
 
+bool read_vulkan_session_bridge(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (module_directory.empty()) {
+            return true;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"vulkan_session_bridge", 1, ini_path.c_str()) != 0;
+    } catch (...) {
+        return true;
+    }
+}
+
 bool read_single_swapchain_rings(
     const std::filesystem::path& module_directory) noexcept {
     try {

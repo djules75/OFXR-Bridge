@@ -169,6 +169,9 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "single_swapchain_rings") {
                     settings.single_swapchain_rings = value == "1" ||
                         lower_ascii(value) == "true";
+                } else if (key == "vulkan_session_bridge") {
+                    settings.vulkan_session_bridge = value == "1" ||
+                        lower_ascii(value) == "true";
                 } else if (key == "vulkan_bridge") {
                     // Not vulkan_support: while the option was off by default
                     // every save wrote vulkan_support=0, so that key says
@@ -208,6 +211,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\ntriple_frame_gen=" + (settings.triple_frame_gen ? "1" : "0") +
            "\r\nexcluded_processes=" + settings.excluded_processes +
            "\r\nsingle_swapchain_rings=" + (settings.single_swapchain_rings ? "1" : "0") +
+           "\r\nvulkan_session_bridge=" + (settings.vulkan_session_bridge ? "1" : "0") +
            "\r\nvulkan_bridge=" + (settings.vulkan_support ? "1" : "0") +
            "\r\nd3d11_bridge=" + (settings.d3d11_bridge ? "1" : "0") +
            "\r\ndiagnostics=" + (settings.diagnostics ? "1" : "0") +
@@ -281,6 +285,7 @@ std::string build_runtime_ini(
            "\r\ntriple_frame_gen=" + (settings.triple_frame_gen ? "1" : "0") +
            "\r\nexcluded_processes=" + settings.excluded_processes +
            "\r\nsingle_swapchain_rings=" + (settings.single_swapchain_rings ? "1" : "0") +
+           "\r\nvulkan_session_bridge=" + (settings.vulkan_session_bridge ? "1" : "0") +
            "\r\nvulkan_bridge=" + (settings.vulkan_support ? "1" : "0") +
            "\r\nd3d11_bridge=" + (settings.d3d11_bridge ? "1" : "0") +
            "\r\n\r\n[diagnostics]\r\nlogging_enabled=" +

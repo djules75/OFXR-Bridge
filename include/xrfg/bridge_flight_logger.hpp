@@ -199,6 +199,14 @@ enum class BridgeFlightOperation : std::uint32_t {
     // a= the executable name's length. Nothing else is recorded for the
     // process: the loader goes on without the layer.
     process_excluded,
+    // A Vulkan session bridged to a D3D12 runtime session: result is a
+    // stage or a failure code, like d3d11_bridge. 0 at instance creation
+    // (a= graphics extensions, b= the ini, c= flags), 1 the session bridged
+    // (c= adapter LUID low half), 2 a swapchain bridged (b= path<<32|image
+    // count, c= shared format<<32|requested VkFormat), 3 a failed release
+    // copy, 4 a format the bridge cannot translate; negative values are the
+    // failing call's result with the stage in b.
+    vulkan_bridge,
 };
 
 struct BridgeFlightToken {

@@ -73,28 +73,33 @@ not loaded (Table A).
 The bridge needs extra video memory on top of what the game uses. How much
 depends on your per-eye resolution, the game's graphics API, and on which
 OpenXR runtime the headset runs through. Since 0.2.10.1 the mode no longer
-matters on D3D12 and D3D11: 2X, 2X with **Prefer FPS over latency** and
-**3X Frame Gen** cost the same. The optical-flow backend makes no real
+matters: 2X, 2X with **Prefer FPS over latency** and **3X Frame Gen** cost
+the same, on every graphics API. The optical-flow backend makes no real
 difference either: NVIDIA and FidelityFX are within 0.01 GB of each other.
 
 Total extra VRAM, both eyes, on SteamVR, Virtual Desktop and the Meta runtime:
 
-| Per-eye resolution | D3D12 | D3D11 | Vulkan, 2X | Vulkan, 2X Prefer FPS or 3X |
-|---|---|---|---|---|
-| 2064×2208 (4.6 Mpx, Quest 3 class) | 0.45 GB | 0.55 GB | 0.83 GB | 1.03 GB |
-| 3030×2971 (9.0 Mpx) | 0.90 GB | 1.11 GB | 1.64 GB | 2.04 GB |
-| 4172×3268 (13.6 Mpx, Crystal Super) | 1.36 GB | 1.67 GB | 2.48 GB | 3.09 GB |
-| 5040×3948 (19.9 Mpx) | 1.99 GB | 2.44 GB | 3.62 GB | 4.51 GB |
-| 5884×4608 (27.1 Mpx) | 2.72 GB | 3.32 GB | 4.94 GB | 6.15 GB |
+| Per-eye resolution | D3D12 | D3D11 | Vulkan |
+|---|---|---|---|
+| 2064×2208 (4.6 Mpx, Quest 3 class) | 0.45 GB | 0.55 GB | 0.66 GB |
+| 3030×2971 (9.0 Mpx) | 0.90 GB | 1.11 GB | 1.33 GB |
+| 4172×3268 (13.6 Mpx, Crystal Super) | 1.36 GB | 1.67 GB | 2.00 GB |
+| 5040×3948 (19.9 Mpx) | 1.99 GB | 2.44 GB | 2.93 GB |
+| 5884×4608 (27.1 Mpx) | 2.72 GB | 3.32 GB | 3.98 GB |
 
-D3D11 means through the D3D11 bridge, which is on by default. The figures
-are worked out from what the bridge allocates and assume a game rendering
-8-bit colour; a game rendering 16-bit colour roughly doubles them. Measured
-in MSFS 2024 on SteamVR they hold within 10%: 3.1 GB in 3X at 29 megapixels
-per eye. Above the table, count about **0.10 GB per megapixel of per-eye
-resolution** on D3D12, 0.12 GB on D3D11 and 0.18 to 0.23 GB on Vulkan.
-0.2.9.1 and earlier used about 15% more on D3D12 and D3D11 with Prefer FPS
-over latency or 3X on.
+D3D11 and Vulkan games run through a bridge, on by default, that hands the
+runtime a D3D12 session; it costs one extra set of images, plus a little
+more on Vulkan, where the shared images take more memory than their size.
+The figures are worked out from what the bridge allocates and assume a game
+rendering 8-bit colour; a game rendering 16-bit colour roughly doubles them.
+Measured on SteamVR they hold within 10%: 3.1 GB in MSFS 2024 in 3X at
+29 megapixels per eye, and in No Man's Sky about 2.0 GB per swapchain at
+27 megapixels. Above the table, count about **0.10 GB per megapixel of
+per-eye resolution** on D3D12, 0.12 GB on D3D11 and 0.15 GB on Vulkan.
+
+0.2.9.1 and earlier used more: about 15% more on D3D12 and D3D11 with
+Prefer FPS over latency or 3X on, and about twice as much on Vulkan, which
+then mirrored every image instead of sharing it.
 
 > [!WARNING]
 > **On Pimax OpenXR, add about half again.** Pimax Play's runtime keeps an

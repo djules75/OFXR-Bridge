@@ -42,6 +42,8 @@ int main() {
         !contains(default_runtime_ini, "excluded_processes=PimaxHome-Win64-Shipping.exe") ||
         !release_defaults.single_swapchain_rings ||
         !contains(default_runtime_ini, "single_swapchain_rings=1") ||
+        !release_defaults.vulkan_session_bridge ||
+        !contains(default_runtime_ini, "vulkan_session_bridge=1") ||
         !contains(default_runtime_ini, "triple_frame_gen=0") ||
         !contains(default_runtime_ini, "deep_pipeline=1") ||
         !release_defaults.vulkan_support ||
@@ -83,6 +85,7 @@ int main() {
     settings.triple_frame_gen = true;
     settings.excluded_processes = "Home.exe; Other-Shipping.exe";
     settings.single_swapchain_rings = false;
+    settings.vulkan_session_bridge = false;
     settings.vulkan_support = false;
     settings.d3d11_bridge = false;
     settings.diagnostics = true;
@@ -94,7 +97,7 @@ int main() {
         !parsed.nvidia_bidirectional || parsed.deep_pipeline ||
         !parsed.triple_frame_gen ||
         parsed.excluded_processes != "Home.exe; Other-Shipping.exe" ||
-        parsed.single_swapchain_rings ||
+        parsed.single_swapchain_rings || parsed.vulkan_session_bridge ||
         parsed.vulkan_support || parsed.d3d11_bridge || !parsed.diagnostics) {
         std::cerr << "standalone settings round-trip failed\n";
         return 1;
@@ -136,6 +139,7 @@ int main() {
         !contains(runtime_ini, "triple_frame_gen=1") ||
         !contains(runtime_ini, "excluded_processes=Home.exe; Other-Shipping.exe") ||
         !contains(runtime_ini, "single_swapchain_rings=0") ||
+        !contains(runtime_ini, "vulkan_session_bridge=0") ||
         !contains(runtime_ini, "vulkan_bridge=0") ||
         !contains(runtime_ini, "d3d11_bridge=0") ||
         !contains(runtime_ini, "[diagnostics]\r\nlogging_enabled=1") ||

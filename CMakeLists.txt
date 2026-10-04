@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.410.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.412.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -772,6 +772,21 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 TIMEOUT 60
                 SKIP_REGULAR_EXPRESSION "SKIP: no Vulkan implementation on this machine")
         endforeach()
+        # The Vulkan bridge: the same Vulkan application, a fake runtime that
+        # lists D3D12 and takes the D3D12 session the layer hands it.
+        add_test(
+            NAME xrfg_layer_vulkan_bridge
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DQUEUE_LAYER_DLL=$<TARGET_FILE:OFXR_vulkan_queue_layer>"
+                "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_vulkan_deep.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/vulkan-bridge"
+                "-DMODE=vulkan-bridge"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
+        set_tests_properties(xrfg_layer_vulkan_bridge PROPERTIES
+            TIMEOUT 60
+            SKIP_REGULAR_EXPRESSION "SKIP: no Vulkan implementation on this machine")
 
         # The D3D11 bridge needs d3d11_bridge=1, which the shipped ini
         # leaves off: the application binds a real D3D11 device and the fake
