@@ -3,8 +3,9 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current release: **v0.2.9.1 (internal build V401)**.
-See the [release notes](docs/releases/0.2.9.1.md).
+Current release: **v0.2.10.1 (internal build V412)**.
+See the [release notes](docs/releases/0.2.10.1.md). This release cuts
+OFXR's VRAM use in every game, by about half in Vulkan games.
 
 > [!WARNING]
 > **Pimax headsets: use SteamVR, not Pimax OpenXR.** Pimax Play's OpenXR
@@ -87,7 +88,9 @@ The current build provides:
   D3D11 device. DCS World, Assetto Corsa, SkyrimVR and Cyberpunk 2077 run
   through it
 - **Vulkan support (on by default)**: frame generation for Vulkan games,
-  tested with No Man's Sky through OpenComposite
+  tested with No Man's Sky through OpenComposite. Since 0.2.10.1 Vulkan
+  games run through a bridge like D3D11 games, on the same pipeline as
+  native D3D12 games
 - eye tracking that keeps working alongside Cheeky Foveated DLSS
 - an optional transparent in-headset FPS number with four corner positions;
   green means recent synthetic submissions and red means inactive generation
@@ -259,6 +262,11 @@ the option was off by default.
 - On SteamVR, turn off the game's **fixed frame rate at half** and Motion
   Smoothing in the per-application video settings, or SteamVR holds the game
   to half rate and the bridge can only deliver half.
+- Since 0.2.10.1 a Vulkan game's VR session goes through a bridge, like a
+  D3D11 game's: the game renders into images the bridge shares with it, and
+  everything after that is the native D3D12 pipeline. That halves the VRAM
+  the bridge needs and gives Vulkan games SteamVR's frame pacing. To go back
+  to the earlier path, set `vulkan_session_bridge=0` in `tray.ini`.
 - Off, Vulkan games are passed through unchanged and nothing Vulkan is
   registered.
 
@@ -288,6 +296,9 @@ For the best results on SteamVR:
 ### How much VRAM the bridge uses
 
 See the VRAM table in [Troubleshooting](docs/TROUBLESHOOTING.md#how-much-vram-ofxr-uses).
+Since 0.2.10.1 the mode no longer changes it: 2X, Prefer FPS over latency
+and 3X Frame Gen all use the same amount. The bridge also stays out of
+Pimax Home, which takes the headset whenever a game leaves VR.
 
 ### What the tray changes on your PC
 
