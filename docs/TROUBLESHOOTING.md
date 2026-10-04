@@ -1,5 +1,18 @@
 # OFXR Bridge troubleshooting
 
+> [!WARNING]
+> **Pimax headsets: use SteamVR, not Pimax OpenXR.** Pimax Play's OpenXR
+> runtime keeps an extra copy in VRAM of every image it is handed, so OFXR
+> costs about **1.7 times** more on it than on SteamVR, and the copies stay
+> until the game closes. We have reported it to Pimax so they can fix their
+> runtime; there is nothing OFXR can do about it in the meantime. Until it is
+> fixed, run your Pimax through SteamVR with
+> [sboys3's CustomHeadsetOpenVR driver](https://github.com/sboys3/CustomHeadsetOpenVR)
+> and make SteamVR the active OpenXR runtime (SteamVR → Settings → OpenXR).
+> This matters most in MSFS 2024, which is already close to the VRAM limit
+> at Pimax resolutions. Details in
+> [How much VRAM OFXR uses](#how-much-vram-ofxr-uses).
+
 ## Step 1: is OFXR running in your game?
 
 Turn on the FPS overlay: right-click the tray icon, **FPS overlay**, pick a
@@ -74,11 +87,17 @@ rendering 16-bit colour roughly doubles them. Measured in MSFS 2024 on
 SteamVR they hold within 10%. Above the table, count about **0.12 GB per
 megapixel per eye** (0.09 GB with Prefer FPS over latency off).
 
-**Pimax OpenXR costs about 1.7 times the table.** Pimax Play's runtime keeps
-an extra copy of every image it is handed, so each of OFXR's private images
-costs twice on it: measured 7.0 GB against 4.2 GB on SteamVR at the same
-29 megapixels per eye. SteamVR does not do this; the other runtimes have
-not been measured yet.
+> [!WARNING]
+> **Pimax OpenXR costs about 1.7 times the table.** Pimax Play's runtime
+> keeps an extra copy of every image it is handed, made the first time the
+> image is shown and kept until the game closes, so each of OFXR's private
+> images costs twice on it: measured **7.0 GB against 4.2 GB on SteamVR** at
+> the same 29 megapixels per eye. SteamVR does not do this; the other
+> runtimes have not been measured yet. We have reported it to Pimax so they
+> can fix their runtime, and there is nothing OFXR can do about it for now:
+> run your Pimax through SteamVR with
+> [sboys3's CustomHeadsetOpenVR driver](https://github.com/sboys3/CustomHeadsetOpenVR)
+> instead, especially for MSFS 2024.
 
 **Know your real per-eye resolution.** It is what your VR software asks the
 game to render, not the headset's panel and not the "100%" figure. In
