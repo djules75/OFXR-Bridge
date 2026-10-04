@@ -45,16 +45,52 @@ cbuffer SynthesisParameters : register(b0) {
     float2 GameMotionJitterDelta;
     CameraMapping PreviousMappings[2];
     uint Slice;
-    // Bit 0 is the repeated-capture flag. Bits 8-23 carry the synthetic's
-    // position between the two captures in 1/65535ths - 0 at the previous
-    // capture, 1 at the current. They share a slot because the root signature
-    // is full: 62 constants plus two descriptor tables is the whole 64-DWORD
-    // budget, leaving no room for a 63rd.
+    // Bit 0 is the repeated-capture flag. Bit 1 asks the pack shaders to
+    // sRGB-encode the flow input. Bits 8-23 carry the synthetic's position
+    // between the two captures in 1/65535ths - 0 at the previous capture, 1
+    // at the current. They share a slot because the root signature is full:
+    // 62 constants plus two descriptor tables is the whole 64-DWORD budget,
+    // leaving no room for a 63rd.
     uint SynthesisFlags;
 };
 
 uint repeated_capture_flag() {
     return SynthesisFlags & 1u;
+}
+
+// The source views are the swapchain's own format. On an sRGB swapchain a
+// Load returns linear light, which is what the composition needs to write
+// back through its sRGB render target - but written as-is into the 8-bit
+// flow input it leaves the darkest tenth of the perceptual range in two or
+// three codes, and the optical flow matches on that. Filtering and the luma
+// weighting stay in linear light; the encode is applied to the packed value.
+bool encode_srgb_flow_input() {
+    return (SynthesisFlags & 2u) != 0u;
+}
+
+float3 linear_to_srgb(float3 linear_color) {
+    float3 low = linear_color * 12.92;
+    float3 high = 1.055 * pow(max(linear_color, 0.0), 1.0 / 2.4) - 0.055;
+    return linear_color <= 0.0031308 ? low : high;
+}
+
+float4 pack_flow_input_color(float4 color) {
+    float4 packed = saturate(color);
+    if (encode_srgb_flow_input()) {
+        packed.rgb = linear_to_srgb(packed.rgb);
+    }
+    return packed;
+}
+
+// Rec. 709 weights give relative luminance from linear values; the encode
+// then spreads it over the codes the way the swapchain spreads colour.
+float pack_flow_input_luma(float4 color) {
+    const float3 luma_weights = float3(0.2126, 0.7152, 0.0722);
+    float luma = dot(saturate(color).rgb, luma_weights);
+    if (encode_srgb_flow_input()) {
+        luma = linear_to_srgb(luma.xxx).x;
+    }
+    return luma;
 }
 
 // An unset field decodes to 0.5, which is the fixed midpoint this shader
@@ -301,7 +337,7 @@ void PackFlowInput(uint3 thread_id : SV_DispatchThreadID) {
     // sees a filtered image instead of every fourth pixel.
     float2 input_scale = flow_input_scale();
     if (slice >= ArraySize) {
-        PackedColor[thread_id.xy] = saturate(current_color);
+        PackedColor[thread_id.xy] = pack_flow_input_color(current_color);
         return;
     }
     if (PackedWidth < Width) {
@@ -316,7 +352,7 @@ void PackFlowInput(uint3 thread_id : SV_DispatchThreadID) {
         current_color = CurrentFrame.Load(
             int4(int2(thread_id.x, local_y), int(slice), 0));
     }
-    PackedColor[thread_id.xy] = saturate(current_color);
+    PackedColor[thread_id.xy] = pack_flow_input_color(current_color);
 }
 
 // The view whose target rectangle holds this pixel, for the pack, which runs
@@ -383,14 +419,13 @@ void PackNvidiaFlowInput(uint3 thread_id : SV_DispatchThreadID) {
         }
     }
 #ifdef XRFG_NVIDIA_LUMA_INPUT
-    // Rec. 709 weights on the values as read: the engine matches structure,
-    // and one channel of it is a quarter of the bytes of four.
-    const float3 luma_weights = float3(0.2126, 0.7152, 0.0722);
-    NvidiaPreviousColor[thread_id.xy] = dot(saturate(previous_color).rgb, luma_weights);
-    NvidiaCurrentColor[thread_id.xy] = dot(saturate(current_color).rgb, luma_weights);
+    // One channel is a quarter of the bytes of four, and the engine matches
+    // structure, not colour.
+    NvidiaPreviousColor[thread_id.xy] = pack_flow_input_luma(previous_color);
+    NvidiaCurrentColor[thread_id.xy] = pack_flow_input_luma(current_color);
 #else
-    NvidiaPreviousColor[thread_id.xy] = saturate(previous_color);
-    NvidiaCurrentColor[thread_id.xy] = saturate(current_color);
+    NvidiaPreviousColor[thread_id.xy] = pack_flow_input_color(previous_color);
+    NvidiaCurrentColor[thread_id.xy] = pack_flow_input_color(current_color);
 #endif
 }
 

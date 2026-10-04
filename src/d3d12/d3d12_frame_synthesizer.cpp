@@ -283,11 +283,33 @@ struct SynthesisParameters {
     std::array<float, 2> game_motion_jitter_delta{};
     std::array<CameraMapping, kMaxReprojectionViews> previous_mappings{};
     UINT slice{};
-    // Bit 0 is the repeated-capture flag; bits 8-23 carry the synthetic's
-    // position between the two captures in 1/65535ths. They share a slot
-    // because the root signature is full - see the assert below.
+    // Bit 0 is the repeated-capture flag; bit 1 asks the pack shaders to
+    // sRGB-encode the flow input; bits 8-23 carry the synthetic's position
+    // between the two captures in 1/65535ths. They share a slot because the
+    // root signature is full - see the assert below.
     UINT synthesis_flags{};
 };
+
+// The source views are created in the swapchain's own format, so on an sRGB
+// swapchain the pack shaders read linear light. The composition needs that -
+// its render target is the same sRGB format and encodes on write - but the
+// 8-bit flow input does not go through a render target, and written linear
+// it leaves the darkest tenth of the perceptual range in two or three codes:
+// dim walls turn flat to the matcher, which ghosts them under head turns. The
+// pack encodes on the way out instead; the views stay shared. FidelityFX is
+// told its input is sRGB (FFX_BACKBUFFER_TRANSFER_FUNCTION_SRGB) and receives
+// it that way.
+constexpr UINT kEncodeSrgbFlowInputFlag = 2U;
+
+[[nodiscard]] constexpr bool srgb_view_format(DXGI_FORMAT format) noexcept {
+    return format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+           format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+}
+
+// The flag bits every pack dispatch carries; the composition ignores them.
+[[nodiscard]] constexpr UINT pack_input_flags(DXGI_FORMAT view_format) noexcept {
+    return srgb_view_format(view_format) ? kEncodeSrgbFlowInputFlag : 0U;
+}
 
 // Packs the synthetic's position between the two captures into the spare
 // bits of synthesis_flags. Zero is reserved for "not set", which the shader
@@ -2972,7 +2994,8 @@ struct D3D12FrameSynthesizer::Impl {
         slot.command_list->SetPipelineState(pack_pipeline.Get());
 
         SynthesisParameters parameters{};
-        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
+        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
+            pack_input_flags(view_format);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;
@@ -3137,7 +3160,8 @@ struct D3D12FrameSynthesizer::Impl {
                 : nvidia_pack_pipeline.Get());
 
         SynthesisParameters parameters{};
-        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
+        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
+            pack_input_flags(view_format);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;
@@ -3554,7 +3578,8 @@ struct D3D12FrameSynthesizer::Impl {
         slot.command_list->SetPipelineState(pack_pipeline.Get());
 
         SynthesisParameters parameters{};
-        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
+        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
+            pack_input_flags(view_format);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;

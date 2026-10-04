@@ -1,7 +1,7 @@
 # OFXR Bridge troubleshooting
 
 > [!IMPORTANT]
-> **First, make sure you are on the latest version: 0.2.11.1.** Every
+> **First, make sure you are on the latest version: 0.2.11.2.** Every
 > release fixes problems reported here, so check the
 > [releases page](https://github.com/djules75/OFXR-Bridge/releases) before
 > anything else. The tray's menu shows the version you are running.
