@@ -520,6 +520,9 @@ struct Dispatch {
     // BridgeFlightOperation::vulkan_negotiation.
     VulkanNegotiationDispatch vulkan{};
     bool steamvr_runtime{};
+    // Virtual Desktop's own runtime (VDXR). Its presenter is paced on the
+    // steady_clock grid rather than the floor; see pace_presenter_submission.
+    bool virtual_desktop_runtime{};
     XrVersion runtime_version{};
     std::string runtime_name;
 };
@@ -1159,48 +1162,23 @@ struct SessionState {
     // 0.8% and 0.1%.
     //
     // What is kept is a floor of half a period between hand-overs, measured
-    // from this timestamp. Virtual Desktop returns the wait instantly while
-    // the application is behind, and with nothing spacing them two frames
-    // went out 2 ms apart: 12% of submissions at 144 Hz with the game at
-    // 55 fps, against 1-2% under the grid, and 83% of them straight after a
-    // wait that returned in under half a millisecond. A floor from the
-    // previous call cannot drift the way a grid could, and in the paced
-    // steady state, where hand-overs are a period apart, it never fires.
-    // Presenter thread only.
+    // from this timestamp. A floor from the previous call cannot drift the way
+    // a grid could, and in the paced steady state, where hand-overs are a
+    // period apart, it never fires.
+    //
+    // Virtual Desktop keeps the grid instead. It returns the wait instantly
+    // while the application is behind, so once the application's frame takes
+    // longer than a period after its release nothing paces the presenter: the
+    // application is released from the presenter's progress, the presenter
+    // waits on the application, and the loop clocks itself at frame time plus
+    // the floor. Measured at 90 and 100 Hz on two machines: the real frame went
+    // out 6.5 ms after its synthetic on 81-90% of pairs, inside the
+    // synthetic's scanout, and the application fell from 45 to 42 a second,
+    // against an even 11 ms cadence and a steady 45 under the grid. The floor
+    // alone did not help at 144 Hz either - 12% of submissions bunched, 1-2%
+    // under the grid. Pimax's two-clock stacking needs a wait that blocks
+    // every frame, which Virtual Desktop's does not. Presenter thread only.
     std::chrono::steady_clock::time_point presenter_last_end_returned_at{};
-    // Where the application's frames complete within the presenter's cycle,
-    // and the release delay that keeps that away from the pop.
-    //
-    // The presenter takes a frame at its pop, once per cycle, and the
-    // application is released once per pair from the presenter's serial. On a
-    // runtime whose wait paces the presenter, the pop is the wait's return,
-    // so the application is released on a cycle boundary, spends its frame
-    // time, and its next xrEndFrame lands wherever that time puts it. On
-    // Pimax OpenXR, MSFS 2024 at 72 Hz, that was 12.2 ms into a 13.8 ms cycle:
-    // 65-72% of the application's frames completed within 1.5 ms of the pop,
-    // and its own frame-time jitter decided which cycle took each one - a
-    // third of them went out a whole cycle earlier or later than the frame
-    // before, a 13.8 ms latency step on every such frame, felt as the head
-    // pose jittering. On SteamVR the pace hold moves the pop mid-cycle and
-    // 99.1% of the application's frames sit exactly two cycles apart.
-    //
-    // So the completion phase is measured at xrEndFrame entry against the
-    // last pop, modulo the period, and while its median sits within
-    // kCompletionPhaseBand of the boundary the release is delayed by whatever
-    // moves it a quarter period past the pop - once, then held there. The
-    // offset wraps at one period: a whole cycle of delay buys nothing. Costs
-    // up to a period of the application's latency, about a third of one on
-    // the measured scene, and only while its completion sits on the boundary.
-    // Not on SteamVR, whose completion already sits mid-cycle - held on a
-    // fast application too: Cyberpunk 2077 finishing in 13 ms and held 8-10
-    // ms per pair completed 2.3 ms after the real submission, sd 0.4, in
-    // every window of a session that delivered 77 frames a second, and V375
-    // running the steering there stepped 0.7 ms and changed nothing. Guarded
-    // by presenter_mutex.
-    std::chrono::steady_clock::time_point presenter_pop_at{};
-    std::array<std::chrono::nanoseconds, 8> application_completion_phase{};
-    std::uint32_t application_completion_samples{};
-    std::chrono::nanoseconds application_release_offset{0};
     // 3X only: how long the application is kept, after its frame is handed
     // over, before it is released to render the next one.
     //
@@ -4544,6 +4522,9 @@ XrResult layer_create_api_layer_instance_impl(
             dispatch->steamvr_runtime =
                 std::string_view(dispatch->runtime_name).find("SteamVR") !=
                 std::string_view::npos;
+            dispatch->virtual_desktop_runtime =
+                std::string_view(dispatch->runtime_name).find(
+                    "VirtualDesktopXR") != std::string_view::npos;
         }
     }
     xrfg::bridge_flight_logger().event(
@@ -7333,10 +7314,12 @@ void pace_presenter_submission(
         int pace_band_correction = 0;
         // A runtime other than SteamVR paces the presenter with its own
         // xrWaitFrame and the grid is not held; what remains is the floor
-        // between hand-overs. See presenter_last_end_returned_at. Recorded as
-        // result=5, after the lock: a the hold in microseconds, b 1 where the
-        // floor held, so a capture tells a paced cycle from a spaced one.
-        if (!state->dispatch->steamvr_runtime) {
+        // between hand-overs. Virtual Desktop excepted: it holds the grid
+        // below. See presenter_last_end_returned_at. Recorded as result=5,
+        // after the lock: a the hold in microseconds, b 1 where the floor
+        // held, so a capture tells a paced cycle from a spaced one.
+        if (!state->dispatch->steamvr_runtime &&
+            !state->dispatch->virtual_desktop_runtime) {
             std::chrono::nanoseconds floor_remaining{0};
             {
                 std::scoped_lock lock(state->presenter_mutex);
@@ -7981,9 +7964,6 @@ void continuous_presenter_main(
             TripleReleaseReport release_report{};
             {
                 std::scoped_lock lock(state->presenter_mutex);
-                // The boundary the application's release is steered against;
-                // see application_completion_phase.
-                state->presenter_pop_at = pop_now;
                 if (!state->presenter_stop_requested &&
                     !state->presenter_submissions.empty()) {
                     const auto& front = state->presenter_submissions.front();
@@ -9270,64 +9250,18 @@ void wait_for_presenter_pair(
             ? reached - served - kPresenterFramesPerPair
             : 0;
         state->application_served_serial = reached;
-        // Keep the application's completion off the pop boundary; see
-        // application_completion_phase. The step is decided here, under the
-        // lock, and slept after it.
-        std::chrono::nanoseconds release_offset{0};
-        std::int64_t steer_phase_us = -1;
-        std::int64_t steer_step_us = 0;
-        if (state->frames_per_application_frame > 2) {
-            // 3X is steered on synthesis readiness instead, on every
-            // runtime: see triple_release_delay.
-            release_offset = state->triple_release_delay;
-        } else if (!state->dispatch->steamvr_runtime &&
-            state->presenter_display_period > 0) {
-            const auto period = std::chrono::nanoseconds(
-                static_cast<std::int64_t>(state->presenter_display_period));
-            auto& ring = state->application_completion_phase;
-            if (state->application_completion_samples >= ring.size()) {
-                auto sorted = ring;
-                std::sort(sorted.begin(), sorted.end());
-                const auto median = sorted[sorted.size() / 2];
-                // Only a phase the samples agree on is worth stepping to. An
-                // application that cannot make half rate completes anywhere
-                // in the cycle, and a step taken from such a median is noise
-                // that the next eight samples undo: 97 steps in 23 s at
-                // 144 Hz with the game at 55 fps. The spread is taken around
-                // the median, because a phase on the boundary straddles zero
-                // and the period.
-                auto spread = std::chrono::nanoseconds::zero();
-                for (const auto sample : sorted) {
-                    auto offset = sample - median;
-                    if (offset > period / 2) {
-                        offset -= period;
-                    } else if (offset < -(period / 2)) {
-                        offset += period;
-                    }
-                    if (offset < std::chrono::nanoseconds::zero()) {
-                        offset = -offset;
-                    }
-                    spread = std::max(spread, offset);
-                }
-                constexpr auto kCompletionPhaseBand =
-                    std::chrono::nanoseconds(2'500'000);
-                if (spread < period / 4 &&
-                    (median < kCompletionPhaseBand ||
-                     median > period - kCompletionPhaseBand)) {
-                    auto step = period / 4 - median;
-                    while (step < std::chrono::nanoseconds::zero()) {
-                        step += period;
-                    }
-                    state->application_release_offset =
-                        (state->application_release_offset + step) % period;
-                    // Judge the next step on frames that felt this one.
-                    state->application_completion_samples = 0;
-                    steer_phase_us = median.count() / 1000;
-                    steer_step_us = step.count() / 1000;
-                }
-            }
-            release_offset = state->application_release_offset;
-        }
+        // 3X only: see triple_release_delay. A pair is released as soon as
+        // the presenter has run it. A delay that steered the application's
+        // completion away from the presenter's cycle boundary used to sit
+        // here on every runtime but SteamVR; it only ever stepped later, and
+        // whatever it reached came out of the application's two periods. At
+        // 90 Hz, 10.7 ms of it on a 12.2 ms frame put half the frames past
+        // their slot and the application at 39 a second, against 45 with
+        // 5.9 ms on the same frame.
+        const std::chrono::nanoseconds release_offset =
+            state->frames_per_application_frame > 2
+                ? state->triple_release_delay
+                : std::chrono::nanoseconds::zero();
         // Never record under presenter_mutex: the presenter thread takes it
         // every frame, and this path has deadlocked the layer twice.
         lock.unlock();
@@ -9356,17 +9290,6 @@ void wait_for_presenter_pair(
                         state->application_release_timer, INFINITE));
                 }
             }
-        }
-        // result=800: the release offset stepped. a the median completion
-        // phase that triggered it, b the offset now in force, c the step,
-        // all in microseconds.
-        if (steer_step_us > 0) {
-            xrfg::bridge_flight_logger().event(
-                xrfg::BridgeFlightOperation::presenter_transition,
-                800,
-                static_cast<std::uint64_t>(steer_phase_us),
-                static_cast<std::uint64_t>(release_offset.count() / 1000),
-                static_cast<std::uint64_t>(steer_step_us));
         }
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::presenter_pair_release,
@@ -11598,26 +11521,6 @@ XrResult layer_end_frame_impl(
     std::unique_lock frame_call_lock(state->frame_call_mutex);
     state->application_end_thread_id = GetCurrentThreadId();
     const auto application_end_now = std::chrono::steady_clock::now();
-    // Where this frame completed within the presenter's cycle; see
-    // application_completion_phase.
-    {
-        std::scoped_lock pop_lock(state->presenter_mutex);
-        if (state->presenter_pop_at !=
-                std::chrono::steady_clock::time_point{} &&
-            state->presenter_display_period > 0) {
-            const auto period = std::chrono::nanoseconds(
-                static_cast<std::int64_t>(state->presenter_display_period));
-            auto phase = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                application_end_now - state->presenter_pop_at);
-            if (phase >= std::chrono::nanoseconds::zero()) {
-                phase %= period;
-                auto& ring = state->application_completion_phase;
-                ring[state->application_completion_samples % ring.size()] =
-                    phase;
-                ++state->application_completion_samples;
-            }
-        }
-    }
     // Every image of the application's that this frame names was released
     // before this call, so the counter as it stands now covers them all.
     {
