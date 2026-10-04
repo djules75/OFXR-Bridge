@@ -177,7 +177,10 @@ enum class BridgeFlightOperation : std::uint32_t {
     // a= bytes in use, b= the budget Windows gives the process, c= the
     // swapchain (0 for the session). Usage is the whole process - the game and
     // a runtime that runs inside it included - so a step's cost is the change
-    // across it, and only while nothing else is allocating.
+    // across it, and only while nothing else is allocating. Stage 10 is the
+    // first acquire of each private swapchain, for a runtime that allocates
+    // on first use; the periodic record comes every second for the first
+    // minute and every five after.
     vram_usage,
     // Once per view, when a session is created: the size the runtime
     // recommends an eye be rendered at, against the swapchains the

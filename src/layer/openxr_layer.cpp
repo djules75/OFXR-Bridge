@@ -938,6 +938,7 @@ struct SessionState {
     bool video_memory_unavailable{}; // video_memory_mutex
     // The next periodic record. The application's xrEndFrame thread only.
     std::chrono::steady_clock::time_point video_memory_poll_at{};
+    std::chrono::steady_clock::time_point video_memory_first_poll{};
     // projection_view_rect: the last rectangle recorded per swapchain, so
     // the record is written on change only. The application's xrEndFrame
     // thread only.
@@ -1632,6 +1633,8 @@ struct PrivateSwapchainState {
     XrSwapchain handle{XR_NULL_HANDLE};
     PrivateOwnershipPhase phase{PrivateOwnershipPhase::idle};
     std::uint32_t acquired_index{};
+    // vram_usage private_first_use has been written for this swapchain.
+    bool first_use_logged{};
 };
 
 // Each output alternates between private swapchains so the application can
@@ -1740,6 +1743,9 @@ enum class VideoMemoryStage : std::int64_t {
     synthesizer = 7,
     swapchain_destroyed = 8,
     periodic = 9,
+    // The first acquire of a private swapchain: a runtime that allocates
+    // on first use rather than at creation shows up here, c= the swapchain.
+    private_first_use = 10,
 };
 
 void log_video_memory(
@@ -1799,6 +1805,28 @@ void log_video_memory(
             local.CurrentUsage,
             local.Budget,
             subject);
+    } catch (...) {
+    }
+}
+
+// swapchain_image for a D3D12 image: what the runtime actually allocated
+// against what was asked for. result= DXGI format, a= swapchain, b= width
+// <<32 | height, c= mip levels<<48 | array size<<32 | resource flags.
+void log_d3d12_image_description(XrSwapchain swapchain, ID3D12Resource* image) noexcept {
+    try {
+        if (image == nullptr || !xrfg::bridge_flight_logger().enabled()) {
+            return;
+        }
+        const D3D12_RESOURCE_DESC description = image->GetDesc();
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::swapchain_image,
+            static_cast<std::int64_t>(description.Format),
+            handle_value(swapchain),
+            (static_cast<std::uint64_t>(description.Width) << 32) |
+                description.Height,
+            (static_cast<std::uint64_t>(description.MipLevels) << 48) |
+                (static_cast<std::uint64_t>(description.DepthOrArraySize) << 32) |
+                static_cast<std::uint32_t>(description.Flags));
     } catch (...) {
     }
 }
@@ -2351,6 +2379,7 @@ struct CreatedPrivateSwapchain {
             }
             output->d3d12_resources[index] = images[index].texture;
         }
+        log_d3d12_image_description(handle, output->d3d12_resources.front());
     }
     output->state.handle = handle;
     return true;
@@ -5754,6 +5783,9 @@ XrResult layer_enumerate_swapchain_images_impl(
                 return result;
             }
             resources[index] = d3d12_images[index].texture;
+        }
+        if (!bridge && !resources.empty()) {
+            log_d3d12_image_description(state->handle, resources.front());
         }
         std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
         bool resources_changed = false;
@@ -9453,6 +9485,11 @@ struct ProjectionResourceDestination {
             return false;
         }
         image.phase = PrivateOwnershipPhase::waited;
+        if (!image.first_use_logged && session != nullptr) {
+            image.first_use_logged = true;
+            log_video_memory(*session, VideoMemoryStage::private_first_use,
+                handle_value(image.handle));
+        }
         return true;
     } catch (...) {
         return false;
@@ -10857,7 +10894,15 @@ void log_video_memory_periodically(SessionState& state) noexcept {
     if (now < state.video_memory_poll_at) {
         return;
     }
-    state.video_memory_poll_at = now + std::chrono::seconds(5);
+    // Every second for the first minute: what a runtime or the game does
+    // right after arming lands inside the first few seconds.
+    if (state.video_memory_first_poll == std::chrono::steady_clock::time_point{}) {
+        state.video_memory_first_poll = now;
+    }
+    state.video_memory_poll_at = now +
+        (now - state.video_memory_first_poll < std::chrono::seconds(60)
+             ? std::chrono::seconds(1)
+             : std::chrono::seconds(5));
     log_video_memory(state, VideoMemoryStage::periodic, 0);
 }
 
