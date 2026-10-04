@@ -68,13 +68,32 @@ Total extra VRAM, both eyes:
 | 5884×4608 (27.1 Mpx) | 2.51 GB | 3.12 GB | 3.12 GB | 3.72 GB | 4.94 GB | 6.15 GB |
 
 "2X" alone means **Prefer FPS over latency** off. D3D11 means through the
-D3D11 bridge, which is on by default. These figures are worked out from what
-the bridge allocates, not measured, and assume a game rendering 8-bit colour;
-a game rendering 16-bit colour roughly doubles them.
+D3D11 bridge, which is on by default. The figures are worked out from what
+the bridge allocates and assume a game rendering 8-bit colour; a game
+rendering 16-bit colour roughly doubles them. Measured in MSFS 2024 on
+SteamVR they hold within 10%. Above the table, count about **0.12 GB per
+megapixel per eye** (0.09 GB with Prefer FPS over latency off).
 
-If you run out of VRAM, lower the game's settings or the per-eye resolution
-first. Resolution moves every column of this table. Turning **Prefer FPS over
-latency** off also saves about 20%, but costs the smoothness it buys.
+**Pimax OpenXR costs about 1.7 times the table.** Pimax Play's runtime keeps
+an extra copy of every image it is handed, so each of OFXR's private images
+costs twice on it: measured 7.0 GB against 4.2 GB on SteamVR at the same
+29 megapixels per eye. SteamVR does not do this; the other runtimes have
+not been measured yet.
+
+**Know your real per-eye resolution.** It is what your VR software asks the
+game to render, not the headset's panel and not the "100%" figure. In
+SteamVR the global resolution and a per-application resolution **multiply**:
+200% global with 199% for the game gave 8192×6412 per eye on a Crystal
+Super, four times the 100% figure, and OFXR paid for all of it. The flight
+log says what was really asked: the `view_configuration` record near the
+top holds the per-eye size.
+
+If you run out of VRAM, lower the per-eye resolution first; it moves every
+column of this table and the game's own usage with it. Turning **Prefer FPS
+over latency** off also saves about 20%, but costs the smoothness it buys.
+Since V408, OFXR stays out of **Pimax Home**, which takes the headset
+whenever a game leaves VR and used to hold OFXR's buffers at full resolution
+the whole time the game was out of VR; earlier versions let it.
 
 ## Still stuck? Send a flight log
 
