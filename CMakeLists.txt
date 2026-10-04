@@ -734,6 +734,19 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             xrfg_layer_triple_frame_gen_inline
             xrfg_layer_triple_frame_gen_presenter
             PROPERTIES TIMEOUT 60)
+        # 3X on the presenter expects every application frame to generate,
+        # and with single-swapchain rings a pair reuses both synthetic
+        # staging textures of the one before it. On WARP the synthesis runs
+        # on the CPU, and a CPU-starved machine - a GPU-less build runner -
+        # finishes it late enough that the next pair finds a destination busy
+        # and fails open, as it should. A GPU never gets there, so these run
+        # everywhere but are excluded by label where the hardware cannot
+        # keep up (.github/workflows/build.yml).
+        set_tests_properties(
+            xrfg_layer_triple_frame_gen_presenter
+            xrfg_layer_triple_steamvr-presenter
+            xrfg_layer_triple_steamvr-destroy-space
+            PROPERTIES LABELS needs_gpu_timing)
         # And through the Vulkan interop, which publishes both synthetics.
         # A Vulkan session never takes a presenter, so this is the inline
         # path; the scenario's own counts are a pair's.

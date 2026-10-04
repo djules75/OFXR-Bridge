@@ -121,9 +121,12 @@ jobs:
         shell: pwsh
         run: cmake --build build --config Release --parallel
 
+      # The runner has no GPU, so D3D12 runs on WARP in software. Tests that
+      # need a GPU's synthesis speed carry the needs_gpu_timing label (see
+      # CMakeLists.txt) and run locally only.
       - name: Test
         shell: pwsh
-        run: ctest --test-dir build -C Release --output-on-failure --timeout 300
+        run: ctest --test-dir build -C Release --output-on-failure --timeout 300 -LE needs_gpu_timing
 
       # --- Stage the release file set ----------------------------------------
 
