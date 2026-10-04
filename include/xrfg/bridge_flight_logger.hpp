@@ -179,6 +179,23 @@ enum class BridgeFlightOperation : std::uint32_t {
     // a runtime that runs inside it included - so a step's cost is the change
     // across it, and only while nothing else is allocating.
     vram_usage,
+    // Once per view, when a session is created: the size the runtime
+    // recommends an eye be rendered at, against the swapchains the
+    // application then creates. result= view index, a= recommended
+    // width<<32|height, b= the maximum, c= recommended sample count.
+    view_configuration,
+    // The rectangle a projection view draws into its swapchain, recorded
+    // whenever it differs from the last record for that swapchain. A
+    // swapchain larger than its rectangle (MSFS 2024 allocates about twice
+    // its render size) costs the layer the swapchain's size for every
+    // private image. result= array index<<8 | view index, a= swapchain,
+    // b= offset x<<32|y, c= width<<32|height.
+    projection_view_rect,
+    // The layer declined to load in this process at negotiation because its
+    // executable is in `[ofxr] excluded_processes` (Pimax Home by default).
+    // a= the executable name's length. Nothing else is recorded for the
+    // process: the loader goes on without the layer.
+    process_excluded,
 };
 
 struct BridgeFlightToken {

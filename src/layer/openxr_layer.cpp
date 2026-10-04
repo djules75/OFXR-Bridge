@@ -938,6 +938,10 @@ struct SessionState {
     bool video_memory_unavailable{}; // video_memory_mutex
     // The next periodic record. The application's xrEndFrame thread only.
     std::chrono::steady_clock::time_point video_memory_poll_at{};
+    // projection_view_rect: the last rectangle recorded per swapchain, so
+    // the record is written on change only. The application's xrEndFrame
+    // thread only.
+    std::unordered_map<XrSwapchain, std::array<std::uint64_t, 3>> logged_view_rects;
     // Held while this session cannot follow the switch, so the tray can say
     // a restart is needed.
     xrfg::implicit_layer::FixedFrameMultiplierMarker fixed_frame_multiplier;
@@ -3466,6 +3470,43 @@ template <typename Function>
     return true;
 }
 
+// view_configuration, once per view at session creation.
+void log_view_configuration(
+    const Dispatch& dispatch, XrInstance instance, XrSystemId system_id) noexcept {
+    try {
+        if (!xrfg::bridge_flight_logger().enabled() || system_id == XR_NULL_SYSTEM_ID) {
+            return;
+        }
+        PFN_xrEnumerateViewConfigurationViews enumerate = nullptr;
+        if (!load_function(
+                dispatch.get_instance_proc_addr, instance,
+                "xrEnumerateViewConfigurationViews", enumerate)) {
+            return;
+        }
+        std::array<XrViewConfigurationView, 4> views{};
+        for (auto& view : views) {
+            view.type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
+        }
+        std::uint32_t count = 0;
+        if (XR_FAILED(enumerate(
+                instance, system_id, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                static_cast<std::uint32_t>(views.size()), &count, views.data()))) {
+            return;
+        }
+        for (std::uint32_t index = 0; index < std::min<std::uint32_t>(count, 4); ++index) {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::view_configuration,
+                index,
+                (static_cast<std::uint64_t>(views[index].recommendedImageRectWidth) << 32) |
+                    views[index].recommendedImageRectHeight,
+                (static_cast<std::uint64_t>(views[index].maxImageRectWidth) << 32) |
+                    views[index].maxImageRectHeight,
+                views[index].recommendedSwapchainSampleCount);
+        }
+    } catch (...) {
+    }
+}
+
 XRAPI_ATTR XrResult XRAPI_CALL layer_get_instance_proc_addr(
     XrInstance instance,
     const char* name,
@@ -4540,6 +4581,7 @@ XrResult layer_create_session_impl(
     }
     state->handle = created_session;
     log_video_memory(*state, VideoMemoryStage::session, 0);
+    log_view_configuration(*dispatch, instance, create_info ? create_info->systemId : XR_NULL_SYSTEM_ID);
     // Optional instrumentation cannot fail an otherwise valid session.
     try {
         state->steamvr_delivery =
@@ -10771,6 +10813,40 @@ void apply_live_frame_multiplier(
     }
 }
 
+// projection_view_rect, for every view whose rectangle or array index
+// differs from the last record for its swapchain.
+void log_projection_view_rects(
+    SessionState& state, const ProjectionSnapshot& snapshot) noexcept {
+    try {
+        if (!xrfg::bridge_flight_logger().enabled()) {
+            return;
+        }
+        for (const ProjectionLayerSnapshot& layer : snapshot.layers) {
+            for (std::size_t view_index = 0; view_index < layer.views.size(); ++view_index) {
+                const XrSwapchainSubImage& sub_image = layer.views[view_index].subImage;
+                const std::array<std::uint64_t, 3> rect{
+                    static_cast<std::uint64_t>(sub_image.imageArrayIndex),
+                    (static_cast<std::uint64_t>(static_cast<std::uint32_t>(sub_image.imageRect.offset.x)) << 32) |
+                        static_cast<std::uint32_t>(sub_image.imageRect.offset.y),
+                    (static_cast<std::uint64_t>(static_cast<std::uint32_t>(sub_image.imageRect.extent.width)) << 32) |
+                        static_cast<std::uint32_t>(sub_image.imageRect.extent.height)};
+                auto& last = state.logged_view_rects[sub_image.swapchain];
+                if (last == rect) {
+                    continue;
+                }
+                last = rect;
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::projection_view_rect,
+                    static_cast<std::int64_t>((rect[0] << 8) | (view_index & 0xFFU)),
+                    handle_value(sub_image.swapchain),
+                    rect[1],
+                    rect[2]);
+            }
+        }
+    } catch (...) {
+    }
+}
+
 // A vram_usage record every five seconds of the application's frames, so a
 // report of memory growing during play has a timeline to read against.
 void log_video_memory_periodically(SessionState& state) noexcept {
@@ -11024,6 +11100,7 @@ XrResult layer_end_frame_impl(
     ProjectionMappingResult resource_mappings{};
     if (has_projection) {
         resource_mappings = build_projection_resource_mappings(current_snapshot);
+        log_projection_view_rects(*state, current_snapshot);
     } else {
         resource_mappings.reason = ProjectionMappingReason::no_projection_views;
     }
@@ -12120,6 +12197,25 @@ extern "C" __declspec(dllexport) XRAPI_ATTR XrResult XRAPI_CALL xrNegotiateLoade
             loader_info->maxInterfaceVersion < XR_CURRENT_LOADER_API_LAYER_VERSION ||
             loader_info->minApiVersion > kLayerApiVersion ||
             loader_info->maxApiVersion < kLayerApiVersion) {
+            return XR_ERROR_INITIALIZATION_FAILED;
+        }
+
+        // A refusal here is the one way to keep the layer out of a process
+        // entirely: the loader drops an implicit layer whose negotiation
+        // fails and carries on without it, so an excluded process has no
+        // hook, no history and no private swapchain from this layer.
+        const std::wstring executable =
+            xrfg::implicit_layer::current_executable_name();
+        if (xrfg::implicit_layer::executable_is_excluded(
+                executable,
+                xrfg::implicit_layer::read_excluded_processes(
+                    current_layer_directory()))) {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::process_excluded,
+                0,
+                executable.size(),
+                0,
+                0);
             return XR_ERROR_INITIALIZATION_FAILED;
         }
 

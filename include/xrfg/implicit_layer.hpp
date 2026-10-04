@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace xrfg::implicit_layer {
 
@@ -93,6 +94,25 @@ struct ConfiguredNvidiaOptions {
 // "3X Frame Gen".
 [[nodiscard]] bool read_triple_frame_gen(
     const std::filesystem::path& module_directory) noexcept;
+
+// `[ofxr] excluded_processes`: executable names, separated by ';', in which
+// the layer declines to load at negotiation. Absent, it is Pimax Home: a
+// home environment is an OpenXR application like any other, takes the
+// headset the moment a game leaves VR, and would otherwise carry the
+// layer's buffers at the headset's full resolution - about 4 GB at a
+// Crystal's - for as long as the game is out of VR, on top of the game's
+// own. Written out explicitly empty, it excludes nothing.
+inline constexpr wchar_t kDefaultExcludedProcesses[] = L"PimaxHome-Win64-Shipping.exe";
+[[nodiscard]] std::vector<std::wstring> read_excluded_processes(
+    const std::filesystem::path& module_directory) noexcept;
+
+// Whether an executable's file name is in the list, compared without case.
+[[nodiscard]] bool executable_is_excluded(
+    std::wstring_view executable,
+    const std::vector<std::wstring>& excluded) noexcept;
+
+// This process's executable file name, without its directory.
+[[nodiscard]] std::wstring current_executable_name() noexcept;
 
 // Held by every running session that cannot follow the "3X Frame Gen"
 // switch live - one started with "Prefer FPS over latency" off, or one the

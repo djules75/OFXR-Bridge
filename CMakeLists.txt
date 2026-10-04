@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.406.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.408.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -800,6 +800,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 "-DENABLED_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_logging_enabled.ini"
                 "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/flight-logging-contract"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_flight_logging.cmake")
+
+        add_test(
+            NAME xrfg_layer_process_exclusion
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/process-exclusion"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_process_exclusion.cmake")
 
         add_test(
             NAME xrfg_layer_d3d11_interop_logging

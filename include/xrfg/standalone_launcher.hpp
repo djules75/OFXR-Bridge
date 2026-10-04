@@ -41,6 +41,10 @@ struct LauncherSettings {
     // "3X Frame Gen": two synthetic frames per application frame. Off by
     // default.
     bool triple_frame_gen{};
+    // Executables the layer declines to load in, ';'-separated; written to
+    // the layer's ini as excluded_processes. Pimax Home by default (see
+    // implicit_layer.hpp). No menu entry; edit tray.ini.
+    std::string excluded_processes{"PimaxHome-Win64-Shipping.exe"};
     // Vulkan support: generate for Vulkan sessions and register the
     // queue-serialising Vulkan layer while armed. On by default and not in
     // the menu, like d3d11_bridge: vulkan_bridge=0 in tray.ini turns it off. The
