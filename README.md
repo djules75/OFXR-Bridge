@@ -3,9 +3,10 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current release: **v0.2.10.1 (internal build V412)**.
-See the [release notes](docs/releases/0.2.10.1.md). This release cuts
-OFXR's VRAM use in every game, by about half in Vulkan games.
+Current release: **v0.2.11.1 (internal build V414)**.
+See the [release notes](docs/releases/0.2.11.1.md). This release makes frame
+pacing smooth on Virtual Desktop (Quest headsets) and stops a slow loss of
+frame rate on runtimes other than SteamVR.
 
 > [!WARNING]
 > **Pimax headsets: use SteamVR, not Pimax OpenXR.** Pimax Play's OpenXR
