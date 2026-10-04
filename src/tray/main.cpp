@@ -41,6 +41,8 @@ constexpr wchar_t kDonateMaintainerUrl[] = L"https://ko-fi.com/djules";
 // glance at the menu says generation is off. The FPS overlay's pause symbol
 // is the same colour.
 constexpr COLORREF kPausedColor = RGB(230, 115, 0);
+constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+constexpr wchar_t kRunValueName[] = L"OFXRBridgeTray";
 
 enum MenuCommand : UINT {
     toggle_arm = 90,
@@ -57,6 +59,7 @@ enum MenuCommand : UINT {
     toggle_deep_pipeline = 118,
     toggle_triple_frame_gen = 119,
     toggle_diagnostics = 120,
+    toggle_start_with_windows = 126,
     overlay_off = 121,
     overlay_upper_left = 122,
     overlay_upper_right = 123,
@@ -900,6 +903,58 @@ void change_pause_hotkey(AppState& state) {
     }
 }
 
+// "Start with Windows" is the per-user Run entry itself, not a setting in
+// tray.ini: the registry is the one place that can tell whether it is on, so
+// the menu can never disagree with what Windows will do at sign-in.
+[[nodiscard]] std::wstring startup_command() {
+    std::array<wchar_t, 32768> path{};
+    const DWORD length = GetModuleFileNameW(
+        nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (length == 0 || length >= path.size()) return {};
+    return L"\"" + std::wstring(path.data(), length) + L"\"";
+}
+
+[[nodiscard]] bool start_with_windows_enabled() {
+    HKEY key{};
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_QUERY_VALUE, &key) !=
+        ERROR_SUCCESS) {
+        return false;
+    }
+    const bool present =
+        RegQueryValueExW(key, kRunValueName, nullptr, nullptr, nullptr, nullptr) ==
+        ERROR_SUCCESS;
+    RegCloseKey(key);
+    return present;
+}
+
+[[nodiscard]] bool set_start_with_windows(bool enable, std::wstring* error) {
+    HKEY key{};
+    LONG status = RegCreateKeyExW(
+        HKEY_CURRENT_USER, kRunKey, 0, nullptr, 0,
+        KEY_SET_VALUE, nullptr, &key, nullptr);
+    if (status == ERROR_SUCCESS) {
+        if (enable) {
+            const std::wstring command = startup_command();
+            status = command.empty()
+                ? ERROR_PATH_NOT_FOUND
+                : RegSetValueExW(
+                      key, kRunValueName, 0, REG_SZ,
+                      reinterpret_cast<const BYTE*>(command.c_str()),
+                      static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+        } else {
+            status = RegDeleteValueW(key, kRunValueName);
+            if (status == ERROR_FILE_NOT_FOUND) status = ERROR_SUCCESS;
+        }
+        RegCloseKey(key);
+    }
+    if (status != ERROR_SUCCESS) {
+        SetLastError(static_cast<DWORD>(status));
+        if (error) *error = last_error_message(L"Updating the Windows startup entry");
+        return false;
+    }
+    return true;
+}
+
 void show_context_menu(AppState& state) {
     HMENU menu = CreatePopupMenu();
     HMENU backend_menu = CreatePopupMenu();
@@ -1064,6 +1119,11 @@ void show_context_menu(AppState& state) {
         }
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(overlay_menu), L"FPS overlay");
     }
+    AppendMenuW(
+        menu,
+        MF_STRING | (start_with_windows_enabled() ? MF_CHECKED : MF_UNCHECKED),
+        toggle_start_with_windows,
+        L"Start with Windows");
     AppendMenuW(menu, MF_STRING, open_logs, L"Open bridge logs");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     HMENU donate_menu = CreatePopupMenu();
@@ -1246,6 +1306,13 @@ void handle_command(AppState& state, UINT command) {
                 : L"Recording stops within a moment, with one hitch, and the "
                   L"log file is closed.");
         break;
+    case toggle_start_with_windows: {
+        std::wstring error;
+        if (!set_start_with_windows(!start_with_windows_enabled(), &error)) {
+            show_error(state.window, error);
+        }
+        break;
+    }
     case open_logs: {
         const auto directory = runtime_directory(state.local_directory);
         std::error_code ignored;
