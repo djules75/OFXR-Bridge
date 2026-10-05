@@ -319,7 +319,7 @@ inert and may be deleted manually at any time.
 ## Reporting problems
 
 Please report both working and non-working games, rendering problems, freezes
-and crashes in [GitHub Issues](https://github.com/tig3rmast3r/OFXR-Bridge/issues)
+and crashes in [GitHub Issues](https://github.com/djules75/OFXR-Bridge/issues)
 or on the [Flat2VR Modding Discord](https://discord.gg/flat2vr).
 
 Reported results are collected in the

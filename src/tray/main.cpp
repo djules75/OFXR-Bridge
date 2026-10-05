@@ -960,8 +960,8 @@ void handle_command(AppState& state, UINT command) {
         dialog.pszMainInstruction = version_label;
         dialog.pszContent =
             L"Licensed under LGPL-3.0-or-later.\r\n\r\n"
-            L"<a href=\"https://github.com/tig3rmast3r/OFXR-Bridge\">"
-            L"github.com/tig3rmast3r/OFXR-Bridge</a>";
+            L"<a href=\"https://github.com/djules75/OFXR-Bridge\">"
+            L"github.com/djules75/OFXR-Bridge</a>";
         dialog.hMainIcon = state.disarmed_icon;
         dialog.pfCallback = [](
             HWND window,
@@ -983,7 +983,7 @@ void handle_command(AppState& state, UINT command) {
         if (FAILED(TaskDialogIndirect(&dialog, nullptr, nullptr, nullptr))) {
             const std::wstring message = std::wstring(version_label) +
                 L"\r\n\r\nLicense: LGPL-3.0-or-later\r\n"
-                L"https://github.com/tig3rmast3r/OFXR-Bridge";
+                L"https://github.com/djules75/OFXR-Bridge";
             MessageBoxW(
                 state.window,
                 message.c_str(),
