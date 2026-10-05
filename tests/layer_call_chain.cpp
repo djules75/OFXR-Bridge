@@ -118,6 +118,8 @@ bool g_vulkan_bridge_mode = false;
 bool g_vulkan_application = false;
 bool g_inverted_vertical_fov = false;
 bool g_steamvr_runtime_mode = false;
+// Another runtime's name, for the rules the layer keys on it.
+const char* g_runtime_name_override = nullptr;
 bool g_steamvr_presenter_mode = false;
 // Set while the application is inside xrEndFrame. The layer runs its inline
 // second wait/begin/end cycle from that call on this same thread, which is
@@ -589,9 +591,11 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_properties(
     properties->runtimeVersion = XR_MAKE_VERSION(1, 0, 0);
     strcpy_s(
         properties->runtimeName,
-        g_steamvr_runtime_mode
-            ? "SteamVR/OpenXR : XRFG fake lighthouse"
-            : "XRFG fake runtime");
+        g_runtime_name_override != nullptr
+            ? g_runtime_name_override
+            : g_steamvr_runtime_mode
+                ? "SteamVR/OpenXR : XRFG fake lighthouse"
+                : "XRFG fake runtime");
     return XR_SUCCESS;
 }
 

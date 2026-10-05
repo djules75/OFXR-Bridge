@@ -35,13 +35,31 @@ std::array<std::size_t, 2> marker_pixels(
     return counts;
 }
 
+// Thrown by a scenario that ends before the Disarm sequence, to reach the
+// common teardown.
+struct FinishedEarly {};
+
 int main(int argc, char** argv) {
-    if (argc != 3 && argc != 4) return 1;
+    if (argc < 3 || argc > 6) return 1;
     const std::string mode = argv[2];
     // "pause" as the third argument drives the tray's reversible pause in
     // place of the Disarm, and resumes afterwards.
     const bool pause_test = argc == 4 && std::string(argv[3]) == "pause";
-    const std::string marker_mode = argc == 4 && !pause_test ? argv[3] : "";
+    // "frame-loop <runtime> <single|split> [paused]": that a session which
+    // does not pipeline its waits stays inline on Virtual Desktop and Pimax
+    // OpenXR whatever its pairs measure, and that another runtime still
+    // promotes it on bunched pairs.
+    const bool frame_loop_test = mode == "frame-loop";
+    if (frame_loop_test && argc != 5 && argc != 6) return 1;
+    const std::string loop_runtime = frame_loop_test ? argv[3] : "";
+    const bool split_loop = frame_loop_test && std::string(argv[4]) == "split";
+    const bool start_paused = frame_loop_test && argc == 6;
+    if (loop_runtime == "virtual-desktop") g_runtime_name_override = "VirtualDesktopXR (Bundled)";
+    else if (loop_runtime == "pimax") g_runtime_name_override = "Pimax OpenXR";
+    else if (loop_runtime == "other") g_runtime_name_override = "XRFG fake runtime";
+    else if (frame_loop_test) return 1;
+    const std::string marker_mode =
+        argc == 4 && !pause_test && !frame_loop_test ? argv[3] : "";
     if (!marker_mode.empty() && (mode != "d3d11" ||
         (marker_mode != "on" && marker_mode != "off" && marker_mode != "hidden"))) return 1;
     g_flight_simulator_mode = mode == "flight";
@@ -74,10 +92,11 @@ int main(int argc, char** argv) {
         std::filesystem::copy_file(argv[1], dll);
         signal = xrfg::implicit_layer::create_arm_signal(manifest);
         require(signal != nullptr, "create isolated arm signal");
-        if (pause_test) {
+        if (pause_test || start_paused) {
             pause_signal = xrfg::implicit_layer::create_pause_signal(manifest);
             require(pause_signal != nullptr, "create isolated pause signal");
         }
+        if (start_paused) require(SetEvent(pause_signal) != FALSE, "pause before the session");
         const auto control = xrfg::implicit_layer::arm_signal_name(manifest);
         std::string ascii_control;
         for (const wchar_t c : control) ascii_control.push_back(static_cast<char>(c));
@@ -210,6 +229,59 @@ int main(int argc, char** argv) {
             g_application_in_end_frame.store(false, std::memory_order_release);
             require(XR_SUCCEEDED(end_result), "end frame");
         };
+        if (frame_loop_test) {
+            // The split loop: the wait and the begin on this thread, the
+            // submission on another, one after the other - No Man's Sky's
+            // shape. The fake runtime does not block a wait, so every inline
+            // pair is bunched: the evidence that used to promote any session
+            // after thirty of them.
+            const auto frame = [&](bool expect_native, const char* what) {
+                XrFrameState state{XR_TYPE_FRAME_STATE};
+                require(XR_SUCCEEDED(wait(session, nullptr, &state)), what);
+                if (expect_native)
+                    require(state.predictedDisplayPeriod == kFakeDisplayPeriod, what);
+                require(XR_SUCCEEDED(begin(session, nullptr)), what);
+                capture();
+                if (split_loop) {
+                    std::exception_ptr failure;
+                    std::thread render([&] {
+                        try { submit(state.predictedDisplayTime); }
+                        catch (...) { failure = std::current_exception(); }
+                    });
+                    render.join();
+                    if (failure) std::rethrow_exception(failure);
+                } else {
+                    submit(state.predictedDisplayTime);
+                }
+                require(wait_for_queue_idle(), "frame GPU retirement");
+                return state.predictedDisplayPeriod;
+            };
+            if (start_paused) {
+                for (int i = 0; i < 8; ++i) frame(true, "paused frame at the native period");
+                require(g_synthetic_release_calls.load() == 0, "nothing generated while paused");
+                require(ResetEvent(pause_signal) != FALSE, "resume");
+            }
+            // Past the thirty pairs the bunched-pair detector needs.
+            int presenter_at = -1;
+            for (int i = 0; i < 45; ++i) {
+                const XrDuration period = frame(false, "generating frame");
+                if (presenter_at < 0 && period == kFakeDisplayPeriod * 2) presenter_at = i;
+            }
+            require(g_synthetic_release_calls.load() > 0, "generation ran");
+            std::cout << "frame loop " << loop_runtime << (split_loop ? " split" : " single")
+                      << (start_paused ? " paused" : "") << ": presenter at frame "
+                      << presenter_at << std::endl;
+            const bool decided_by_shape = loop_runtime != "other";
+            if (!decided_by_shape && start_paused) return 1; // not a scenario
+            if (decided_by_shape)
+                require(presenter_at < 0,
+                    "stays inline on this runtime whatever the pairs measure");
+            else
+                require(presenter_at >= 25,
+                    "another runtime still promotes on bunched pairs, and not before");
+            result = 0;
+            throw FinishedEarly{};
+        }
         XrFrameState current{XR_TYPE_FRAME_STATE};
         require(XR_SUCCEEDED(wait(session, nullptr, &current)), "first wait");
         // One more warm-up frame than the promotion needs on its own: the frame
@@ -347,6 +419,7 @@ int main(int argc, char** argv) {
                       << synthetic[0] << '/' << synthetic[1] << " purple pixels; originals clean\n";
         }
         result = 0;
+    } catch (const FinishedEarly&) {
     } catch (const std::exception& error) { std::cerr << mode << ": " << error.what() << '\n'; }
     if (session && end_session) end_session(session);
     if (swapchain && destroy_swapchain) destroy_swapchain(swapchain);

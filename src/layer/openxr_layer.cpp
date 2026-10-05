@@ -523,6 +523,23 @@ struct Dispatch {
     // Virtual Desktop's own runtime (VDXR). Its presenter is paced on the
     // steady_clock grid rather than the floor; see pace_presenter_submission.
     bool virtual_desktop_runtime{};
+    // Virtual Desktop's runtime or Pimax Play's ("Pimax OpenXR"): the two
+    // where a session's mode is fixed by the application's frame loop and by
+    // nothing measured. A title that waits for its next frame inside the
+    // current one takes the presenter, as on every runtime; every other
+    // title stays inline for the whole session.
+    //
+    // They went by the bunched-pair detector before, and on these runtimes
+    // its evidence was an accident of the session: the same title produced
+    // the thirty pairs at a stall 46 seconds in on one run, in the first half
+    // second after a resume on another, and never on a third. And the
+    // presenter it switched to was not the better mode there. No Man's Sky at
+    // 144 Hz on the presenter ran the GPU out of room in a heavy scene -
+    // synthetics held three periods for their pixels, fifteen continuity
+    // resets a second, a quarter of the application's frames without a
+    // synthetic - where inline, which holds the application's thread and so
+    // its rate, gave a steady 55 and a synthetic for every one of them.
+    bool inline_unless_pipelined{};
     XrVersion runtime_version{};
     std::string runtime_name;
 };
@@ -4534,6 +4551,10 @@ XrResult layer_create_api_layer_instance_impl(
             dispatch->virtual_desktop_runtime =
                 std::string_view(dispatch->runtime_name).find(
                     "VirtualDesktopXR") != std::string_view::npos;
+            dispatch->inline_unless_pipelined =
+                dispatch->virtual_desktop_runtime ||
+                std::string_view(dispatch->runtime_name).find(
+                    "Pimax OpenXR") != std::string_view::npos;
         }
     }
     xrfg::bridge_flight_logger().event(
@@ -12533,7 +12554,8 @@ XrResult layer_end_frame_impl(
                     state,
                     current_cycle) ||
                 runtime_wait_lacks_pacing(state) ||
-                inline_pair_lands_in_one_scanout(state, inline_pair_gap))) {
+                (!state->dispatch->inline_unless_pipelined &&
+                 inline_pair_lands_in_one_scanout(state, inline_pair_gap)))) {
         // Request the promotion; do not perform it here. submit_current_cycle
         // has already submitted this frame, so seeding a freshly started
         // presenter thread with it handed a second owner to composition layers

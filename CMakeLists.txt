@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.421.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.423.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -559,6 +559,18 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             add_test(NAME xrfg_manual_pause_${mode} COMMAND xrfg_layer_manual_disarm_tests
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> ${mode} pause)
             set_tests_properties(xrfg_manual_pause_${mode} PROPERTIES TIMEOUT 30)
+        endforeach()
+        # Virtual Desktop and Pimax OpenXR keep a session that does not
+        # pipeline its waits inline, and another runtime still goes by the
+        # bunched-pair measurement.
+        foreach(shape
+                "virtual-desktop;split" "virtual-desktop;split;paused"
+                "virtual-desktop;single" "pimax;split" "pimax;single"
+                "other;single")
+            string(REPLACE ";" "_" shape_name "${shape}")
+            add_test(NAME xrfg_frame_loop_${shape_name} COMMAND xrfg_layer_manual_disarm_tests
+                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> frame-loop ${shape})
+            set_tests_properties(xrfg_frame_loop_${shape_name} PROPERTIES TIMEOUT 60)
         endforeach()
         foreach(marker on off hidden)
             add_test(NAME xrfg_layer_marker_d3d11_${marker} COMMAND xrfg_layer_manual_disarm_tests
