@@ -3,8 +3,9 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current release: **v0.2.12.1 (internal build V426)**.
-See the [release notes](docs/releases/0.2.12.1.md). This release lets you
+Current release: **v0.2.12.2 (internal build V427)**.
+See the [release notes](docs/releases/0.2.12.2.md). 0.2.12.2 removes a
+flicker in the left eye in MSFS 2024 with 3X Frame Gen. 0.2.12.1 lets you
 pause and resume frame generation while you play, from the tray or with a
 key you choose, switch the flight recorder on in a running game, and get the
 same behaviour every session on Virtual Desktop and Pimax OpenXR. It also
@@ -245,6 +246,18 @@ rate, the normal 2X mode looks better: leave this off.
 - **Games:** D3D12, D3D11 (through the D3D11 bridge, on by default) and
   Vulkan. Tested in MSFS 2024, The Callisto Protocol, Cyberpunk 2077 and
   No Man's Sky.
+
+### D3D12 games
+
+Since 0.2.12.2 the bridge takes its copy of each eye's image when the game
+ends its frame, not when the game hands each eye over. A game that hands the
+first eye over before it has finished drawing it otherwise gave the bridge a
+picture of that eye that was one frame old, which showed as flicker in one
+eye only: reported in MSFS 2024 with 3X Frame Gen.
+
+There is no menu entry. To go back to the earlier behaviour for diagnosis,
+close the tray, set `capture_at_end_frame=0` under `[tray]` in
+`%LOCALAPPDATA%\OFXR Bridge\tray.ini` and start the tray again.
 
 ### D3D11 games
 
