@@ -742,10 +742,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         # and fails open, as it should. A GPU never gets there, so these run
         # everywhere but are excluded by label where the hardware cannot
         # keep up (.github/workflows/build.yml).
+        # The two pipelined (flight-simulator) scenarios expect the same and
+        # have failed the same way on the runner, only less often.
         set_tests_properties(
             xrfg_layer_triple_frame_gen_presenter
             xrfg_layer_triple_steamvr-presenter
             xrfg_layer_triple_steamvr-destroy-space
+            xrfg_layer_triple_flight-simulator
+            xrfg_layer_triple_flight-destroy-swapchain
             PROPERTIES LABELS needs_gpu_timing)
         # And through the Vulkan interop, which publishes both synthetics.
         # A Vulkan session never takes a presenter, so this is the inline
