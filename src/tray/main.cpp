@@ -34,7 +34,9 @@ constexpr UINT_PTR kTrayId = 1;
 constexpr int kPauseHotkeyId = 1;
 constexpr UINT kArmPollMilliseconds = 250;
 constexpr std::uint32_t kImplementationVersion = XRFG_IMPLEMENTATION_VERSION;
-constexpr wchar_t kDonateUrl[] = L"https://ko-fi.com/tig3rmast3r";
+// One Donate entry each, creator first, as in the About box and the README.
+constexpr wchar_t kDonateCreatorUrl[] = L"https://ko-fi.com/tig3rmast3r";
+constexpr wchar_t kDonateMaintainerUrl[] = L"https://ko-fi.com/djules";
 // The pause symbol beside the menu's "Resume frame generation", orange so a
 // glance at the menu says generation is off. The FPS overlay's pause symbol
 // is the same colour.
@@ -61,7 +63,8 @@ enum MenuCommand : UINT {
     overlay_lower_left = 124,
     overlay_lower_right = 125,
     open_logs = 130,
-    donate = 139,
+    donate_creator = 138,
+    donate_maintainer = 139,
     show_about = 140,
     exit_application = 150,
 };
@@ -1063,7 +1066,14 @@ void show_context_menu(AppState& state) {
     }
     AppendMenuW(menu, MF_STRING, open_logs, L"Open bridge logs");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, donate, L"Donate");
+    HMENU donate_menu = CreatePopupMenu();
+    if (donate_menu) {
+        AppendMenuW(donate_menu, MF_STRING, donate_creator,
+            L"tig3rmast3r, creator of OFXR");
+        AppendMenuW(donate_menu, MF_STRING, donate_maintainer,
+            L"Djules, maintainer of 0.2.x");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(donate_menu), L"Donate");
+    }
     AppendMenuW(menu, MF_STRING, show_about, L"About");
     AppendMenuW(menu, MF_STRING, exit_application, L"Exit");
 
@@ -1244,9 +1254,12 @@ void handle_command(AppState& state, UINT command) {
             state.window, L"open", directory.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         break;
     }
-    case donate:
+    case donate_creator:
+    case donate_maintainer:
         ShellExecuteW(
-            state.window, L"open", kDonateUrl, nullptr, nullptr, SW_SHOWNORMAL);
+            state.window, L"open",
+            command == donate_creator ? kDonateCreatorUrl : kDonateMaintainerUrl,
+            nullptr, nullptr, SW_SHOWNORMAL);
         break;
     case show_about: {
         wchar_t version_label[64]{};

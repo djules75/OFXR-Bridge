@@ -3,7 +3,7 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current release: **v0.2.12.1 (internal build V425)**.
+Current release: **v0.2.12.1 (internal build V426)**.
 See the [release notes](docs/releases/0.2.12.1.md). This release lets you
 pause and resume frame generation while you play, from the tray or with a
 key you choose, switch the flight recorder on in a running game, and get the
