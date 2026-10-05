@@ -694,7 +694,10 @@ void close_pause_signal(AppState& state) {
     return true;
 }
 
-void update_runtime_options(AppState& state, bool overlay_change = false) {
+// `running_message`: what the balloon says for an option a running game
+// follows; without one the option is for the next session.
+void update_runtime_options(
+    AppState& state, const wchar_t* running_message = nullptr) {
     save_settings(state);
     if (state.armed) {
         std::wstring error;
@@ -707,7 +710,8 @@ void update_runtime_options(AppState& state, bool overlay_change = false) {
         show_balloon(
             state,
             L"OFXR options saved",
-            overlay_change ? L"The FPS overlay position updates in running applications."
+            running_message != nullptr
+                ? running_message
                 : L"The new optical-flow settings will be used by the next OpenXR session.");
     }
 }
@@ -897,7 +901,7 @@ void show_context_menu(AppState& state) {
         menu,
         MF_STRING | (state.settings.diagnostics ? MF_CHECKED : MF_UNCHECKED),
         toggle_diagnostics,
-        L"Bridge flight recorder");
+        L"Bridge flight recorder [live change]");
     HMENU overlay_menu = CreatePopupMenu();
     if (overlay_menu) {
         const struct { UINT command; xrfg::FpsOverlayPosition position; const wchar_t* text; } entries[]{
@@ -1072,11 +1076,19 @@ void handle_command(AppState& state, UINT command) {
             : command == overlay_lower_left ? xrfg::FpsOverlayPosition::lower_left
             : command == overlay_lower_right ? xrfg::FpsOverlayPosition::lower_right
             : xrfg::FpsOverlayPosition::upper_right;
-        update_runtime_options(state, true);
+        update_runtime_options(
+            state, L"The FPS overlay position updates in running applications.");
         break;
     case toggle_diagnostics:
         state.settings.diagnostics = !state.settings.diagnostics;
-        update_runtime_options(state);
+        update_runtime_options(
+            state,
+            state.settings.diagnostics
+                ? L"Recording starts within a moment, in running games too, "
+                  L"with one hitch. The log begins with the session's "
+                  L"start-up records."
+                : L"Recording stops within a moment, with one hitch, and the "
+                  L"log file is closed.");
         break;
     case open_logs: {
         const auto directory = runtime_directory(state.local_directory);

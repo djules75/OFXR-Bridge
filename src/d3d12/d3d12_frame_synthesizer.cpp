@@ -4780,6 +4780,35 @@ HRESULT D3D12FrameSynthesizer::reconfigure(D3D12OpticalFlowBackend backend,
       catch (...) { return E_FAIL; }
 }
 
+HRESULT D3D12FrameSynthesizer::reconfigure_gpu_timing(bool enabled) noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if (!impl_) return E_UNEXPECTED;
+        const HRESULT idle = impl_->wait_for_idle();
+        if (FAILED(idle)) return idle; // never free pending GPU work
+        std::vector<ID3D12Resource*> current, synthetic;
+        for (const auto& d : impl_->current_destinations) current.push_back(d.resource.Get());
+        for (const auto& d : impl_->synthetic_destinations) synthetic.push_back(d.resource.Get());
+        auto candidate = std::make_unique<Impl>();
+        const HRESULT result = candidate->initialize(impl_->device.Get(), impl_->queue.Get(),
+            impl_->history, current, synthetic, impl_->view_format, impl_->release_state,
+            impl_->backend, impl_->nvidia_options, enabled);
+        if (FAILED(result)) return result;
+        impl_ = std::move(candidate);
+        return S_OK;
+    } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+      catch (...) { return E_FAIL; }
+}
+
+bool D3D12FrameSynthesizer::gpu_timing_enabled() noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ && impl_->nvidia_gpu_timing_enabled;
+    } catch (...) {
+        return false;
+    }
+}
+
 HRESULT D3D12FrameSynthesizer::submit_prime(
     const D3D12HistoryCaptureTicket& current,
     std::span<const D3D12ReprojectionView> current_source_views,

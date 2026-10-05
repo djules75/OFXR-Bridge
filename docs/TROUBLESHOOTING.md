@@ -139,5 +139,9 @@ the whole time the game was out of VR; earlier versions let it.
    software (SteamVR, Pimax Play, Virtual Desktop...) and the game's name, on
    [GitHub Issues](https://github.com/djules75/OFXR-Bridge/issues) or Discord.
 
-The recorder keeps only the last part of a long session. Start the game with
-the recorder already on, and reproduce the problem early.
+You can also tick the recorder while the game is already running: it starts
+within a moment, and the log still begins with the game's start-up
+information. Untick it to close the file. The game hitches once each time.
+
+The recorder keeps only the last part of a long session, so switch it on
+shortly before the problem, or reproduce the problem early.

@@ -50,6 +50,9 @@ int main(int argc, char** argv) {
     // OpenXR whatever its pairs measure, and that another runtime still
     // promotes it on bunched pairs.
     const bool frame_loop_test = mode == "frame-loop";
+    // "recorder": the flight recorder switched on, off and on again while a
+    // session runs.
+    const bool recorder_test = mode == "recorder";
     if (frame_loop_test && argc != 5 && argc != 6) return 1;
     const std::string loop_runtime = frame_loop_test ? argv[3] : "";
     const bool split_loop = frame_loop_test && std::string(argv[4]) == "split";
@@ -229,6 +232,112 @@ int main(int argc, char** argv) {
             g_application_in_end_frame.store(false, std::memory_order_release);
             require(XR_SUCCEEDED(end_result), "end frame");
         };
+        if (recorder_test) {
+            const auto ini_path = root / L"ofxr_bridge.ini";
+            const auto logs = [&] {
+                std::vector<std::filesystem::path> found;
+                for (const auto& entry : std::filesystem::directory_iterator(root)) {
+                    if (entry.path().extension() == L".log") found.push_back(entry.path());
+                }
+                std::sort(found.begin(), found.end());
+                return found;
+            };
+            const auto read = [](const std::filesystem::path& path) {
+                std::ifstream stream(path, std::ios::binary);
+                return std::string(std::istreambuf_iterator<char>(stream), {});
+            };
+            const auto frame = [&] {
+                XrFrameState state{XR_TYPE_FRAME_STATE};
+                require(XR_SUCCEEDED(wait(session, nullptr, &state)), "recorder wait");
+                require(XR_SUCCEEDED(begin(session, nullptr)), "recorder begin");
+                capture();
+                submit(state.predictedDisplayTime);
+                require(wait_for_queue_idle(), "recorder GPU retirement");
+            };
+            // The recorder reads its setting four times a second and wants
+            // two readings alike, so a switch needs wall time, not frames.
+            const auto frames_until = [&](const auto& done, const char* what) {
+                for (int i = 0; i < 200; ++i) {
+                    frame();
+                    if (done()) return;
+                    Sleep(20);
+                }
+                throw std::runtime_error(what);
+            };
+            const auto set_recorder = [&](bool on) {
+                require(WritePrivateProfileStringW(L"diagnostics", L"logging_enabled",
+                    on ? L"1" : L"0", ini_path.c_str()) != FALSE, "write the recorder setting");
+            };
+            for (int i = 0; i < 12; ++i) { frame(); Sleep(20); }
+            require(logs().empty(), "no file while the recorder is off");
+
+            set_recorder(true);
+            frames_until([&] {
+                const auto found = logs();
+                return found.size() == 1 &&
+                    read(found[0]).find("op=recording result=1") != std::string::npos;
+            }, "the recorder starts while the session runs");
+            // Long enough for a pair's GPU timing to be read back.
+            for (int i = 0; i < 16; ++i) { frame(); Sleep(10); }
+            const auto first_path = logs().at(0);
+            const std::string first = read(first_path);
+            const auto switched_on = first.find("op=recording result=1");
+            // What the session is, from before the file existed, ahead of
+            // the switch; what it does each frame, only after it.
+            require(first.rfind("seq=1 ms=0.0", 0) == 0 &&
+                    first.find("op=logger result=") < first.find('\n'),
+                "the file opens on the process's first record, at time zero");
+            for (const char* kept : {"op=runtime_identity", "op=session_binding",
+                     "phase=E op=session_create", "op=swapchain_create",
+                     "phase=E op=synthesis_initialize"}) {
+                const auto at = first.find(kept);
+                require(at != std::string::npos && at < switched_on,
+                    "a session record from before the switch is ahead of it");
+            }
+            const auto first_frame = first.find("op=app_end_frame");
+            require(first_frame != std::string::npos && first_frame > switched_on,
+                "frames are recorded from the switch on and not before");
+            // The synthesizer is rebuilt with its GPU timing at the switch,
+            // so the timings are in a log that was not on from the start.
+            const auto rebuilt = first.find("op=embedded_configuration", switched_on);
+            const auto timed = first.find("op=synthesis_gpu_span", switched_on);
+            require(rebuilt != std::string::npos && timed != std::string::npos && timed > rebuilt,
+                "GPU timings are recorded after the switch");
+            const auto millisecond = [&](std::size_t record) {
+                const auto line = first.rfind("seq=", record);
+                return std::stod(first.substr(first.find("ms=", line) + 3));
+            };
+            require(millisecond(switched_on) > millisecond(first.find("phase=E op=session_create")) + 200.0,
+                "the session records keep the times they happened at");
+
+            set_recorder(false);
+            frames_until([&] {
+                return read(first_path).find("op=recording result=0") != std::string::npos;
+            }, "the recorder stops while the session runs");
+            const auto size_when_stopped = std::filesystem::file_size(first_path);
+            for (int i = 0; i < 6; ++i) { frame(); Sleep(20); }
+            require(std::filesystem::file_size(first_path) == size_when_stopped,
+                "nothing is written after the switch off");
+
+            set_recorder(true);
+            frames_until([&] {
+                const auto found = logs();
+                return found.size() == 2 &&
+                    read(found[1]).find("op=recording result=1") != std::string::npos;
+            }, "a second start makes a second file");
+            const auto found = logs();
+            const std::string second = read(found[0] == first_path ? found[1] : found[0]);
+            require(second.rfind("seq=1 ms=0.0", 0) == 0 &&
+                    second.find("op=runtime_identity") != std::string::npos &&
+                    second.find("op=recording result=0") != std::string::npos,
+                "the second file carries the session records and the earlier switch");
+            require(std::filesystem::file_size(first_path) == size_when_stopped,
+                "the first file is left as it was closed");
+            std::cout << "recorder: " << first.size() << " bytes in the first file, "
+                      << switched_on << " of them from before the switch" << std::endl;
+            result = 0;
+            throw FinishedEarly{};
+        }
         if (frame_loop_test) {
             // The split loop: the wait and the begin on this thread, the
             // submission on another, one after the other - No Man's Sky's

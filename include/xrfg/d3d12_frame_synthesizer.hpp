@@ -239,6 +239,13 @@ public:
     // Caller excludes presenter use and new history captures. Keeps XR destinations.
     [[nodiscard]] HRESULT reconfigure(D3D12OpticalFlowBackend backend,
         D3D12NvidiaOpticalFlowOptions options) noexcept;
+    // The same rebuild with the backend and options it has, to turn the
+    // diagnostic GPU timing on or off: its queries and readback are created
+    // with the contexts, so the flight recorder switched on in a running
+    // session has no timings until this runs. On failure the synthesizer is
+    // left exactly as it was.
+    [[nodiscard]] HRESULT reconfigure_gpu_timing(bool enabled) noexcept;
+    [[nodiscard]] bool gpu_timing_enabled() noexcept;
 
     // Returns S_OK and consumes one completed NVIDIA timing record, S_FALSE
     // when none is ready, or an error for an invalid output pointer/readback.

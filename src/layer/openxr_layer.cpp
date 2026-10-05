@@ -780,6 +780,10 @@ struct SessionState {
     // The tray's pause as last applied by apply_embedded_control, which
     // folds it into menu_enabled.
     bool pause_applied{}; // frame_call_mutex
+    // Whether the flight recorder was writing when apply_embedded_control
+    // last ran. A change rebuilds each synthesizer with or without its GPU
+    // timing, so a log switched on in a running session has the timings.
+    bool recorder_applied{}; // frame_call_mutex
     // The pause took a presenter this session had earned. The resume asks
     // for it back instead of waiting for the runtime to show the evidence
     // again: on Virtual Desktop that evidence was a transient, and a resumed
@@ -2009,7 +2013,8 @@ void log_video_memory(
 // <<32 | height, c= mip levels<<48 | array size<<32 | resource flags.
 void log_d3d12_image_description(XrSwapchain swapchain, ID3D12Resource* image) noexcept {
     try {
-        if (image == nullptr || !xrfg::bridge_flight_logger().enabled()) {
+        if (image == nullptr ||
+            !xrfg::bridge_flight_logger().keeps_session_records()) {
             return;
         }
         const D3D12_RESOURCE_DESC description = image->GetDesc();
@@ -3809,7 +3814,8 @@ template <typename Function>
 void log_view_configuration(
     const Dispatch& dispatch, XrInstance instance, XrSystemId system_id) noexcept {
     try {
-        if (!xrfg::bridge_flight_logger().enabled() || system_id == XR_NULL_SYSTEM_ID) {
+        if (!xrfg::bridge_flight_logger().keeps_session_records() ||
+            system_id == XR_NULL_SYSTEM_ID) {
             return;
         }
         PFN_xrEnumerateViewConfigurationViews enumerate = nullptr;
@@ -4741,6 +4747,7 @@ XrResult layer_create_session_impl(
     state->vulkan_support =
         xrfg::implicit_layer::read_vulkan_support(current_layer_directory());
     state->pause_applied = state->manual_control.pause_requested();
+    state->recorder_applied = xrfg::bridge_flight_logger().enabled();
     state->menu_enabled = initial_control.desired.enabled && !state->pause_applied;
     state->dlss_motion_vectors = initial_control.desired.motion_vectors == 1;
     state->control_revision = initial_control.revision;
@@ -11192,9 +11199,13 @@ void apply_embedded_control(
     bool use_continuous_presenter) {
     const auto control = xrfg::embedded::snapshot();
     const bool paused = state->manual_control.pause_requested();
+    const bool recording = xrfg::bridge_flight_logger().enabled();
     if (state->control_revision == control.revision &&
-        paused == state->pause_applied) return;
-    if (paused != state->pause_applied && use_continuous_presenter &&
+        paused == state->pause_applied &&
+        recording == state->recorder_applied) return;
+    if ((paused != state->pause_applied ||
+         recording != state->recorder_applied) &&
+        use_continuous_presenter &&
         XR_FAILED(wait_for_presenter_idle(state))) return;
     state->menu_enabled = false;
     {
@@ -11313,6 +11324,24 @@ void apply_embedded_control(
                     result = synthesis->reconfigure(backend, options);
                 }
             }
+            if (SUCCEEDED(result) &&
+                synthesis->gpu_timing_enabled() != recording) {
+                // The recorder was switched while the session runs. The
+                // rebuild costs one hitch and holds two sets of contexts for
+                // a moment; where there is no room for that it fails, and
+                // the session carries on with the synthesizer it had - a log
+                // without GPU timings, never a session without generation.
+                const HRESULT timing_result =
+                    synthesis->reconfigure_gpu_timing(recording);
+                if (FAILED(timing_result)) {
+                    xrfg::bridge_flight_logger().event(
+                        xrfg::BridgeFlightOperation::synthesis_initialize,
+                        timing_result,
+                        handle_value(state->handle),
+                        3,
+                        optical_flow_configuration_code(backend, options));
+                }
+            }
         }
         if (SUCCEEDED(result) && chain->d3d12_history) result = chain->d3d12_history->wait_for_idle();
         if (SUCCEEDED(result) && chain->frame_generation && chain->frame_generation->interop)
@@ -11339,6 +11368,7 @@ void apply_embedded_control(
     state->control_revision = control.revision;
     state->control_reconfigure_required = FAILED(result);
     state->pause_applied = paused;
+    state->recorder_applied = recording;
     state->menu_enabled = SUCCEEDED(result) && control.desired.enabled && !paused;
     if (state->menu_enabled && state->presenter_restore_after_pause) {
         state->presenter_restore_after_pause = false;
@@ -11526,7 +11556,7 @@ void apply_live_frame_multiplier(
 void log_projection_view_rects(
     SessionState& state, const ProjectionSnapshot& snapshot) noexcept {
     try {
-        if (!xrfg::bridge_flight_logger().enabled()) {
+        if (!xrfg::bridge_flight_logger().keeps_session_records()) {
             return;
         }
         for (const ProjectionLayerSnapshot& layer : snapshot.layers) {
@@ -12954,6 +12984,9 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_release_swapchain_image(
 XRAPI_ATTR XrResult XRAPI_CALL layer_end_frame(
     XrSession session,
     const XrFrameEndInfo* end_info) {
+    // Before this frame's first record, so a frame is in the file whole or
+    // not at all.
+    xrfg::bridge_flight_logger().follow_setting();
     const auto token = xrfg::bridge_flight_logger().begin(
         xrfg::BridgeFlightOperation::application_end_frame,
         handle_value(session),

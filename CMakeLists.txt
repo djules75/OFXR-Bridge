@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.423.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.424.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -572,6 +572,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> frame-loop ${shape})
             set_tests_properties(xrfg_frame_loop_${shape_name} PROPERTIES TIMEOUT 60)
         endforeach()
+        # The flight recorder switched on, off and on again in a running
+        # session: the session records from before the switch head the file.
+        add_test(NAME xrfg_layer_live_recorder COMMAND xrfg_layer_manual_disarm_tests
+            $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> recorder)
+        set_tests_properties(xrfg_layer_live_recorder PROPERTIES TIMEOUT 60)
         foreach(marker on off hidden)
             add_test(NAME xrfg_layer_marker_d3d11_${marker} COMMAND xrfg_layer_manual_disarm_tests
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> d3d11 ${marker})

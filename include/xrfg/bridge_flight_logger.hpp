@@ -207,6 +207,12 @@ enum class BridgeFlightOperation : std::uint32_t {
     // copy, 4 a format the bridge cannot translate; negative values are the
     // failing call's result with the stage in b.
     vulkan_bridge,
+    // The recorder was switched on (result 1) or off (result 0) while the
+    // process ran. On: a the session records written ahead of this one from
+    // memory, b how many of those the memory's bound had dropped. Everything
+    // above this record in the file is from before the switch, with the
+    // times it happened at.
+    recording,
 };
 
 struct BridgeFlightToken {
@@ -225,7 +231,24 @@ public:
     void initialize(const std::filesystem::path& module_directory) noexcept;
     void shutdown() noexcept;
 
+    // Follows `[diagnostics] logging_enabled` while the process runs: starts
+    // a new file when it turns on, closes the file when it turns off. Reads
+    // the ini at most four times a second and returns at once otherwise, so
+    // it is called from every xrEndFrame.
+    //
+    // The records that describe a session - the runtime, the binding, the
+    // views, each swapchain, the synthesis configuration - are written once,
+    // when the session starts. They are kept in memory whether or not the
+    // recorder is on, and a file opened later begins with them, at the times
+    // they happened, followed by a `recording` record at the switch. A file
+    // that wraps begins with them again.
+    void follow_setting() noexcept;
+
+    // Writing to a file now. False while only the session records are kept.
     [[nodiscard]] bool enabled() const noexcept;
+    // The session records are being kept, so the code that produces one runs
+    // even while enabled() is false.
+    [[nodiscard]] bool keeps_session_records() const noexcept;
     [[nodiscard]] std::filesystem::path log_path() const;
 
     // Places a QueryPerformanceCounter value on this log's own timeline,

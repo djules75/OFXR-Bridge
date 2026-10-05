@@ -345,7 +345,11 @@ Reported results are collected in the
 Before reproducing a problem:
 
 1. Right-click the tray icon and enable **Bridge flight recorder**.
-2. Start the game and reproduce the problem once.
+2. Start the game and reproduce the problem once. The recorder can also be
+   switched on while the game is already running: recording starts within a
+   moment, and the log still begins with what was recorded when the game
+   started (your headset's runtime, the resolution, the game's graphics API).
+   The game hitches once when you switch it on or off.
 3. Close the game, then select **Open bridge logs** from the tray.
 4. Attach the newest `ofxr-bridge-flight-*.log` file to the issue.
 5. Make sure OFXR has worked on your system on at least another game before claiming that is not working for the game you are reporting
