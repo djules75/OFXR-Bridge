@@ -50,6 +50,7 @@ foreach(required IN ITEMS
         "phase=I op=vram_usage result=1 "
         "phase=I op=vram_usage result=7 "
         "phase=I op=projection_view_rect"
+        "phase=I op=deferred_capture result=0 "
         "phase=B op=downstream_first_end_frame"
         "phase=E op=downstream_first_end_frame"
         "phase=B op=internal_wait_frame"

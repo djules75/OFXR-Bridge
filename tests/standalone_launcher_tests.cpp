@@ -50,6 +50,8 @@ int main() {
         !release_defaults.d3d11_bridge ||
         !contains(default_runtime_ini, "vulkan_bridge=1") ||
         !contains(default_runtime_ini, "d3d11_bridge=1") ||
+        !release_defaults.capture_at_end_frame ||
+        !contains(default_runtime_ini, "capture_at_end_frame=1") ||
         !contains(default_runtime_ini, "[ofxr]\r\nbackend=nvidia") ||
         !contains(default_runtime_ini, "motion_vectors=dlss") ||
         !contains(default_runtime_ini, "nvidia_preset=medium") ||
@@ -88,6 +90,7 @@ int main() {
     settings.vulkan_session_bridge = false;
     settings.vulkan_support = false;
     settings.d3d11_bridge = false;
+    settings.capture_at_end_frame = false;
     settings.diagnostics = true;
     settings.pause_hotkey = "shift+scrolllock";
     const std::string serialized = serialize_settings(settings);
@@ -99,7 +102,9 @@ int main() {
         !parsed.triple_frame_gen ||
         parsed.excluded_processes != "Home.exe; Other-Shipping.exe" ||
         parsed.single_swapchain_rings || parsed.vulkan_session_bridge ||
-        parsed.vulkan_support || parsed.d3d11_bridge || !parsed.diagnostics) {
+        parsed.vulkan_support || parsed.d3d11_bridge ||
+        parsed.capture_at_end_frame || !parsed.diagnostics ||
+        !contains(build_runtime_ini(parsed), "capture_at_end_frame=0")) {
         std::cerr << "standalone settings round-trip failed\n";
         return 1;
     }

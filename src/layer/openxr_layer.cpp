@@ -11747,22 +11747,25 @@ XrResult layer_end_frame_impl(
     std::unique_lock frame_call_lock(state->frame_call_mutex);
     state->application_end_thread_id = GetCurrentThreadId();
     const auto application_end_now = std::chrono::steady_clock::now();
-    // Every image of the application's that this frame names was released
-    // before this call, so the counter as it stands now covers them all.
     if (state->capture_at_end_frame) {
-        // A release marks the queue where it stood at the release call. An
-        // application that submits an image's rendering after releasing it
-        // - the case capture_at_end_frame exists for - has it on the queue
-        // by now, so mark once more here and the join below covers it.
+        // The history captures this frame's releases left for here; before
+        // anything below reads last_released_capture.
+        capture_pending_end_frame_images(state);
+        // Then mark the queue once more, behind those captures, so the join
+        // below covers them and whatever the application submitted after
+        // its releases - the case capture_at_end_frame exists for. The mark
+        // has to follow the capture, as it does at a release: the capture
+        // moves the application's image through a copy state, and a runtime
+        // on the binding queue that began reading the image before the
+        // capture had run would be reading it under that transition.
         mark_application_release(state.get());
     }
+    // Every image of the application's that this frame names was released
+    // before this call, so the counter as it stands now covers them all.
     {
         std::scoped_lock join_lock(state->binding_join_mutex);
         state->app_end_frame_release_value = state->app_release_counter;
     }
-    // The history captures this frame's releases left for here; before
-    // anything below reads last_released_capture.
-    capture_pending_end_frame_images(state);
     const bool frame_had_overlapping_wait =
         state->application_frame_has_overlapping_wait;
     const bool pipelined_presenter_mode = state->pipelined_presenter_mode;
