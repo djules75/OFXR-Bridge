@@ -1,7 +1,7 @@
 # OFXR Bridge troubleshooting
 
 > [!IMPORTANT]
-> **First, make sure you are on the latest version: 0.2.11.2.** Every
+> **First, make sure you are on the latest version: 0.2.12.1.** Every
 > release fixes problems reported here, so check the
 > [releases page](https://github.com/djules75/OFXR-Bridge/releases) before
 > anything else. The tray's menu shows the version you are running.
@@ -29,6 +29,7 @@ corner. Start the game and look at that corner in the headset.
 | No number at all | OFXR is not loaded in the game | [Table A](#a-ofxr-is-not-loaded) |
 | A **red** number | OFXR is loaded but not generating frames | [Table B](#b-ofxr-is-loaded-but-not-generating) |
 | A **green** number | OFXR is generating frames | [Table C](#c-ofxr-works-but-it-does-not-feel-better) |
+| **Two orange bars** before the number | Frame generation is paused | Choose **Resume frame generation** in the tray menu, or press the pause key (Ctrl + Alt + F7 unless you changed it) |
 
 Vulkan games (No Man's Sky, for example) show no FPS number. For those, use
 the flight recorder instead: tick **Bridge flight recorder** in the tray, play
@@ -54,7 +55,8 @@ not loaded (Table A).
 | The game uses OpenGL | Not supported. |
 | Too many swapchains for SteamVR (some UEVR games, often with depth submission on) | Turn off **Prefer FPS over latency**, or turn off depth submission in UEVR. |
 | You disarmed OFXR from the tray | Arm it again, then restart the game. |
-| You paused frame generation from the tray (the FPS number shows two vertical bars) | Choose **Resume frame generation** in the tray menu. No restart needed. |
+| You paused frame generation, from the tray or with the pause key (the FPS number shows two orange bars) | Choose **Resume frame generation** in the tray menu, or press the key again. No restart needed. |
+| Generation stops and starts by itself while you play | The pause key (Ctrl + Alt + F7 by default) is also a key your game or a mod uses. Choose another under **Current key binding** in the tray menu. |
 | Something else | Send a flight log (see below). |
 
 ## C. OFXR works, but it does not feel better
@@ -67,6 +69,7 @@ not loaded (Table A).
 | Your VR software's own frame smoothing is on | Turn it off, it fights OFXR: **SteamVR** Motion Smoothing and "fixed frame rate at half" (per-application video settings), **Virtual Desktop** SSW, **Pimax Play** Smart Smoothing, **Pico Streaming Assistant** Frame Interpolation. |
 | Your GPU runs out of VRAM | OFXR needs extra video memory on top of the game (see [How much VRAM OFXR uses](#how-much-vram-ofxr-uses)). Signs: stutter, sudden drops, or a crash, often after a few minutes. Lower the game's settings or the per-eye resolution first. |
 | 3X doesn't switch while you play | The game was started with **Prefer FPS over latency** off. Restart the game. |
+| The number stops short of the refresh rate (110 to 115 at 120 Hz, for example), although the game runs above half of it without OFXR | Generating frames costs GPU time too, so the game needs some headroom above half the refresh rate. Lower the refresh rate, the per-eye resolution or the optical-flow resolution. Example: No Man's Sky ran at 94 FPS without OFXR; OFXR gave an even 100 at 100 Hz and 113 to 115 at 120 Hz, because a real frame plus a generated one took about 17.7 ms and 120 Hz allows 16.7. |
 | Dips only in heavy scenes | Disarm OFXR and play the same scene. If the dips are still there, lower the per-eye resolution: OFXR can't make up frames the game doesn't render. |
 | You want to know whether a problem comes from OFXR | **Disarm** and restart the game. **Pause frame generation** is not enough: a paused game still runs through OFXR, it only stops making extra frames. |
 

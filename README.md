@@ -3,10 +3,12 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current release: **v0.2.11.2 (internal build V416)**.
-See the [release notes](docs/releases/0.2.11.2.md). This release removes
-ghosting in dark scenes, makes frame pacing smooth on Virtual Desktop (Quest
-headsets) and stops a slow loss of frame rate on runtimes other than SteamVR.
+Current release: **v0.2.12.1 (internal build V425)**.
+See the [release notes](docs/releases/0.2.12.1.md). This release lets you
+pause and resume frame generation while you play, from the tray or with a
+key you choose, switch the flight recorder on in a running game, and get the
+same behaviour every session on Virtual Desktop and Pimax OpenXR. It also
+fixes a black screen while some games load.
 
 > [!WARNING]
 > **Pimax headsets: use SteamVR, not Pimax OpenXR.** Pimax Play's OpenXR
@@ -80,7 +82,8 @@ The current build provides:
 - a tray icon that arms the bridge as soon as it starts, with manual
   Arm/Disarm
 - **Pause frame generation**: switch generation off and back on while you
-  play, without restarting the game
+  play, without restarting the game, from the tray or with a key
+  (Ctrl + Alt + F7 by default, changed from the tray menu)
 - **Prefer FPS over latency** (on by default): one frame of extra latency in
   exchange for reaching full frame rate from half, with smoother dips
 - **3X Frame Gen** (off by default): two generated frames per game frame,
@@ -97,7 +100,8 @@ The current build provides:
 - eye tracking that keeps working alongside Cheeky Foveated DLSS
 - an optional transparent in-headset FPS number with four corner positions;
   green means recent synthetic submissions and red means inactive generation
-- an optional bridge flight recorder for diagnostics
+- an optional bridge flight recorder for diagnostics, which can be switched
+  on and off while you play
 
 OFXR Bridge uses color-only optical flow. It does not receive game motion
 vectors or depth, so artifacts around moving objects, disocclusions and head
@@ -109,23 +113,37 @@ rotation are still possible.
 2. Extract the complete archive to a writable folder.
 3. Run `OFXRBridgeTray.exe`. The bridge arms itself straight away.
 4. Right-click the tray icon to choose the optical-flow backend and options.
-   Most options take effect the next time the game starts.
+   Most options take effect the next time the game starts. Pause, 3X Frame
+   Gen, the FPS overlay position and the flight recorder change in a running
+   game.
 5. Start the game normally. For injectors such as UEVR, start the tray before
    the game and leave it armed while the VR mod is injected.
 6. Select **Disarm bridge** or close the tray application when finished.
 
+### Pause and resume
+
 To compare with and without generated frames while you play, use **Pause
 frame generation** in the tray menu. The entry turns into **Resume frame
 generation** with an orange pause symbol, and the FPS number in the headset
-shows the same symbol (two vertical bars) until you resume. A paused game still runs through the
-bridge: to rule OFXR out of a problem, disarm it and restart the game
-instead. Every arm starts resumed.
+shows the same symbol (two vertical bars) until you resume. Every arm starts
+resumed.
 
-**Ctrl+Alt+F7** does the same from inside the game, while the bridge is
+A paused game still runs through the bridge: it only stops making extra
+frames. To rule OFXR out of a problem, disarm it and restart the game
+instead.
+
+**Ctrl + Alt + F7** does the same from inside the game, while the bridge is
 armed. To change the key, select **Current key binding** in the tray menu,
-press the keys you want and confirm; **No key** turns it off. The game still
-sees the key press, so pick keys your game and mods do not use. The setting
-is `pause_hotkey` under `[tray]` in `%LOCALAPPDATA%\OFXR Bridge\tray.ini`.
+press the key or keys you want and confirm:
+
+- any key works, with or without Ctrl, Alt and Shift;
+- **Default** goes back to Ctrl + Alt + F7 and **No key** turns the key off;
+- a combination another program already uses is refused.
+
+The game still sees the key press, so pick keys your game and mods do not
+use. A key used on its own, without Ctrl, Alt or Shift, stops working in
+every other program while the bridge is armed. The setting is `pause_hotkey`
+under `[tray]` in `%LOCALAPPDATA%\OFXR Bridge\tray.ini`.
 
 If arming fails at start-up, the tray shows the reason and stays disarmed;
 select **Arm bridge until manual disarm** to retry.
@@ -310,6 +328,37 @@ For the best results on SteamVR:
   frames the game does not render. Pausing is not enough for this test: a
   paused game still runs through the bridge.
 
+### Virtual Desktop and Pimax OpenXR users
+
+On these two runtimes the bridge chooses how it sends frames once, from how
+the game itself is built, and keeps that choice for the whole session. A
+given game behaves the same way every time; earlier versions could switch in
+the middle of a session when the game stalled, and stay that way.
+
+### When the number stops short of the refresh rate
+
+Generating frames costs GPU time too, so a game needs some headroom above
+half the refresh rate, on every runtime. Each pair of frames is one frame
+from the game plus the optical flow and the generated frame, and the pair
+has to fit in two display refreshes.
+
+An example from our test machine, No Man's Sky on Virtual Desktop, which
+runs at 94 FPS without the bridge:
+
+| Refresh rate | Time allowed per pair | Result |
+|---|---|---|
+| 100 Hz | 20.0 ms | an even 100 |
+| 120 Hz | 16.7 ms | 113 to 115 |
+| 144 Hz | 13.9 ms | about 110 |
+
+A pair took about 17.7 ms there: about 10.5 ms for the game's frame, about
+5 ms of optical flow and generation, and the rest in handing the extra frame
+over. That fits at 100 Hz and not above.
+
+If your number stops short like this, lower the refresh rate, the per-eye
+resolution or the optical-flow resolution. The refresh rate where the number
+reaches the refresh rate is the one to play at.
+
 ### How much VRAM the bridge uses
 
 See the VRAM table in [Troubleshooting](docs/TROUBLESHOOTING.md#how-much-vram-ofxr-uses).
@@ -345,10 +394,11 @@ Before reproducing a problem:
 
 1. Right-click the tray icon and enable **Bridge flight recorder**.
 2. Start the game and reproduce the problem once. The recorder can also be
-   switched on while the game is already running: recording starts within a
-   moment, and the log still begins with what was recorded when the game
-   started (your headset's runtime, the resolution, the game's graphics API).
-   The game hitches once when you switch it on or off.
+   switched on while the game is already running, right when the problem
+   shows up: recording starts within a moment, and the log still begins with
+   what was noted when the game started (your headset's runtime, the
+   resolution, the game's graphics API). The game hitches once when you
+   switch it on or off.
 3. Close the game, then select **Open bridge logs** from the tray.
 4. Attach the newest `ofxr-bridge-flight-*.log` file to the issue.
 5. Make sure OFXR has worked on your system on at least another game before claiming that is not working for the game you are reporting
@@ -383,5 +433,9 @@ components retain their respective licenses.
 
 ## Support
 
-If you find OFXR Bridge useful and want to support its development, you can
-[support the project on Ko-fi](https://ko-fi.com/tig3rmast3r).
+If you find OFXR Bridge useful and want to support its development:
+
+- Created by tig3rmast3r, the original author of OFXR:
+  [ko-fi.com/tig3rmast3r](https://ko-fi.com/tig3rmast3r)
+- 0.2.X version maintained by Djules:
+  [ko-fi.com/djules](https://ko-fi.com/djules)
