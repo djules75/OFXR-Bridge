@@ -152,6 +152,29 @@ void pause_switch() {
     require(!test.state.paused && !signalled(), "pause key resumes");
     SendMessageW(window, WM_HOTKEY, kPauseHotkeyId, 0);
     require(test.state.paused && signalled(), "pause key pauses");
+    // A new key from the dialog is saved and taken at once while armed.
+    test.state.settings_path = test.state.local_directory / L"tray.ini";
+    apply_pause_hotkey(test.state, "ctrl+alt+shift+f23");
+    require(test.state.pause_hotkey_registered &&
+            test.state.settings.pause_hotkey == "ctrl+alt+shift+f23",
+        "a changed key is registered while armed");
+    {
+        std::ifstream saved(test.state.settings_path);
+        const std::string text((std::istreambuf_iterator<char>(saved)), {});
+        require(text.find("pause_hotkey=ctrl+alt+shift+f23") != std::string::npos,
+            "a changed key is saved to tray.ini");
+    }
+    require(RegisterHotKey(window, kPauseHotkeyId + 1, MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_F24) != FALSE,
+        "the old chord is given back when the key changes");
+    UnregisterHotKey(window, kPauseHotkeyId + 1);
+    require(pause_key_display("ctrl+alt+f7") == L"Ctrl + Alt + F7" &&
+            pause_key_display("off") == L"none", "the binding as the menu shows it");
+    require(hotkey_from_control(hotkey_control_value({MOD_CONTROL | MOD_ALT, VK_F7})) ==
+            xrfg::standalone::Hotkey{MOD_CONTROL | MOD_ALT, VK_F7} &&
+            hotkey_from_control(hotkey_control_value({MOD_SHIFT, VK_NEXT})) ==
+            xrfg::standalone::Hotkey{MOD_SHIFT, VK_NEXT},
+        "a chord survives the hotkey control's own encoding");
+    apply_pause_hotkey(test.state, "ctrl+alt+shift+f24");
     std::wstring error;
     require(disarm_bridge(test.state, &error), "disarm while paused");
     require(!test.state.paused && test.state.pause_signal == nullptr, "pause ends with the arm");

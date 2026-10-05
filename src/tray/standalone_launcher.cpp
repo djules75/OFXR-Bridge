@@ -282,7 +282,37 @@ constexpr HotkeyToken kHotkeyNamedKeys[]{
     {"scrolllock", "Scroll Lock", 0x91}, {"pause", "Pause", 0x13},
     {"insert", "Insert", 0x2D}, {"delete", "Delete", 0x2E},
     {"home", "Home", 0x24}, {"end", "End", 0x23},
-    {"pageup", "Page Up", 0x21}, {"pagedown", "Page Down", 0x22}};
+    {"pageup", "Page Up", 0x21}, {"pagedown", "Page Down", 0x22},
+    {"left", "Left", 0x25}, {"up", "Up", 0x26},
+    {"right", "Right", 0x27}, {"down", "Down", 0x28},
+    {"numpad0", "Num 0", 0x60}, {"numpad1", "Num 1", 0x61},
+    {"numpad2", "Num 2", 0x62}, {"numpad3", "Num 3", 0x63},
+    {"numpad4", "Num 4", 0x64}, {"numpad5", "Num 5", 0x65},
+    {"numpad6", "Num 6", 0x66}, {"numpad7", "Num 7", 0x67},
+    {"numpad8", "Num 8", 0x68}, {"numpad9", "Num 9", 0x69},
+    {"numpadmultiply", "Num *", 0x6A}, {"numpadadd", "Num +", 0x6B},
+    {"numpadsubtract", "Num -", 0x6D}, {"numpaddecimal", "Num .", 0x6E},
+    {"numpaddivide", "Num /", 0x6F}};
+
+// Any other key, by its virtual-key code: "vk" and two hex digits.
+[[nodiscard]] unsigned parse_virtual_key(const std::string& token) noexcept {
+    if (token.size() != 4 || token[0] != 'v' || token[1] != 'k') return 0;
+    unsigned value = 0;
+    for (std::size_t i = 2; i < 4; ++i) {
+        const char c = token[i];
+        const unsigned digit = c >= '0' && c <= '9' ? static_cast<unsigned>(c - '0')
+            : c >= 'a' && c <= 'f' ? static_cast<unsigned>(c - 'a' + 10)
+            : 16U;
+        if (digit > 15) return 0;
+        value = value * 16 + digit;
+    }
+    return value >= 1 && value <= 0xFE ? value : 0;
+}
+
+[[nodiscard]] std::string virtual_key_token(unsigned key) {
+    constexpr char digits[] = "0123456789abcdef";
+    return std::string("vk") + digits[(key >> 4) & 15] + digits[key & 15];
+}
 
 struct ParsedHotkey {
     Hotkey hotkey;
@@ -305,14 +335,13 @@ std::optional<ParsedHotkey> parse_hotkey_parts(std::string_view text) {
             if (token != modifier.name) continue;
             if (result.hotkey.modifiers & modifier.value) return std::nullopt;
             result.hotkey.modifiers |= modifier.value;
-            result.display += std::string(modifier.display) + "+";
+            result.display += std::string(modifier.display) + " + ";
             matched = true;
             break;
         }
         if (!matched) {
             std::string display;
             unsigned key = 0;
-            bool needs_modifier = false;
             if (token.size() >= 2 && token.size() <= 3 && token[0] == 'f' &&
                 token.find_first_not_of("0123456789", 1) == std::string::npos) {
                 const int number = std::stoi(token.substr(1));
@@ -328,7 +357,6 @@ std::optional<ParsedHotkey> parse_hotkey_parts(std::string_view text) {
                     : token[0];
                 key = static_cast<unsigned char>(upper);
                 display = std::string(1, upper);
-                needs_modifier = true;
             } else {
                 for (const auto& named : kHotkeyNamedKeys) {
                     if (token != named.name) continue;
@@ -336,9 +364,14 @@ std::optional<ParsedHotkey> parse_hotkey_parts(std::string_view text) {
                     display = std::string(named.display);
                     break;
                 }
+                if (key == 0) {
+                    key = parse_virtual_key(token);
+                    if (key != 0) {
+                        display = "Key 0x" + virtual_key_token(key).substr(2);
+                    }
+                }
             }
-            if (key == 0 || (needs_modifier && result.hotkey.modifiers == 0))
-                return std::nullopt;
+            if (key == 0) return std::nullopt;
             result.hotkey.key = key;
             result.display += display;
             have_key = true;
@@ -360,6 +393,39 @@ std::optional<Hotkey> parse_hotkey(std::string_view text) {
 std::string hotkey_display_name(std::string_view text) {
     const auto parsed = parse_hotkey_parts(text);
     return parsed ? parsed->display : std::string();
+}
+
+std::optional<std::string> hotkey_setting(Hotkey hotkey) {
+    std::string setting;
+    // "control" is a second spelling of ctrl, so one name per bit.
+    for (const auto& modifier : kHotkeyModifiers) {
+        if (modifier.name == "control") continue;
+        if (hotkey.modifiers & modifier.value) {
+            setting += std::string(modifier.name) + "+";
+        }
+    }
+    if (hotkey.key >= 0x70 && hotkey.key <= 0x87) {
+        setting += "f" + std::to_string(hotkey.key - 0x70 + 1);
+    } else if (hotkey.key >= 'A' && hotkey.key <= 'Z') {
+        setting += static_cast<char>(hotkey.key - 'A' + 'a');
+    } else if (hotkey.key >= '0' && hotkey.key <= '9') {
+        setting += static_cast<char>(hotkey.key);
+    } else {
+        bool named_key = false;
+        for (const auto& named : kHotkeyNamedKeys) {
+            if (hotkey.key != named.value) continue;
+            setting += std::string(named.name);
+            named_key = true;
+            break;
+        }
+        if (!named_key) {
+            if (hotkey.key < 1 || hotkey.key > 0xFE) return std::nullopt;
+            setting += virtual_key_token(hotkey.key);
+        }
+    }
+    // One rule for what is allowed: the parser's.
+    if (parse_hotkey(setting) != hotkey) return std::nullopt;
+    return setting;
 }
 
 std::string build_vulkan_layer_manifest(

@@ -115,14 +115,33 @@ int main() {
         parse_hotkey("f24") != Hotkey{0, 0x87} ||
         parse_hotkey("ctrl+shift+p") != Hotkey{6, 'P'} ||
         parse_hotkey("win+0") != Hotkey{8, '0'} ||
-        hotkey_display_name("ctrl+alt+f7") != "Ctrl+Alt+F7" ||
-        hotkey_display_name("shift+pagedown") != "Shift+Page Down" ||
+        hotkey_display_name("ctrl+alt+f7") != "Ctrl + Alt + F7" ||
+        hotkey_display_name("shift+pagedown") != "Shift + Page Down" ||
+        xrfg::standalone::hotkey_setting(Hotkey{3, 0x76}) != std::string("ctrl+alt+f7") ||
+        xrfg::standalone::hotkey_setting(Hotkey{6, 'P'}) != std::string("ctrl+shift+p") ||
+        xrfg::standalone::hotkey_setting(Hotkey{4, 0x22}) != std::string("shift+pagedown") ||
+        xrfg::standalone::hotkey_setting(Hotkey{0, 0x76}) != std::string("f7") ||
+        // Whatever the user picks: a bare letter, an arrow, a numpad key,
+        // and a key with no name, by its code.
+        xrfg::standalone::hotkey_setting(Hotkey{0, 'P'}) != std::string("p") ||
+        xrfg::standalone::hotkey_setting(Hotkey{2, 0x25}) != std::string("ctrl+left") ||
+        xrfg::standalone::hotkey_setting(Hotkey{0, 0x6B}) != std::string("numpadadd") ||
+        xrfg::standalone::hotkey_setting(Hotkey{1, 0xBA}) != std::string("alt+vkba") ||
+        parse_hotkey("p") != Hotkey{0, 'P'} ||
+        parse_hotkey("7") != Hotkey{0, '7'} ||
+        parse_hotkey("Alt+VKBA") != Hotkey{1, 0xBA} ||
+        hotkey_display_name("numpad5") != "Num 5" ||
+        hotkey_display_name("alt+vkba") != "Alt + Key 0xba" ||
+        xrfg::standalone::hotkey_setting(Hotkey{2, 0}) ||
+        xrfg::standalone::hotkey_setting(Hotkey{2, 0xFF}) ||
+        std::string(xrfg::standalone::kDefaultPauseHotkey) != release_defaults.pause_hotkey ||
         !hotkey_display_name("off").empty()) {
         std::cerr << "pause hotkey parsing failed\n";
         return 1;
     }
-    for (const char* refused : {"", "off", "none", "p", "7", "ctrl", "ctrl+", "+f7",
-             "ctrl+ctrl+f7", "f7+ctrl", "f0", "f25", "ctrl+f7+f8", "ctrl+banana"}) {
+    for (const char* refused : {"", "off", "none", "ctrl", "ctrl+", "+f7",
+             "ctrl+ctrl+f7", "f7+ctrl", "f0", "f25", "ctrl+f7+f8", "ctrl+banana",
+             "vk00", "vkff", "vkzz", "vk1"}) {
         if (parse_hotkey(refused)) {
             std::cerr << "pause hotkey accepted: " << refused << '\n';
             return 1;

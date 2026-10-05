@@ -73,7 +73,7 @@ struct LauncherSettings {
     // The system-wide key for "Pause frame generation" while armed, in
     // parse_hotkey's form. No menu entry; edit tray.ini. Empty, "off" or
     // anything parse_hotkey refuses means no key.
-    std::string pause_hotkey{"ctrl+alt+f7"};
+    std::string pause_hotkey{"ctrl+alt+f7"}; // kDefaultPauseHotkey
 };
 
 // A key chord for RegisterHotKey: `modifiers` in its MOD_ALT (1),
@@ -84,13 +84,18 @@ struct Hotkey {
     bool operator==(const Hotkey&) const = default;
 };
 // "ctrl+alt+f7": '+'-separated, any case, the key last. Modifiers are ctrl,
-// alt, shift and win; keys are f1-f24, a letter, a digit, or one of
-// scrolllock, pause, insert, delete, home, end, pageup, pagedown. At least
-// one modifier is required for a letter or a digit, which would otherwise
-// take the key away from typing everywhere.
+// alt, shift and win, and none is required: the choice is the user's. Keys
+// are f1-f24, a letter, a digit, a named key (scrolllock, pause, insert,
+// delete, home, end, pageup, pagedown, left, up, right, down, numpad0-9,
+// numpadmultiply/add/subtract/decimal/divide) or any other key by its
+// virtual-key code, "vk" and two hex digits ("vkba").
 [[nodiscard]] std::optional<Hotkey> parse_hotkey(std::string_view text);
-// "Ctrl+Alt+F7", for the menu.
+// "Ctrl + Alt + F7", for the menu; empty for no key.
 [[nodiscard]] std::string hotkey_display_name(std::string_view text);
+// The tray.ini spelling of a chord, "ctrl+alt+f7", or nothing for one
+// parse_hotkey would refuse: the inverse of parse_hotkey.
+[[nodiscard]] std::optional<std::string> hotkey_setting(Hotkey hotkey);
+inline constexpr char kDefaultPauseHotkey[] = "ctrl+alt+f7";
 
 [[nodiscard]] std::string backend_ini_value(FlowBackend backend);
 [[nodiscard]] std::string nvidia_preset_ini_value(

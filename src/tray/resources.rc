@@ -3,3 +3,21 @@
 
 IDI_OFXR_DISARMED ICON "../../OFXR_disarmed.ico"
 IDI_OFXR_ARMED ICON "../../OFXR_armed.ico"
+
+// The key for "Pause frame generation". The box is the system's hotkey
+// control: it shows the keys as they are pressed.
+IDD_PAUSE_KEY DIALOGEX 0, 0, 240, 150
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "OFXR Bridge - Pause / Resume key"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "Press the key or keys you want to use to pause and resume frame generation, for example Ctrl + Alt + F7 or F9 on its own.", -1, 10, 8, 220, 18
+    CONTROL "", IDC_PAUSE_KEY_HOTKEY, "msctls_hotkey32", WS_BORDER | WS_TABSTOP, 10, 32, 220, 14
+    LTEXT "", IDC_PAUSE_KEY_STATUS, 10, 50, 220, 18
+    LTEXT "The game still sees the key press, so choose keys your game and its mods do not use.", -1, 10, 72, 220, 18
+    LTEXT "A key used on its own, without Ctrl, Alt or Shift, stops working in every other program while OFXR is armed.", -1, 10, 94, 220, 18
+    PUSHBUTTON "Default", IDC_PAUSE_KEY_DEFAULT, 10, 126, 46, 14
+    PUSHBUTTON "No key", IDC_PAUSE_KEY_NONE, 60, 126, 46, 14
+    DEFPUSHBUTTON "OK", IDOK, 134, 126, 46, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 184, 126, 46, 14
+END

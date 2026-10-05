@@ -122,11 +122,10 @@ bridge: to rule OFXR out of a problem, disarm it and restart the game
 instead. Every arm starts resumed.
 
 **Ctrl+Alt+F7** does the same from inside the game, while the bridge is
-armed. To change the key, close the tray, edit `pause_hotkey` under `[tray]`
-in `%LOCALAPPDATA%\OFXR Bridge\tray.ini` (for example
-`pause_hotkey=ctrl+shift+f9`, or `pause_hotkey=off` for no key), and start
-the tray again. The game still sees the key press, so pick one your game
-and mods do not use.
+armed. To change the key, select **Current key binding** in the tray menu,
+press the keys you want and confirm; **No key** turns it off. The game still
+sees the key press, so pick keys your game and mods do not use. The setting
+is `pause_hotkey` under `[tray]` in `%LOCALAPPDATA%\OFXR Bridge\tray.ini`.
 
 If arming fails at start-up, the tray shows the reason and stays disarmed;
 select **Arm bridge until manual disarm** to retry.

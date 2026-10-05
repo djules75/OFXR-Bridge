@@ -43,6 +43,7 @@ constexpr COLORREF kPausedColor = RGB(230, 115, 0);
 enum MenuCommand : UINT {
     toggle_arm = 90,
     toggle_pause = 91,
+    change_pause_key = 92,
     backend_fidelity_fx = 110,
     backend_nvidia_slow = 111,
     backend_nvidia_medium = 112,
@@ -753,6 +754,149 @@ void update_runtime_options(
     return bitmap;
 }
 
+// What the "Current key binding" entry and the dialog call a setting.
+[[nodiscard]] std::wstring pause_key_display(std::string_view setting) {
+    const std::string name = xrfg::standalone::hotkey_display_name(setting);
+    if (name.empty()) return L"none";
+    return std::wstring(name.begin(), name.end());
+}
+
+// The dialog's own state: the setting it opened on and the one it closed on.
+struct PauseKeyDialog {
+    std::string setting;
+};
+
+// The hotkey control's value for a chord, and back. Its modifier flags are
+// not RegisterHotKey's, and it marks the navigation keys as extended.
+[[nodiscard]] WORD hotkey_control_value(const xrfg::standalone::Hotkey& hotkey) {
+    BYTE flags = 0;
+    if (hotkey.modifiers & MOD_SHIFT) flags |= HOTKEYF_SHIFT;
+    if (hotkey.modifiers & MOD_CONTROL) flags |= HOTKEYF_CONTROL;
+    if (hotkey.modifiers & MOD_ALT) flags |= HOTKEYF_ALT;
+    switch (hotkey.key) {
+    case VK_INSERT: case VK_DELETE: case VK_HOME: case VK_END:
+    case VK_PRIOR: case VK_NEXT:
+    case VK_LEFT: case VK_UP: case VK_RIGHT: case VK_DOWN:
+    case VK_DIVIDE: case VK_NUMLOCK:
+        flags |= HOTKEYF_EXT;
+        break;
+    default:
+        break;
+    }
+    return MAKEWORD(static_cast<BYTE>(hotkey.key), flags);
+}
+
+[[nodiscard]] xrfg::standalone::Hotkey hotkey_from_control(WORD value) {
+    xrfg::standalone::Hotkey hotkey;
+    hotkey.key = LOBYTE(value);
+    const BYTE flags = HIBYTE(value);
+    if (flags & HOTKEYF_SHIFT) hotkey.modifiers |= MOD_SHIFT;
+    if (flags & HOTKEYF_CONTROL) hotkey.modifiers |= MOD_CONTROL;
+    if (flags & HOTKEYF_ALT) hotkey.modifiers |= MOD_ALT;
+    return hotkey;
+}
+
+INT_PTR CALLBACK pause_key_dialog_procedure(
+    HWND dialog, UINT message, WPARAM wparam, LPARAM lparam) {
+    constexpr int kAvailabilityProbeId = 0x7F01;
+    const HWND box = GetDlgItem(dialog, IDC_PAUSE_KEY_HOTKEY);
+    const auto show = [&](const std::string& setting) {
+        const auto hotkey = xrfg::standalone::parse_hotkey(setting);
+        SendMessageW(box, HKM_SETHOTKEY, hotkey ? hotkey_control_value(*hotkey) : 0, 0);
+    };
+    switch (message) {
+    case WM_INITDIALOG: {
+        SetWindowLongPtrW(dialog, DWLP_USER, lparam);
+        const auto* state = reinterpret_cast<const PauseKeyDialog*>(lparam);
+        // No rules on the box: any key, with or without modifiers, is the
+        // user's to choose. The dialog's text says what a bare key costs.
+        show(state->setting);
+        SetDlgItemTextW(dialog, IDC_PAUSE_KEY_STATUS,
+            (L"Current key binding: " + pause_key_display(state->setting)).c_str());
+        SetForegroundWindow(dialog);
+        SetFocus(box);
+        return FALSE; // the focus is set
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wparam)) {
+        case IDC_PAUSE_KEY_DEFAULT:
+            show(xrfg::standalone::kDefaultPauseHotkey);
+            SetFocus(box);
+            return TRUE;
+        case IDC_PAUSE_KEY_NONE:
+            SendMessageW(box, HKM_SETHOTKEY, 0, 0);
+            SetFocus(box);
+            return TRUE;
+        case IDOK: {
+            auto* state = reinterpret_cast<PauseKeyDialog*>(
+                GetWindowLongPtrW(dialog, DWLP_USER));
+            const WORD value = LOWORD(SendMessageW(box, HKM_GETHOTKEY, 0, 0));
+            if (LOBYTE(value) == 0) {
+                state->setting = "off";
+                EndDialog(dialog, IDOK);
+                return TRUE;
+            }
+            const auto hotkey = hotkey_from_control(value);
+            const auto setting = xrfg::standalone::hotkey_setting(hotkey);
+            if (!setting) {
+                SetDlgItemTextW(dialog, IDC_PAUSE_KEY_STATUS,
+                    L"That key cannot be used. Choose a different one.");
+                SetFocus(box);
+                return TRUE;
+            }
+            // Asked of the system now, while the dialog can still say so:
+            // the tray's own registration is released for as long as this
+            // dialog is open, so a refusal is another program's.
+            if (!RegisterHotKey(dialog, kAvailabilityProbeId,
+                    hotkey.modifiers | MOD_NOREPEAT, hotkey.key)) {
+                SetDlgItemTextW(dialog, IDC_PAUSE_KEY_STATUS,
+                    L"Another program already uses that combination. "
+                    L"Choose a different one.");
+                SetFocus(box);
+                return TRUE;
+            }
+            UnregisterHotKey(dialog, kAvailabilityProbeId);
+            state->setting = *setting;
+            EndDialog(dialog, IDOK);
+            return TRUE;
+        }
+        case IDCANCEL:
+            EndDialog(dialog, IDCANCEL);
+            return TRUE;
+        default:
+            return FALSE;
+        }
+    default:
+        return FALSE;
+    }
+}
+
+// Stores a new key and takes it at once if the bridge is armed.
+void apply_pause_hotkey(AppState& state, const std::string& setting) {
+    unregister_pause_hotkey(state);
+    state.settings.pause_hotkey = setting;
+    save_settings(state);
+    if (state.armed) register_pause_hotkey(state);
+    log_lifecycle(state.local_directory, L"pause-hotkey-changed");
+}
+
+void change_pause_hotkey(AppState& state) {
+    // Released while the dialog is open, or pressing the current chord in
+    // the box would pause the game instead of reaching the box.
+    unregister_pause_hotkey(state);
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_HOTKEY_CLASS};
+    InitCommonControlsEx(&controls);
+    PauseKeyDialog dialog{state.settings.pause_hotkey};
+    const INT_PTR answer = DialogBoxParamW(
+        GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_PAUSE_KEY), state.window,
+        pause_key_dialog_procedure, reinterpret_cast<LPARAM>(&dialog));
+    if (answer == IDOK) {
+        apply_pause_hotkey(state, dialog.setting);
+    } else if (state.armed) {
+        register_pause_hotkey(state);
+    }
+}
+
 void show_context_menu(AppState& state) {
     HMENU menu = CreatePopupMenu();
     HMENU backend_menu = CreatePopupMenu();
@@ -773,21 +917,20 @@ void show_context_menu(AppState& state) {
             ? L"Disarm bridge"
             : L"Arm bridge until manual disarm");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    // The key is shown only while it is held, so the menu never advertises
-    // one that another program took.
-    std::wstring pause_label =
-        state.paused ? L"Resume frame generation" : L"Pause frame generation";
-    if (state.pause_hotkey_registered) {
-        pause_label += L'\t';
-        for (const char c : xrfg::standalone::hotkey_display_name(
-                 state.settings.pause_hotkey))
-            pause_label += static_cast<wchar_t>(c);
-    }
     AppendMenuW(
         menu,
         MF_STRING | (state.armed && state.pause_signal ? MF_ENABLED : MF_GRAYED),
         toggle_pause,
-        pause_label.c_str());
+        state.paused ? L"Resume frame generation" : L"Pause frame generation");
+    // Opens the dialog that changes it. While armed, a key the system would
+    // not give the tray says so here, since it will not work.
+    std::wstring binding_label =
+        L"Current key binding: " + pause_key_display(state.settings.pause_hotkey);
+    if (state.armed && state.pause_signal && !state.pause_hotkey_registered &&
+        xrfg::standalone::parse_hotkey(state.settings.pause_hotkey)) {
+        binding_label += L" (used by another program)";
+    }
+    AppendMenuW(menu, MF_STRING, change_pause_key, binding_label.c_str());
     // Must outlive the menu, which only borrows it.
     HBITMAP pause_bitmap = state.paused ? create_pause_bitmap() : nullptr;
     if (pause_bitmap) {
@@ -970,6 +1113,9 @@ void handle_command(AppState& state, UINT command) {
             show_error(
                 state.window, last_error_message(L"Switching the frame generation pause"));
         }
+        break;
+    case change_pause_key:
+        change_pause_hotkey(state);
         break;
     case backend_fidelity_fx:
         state.settings.backend = xrfg::standalone::FlowBackend::fidelity_fx;
