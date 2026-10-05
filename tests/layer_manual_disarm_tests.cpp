@@ -259,15 +259,26 @@ int main(int argc, char** argv) {
         require(wait_for_queue_idle(), "final GPU retirement");
         if (pause_test) {
             require(ResetEvent(pause_signal) != FALSE, "signal Resume");
+            int presenter_back_at = -1;
             for (int i = 0; i < 10; ++i) {
                 XrFrameState frame{XR_TYPE_FRAME_STATE};
                 require(XR_SUCCEEDED(wait(session, nullptr, &frame)), "resumed wait");
+                if (presenter_back_at < 0 && frame.predictedDisplayPeriod == kFakeDisplayPeriod * 2)
+                    presenter_back_at = i;
                 require(XR_SUCCEEDED(begin(session, nullptr)), "resumed begin");
                 capture(); submit(frame.predictedDisplayTime);
                 require(wait_for_queue_idle(), "resumed GPU retirement");
             }
             require(g_synthetic_release_calls.load() > synthetic_after_stop,
                 "synthesis resumes after the pause in the same XR session");
+            // A session that had its presenter when it was paused gets it back
+            // at the resume, not when the runtime happens to show the evidence
+            // again: on a runtime where that evidence is a transient, it never
+            // came back and the session stayed inline.
+            std::cout << mode << ": presenter back at resumed wait " << presenter_back_at << std::endl;
+            if (g_steamvr_presenter_mode)
+                require(presenter_back_at >= 0 && presenter_back_at <= 3,
+                    "presenter restored straight after the resume");
             // And a second pause stops it again: the switch is not one-shot.
             require(SetEvent(pause_signal) != FALSE, "signal second Pause");
             {

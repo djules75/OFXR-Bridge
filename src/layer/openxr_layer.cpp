@@ -763,6 +763,12 @@ struct SessionState {
     // The tray's pause as last applied by apply_embedded_control, which
     // folds it into menu_enabled.
     bool pause_applied{}; // frame_call_mutex
+    // The pause took a presenter this session had earned. The resume asks
+    // for it back instead of waiting for the runtime to show the evidence
+    // again: on Virtual Desktop that evidence was a transient, and a resumed
+    // No Man's Sky stayed inline at 112 frames a second where it had held
+    // 144 before the pause.
+    bool presenter_restore_after_pause{}; // frame_call_mutex
     std::atomic<bool> menu_enabled{true};
     std::atomic<bool> generation_steady_state_established{false};
     bool manual_stop_applied{}; // frame_call_mutex; terminal for this XrSession.
@@ -11313,6 +11319,14 @@ void apply_embedded_control(
     state->control_reconfigure_required = FAILED(result);
     state->pause_applied = paused;
     state->menu_enabled = SUCCEEDED(result) && control.desired.enabled && !paused;
+    if (state->menu_enabled && state->presenter_restore_after_pause) {
+        state->presenter_restore_after_pause = false;
+        if (!presenter_forbidden(*state)) {
+            // Started by the next xrEndFrame that generates, through the path
+            // every promotion takes.
+            state->steamvr_presenter_start_requested = true;
+        }
+    }
     if (state->fps_overlay) state->fps_overlay->reset_metrics();
     xrfg::embedded::applied(state->control_id, control.revision, state->menu_enabled, result);
     // c: 1 generating, 0 off from the menu or a failed reconfiguration,
@@ -11716,6 +11730,9 @@ XrResult layer_end_frame_impl(
             }
             if (use_continuous_presenter && !pipelined_presenter_mode) {
                 stop_continuous_presenter(state);
+                if (state->pause_applied) {
+                    state->presenter_restore_after_pause = true;
+                }
                 std::scoped_lock lock(state->mutex);
                 state->steamvr_throttled_wait_streak = 0;
                 // Both promotion routes start over, or the demotion would be
