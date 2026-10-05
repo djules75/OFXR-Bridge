@@ -959,7 +959,13 @@ void handle_command(AppState& state, UINT command) {
         dialog.pszWindowTitle = kApplicationName;
         dialog.pszMainInstruction = version_label;
         dialog.pszContent =
-            L"Licensed under LGPL-3.0-or-later.\r\n\r\n"
+            L"Created by tig3rmast3r, the original author of OFXR.\r\n"
+            L"Support him: <a href=\"https://ko-fi.com/tig3rmast3r\">"
+            L"ko-fi.com/tig3rmast3r</a>\r\n\r\n"
+            L"0.2.X version maintained by Djules.\r\n"
+            L"Support him: <a href=\"https://ko-fi.com/djules\">"
+            L"ko-fi.com/djules</a>\r\n\r\n"
+            L"Licensed under LGPL-3.0-or-later.\r\n"
             L"<a href=\"https://github.com/djules75/OFXR-Bridge\">"
             L"github.com/djules75/OFXR-Bridge</a>";
         dialog.hMainIcon = state.disarmed_icon;
@@ -982,7 +988,11 @@ void handle_command(AppState& state, UINT command) {
             };
         if (FAILED(TaskDialogIndirect(&dialog, nullptr, nullptr, nullptr))) {
             const std::wstring message = std::wstring(version_label) +
-                L"\r\n\r\nLicense: LGPL-3.0-or-later\r\n"
+                L"\r\n\r\nCreated by tig3rmast3r, the original author of OFXR.\r\n"
+                L"Support him: https://ko-fi.com/tig3rmast3r\r\n\r\n"
+                L"0.2.X version maintained by Djules.\r\n"
+                L"Support him: https://ko-fi.com/djules\r\n\r\n"
+                L"License: LGPL-3.0-or-later\r\n"
                 L"https://github.com/djules75/OFXR-Bridge";
             MessageBoxW(
                 state.window,
