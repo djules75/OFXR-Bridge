@@ -31,6 +31,7 @@ constexpr wchar_t kApplicationName[] = L"OFXR Bridge";
 constexpr wchar_t kCleanupArgument[] = L"--cleanup-manual-arm";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kTrayId = 1;
+constexpr int kPauseHotkeyId = 1;
 constexpr UINT kArmPollMilliseconds = 250;
 constexpr std::uint32_t kImplementationVersion = XRFG_IMPLEMENTATION_VERSION;
 constexpr wchar_t kDonateUrl[] = L"https://ko-fi.com/tig3rmast3r";
@@ -82,6 +83,8 @@ struct AppState {
     // with it, so every arm starts resumed; null if it could not be made.
     HANDLE pause_signal{};
     bool paused{};
+    // The `pause_hotkey` of tray.ini is held system-wide, while armed only.
+    bool pause_hotkey_registered{};
     // Alternate namespace used by lifecycle tests, never read from user INI.
     std::wstring registry_subkey{xrfg::implicit_layer::kRegistrySubkey};
     HICON armed_icon{};
@@ -557,9 +560,33 @@ void show_balloon(
     return Shell_NotifyIconW(NIM_ADD, &state.icon) != FALSE;
 }
 
+// Takes tray.ini's `pause_hotkey` for as long as the bridge is armed. The key
+// is the tray's and not the layer's: nothing is added to the game, and the
+// same chord works in every title. A key another program already holds is
+// left to it; the menu entry still works.
+void register_pause_hotkey(AppState& state) {
+    if (state.pause_hotkey_registered || state.window == nullptr ||
+        state.pause_signal == nullptr) return;
+    const auto hotkey = xrfg::standalone::parse_hotkey(state.settings.pause_hotkey);
+    if (!hotkey) return;
+    state.pause_hotkey_registered = RegisterHotKey(
+        state.window, kPauseHotkeyId, hotkey->modifiers | MOD_NOREPEAT,
+        hotkey->key) != FALSE;
+    if (!state.pause_hotkey_registered)
+        log_lifecycle(state.local_directory, L"pause-hotkey",
+            last_error_message(L"Registering the pause key"));
+}
+
+void unregister_pause_hotkey(AppState& state) {
+    if (!state.pause_hotkey_registered) return;
+    UnregisterHotKey(state.window, kPauseHotkeyId);
+    state.pause_hotkey_registered = false;
+}
+
 // Ends the pause with the arm it belonged to. A running session keeps its own
 // handle, and by now the arm signal has stopped it for good.
 void close_pause_signal(AppState& state) {
+    unregister_pause_hotkey(state);
     if (state.pause_signal) {
         CloseHandle(state.pause_signal);
         state.pause_signal = nullptr;
@@ -652,6 +679,7 @@ void close_pause_signal(AppState& state) {
         return false;
     }
     state.armed = true;
+    register_pause_hotkey(state);
     state.armed_manifest = manifest;
     state.armed_scope = scope;
     log_lifecycle(state.local_directory,
@@ -741,11 +769,21 @@ void show_context_menu(AppState& state) {
             ? L"Disarm bridge"
             : L"Arm bridge until manual disarm");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    // The key is shown only while it is held, so the menu never advertises
+    // one that another program took.
+    std::wstring pause_label =
+        state.paused ? L"Resume frame generation" : L"Pause frame generation";
+    if (state.pause_hotkey_registered) {
+        pause_label += L'\t';
+        for (const char c : xrfg::standalone::hotkey_display_name(
+                 state.settings.pause_hotkey))
+            pause_label += static_cast<wchar_t>(c);
+    }
     AppendMenuW(
         menu,
         MF_STRING | (state.armed && state.pause_signal ? MF_ENABLED : MF_GRAYED),
         toggle_pause,
-        state.paused ? L"Resume frame generation" : L"Pause frame generation");
+        pause_label.c_str());
     // Must outlive the menu, which only borrows it.
     HBITMAP pause_bitmap = state.paused ? create_pause_bitmap() : nullptr;
     if (pause_bitmap) {
@@ -1148,6 +1186,9 @@ LRESULT CALLBACK window_procedure(
         return 0;
     case WM_COMMAND:
         handle_command(*state, LOWORD(wparam));
+        return 0;
+    case WM_HOTKEY:
+        if (wparam == kPauseHotkeyId) handle_command(*state, toggle_pause);
         return 0;
     case WM_CLOSE: {
         std::wstring error;

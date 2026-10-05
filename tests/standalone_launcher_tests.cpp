@@ -89,6 +89,7 @@ int main() {
     settings.vulkan_support = false;
     settings.d3d11_bridge = false;
     settings.diagnostics = true;
+    settings.pause_hotkey = "shift+scrolllock";
     const std::string serialized = serialize_settings(settings);
     const LauncherSettings parsed = parse_settings(serialized);
     if (parsed.backend != FlowBackend::fidelity_fx ||
@@ -101,6 +102,31 @@ int main() {
         parsed.vulkan_support || parsed.d3d11_bridge || !parsed.diagnostics) {
         std::cerr << "standalone settings round-trip failed\n";
         return 1;
+    }
+    using xrfg::standalone::Hotkey;
+    using xrfg::standalone::hotkey_display_name;
+    using xrfg::standalone::parse_hotkey;
+    if (release_defaults.pause_hotkey != "ctrl+alt+f7" ||
+        parsed.pause_hotkey != "shift+scrolllock" ||
+        parse_settings("[tray]\r\npause_hotkey= Ctrl+Alt+F9 \r\n").pause_hotkey != "ctrl+alt+f9" ||
+        parse_hotkey("ctrl+alt+f7") != Hotkey{3, 0x76} ||
+        parse_hotkey(" Alt + Control + F7 ") != Hotkey{3, 0x76} ||
+        parse_hotkey("shift+scrolllock") != Hotkey{4, 0x91} ||
+        parse_hotkey("f24") != Hotkey{0, 0x87} ||
+        parse_hotkey("ctrl+shift+p") != Hotkey{6, 'P'} ||
+        parse_hotkey("win+0") != Hotkey{8, '0'} ||
+        hotkey_display_name("ctrl+alt+f7") != "Ctrl+Alt+F7" ||
+        hotkey_display_name("shift+pagedown") != "Shift+Page Down" ||
+        !hotkey_display_name("off").empty()) {
+        std::cerr << "pause hotkey parsing failed\n";
+        return 1;
+    }
+    for (const char* refused : {"", "off", "none", "p", "7", "ctrl", "ctrl+", "+f7",
+             "ctrl+ctrl+f7", "f7+ctrl", "f0", "f25", "ctrl+f7+f8", "ctrl+banana"}) {
+        if (parse_hotkey(refused)) {
+            std::cerr << "pause hotkey accepted: " << refused << '\n';
+            return 1;
+        }
     }
 
     // A tray.ini from before Vulkan support was on by default carries the

@@ -234,6 +234,8 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "diagnostics") {
                     settings.diagnostics = value == "1" ||
                                            lower_ascii(value) == "true";
+                } else if (key == "pause_hotkey") {
+                    settings.pause_hotkey = lower_ascii(value);
                 }
             }
         }
@@ -262,7 +264,102 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\nd3d11_bridge=" + (settings.d3d11_bridge ? "1" : "0") +
            "\r\ndiagnostics=" + (settings.diagnostics ? "1" : "0") +
            "\r\noverlay_position=" + overlay_position_name(settings.overlay_position) +
+           "\r\npause_hotkey=" + settings.pause_hotkey +
            "\r\n";
+}
+
+namespace {
+struct HotkeyToken {
+    std::string_view name;
+    std::string_view display;
+    unsigned value;
+};
+constexpr HotkeyToken kHotkeyModifiers[]{
+    {"ctrl", "Ctrl", 2}, {"control", "Ctrl", 2}, {"alt", "Alt", 1},
+    {"shift", "Shift", 4}, {"win", "Win", 8}};
+// Virtual-key codes, spelled out so this file needs no Windows header.
+constexpr HotkeyToken kHotkeyNamedKeys[]{
+    {"scrolllock", "Scroll Lock", 0x91}, {"pause", "Pause", 0x13},
+    {"insert", "Insert", 0x2D}, {"delete", "Delete", 0x2E},
+    {"home", "Home", 0x24}, {"end", "End", 0x23},
+    {"pageup", "Page Up", 0x21}, {"pagedown", "Page Down", 0x22}};
+
+struct ParsedHotkey {
+    Hotkey hotkey;
+    std::string display;
+};
+
+std::optional<ParsedHotkey> parse_hotkey_parts(std::string_view text) {
+    const std::string normalized = lower_ascii(trim_ascii(text));
+    ParsedHotkey result;
+    bool have_key = false;
+    std::size_t offset = 0;
+    while (offset <= normalized.size()) {
+        const std::size_t plus = normalized.find('+', offset);
+        const std::string token = trim_ascii(std::string_view(normalized).substr(
+            offset, plus == std::string::npos ? std::string::npos : plus - offset));
+        // The key comes last and once; an empty token is a stray '+'.
+        if (token.empty() || have_key) return std::nullopt;
+        bool matched = false;
+        for (const auto& modifier : kHotkeyModifiers) {
+            if (token != modifier.name) continue;
+            if (result.hotkey.modifiers & modifier.value) return std::nullopt;
+            result.hotkey.modifiers |= modifier.value;
+            result.display += std::string(modifier.display) + "+";
+            matched = true;
+            break;
+        }
+        if (!matched) {
+            std::string display;
+            unsigned key = 0;
+            bool needs_modifier = false;
+            if (token.size() >= 2 && token.size() <= 3 && token[0] == 'f' &&
+                token.find_first_not_of("0123456789", 1) == std::string::npos) {
+                const int number = std::stoi(token.substr(1));
+                if (number >= 1 && number <= 24) {
+                    key = 0x70 + static_cast<unsigned>(number - 1);
+                    display = "F" + std::to_string(number);
+                }
+            } else if (token.size() == 1 &&
+                       ((token[0] >= 'a' && token[0] <= 'z') ||
+                        (token[0] >= '0' && token[0] <= '9'))) {
+                const char upper = token[0] >= 'a'
+                    ? static_cast<char>(token[0] - 'a' + 'A')
+                    : token[0];
+                key = static_cast<unsigned char>(upper);
+                display = std::string(1, upper);
+                needs_modifier = true;
+            } else {
+                for (const auto& named : kHotkeyNamedKeys) {
+                    if (token != named.name) continue;
+                    key = named.value;
+                    display = std::string(named.display);
+                    break;
+                }
+            }
+            if (key == 0 || (needs_modifier && result.hotkey.modifiers == 0))
+                return std::nullopt;
+            result.hotkey.key = key;
+            result.display += display;
+            have_key = true;
+        }
+        if (plus == std::string::npos) break;
+        offset = plus + 1;
+    }
+    if (!have_key) return std::nullopt;
+    return result;
+}
+}
+
+std::optional<Hotkey> parse_hotkey(std::string_view text) {
+    const auto parsed = parse_hotkey_parts(text);
+    if (!parsed) return std::nullopt;
+    return parsed->hotkey;
+}
+
+std::string hotkey_display_name(std::string_view text) {
+    const auto parsed = parse_hotkey_parts(text);
+    return parsed ? parsed->display : std::string();
 }
 
 std::string build_vulkan_layer_manifest(

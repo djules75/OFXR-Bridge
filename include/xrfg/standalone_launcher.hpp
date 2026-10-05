@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -69,7 +70,27 @@ struct LauncherSettings {
     bool d3d11_bridge{true};
     bool diagnostics{};
     FpsOverlayPosition overlay_position{FpsOverlayPosition::upper_right};
+    // The system-wide key for "Pause frame generation" while armed, in
+    // parse_hotkey's form. No menu entry; edit tray.ini. Empty, "off" or
+    // anything parse_hotkey refuses means no key.
+    std::string pause_hotkey{"ctrl+alt+f7"};
 };
+
+// A key chord for RegisterHotKey: `modifiers` in its MOD_ALT (1),
+// MOD_CONTROL (2), MOD_SHIFT (4), MOD_WIN (8) bits and a virtual-key code.
+struct Hotkey {
+    unsigned modifiers{};
+    unsigned key{};
+    bool operator==(const Hotkey&) const = default;
+};
+// "ctrl+alt+f7": '+'-separated, any case, the key last. Modifiers are ctrl,
+// alt, shift and win; keys are f1-f24, a letter, a digit, or one of
+// scrolllock, pause, insert, delete, home, end, pageup, pagedown. At least
+// one modifier is required for a letter or a digit, which would otherwise
+// take the key away from typing everywhere.
+[[nodiscard]] std::optional<Hotkey> parse_hotkey(std::string_view text);
+// "Ctrl+Alt+F7", for the menu.
+[[nodiscard]] std::string hotkey_display_name(std::string_view text);
 
 [[nodiscard]] std::string backend_ini_value(FlowBackend backend);
 [[nodiscard]] std::string nvidia_preset_ini_value(

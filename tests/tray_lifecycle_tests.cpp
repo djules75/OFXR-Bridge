@@ -106,6 +106,8 @@ void ownership() {
         require(!xrfg::implicit_layer::owned_registration_path(bad, root), "unsafe/unrelated path rejected");
 }
 
+HWND make_window(AppState& state);
+
 // "Pause frame generation": a switch on the armed bridge that goes both ways
 // and ends with the arm.
 void pause_switch() {
@@ -140,9 +142,25 @@ void pause_switch() {
             described.bmBitsPixel == 32 && described.bmWidth == described.bmHeight,
             "pause symbol is a square 32-bit bitmap");
     DeleteObject(symbol);
+    // The key does what the menu entry does, and is given back at disarm.
+    // A chord nothing else on a developer's machine is likely to hold.
+    test.state.settings.pause_hotkey = "ctrl+alt+shift+f24";
+    const HWND window = make_window(test.state);
+    register_pause_hotkey(test.state);
+    require(test.state.pause_hotkey_registered, "pause key registered while armed");
+    SendMessageW(window, WM_HOTKEY, kPauseHotkeyId, 0);
+    require(!test.state.paused && !signalled(), "pause key resumes");
+    SendMessageW(window, WM_HOTKEY, kPauseHotkeyId, 0);
+    require(test.state.paused && signalled(), "pause key pauses");
     std::wstring error;
     require(disarm_bridge(test.state, &error), "disarm while paused");
     require(!test.state.paused && test.state.pause_signal == nullptr, "pause ends with the arm");
+    require(!test.state.pause_hotkey_registered, "pause key released with the arm");
+    require(RegisterHotKey(window, kPauseHotkeyId, MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_F24) != FALSE,
+        "the chord is free again after the disarm");
+    UnregisterHotKey(window, kPauseHotkeyId);
+    // Destroying the window runs the tray's own cleanup, as a real exit does.
+    DestroyWindow(window);
 }
 
 HWND make_window(AppState& state) {
