@@ -213,6 +213,13 @@ enum class BridgeFlightOperation : std::uint32_t {
     // above this record in the file is from before the switch, with the
     // times it happened at.
     recording,
+    // A history capture queued at the application's xrEndFrame instead of at
+    // its release (`[ofxr] capture_at_end_frame`). result is the capture's
+    // HRESULT, a the swapchain, b the image index, c the history serial the
+    // capture took, or 0 when it failed. One per released image per frame; a
+    // swapchain released more than once between two xrEndFrames is captured
+    // once, at its last release.
+    deferred_capture,
 };
 
 struct BridgeFlightToken {

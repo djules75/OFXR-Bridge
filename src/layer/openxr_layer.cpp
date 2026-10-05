@@ -982,6 +982,11 @@ struct SessionState {
     // synthesizer writes D3D12 images directly; see kStagingSlotCount.
     // Read at xrCreateSession from `[ofxr] single_swapchain_rings`.
     bool single_swapchain_rings{};
+    // Native D3D12 only: the history capture of a released application image
+    // is queued at the application's xrEndFrame, not at the release. See
+    // SwapchainState::pending_end_frame_capture. Read at xrCreateSession
+    // from `[ofxr] capture_at_end_frame`.
+    bool capture_at_end_frame{};
     // The switch can be followed live: a binding 3X covers, and a ring it
     // fits in.
     bool triple_switchable{};
@@ -2117,6 +2122,14 @@ struct SwapchainState {
     std::vector<VkImage> enumerated_vulkan_images;
     std::optional<xrfg::D3D12HistoryCaptureTicket> last_released_capture;
     std::shared_ptr<const xrfg::DlssMotionVectorSet> last_released_motion_vectors;
+    // SessionState::capture_at_end_frame: the image the application released
+    // since its last xrEndFrame, whose history capture is still to be queued.
+    // Set at the release in place of the capture, consumed at the top of the
+    // application's xrEndFrame (capture_pending_end_frame_images), where
+    // every command list of the frame has reached the application's queue.
+    // A second release before then replaces it: the earlier image was never
+    // going to be shown. Guarded by mutex.
+    std::optional<std::uint32_t> pending_end_frame_capture;
     std::shared_ptr<FrameGenerationSwapchainState> frame_generation;
     // Generation costs three runtime swapchains, and a swapchain that never
     // reaches a projection layer never spends them: an application's UI quads
@@ -4744,6 +4757,8 @@ XrResult layer_create_session_impl(
         xrfg::implicit_layer::read_triple_frame_gen(current_layer_directory());
     state->single_swapchain_rings =
         xrfg::implicit_layer::read_single_swapchain_rings(current_layer_directory());
+    state->capture_at_end_frame =
+        xrfg::implicit_layer::read_capture_at_end_frame(current_layer_directory());
     state->vulkan_support =
         xrfg::implicit_layer::read_vulkan_support(current_layer_directory());
     state->pause_applied = state->manual_control.pause_requested();
@@ -6635,13 +6650,24 @@ XrResult layer_release_swapchain_image_impl(
         history.reset();
         interop.reset();
     }
-    if (candidate_index && history) {
+    // Native D3D12 with capture_at_end_frame: the capture waits for the
+    // application's xrEndFrame (capture_pending_end_frame_images). A release
+    // says the image's rendering has been submitted, and an application whose
+    // submission trails its release calls makes that false for the image it
+    // releases first; a capture queued here then copies the previous frame,
+    // for that eye alone. The bridges and the D3D11 interop keep their
+    // release-time capture: their copy into the runtime's image is made here
+    // too, so the two would otherwise disagree.
+    const bool defer_capture = candidate_index && history &&
+        state->session->capture_at_end_frame && !interop && !bridge &&
+        !vulkan_bridge;
+    if (candidate_index && history && !defer_capture) {
         gpu_lock = std::unique_lock<std::mutex>(state->session->gpu_mutex);
     }
 
     std::optional<xrfg::D3D12HistoryCaptureTicket> pending_capture;
     std::shared_ptr<const xrfg::DlssMotionVectorSet> pending_motion_vectors;
-    if (candidate_index && history) {
+    if (candidate_index && history && !defer_capture) {
         if (state->session->dlss_motion_vectors) {
             std::scoped_lock lock(state->mutex);
             if (*candidate_index < state->enumerated_d3d12_images.size()) {
@@ -6725,6 +6751,12 @@ XrResult layer_release_swapchain_image_impl(
                 state->last_released_motion_vectors.reset();
                 commit_capture = pending_capture &&
                                  pending_capture->source_index == released_index;
+                // Deferred: the capture of this image is queued at the
+                // application's xrEndFrame. A release before then replaces
+                // it, the way the runtime shows only the last released image.
+                if (defer_capture) {
+                    state->pending_end_frame_capture = released_index;
+                }
             } else if (state->ownership_tracking_valid) {
                 // A release the runtime accepted with nothing waited here:
                 // the mirror has diverged and nothing can say which image
@@ -6734,6 +6766,7 @@ XrResult layer_release_swapchain_image_impl(
                 state->last_released_index.reset();
                 state->last_released_capture.reset();
                 state->last_released_motion_vectors.reset();
+                state->pending_end_frame_capture.reset();
                 state->ownership_tracking_valid = false;
             }
         }
@@ -6756,6 +6789,97 @@ XrResult layer_release_swapchain_image_impl(
         history->discard(*pending_capture);
     }
     return result;
+}
+
+// SessionState::capture_at_end_frame: queues the history capture of every
+// application image released since the last xrEndFrame, now that every
+// command list of the frame has reached the application's queue. Called at
+// the top of the application's xrEndFrame, under frame_call_mutex, before
+// anything reads last_released_capture. The release left that reset, so a
+// capture that fails here leaves the frame to pass through as
+// missing_capture, exactly as a failed release-time capture does.
+//
+// The capture goes onto the application's queue behind everything the frame
+// submitted, which is the whole point: at the release some of it might not
+// have been submitted yet. Only images the mirror still vouches for are
+// captured; one it has lost track of since the release is dropped.
+void capture_pending_end_frame_images(
+    const std::shared_ptr<SessionState>& session) noexcept {
+    if (!session || !session->capture_at_end_frame) {
+        return;
+    }
+    try {
+        const bool armed = !session->manual_control.stop_requested() &&
+            session->menu_enabled;
+        for (const auto& state : find_swapchains(session)) {
+            std::scoped_lock call_lock(state->call_mutex);
+            std::optional<std::uint32_t> index;
+            std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
+            {
+                std::scoped_lock lock(state->mutex);
+                index = state->pending_end_frame_capture;
+                state->pending_end_frame_capture.reset();
+                if (index && state->ownership_tracking_valid &&
+                    state->last_released_index == index) {
+                    history = state->d3d12_history;
+                }
+            }
+            if (!index) {
+                continue;
+            }
+            if (!history || !armed) {
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::deferred_capture,
+                    E_ABORT,
+                    handle_value(state->handle),
+                    *index,
+                    0);
+                continue;
+            }
+            std::shared_ptr<const xrfg::DlssMotionVectorSet> motion_vectors;
+            xrfg::D3D12HistoryCaptureTicket ticket{};
+            HRESULT capture_result = S_OK;
+            {
+                std::scoped_lock gpu_lock(session->gpu_mutex);
+                if (session->dlss_motion_vectors) {
+                    std::scoped_lock lock(state->mutex);
+                    if (*index < state->enumerated_d3d12_images.size()) {
+                        motion_vectors = xrfg::resolve_dlss_motion_vectors(
+                            state->enumerated_d3d12_images[*index].Get(),
+                            session->d3d12_queue.Get());
+                    }
+                }
+                capture_result = history->capture(*index, &ticket);
+                if (SUCCEEDED(capture_result)) {
+                    // The image went out at its release: nothing is left
+                    // to wait for before the capture becomes history.
+                    capture_result = history->commit(ticket);
+                    if (FAILED(capture_result)) {
+                        history->discard(ticket);
+                    }
+                } else if (ticket.serial != 0) {
+                    history->discard(ticket);
+                }
+            }
+            {
+                std::scoped_lock lock(state->mutex);
+                if (SUCCEEDED(capture_result)) {
+                    state->last_released_capture = ticket;
+                    state->last_released_motion_vectors = motion_vectors;
+                } else {
+                    state->last_released_capture.reset();
+                    state->last_released_motion_vectors.reset();
+                }
+            }
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::deferred_capture,
+                capture_result,
+                handle_value(state->handle),
+                *index,
+                SUCCEEDED(capture_result) ? ticket.serial : 0);
+        }
+    } catch (...) {
+    }
 }
 
 struct ProjectionLayerCopy {
@@ -11625,10 +11749,20 @@ XrResult layer_end_frame_impl(
     const auto application_end_now = std::chrono::steady_clock::now();
     // Every image of the application's that this frame names was released
     // before this call, so the counter as it stands now covers them all.
+    if (state->capture_at_end_frame) {
+        // A release marks the queue where it stood at the release call. An
+        // application that submits an image's rendering after releasing it
+        // - the case capture_at_end_frame exists for - has it on the queue
+        // by now, so mark once more here and the join below covers it.
+        mark_application_release(state.get());
+    }
     {
         std::scoped_lock join_lock(state->binding_join_mutex);
         state->app_end_frame_release_value = state->app_release_counter;
     }
+    // The history captures this frame's releases left for here; before
+    // anything below reads last_released_capture.
+    capture_pending_end_frame_images(state);
     const bool frame_had_overlapping_wait =
         state->application_frame_has_overlapping_wait;
     const bool pipelined_presenter_mode = state->pipelined_presenter_mode;

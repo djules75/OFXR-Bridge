@@ -118,6 +118,7 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::presenter_pair_release:
         return "presenter_pair_release";
     case BridgeFlightOperation::recording: return "recording";
+    case BridgeFlightOperation::deferred_capture: return "deferred_capture";
     }
     return "unknown";
 }

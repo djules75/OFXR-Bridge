@@ -120,6 +120,17 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_single_swapchain_rings(
     const std::filesystem::path& module_directory) noexcept;
 
+// `[ofxr] capture_at_end_frame`: on a native D3D12 session the history
+// capture of an application image is queued at the application's xrEndFrame
+// rather than at its xrReleaseSwapchainImage. A release only promises that
+// the image's rendering has been *submitted*; an application whose
+// submission thread trails the one that releases can release first, and a
+// capture queued then holds the previous frame for that image. The runtime
+// only reads at xrEndFrame and never sees that. On unless set to 0. Read at
+// xrCreateSession.
+[[nodiscard]] bool read_capture_at_end_frame(
+    const std::filesystem::path& module_directory) noexcept;
+
 // `[ofxr] excluded_processes`: executable names, separated by ';', in which
 // the layer declines to load at negotiation. Absent, it is Pimax Home: a
 // home environment is an OpenXR application like any other, takes the
