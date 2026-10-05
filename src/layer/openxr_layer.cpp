@@ -7045,6 +7045,20 @@ make_presenter_owned_frame(GeneratedFrameEndInfo&& source) {
     return time > maximum - duration ? maximum : time + duration;
 }
 
+// The runtime refused one frame for what it contains, not because the session
+// is gone. An application gets this back for that frame alone and carries on;
+// Alien: Rogue Incursion submits a loading-screen layer naming a swapchain it
+// has not released an image of yet, and Virtual Desktop's runtime says
+// XR_ERROR_LAYER_INVALID. Latching it in the presenter failed every later
+// frame call of the session and left the headset black, so the presenter
+// drops the frame and keeps going instead.
+[[nodiscard]] constexpr bool frame_content_refused(XrResult result) noexcept {
+    return result == XR_ERROR_LAYER_INVALID ||
+           result == XR_ERROR_LAYER_LIMIT_EXCEEDED ||
+           result == XR_ERROR_SWAPCHAIN_RECT_INVALID ||
+           result == XR_ERROR_POSE_INVALID;
+}
+
 void fail_pending_presenter_submissions_locked(
     SessionState& state,
     XrResult failure) noexcept {
@@ -9035,12 +9049,15 @@ void continuous_presenter_main(
                     state->presenter_last_frame.reset();
                 }
             }
-            if (XR_FAILED(end_result)) {
+            if (frame_content_refused(end_result)) {
+                // Whatever was retained may name the handle that was refused.
+                state->presenter_last_frame.reset();
+            } else if (XR_FAILED(end_result)) {
                 fail_pending_presenter_submissions_locked(*state, end_result);
             }
         }
         state->presenter_condition.notify_all();
-        if (XR_FAILED(end_result)) {
+        if (XR_FAILED(end_result) && !frame_content_refused(end_result)) {
             break;
         }
     }

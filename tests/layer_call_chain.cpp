@@ -161,6 +161,13 @@ bool g_dcs_mode = false;
 bool g_flight_simulator_mode = false;
 bool g_destroy_pending_swapchain = false;
 bool g_destroy_pending_space = false;
+// steamvr-layer-invalid: the runtime refuses one of the presenter's
+// submissions for its contents, as Virtual Desktop's runtime refused a
+// loading-screen layer naming a swapchain with no released image. The
+// session has to carry on: an application sees that error for one frame.
+bool g_refuse_layer_mode = false;
+std::atomic<std::uint32_t> g_presenter_projection_submissions{0};
+std::atomic<std::uint32_t> g_layer_refusals{0};
 std::atomic<bool> g_swapchain_destroyed{false};
 std::atomic<unsigned> g_submission_after_destroy{0};
 DWORD g_test_application_thread_id{};
@@ -718,6 +725,13 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_end_frame(
         g_swapchain_destroyed.load(std::memory_order_acquire)) {
         ++g_submission_after_destroy;
         return XR_ERROR_HANDLE_INVALID;
+    }
+    if (g_refuse_layer_mode && saw_projection &&
+        GetCurrentThreadId() != g_test_application_thread_id &&
+        g_presenter_projection_submissions.fetch_add(
+            1, std::memory_order_acq_rel) == 2) {
+        g_layer_refusals.fetch_add(1, std::memory_order_relaxed);
+        return XR_ERROR_LAYER_INVALID;
     }
     if (g_destroy_pending_space && saw_projection &&
         record.space != g_valid_composition_space.load(std::memory_order_acquire)) {
@@ -2121,7 +2135,10 @@ int main(int argc, char** argv) {
         argc == 4 && std::strcmp(argv[3], "d3d11-double-wide") == 0;
     g_destroy_pending_space =
         argc == 4 && std::strcmp(argv[3], "steamvr-destroy-space") == 0;
+    g_refuse_layer_mode =
+        argc == 4 && std::strcmp(argv[3], "steamvr-layer-invalid") == 0;
     g_steamvr_presenter_mode = g_destroy_pending_space || g_dcs_mode ||
+        g_refuse_layer_mode ||
         (argc == 4 && std::strcmp(argv[3], "steamvr-presenter") == 0);
     g_single_threaded_mode =
         argc == 4 && std::strcmp(argv[3], "d3d11-single-threaded") == 0;
@@ -3644,12 +3661,15 @@ int main(int argc, char** argv) {
             waits > application_frames.size() &&
             g_current_acquire_calls.load(std::memory_order_relaxed) >= 5 &&
             g_synthetic_acquire_calls.load(std::memory_order_relaxed) >= 4 &&
+            (!g_refuse_layer_mode ||
+             g_layer_refusals.load(std::memory_order_relaxed) == 1) &&
             g_waited_display_times.empty() && !g_begun_display_time;
         if (!valid) {
             std::cerr << "SteamVR presenter validation failed: sequence="
                       << frame_sequence_succeeded << " teardown="
                       << teardown_succeeded << " matched=" << matched_targets
                       << " after-destroy=" << g_submission_after_destroy.load()
+                      << " refusals=" << g_layer_refusals.load()
                       << " waits=" << waits << " begins="
                       << g_begin_frame_calls.load() << " ends="
                       << g_end_frame_calls.load() << '\n';

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.416.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.417.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -576,6 +576,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
                 "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-presenter-space-lifetime.log"
                 steamvr-destroy-space)
+        # A frame the runtime refuses for its contents costs that frame only:
+        # the presenter must not latch it and fail the rest of the session.
+        add_test(
+            NAME xrfg_layer_presenter_layer_invalid
+            COMMAND xrfg_layer_call_chain
+                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
+                "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-presenter-layer-invalid.log"
+                steamvr-layer-invalid)
 
         add_test(
             NAME xrfg_layer_split_eye_call_chain
