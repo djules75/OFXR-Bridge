@@ -17,6 +17,9 @@ struct FpsSnapshot {
     // Share of the window's submissions that carried a new image; 1 when none
     // were repeats or nothing was submitted.
     float new_content_share{1.0f};
+    // Generation paused from the tray: drawn as a pause symbol before the
+    // number.
+    bool paused{};
 };
 
 // The compositor's delivered rate, less the share of it that was repeats.

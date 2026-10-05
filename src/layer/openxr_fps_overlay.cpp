@@ -50,6 +50,7 @@ struct OpenXrFpsOverlay::Impl {
     FpsOverlayPosition position{FpsOverlayPosition::upper_right};
     std::int64_t next_refresh{};
     bool attempted{}, initialized{}, image_valid{}, acquired{}, waited{}, disabled{};
+    bool paused{};
     // The number the overlay draws is what the headset received where that
     // can be known, and what was submitted everywhere else. Only SteamVR
     // reports the former. Borrowed: the session owns it, because the presenter
@@ -327,6 +328,7 @@ struct OpenXrFpsOverlay::Impl {
         quad.pose.position = {placement.x, placement.y, placement.z};
         quad.size = {placement.width, placement.height};
         auto snapshot = counter.snapshot(now);
+        snapshot.paused = paused;
         if (delivery) {
             if (const auto received = delivery->delivered_fps(now)) {
                 snapshot.submitted_fps = delivered_new_images(*received, snapshot);
@@ -359,6 +361,13 @@ void OpenXrFpsOverlay::reset_metrics() noexcept {
     impl_->image_valid = false;
     impl_->next_refresh = 0;
     impl_->placement_valid = false;
+}
+
+void OpenXrFpsOverlay::set_paused(bool paused) noexcept {
+    std::scoped_lock lock(impl_->mutex);
+    if (impl_->paused == paused) return;
+    impl_->paused = paused;
+    impl_->next_refresh = 0; // Redraw now, not at the next quarter second.
 }
 
 void OpenXrFpsOverlay::suspend() noexcept {

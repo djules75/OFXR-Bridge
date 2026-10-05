@@ -54,6 +54,7 @@ not loaded (Table A).
 | The game uses OpenGL | Not supported. |
 | Too many swapchains for SteamVR (some UEVR games, often with depth submission on) | Turn off **Prefer FPS over latency**, or turn off depth submission in UEVR. |
 | You disarmed OFXR from the tray | Arm it again, then restart the game. |
+| You paused frame generation from the tray (the FPS number shows two vertical bars) | Choose **Resume frame generation** in the tray menu. No restart needed. |
 | Something else | Send a flight log (see below). |
 
 ## C. OFXR works, but it does not feel better
@@ -67,6 +68,7 @@ not loaded (Table A).
 | Your GPU runs out of VRAM | OFXR needs extra video memory on top of the game (see [How much VRAM OFXR uses](#how-much-vram-ofxr-uses)). Signs: stutter, sudden drops, or a crash, often after a few minutes. Lower the game's settings or the per-eye resolution first. |
 | 3X doesn't switch while you play | The game was started with **Prefer FPS over latency** off. Restart the game. |
 | Dips only in heavy scenes | Disarm OFXR and play the same scene. If the dips are still there, lower the per-eye resolution: OFXR can't make up frames the game doesn't render. |
+| You want to know whether a problem comes from OFXR | **Disarm** and restart the game. **Pause frame generation** is not enough: a paused game still runs through OFXR, it only stops making extra frames. |
 
 ## How much VRAM OFXR uses
 

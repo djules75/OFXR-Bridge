@@ -79,6 +79,8 @@ The current build provides:
 - 100%, 75% and 50% NVIDIA optical-flow calculation scales
 - a tray icon that arms the bridge as soon as it starts, with manual
   Arm/Disarm
+- **Pause frame generation**: switch generation off and back on while you
+  play, without restarting the game
 - **Prefer FPS over latency** (on by default): one frame of extra latency in
   exchange for reaching full frame rate from half, with smoother dips
 - **3X Frame Gen** (off by default): two generated frames per game frame,
@@ -111,6 +113,13 @@ rotation are still possible.
 5. Start the game normally. For injectors such as UEVR, start the tray before
    the game and leave it armed while the VR mod is injected.
 6. Select **Disarm bridge** or close the tray application when finished.
+
+To compare with and without generated frames while you play, use **Pause
+frame generation** in the tray menu. The entry turns into **Resume frame
+generation** with an orange pause symbol, and the FPS number in the headset
+shows the same symbol (two vertical bars) until you resume. A paused game still runs through the
+bridge: to rule OFXR out of a problem, disarm it and restart the game
+instead. Every arm starts resumed.
 
 If arming fails at start-up, the tray shows the reason and stays disarmed;
 select **Arm bridge until manual disarm** to retry.
@@ -292,7 +301,8 @@ For the best results on SteamVR:
   fills the gap with repeated frames and the image judders.
 - If you get dips, disarm the bridge and play the same scene. If the dips
   remain, lower SteamVR's per-eye resolution; the bridge cannot recover
-  frames the game does not render.
+  frames the game does not render. Pausing is not enough for this test: a
+  paused game still runs through the bridge.
 
 ### How much VRAM the bridge uses
 

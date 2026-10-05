@@ -15,6 +15,14 @@ namespace xrfg::implicit_layer {
                                       std::wstring* error = nullptr) noexcept;
 [[nodiscard]] bool signal_arm_stop(const std::filesystem::path& manifest,
                                     std::wstring* error = nullptr) noexcept;
+// The tray's "Pause frame generation" switch: a second manual-reset event
+// per arm, set while paused and reset on resume. Unlike the stop it goes both
+// ways, and a session that cannot open it is simply never paused. The name
+// is the arm signal's with another prefix, so the layer finds it from the
+// same `control_event` and nothing else has to travel through the ini.
+[[nodiscard]] std::wstring pause_signal_name(const std::filesystem::path& manifest);
+[[nodiscard]] void* create_pause_signal(const std::filesystem::path& manifest,
+                                        std::wstring* error = nullptr) noexcept;
 class ManualArmControl {
 public:
     explicit ManualArmControl(const std::filesystem::path& module_directory) noexcept;
@@ -22,8 +30,10 @@ public:
     ManualArmControl(const ManualArmControl&) = delete;
     ManualArmControl& operator=(const ManualArmControl&) = delete;
     [[nodiscard]] bool stop_requested() const noexcept;
+    [[nodiscard]] bool pause_requested() const noexcept;
 private:
     void* event_{};
+    void* pause_event_{};
     bool managed_{};
 };
 

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.418.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.419.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -365,6 +365,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_link_libraries(OFXRBridgeTray PRIVATE
             xrfg_standalone_core
             comctl32
+            gdi32
             ole32
             shell32
             user32)
@@ -415,7 +416,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 COMMAND xrfg_standalone_launcher_tests)
             add_executable(xrfg_tray_lifecycle_tests tests/tray_lifecycle_tests.cpp)
             target_link_libraries(xrfg_tray_lifecycle_tests PRIVATE
-                xrfg_standalone_core comctl32 ole32 shell32 user32)
+                xrfg_standalone_core comctl32 gdi32 ole32 shell32 user32)
             target_compile_definitions(xrfg_tray_lifecycle_tests PRIVATE
                 XRFG_IMPLEMENTATION_VERSION=${PROJECT_VERSION_MINOR}
                 NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
@@ -553,6 +554,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             add_test(NAME xrfg_manual_disarm_${mode} COMMAND xrfg_layer_manual_disarm_tests
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> ${mode})
             set_tests_properties(xrfg_manual_disarm_${mode} PROPERTIES TIMEOUT 30)
+            # The tray's "Pause frame generation": the same stop, then a
+            # resume in the same session.
+            add_test(NAME xrfg_manual_pause_${mode} COMMAND xrfg_layer_manual_disarm_tests
+                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> ${mode} pause)
+            set_tests_properties(xrfg_manual_pause_${mode} PROPERTIES TIMEOUT 30)
         endforeach()
         foreach(marker on off hidden)
             add_test(NAME xrfg_layer_marker_d3d11_${marker} COMMAND xrfg_layer_manual_disarm_tests

@@ -106,6 +106,45 @@ void ownership() {
         require(!xrfg::implicit_layer::owned_registration_path(bad, root), "unsafe/unrelated path rejected");
 }
 
+// "Pause frame generation": a switch on the armed bridge that goes both ways
+// and ends with the arm.
+void pause_switch() {
+    Fixture test;
+    const auto manifest = test.state.local_directory / L"RuntimeLayer" / L"v001" /
+        L"XR_APILAYER_XRFrameBridge_manual-42-77.json";
+    const auto signalled = [&] {
+        return WaitForSingleObject(test.state.pause_signal, 0) == WAIT_OBJECT_0;
+    };
+    test.state.pause_signal = xrfg::implicit_layer::create_pause_signal(manifest);
+    require(test.state.pause_signal != nullptr, "create pause signal");
+    handle_command(test.state, toggle_pause);
+    require(!test.state.paused && !signalled(), "no pause while disarmed");
+    test.state.armed = true;
+    handle_command(test.state, toggle_pause);
+    require(test.state.paused && signalled(), "pause sets the signal");
+    require(tray_tooltip(test.state).starts_with(L"OFXR Bridge PAUSED"), "tooltip says paused");
+    // What a running session holds: its own handle on the same event.
+    const HANDLE reader = OpenEventW(
+        SYNCHRONIZE, FALSE, xrfg::implicit_layer::pause_signal_name(manifest).c_str());
+    require(reader != nullptr, "layer-side name opens the same event");
+    require(WaitForSingleObject(reader, 0) == WAIT_OBJECT_0, "reader sees the pause");
+    handle_command(test.state, toggle_pause);
+    require(!test.state.paused && !signalled(), "resume resets the signal");
+    require(WaitForSingleObject(reader, 0) == WAIT_TIMEOUT, "reader sees the resume");
+    CloseHandle(reader);
+    handle_command(test.state, toggle_pause);
+    require(test.state.paused, "paused again before the disarm");
+    const HBITMAP symbol = create_pause_bitmap();
+    BITMAP described{};
+    require(symbol != nullptr && GetObjectW(symbol, sizeof(described), &described) != 0 &&
+            described.bmBitsPixel == 32 && described.bmWidth == described.bmHeight,
+            "pause symbol is a square 32-bit bitmap");
+    DeleteObject(symbol);
+    std::wstring error;
+    require(disarm_bridge(test.state, &error), "disarm while paused");
+    require(!test.state.paused && test.state.pause_signal == nullptr, "pause ends with the arm");
+}
+
 HWND make_window(AppState& state) {
     static bool registered = false;
     if (!registered) {
@@ -229,6 +268,7 @@ int main() {
         ownership();
         cross_version_cleanup();
         window_lifecycle();
+        pause_switch();
         blocked_manifest();
         runtime_stop_and_watchdog();
         integrity_scope_policy();

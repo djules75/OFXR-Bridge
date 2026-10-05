@@ -127,6 +127,23 @@ int main(int argc, char** argv) {
                     rasterize_fps_overlay(24, 12, {0, false}, false), "invalid FPS clamp");
         require(rasterize_fps_overlay(24, 12, {1000, true}, false) ==
                 rasterize_fps_overlay(24, 12, {999, true}, false), "three-digit FPS clamp");
+        // Paused: two orange bars, two columns each, before an unchanged
+        // number. "p45" starts at column 3 of the minimal image.
+        const auto paused_image =
+            rasterize_fps_overlay(24, 12, FpsSnapshot{45, false, 1.0f, true}, false);
+        const auto unpaused_image = rasterize_fps_overlay(24, 12, {45, false}, false);
+        require(std::count(paused_image.begin(), paused_image.end(), 0xff0096ffu) == 28,
+                "pause symbol is two 2x7 bars");
+        for (unsigned y = 2; y < 9; ++y)
+            require(paused_image[y * 24 + 3] == 0xff0096ffu && paused_image[y * 24 + 4] == 0xff0096ffu &&
+                    paused_image[y * 24 + 5] == 0u &&
+                    paused_image[y * 24 + 6] == 0xff0096ffu && paused_image[y * 24 + 7] == 0xff0096ffu,
+                    "pause bars stand left of the number");
+        require(std::count(paused_image.begin(), paused_image.end(), 0xff5050ffu) ==
+                std::count(unpaused_image.begin(), unpaused_image.end(), 0xff5050ffu),
+                "pause symbol leaves the number as it was");
+        require(!rasterize_fps_overlay(24, 12, FpsSnapshot{999, false, 1.0f, true}, false).empty(),
+                "pause symbol fits beside three digits");
         // Optional visual artifact, not a live image or runtime dependency.
         if (argc > 1) {
             std::ofstream file(argv[1], std::ios::binary);

@@ -38,7 +38,10 @@ std::array<std::size_t, 2> marker_pixels(
 int main(int argc, char** argv) {
     if (argc != 3 && argc != 4) return 1;
     const std::string mode = argv[2];
-    const std::string marker_mode = argc == 4 ? argv[3] : "";
+    // "pause" as the third argument drives the tray's reversible pause in
+    // place of the Disarm, and resumes afterwards.
+    const bool pause_test = argc == 4 && std::string(argv[3]) == "pause";
+    const std::string marker_mode = argc == 4 && !pause_test ? argv[3] : "";
     if (!marker_mode.empty() && (mode != "d3d11" ||
         (marker_mode != "on" && marker_mode != "off" && marker_mode != "hidden"))) return 1;
     g_flight_simulator_mode = mode == "flight";
@@ -53,6 +56,7 @@ int main(int argc, char** argv) {
     const auto manifest = root / L"XR_APILAYER_XRFrameBridge_manual-1-1.json";
     HMODULE module = nullptr;
     HANDLE signal = nullptr;
+    HANDLE pause_signal = nullptr;
     XrInstance instance = XR_NULL_HANDLE;
     XrSession session = XR_NULL_HANDLE;
     XrSwapchain swapchain = XR_NULL_HANDLE;
@@ -70,6 +74,10 @@ int main(int argc, char** argv) {
         std::filesystem::copy_file(argv[1], dll);
         signal = xrfg::implicit_layer::create_arm_signal(manifest);
         require(signal != nullptr, "create isolated arm signal");
+        if (pause_test) {
+            pause_signal = xrfg::implicit_layer::create_pause_signal(manifest);
+            require(pause_signal != nullptr, "create isolated pause signal");
+        }
         const auto control = xrfg::implicit_layer::arm_signal_name(manifest);
         std::string ascii_control;
         for (const wchar_t c : control) ascii_control.push_back(static_cast<char>(c));
@@ -226,7 +234,8 @@ int main(int argc, char** argv) {
         require(menu_request != nullptr, "embedded menu export");
         require(menu_request(0, 0, 1, 2, 0) != 0, "request reversible bypass");
 #else
-        require(xrfg::implicit_layer::signal_arm_stop(manifest), "signal Disarm");
+        if (pause_test) require(SetEvent(pause_signal) != FALSE, "signal Pause");
+        else require(xrfg::implicit_layer::signal_arm_stop(manifest), "signal Disarm");
 #endif
         // Begin/end the already-waited frame first. It may carry the old period,
         // but no new synthetic can be prepared after this stop boundary.
@@ -248,6 +257,38 @@ int main(int argc, char** argv) {
           for (std::size_t i = records_after_stop; i < g_end_records.size(); ++i)
               require(g_end_records[i].target == SubmittedTarget::original, "only originals after Disarm"); }
         require(wait_for_queue_idle(), "final GPU retirement");
+        if (pause_test) {
+            require(ResetEvent(pause_signal) != FALSE, "signal Resume");
+            for (int i = 0; i < 10; ++i) {
+                XrFrameState frame{XR_TYPE_FRAME_STATE};
+                require(XR_SUCCEEDED(wait(session, nullptr, &frame)), "resumed wait");
+                require(XR_SUCCEEDED(begin(session, nullptr)), "resumed begin");
+                capture(); submit(frame.predictedDisplayTime);
+                require(wait_for_queue_idle(), "resumed GPU retirement");
+            }
+            require(g_synthetic_release_calls.load() > synthetic_after_stop,
+                "synthesis resumes after the pause in the same XR session");
+            // And a second pause stops it again: the switch is not one-shot.
+            require(SetEvent(pause_signal) != FALSE, "signal second Pause");
+            {
+                XrFrameState frame{XR_TYPE_FRAME_STATE};
+                require(XR_SUCCEEDED(wait(session, nullptr, &frame)), "second pause boundary wait");
+                require(XR_SUCCEEDED(begin(session, nullptr)), "second pause boundary begin");
+                capture(); submit(frame.predictedDisplayTime);
+            }
+            const auto synthetic_after_second_pause = g_synthetic_release_calls.load();
+            for (int i = 0; i < 4; ++i) {
+                XrFrameState frame{XR_TYPE_FRAME_STATE};
+                require(XR_SUCCEEDED(wait(session, nullptr, &frame)), "second pause wait");
+                require(frame.predictedDisplayPeriod == kFakeDisplayPeriod,
+                    "native application period after the second Pause");
+                require(XR_SUCCEEDED(begin(session, nullptr)), "second pause begin");
+                capture(); submit(frame.predictedDisplayTime);
+            }
+            require(g_synthetic_release_calls.load() == synthetic_after_second_pause,
+                "no synthesis after the second Pause");
+            require(wait_for_queue_idle(), "paused GPU retirement");
+        }
 #ifdef XRFG_EMBEDDED_MENU_TEST
         // Force context recreation with a different options tuple while keeping
         // FidelityFX so this same test runs on WARP and non-NVIDIA machines.
@@ -302,6 +343,7 @@ int main(int argc, char** argv) {
     if (instance && destroy_instance) destroy_instance(instance);
     if (module) FreeLibrary(module);
     if (signal) CloseHandle(signal);
+    if (pause_signal) CloseHandle(pause_signal);
     std::error_code ignored;
     if (root.is_absolute() && root.filename().wstring().starts_with(L"ofxr-disarm-")) std::filesystem::remove_all(root, ignored);
     if (!result) std::cout << "Live Disarm: " << mode << " passed\n";

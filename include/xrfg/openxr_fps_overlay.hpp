@@ -33,6 +33,9 @@ public:
     [[nodiscard]] XrResult end_frame(
         const XrFrameEndInfo* info, bool synthetic, bool new_content = true);
     void reset_metrics() noexcept;
+    // The tray's "Pause frame generation": the counter carries a pause symbol
+    // while set, so a screenshot says which state it was taken in.
+    void set_paused(bool paused) noexcept;
     // Terminal for this session. Keep resources alive until normal teardown;
     // stop adding the quad or uploading textures immediately.
     void suspend() noexcept;

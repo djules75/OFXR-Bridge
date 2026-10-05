@@ -114,6 +114,7 @@ std::array<unsigned, 7> glyph(char c) noexcept {
     case '7': return {31,1,2,4,8,8,8};
     case '8': return {14,17,17,14,17,17,14};
     case '9': return {14,17,17,15,1,1,14};
+    case 'p': return {27,27,27,27,27,27,27}; // pause: two vertical bars
     default: return {};
     }
 }
@@ -131,19 +132,25 @@ std::vector<std::uint32_t> rasterize_fps_overlay(
     const auto status = snapshot.active ? color(64, 235, 112) : color(255, 80, 80);
     const unsigned scale = std::min(width / 24, height / 12);
     const float rate = std::isfinite(snapshot.submitted_fps) ? snapshot.submitted_fps : 0.0f;
-    char text[4]{};
-    const auto length = static_cast<unsigned>(std::snprintf(text, sizeof(text), "%d",
+    // Four glyphs at most, 23 columns of the 24: the pause symbol and three
+    // digits.
+    char text[5]{};
+    const auto length = static_cast<unsigned>(std::snprintf(text, sizeof(text), "%s%d",
+        snapshot.paused ? "p" : "",
         static_cast<int>(std::clamp(rate, 0.0f, 999.0f) + 0.5f)));
+    // The tray's pause symbol is the same orange.
+    const auto pause = color(255, 150, 0);
     unsigned x = (width - (length * 6 - 1) * scale) / 2;
     const unsigned top = (height - 7 * scale) / 2;
     for (const char* p = text; *p; ++p, x += 6 * scale) {
         const auto rows = glyph(*p);
+        const auto ink = *p == 'p' ? pause : status;
         for (unsigned y = 0; y < 7; ++y) for (unsigned column = 0; column < 5; ++column) {
             if ((rows[y] & (1u << (4 - column))) == 0) continue;
             for (unsigned sy = 0; sy < scale; ++sy) for (unsigned sx = 0; sx < scale; ++sx) {
                 const unsigned px = x + column * scale + sx;
                 const unsigned py = top + y * scale + sy;
-                pixels[static_cast<std::size_t>(py) * width + px] = status;
+                pixels[static_cast<std::size_t>(py) * width + px] = ink;
             }
         }
     }

@@ -760,6 +760,9 @@ struct SessionState {
     std::uint64_t control_id{xrfg::embedded::attach()};
     std::uint64_t control_revision{}; // frame_call_mutex
     bool control_reconfigure_required{};
+    // The tray's pause as last applied by apply_embedded_control, which
+    // folds it into menu_enabled.
+    bool pause_applied{}; // frame_call_mutex
     std::atomic<bool> menu_enabled{true};
     std::atomic<bool> generation_steady_state_established{false};
     bool manual_stop_applied{}; // frame_call_mutex; terminal for this XrSession.
@@ -4710,7 +4713,8 @@ XrResult layer_create_session_impl(
         xrfg::implicit_layer::read_single_swapchain_rings(current_layer_directory());
     state->vulkan_support =
         xrfg::implicit_layer::read_vulkan_support(current_layer_directory());
-    state->menu_enabled = initial_control.desired.enabled;
+    state->pause_applied = state->manual_control.pause_requested();
+    state->menu_enabled = initial_control.desired.enabled && !state->pause_applied;
     state->dlss_motion_vectors = initial_control.desired.motion_vectors == 1;
     state->control_revision = initial_control.revision;
     xrfg::embedded::applied(state->control_id, state->control_revision, state->menu_enabled, 0);
@@ -11150,9 +11154,21 @@ void consume_application_frame(
 
 // Called with frame ownership and presenter content excluded. No GUI thread
 // touches GPU objects; no new captures may enter during this transaction.
-void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
+//
+// The tray's "Pause frame generation" goes through the same transaction as
+// the menu's enable: generation is on when both allow it. A pause or resume
+// moves the application between its virtual period and the native one, so
+// the presenter's queue is drained first and no submission of the old shape
+// is left behind the change.
+void apply_embedded_control(
+    const std::shared_ptr<SessionState>& state,
+    bool use_continuous_presenter) {
     const auto control = xrfg::embedded::snapshot();
-    if (state->control_revision == control.revision) return;
+    const bool paused = state->manual_control.pause_requested();
+    if (state->control_revision == control.revision &&
+        paused == state->pause_applied) return;
+    if (paused != state->pause_applied && use_continuous_presenter &&
+        XR_FAILED(wait_for_presenter_idle(state))) return;
     state->menu_enabled = false;
     {
         std::scoped_lock lock(state->presenter_mutex);
@@ -11207,7 +11223,7 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
         const bool eligible = chain->generation_eligible_pending &&
             !chain->generation_declined &&
             !state->generation_budget_exhausted.load(std::memory_order_acquire);
-        if (!chain->frame_generation && control.desired.enabled && eligible) {
+        if (!chain->frame_generation && control.desired.enabled && !paused && eligible) {
             std::vector<ID3D11Texture2D*> sources;
             for (const auto& image : chain->enumerated_d3d11_images) sources.push_back(image.Get());
             const std::vector<VkImage> vulkan_sources = chain->enumerated_vulkan_images;
@@ -11295,11 +11311,15 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
     }
     state->control_revision = control.revision;
     state->control_reconfigure_required = FAILED(result);
-    state->menu_enabled = SUCCEEDED(result) && control.desired.enabled;
+    state->pause_applied = paused;
+    state->menu_enabled = SUCCEEDED(result) && control.desired.enabled && !paused;
     if (state->fps_overlay) state->fps_overlay->reset_metrics();
     xrfg::embedded::applied(state->control_id, control.revision, state->menu_enabled, result);
+    // c: 1 generating, 0 off from the menu or a failed reconfiguration,
+    // 2 paused from the tray.
     xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::embedded_configuration,
-        result, control.revision, optical_flow_configuration_code(backend, options), state->menu_enabled ? 1 : 0);
+        result, control.revision, optical_flow_configuration_code(backend, options),
+        state->menu_enabled ? 1 : paused ? 2 : 0);
 }
 
 // A bridged depth swapchain on D3D11BridgePath::depth_private has runtime
@@ -11593,7 +11613,7 @@ XrResult layer_end_frame_impl(
 
     apply_live_frame_multiplier(state, use_continuous_presenter);
     log_video_memory_periodically(*state);
-    apply_embedded_control(state);
+    apply_embedded_control(state, use_continuous_presenter);
     const bool manually_disarmed = state->manual_control.stop_requested();
     if (manually_disarmed && !state->manual_stop_applied) {
         // The existing queue has been drained before taking the content lock.
@@ -11609,6 +11629,7 @@ XrResult layer_end_frame_impl(
     }
     if (state->fps_overlay && !manually_disarmed) {
         std::scoped_lock gpu_lock(state->gpu_mutex);
+        state->fps_overlay->set_paused(state->pause_applied);
         state->fps_overlay->application_frame(end_info);
     }
 

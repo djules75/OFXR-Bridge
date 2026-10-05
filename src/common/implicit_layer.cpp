@@ -113,6 +113,11 @@ std::wstring_view registry_scope_name(RegistryScope scope) noexcept {
     return scope == RegistryScope::local_machine ? L"HKLM" : L"HKCU";
 }
 
+namespace {
+constexpr std::wstring_view kArmSignalPrefix = L"Local\\OFXRBridgeArmStop-";
+constexpr std::wstring_view kPauseSignalPrefix = L"Local\\OFXRBridgePause-";
+}
+
 std::wstring arm_signal_name(const std::filesystem::path& manifest) {
     // Deterministic across tray/DLL versions; no user-controlled event name.
     const auto path = normalized_path(manifest);
@@ -121,7 +126,29 @@ std::wstring arm_signal_name(const std::filesystem::path& manifest) {
         if (c >= L'A' && c <= L'Z') c += L'a' - L'A';
         hash = (hash ^ static_cast<std::uint16_t>(c)) * 1099511628211ULL;
     }
-    return L"Local\\OFXRBridgeArmStop-" + std::to_wstring(hash);
+    return std::wstring(kArmSignalPrefix) + std::to_wstring(hash);
+}
+
+std::wstring pause_signal_name(const std::filesystem::path& manifest) {
+    return std::wstring(kPauseSignalPrefix) +
+        arm_signal_name(manifest).substr(kArmSignalPrefix.size());
+}
+
+void* create_pause_signal(const std::filesystem::path& manifest, std::wstring* error) noexcept {
+    try {
+        const auto name = pause_signal_name(manifest);
+        HANDLE event = CreateEventW(nullptr, TRUE, FALSE, name.c_str());
+        const auto status = GetLastError();
+        if (event == nullptr || status == ERROR_ALREADY_EXISTS) {
+            if (event) CloseHandle(event);
+            if (error) *error = registry_error(L"Creating the OFXR pause control", status);
+            return nullptr;
+        }
+        return event;
+    } catch (...) {
+        if (error) *error = L"Unable to create the OFXR pause control.";
+        return nullptr;
+    }
 }
 
 void* create_arm_signal(const std::filesystem::path& manifest, std::wstring* error) noexcept {
@@ -170,15 +197,27 @@ ManualArmControl::ManualArmControl(const std::filesystem::path& module_directory
             name.data(), static_cast<DWORD>(name.size()), ini.c_str());
         managed_ = count != 0;
         const std::wstring_view value(name.data(), count);
-        const std::wstring_view prefix = L"Local\\OFXRBridgeArmStop-";
+        const std::wstring_view prefix = kArmSignalPrefix;
         if (managed_ && count < name.size() - 1 && value.starts_with(prefix) && value.size() > prefix.size()) {
             bool valid = true;
             for (wchar_t c : value.substr(prefix.size())) valid = valid && c >= L'0' && c <= L'9';
-            if (valid) event_ = OpenEventW(SYNCHRONIZE, FALSE, name.data());
+            if (valid) {
+                event_ = OpenEventW(SYNCHRONIZE, FALSE, name.data());
+                const std::wstring pause = std::wstring(kPauseSignalPrefix) +
+                    std::wstring(value.substr(prefix.size()));
+                pause_event_ = OpenEventW(SYNCHRONIZE, FALSE, pause.c_str());
+            }
         }
     } catch (...) { managed_ = true; }
 }
-ManualArmControl::~ManualArmControl() { if (event_) CloseHandle(event_); }
+ManualArmControl::~ManualArmControl() {
+    if (event_) CloseHandle(event_);
+    if (pause_event_) CloseHandle(pause_event_);
+}
+bool ManualArmControl::pause_requested() const noexcept {
+    // No pause control is not paused: an older tray, or a test without one.
+    return pause_event_ && WaitForSingleObject(pause_event_, 0) == WAIT_OBJECT_0;
+}
 bool ManualArmControl::stop_requested() const noexcept {
     // Missing/invalid control in a managed session is Off, never fail-open.
     return managed_ && (!event_ || WaitForSingleObject(event_, 0) != WAIT_TIMEOUT);

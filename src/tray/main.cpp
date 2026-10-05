@@ -34,9 +34,14 @@ constexpr UINT_PTR kTrayId = 1;
 constexpr UINT kArmPollMilliseconds = 250;
 constexpr std::uint32_t kImplementationVersion = XRFG_IMPLEMENTATION_VERSION;
 constexpr wchar_t kDonateUrl[] = L"https://ko-fi.com/tig3rmast3r";
+// The pause symbol beside the menu's "Resume frame generation", orange so a
+// glance at the menu says generation is off. The FPS overlay's pause symbol
+// is the same colour.
+constexpr COLORREF kPausedColor = RGB(230, 115, 0);
 
 enum MenuCommand : UINT {
     toggle_arm = 90,
+    toggle_pause = 91,
     backend_fidelity_fx = 110,
     backend_nvidia_slow = 111,
     backend_nvidia_medium = 112,
@@ -73,6 +78,10 @@ struct AppState {
     xrfg::implicit_layer::RegistryScope armed_scope{
         xrfg::implicit_layer::RegistryScope::current_user};
     HANDLE arm_signal{};
+    // Set while "Pause frame generation" is on. Made with the arm and closed
+    // with it, so every arm starts resumed; null if it could not be made.
+    HANDLE pause_signal{};
+    bool paused{};
     // Alternate namespace used by lifecycle tests, never read from user INI.
     std::wstring registry_subkey{xrfg::implicit_layer::kRegistrySubkey};
     HICON armed_icon{};
@@ -321,6 +330,13 @@ void log_lifecycle(const std::filesystem::path& local_directory,
         *manifest = generated_manifest;
         state.arm_signal = xrfg::implicit_layer::create_arm_signal(generated_manifest, error);
         if (!state.arm_signal) return false;
+        // Not worth refusing the arm over: without it the menu entry is grey.
+        std::wstring pause_error;
+        state.pause_signal = xrfg::implicit_layer::create_pause_signal(
+            generated_manifest, &pause_error);
+        state.paused = false;
+        if (!state.pause_signal)
+            log_lifecycle(state.local_directory, L"pause-control", pause_error);
         if (!write_text_atomic(
                 generated_manifest,
                 xrfg::standalone::build_implicit_layer_manifest(
@@ -460,7 +476,9 @@ void log_lifecycle(const std::filesystem::path& local_directory,
 }
 
 [[nodiscard]] std::wstring tray_tooltip(const AppState& state) {
-    std::wstring tooltip = state.armed ? L"OFXR Bridge ARMED - " : L"OFXR Bridge - ";
+    std::wstring tooltip = state.paused
+        ? L"OFXR Bridge PAUSED - "
+        : state.armed ? L"OFXR Bridge ARMED - " : L"OFXR Bridge - ";
     if (state.settings.backend == xrfg::standalone::FlowBackend::nvidia) {
         switch (state.settings.nvidia_preset) {
         case xrfg::standalone::NvidiaPerformancePreset::fast:
@@ -539,6 +557,16 @@ void show_balloon(
     return Shell_NotifyIconW(NIM_ADD, &state.icon) != FALSE;
 }
 
+// Ends the pause with the arm it belonged to. A running session keeps its own
+// handle, and by now the arm signal has stopped it for good.
+void close_pause_signal(AppState& state) {
+    if (state.pause_signal) {
+        CloseHandle(state.pause_signal);
+        state.pause_signal = nullptr;
+    }
+    state.paused = false;
+}
+
 [[nodiscard]] bool disarm_bridge(
     AppState& state,
     std::wstring* error) {
@@ -562,6 +590,7 @@ void show_balloon(
         CloseHandle(state.arm_signal);
         state.arm_signal = nullptr;
     }
+    close_pause_signal(state);
     state.armed = false;
     state.armed_manifest.clear();
     state.armed_vulkan_manifest.clear();
@@ -602,6 +631,7 @@ void show_balloon(
             CloseHandle(state.arm_signal);
             state.arm_signal = nullptr;
         }
+        close_pause_signal(state);
         return false;
     }
     if (!spawn_cleanup_helper(state, manifest, scope, error, vulkan_manifest)) {
@@ -618,6 +648,7 @@ void show_balloon(
             CloseHandle(state.arm_signal);
             state.arm_signal = nullptr;
         }
+        close_pause_signal(state);
         return false;
     }
     state.armed = true;
@@ -653,6 +684,43 @@ void update_runtime_options(AppState& state, bool overlay_change = false) {
     }
 }
 
+// The pause symbol shown beside "Resume frame generation": two orange bars on
+// a transparent square the size of a check mark. A 32-bit premultiplied
+// bitmap set as the entry's item bitmap is the one way to colour an entry
+// that leaves the popup in the system's own menu style; an owner-drawn entry
+// puts the whole menu in the flat unthemed one.
+[[nodiscard]] HBITMAP create_pause_bitmap() {
+    const int size = std::max(GetSystemMetrics(SM_CXMENUCHECK), 8);
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = size;
+    info.bmiHeader.biHeight = -size;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(
+        nullptr, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (bitmap == nullptr || bits == nullptr) return bitmap;
+    auto* pixels = static_cast<std::uint32_t*>(bits);
+    std::fill_n(pixels, static_cast<std::size_t>(size) * size, 0U);
+    const std::uint32_t ink = 0xff000000U |
+        (static_cast<std::uint32_t>(GetRValue(kPausedColor)) << 16) |
+        (static_cast<std::uint32_t>(GetGValue(kPausedColor)) << 8) |
+        GetBValue(kPausedColor);
+    const int bar = std::max(size / 5, 2);
+    const int gap = std::max(size / 5, 2);
+    const int left = (size - 2 * bar - gap) / 2;
+    const int top = size / 5;
+    for (int y = top; y < size - top; ++y) {
+        for (int x = 0; x < bar; ++x) {
+            pixels[y * size + left + x] = ink;
+            pixels[y * size + left + bar + gap + x] = ink;
+        }
+    }
+    return bitmap;
+}
+
 void show_context_menu(AppState& state) {
     HMENU menu = CreatePopupMenu();
     HMENU backend_menu = CreatePopupMenu();
@@ -672,6 +740,21 @@ void show_context_menu(AppState& state) {
         state.armed
             ? L"Disarm bridge"
             : L"Arm bridge until manual disarm");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(
+        menu,
+        MF_STRING | (state.armed && state.pause_signal ? MF_ENABLED : MF_GRAYED),
+        toggle_pause,
+        state.paused ? L"Resume frame generation" : L"Pause frame generation");
+    // Must outlive the menu, which only borrows it.
+    HBITMAP pause_bitmap = state.paused ? create_pause_bitmap() : nullptr;
+    if (pause_bitmap) {
+        MENUITEMINFOW item{};
+        item.cbSize = sizeof(item);
+        item.fMask = MIIM_BITMAP;
+        item.hbmpItem = pause_bitmap;
+        SetMenuItemInfoW(menu, toggle_pause, FALSE, &item);
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(
         backend_menu,
@@ -805,6 +888,7 @@ void show_context_menu(AppState& state) {
     TrackPopupMenu(menu, TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, state.window, nullptr);
     PostMessageW(state.window, WM_NULL, 0, 0);
     DestroyMenu(menu);
+    if (pause_bitmap) DeleteObject(pause_bitmap);
 }
 
 void handle_command(AppState& state, UINT command) {
@@ -820,6 +904,29 @@ void handle_command(AppState& state, UINT command) {
             if (!arm_bridge(state, &error)) {
                 show_error(state.window, error);
             }
+        }
+        break;
+    case toggle_pause:
+        if (!state.armed || !state.pause_signal) break;
+        if (state.paused ? ResetEvent(state.pause_signal)
+                         : SetEvent(state.pause_signal)) {
+            state.paused = !state.paused;
+            log_lifecycle(state.local_directory, state.paused ? L"pause" : L"resume");
+            refresh_tray_icon(state);
+            if (state.paused) {
+                show_balloon(
+                    state,
+                    L"Frame generation paused",
+                    L"Running games still go through the bridge. To rule OFXR out, disarm and restart the game.");
+            } else {
+                show_balloon(
+                    state,
+                    L"Frame generation resumed",
+                    L"Running games generate frames again.");
+            }
+        } else {
+            show_error(
+                state.window, last_error_message(L"Switching the frame generation pause"));
         }
         break;
     case backend_fidelity_fx:
