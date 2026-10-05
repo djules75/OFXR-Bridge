@@ -109,7 +109,13 @@ constexpr unsigned kDefaultMaxFileMb = 32;
     const std::filesystem::path& local_directory,
     std::uint32_t implementation_version);
 
-// Replaces an existing cached layer instead of silently retaining it.
+// Replaces an existing cached layer instead of silently retaining it, unless
+// it is already the same file. The cache folder is per version, so normally it
+// is - and while armed the Vulkan layer loads into every Vulkan process, which
+// keeps it loaded after a disarm and makes overwriting it fail with a sharing
+// violation that blocked re-arming until those processes exited. A different
+// file that is still loaded is renamed aside and the new one installed under
+// the original name.
 [[nodiscard]] bool install_runtime_layer_dll(
     const std::filesystem::path& source,
     const std::filesystem::path& destination) noexcept;

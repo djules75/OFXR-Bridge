@@ -3,11 +3,57 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <fstream>
 #include <stdexcept>
 
 namespace xrfg::standalone {
 namespace {
+
+// Suffix of a cached layer DLL renamed aside because something still had it
+// loaded when it had to be replaced.
+constexpr wchar_t kSetAsideMarker[] = L".old-";
+
+[[nodiscard]] bool files_identical(
+    const std::filesystem::path& left,
+    const std::filesystem::path& right) {
+    std::error_code error;
+    const auto left_size = std::filesystem::file_size(left, error);
+    if (error) return false;
+    const auto right_size = std::filesystem::file_size(right, error);
+    if (error || left_size != right_size) return false;
+    std::ifstream left_stream(left, std::ios::binary);
+    std::ifstream right_stream(right, std::ios::binary);
+    if (!left_stream || !right_stream) return false;
+    std::array<char, 64 * 1024> left_block{};
+    std::array<char, 64 * 1024> right_block{};
+    while (left_stream && right_stream) {
+        left_stream.read(left_block.data(), left_block.size());
+        right_stream.read(right_block.data(), right_block.size());
+        const auto read = left_stream.gcount();
+        if (read != right_stream.gcount() ||
+            !std::equal(left_block.begin(), left_block.begin() + read,
+                        right_block.begin())) {
+            return false;
+        }
+    }
+    return left_stream.eof() && right_stream.eof();
+}
+
+// Deleting one fails while a process still has it loaded, which is fine: it
+// is tried again at the next arm.
+void remove_unused_set_aside_copies(const std::filesystem::path& destination) {
+    std::error_code error;
+    const std::wstring prefix =
+        destination.filename().wstring() + kSetAsideMarker;
+    for (const auto& entry : std::filesystem::directory_iterator(
+             destination.parent_path(), error)) {
+        if (entry.path().filename().wstring().rfind(prefix, 0) == 0) {
+            DeleteFileW(entry.path().c_str());
+        }
+    }
+}
 
 [[nodiscard]] std::string wide_to_utf8(std::wstring_view value) {
     if (value.empty()) {
@@ -310,6 +356,25 @@ bool install_runtime_layer_dll(
     const std::filesystem::path& destination) noexcept {
     try {
         std::filesystem::create_directories(destination.parent_path());
+        remove_unused_set_aside_copies(destination);
+        if (files_identical(source, destination)) {
+            return true;
+        }
+        if (CopyFileW(source.c_str(), destination.c_str(), FALSE)) {
+            return true;
+        }
+        const DWORD copy_error = GetLastError();
+        if (copy_error != ERROR_SHARING_VIOLATION &&
+            copy_error != ERROR_USER_MAPPED_FILE) {
+            return false;
+        }
+        // Windows renames a loaded DLL but will not overwrite it. Whoever has
+        // it keeps the old copy; the next process loads the new one.
+        auto aside = destination;
+        aside += kSetAsideMarker + std::to_wstring(GetTickCount64());
+        if (!MoveFileExW(destination.c_str(), aside.c_str(), 0)) {
+            return false;
+        }
         return CopyFileW(source.c_str(), destination.c_str(), FALSE) != FALSE;
     } catch (...) {
         return false;

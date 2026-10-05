@@ -300,6 +300,75 @@ int main() {
         return 1;
     }
 
+    // A cached layer some process still has loaded: overwriting it fails,
+    // which used to block re-arming. Mapping a copy of this executable as an
+    // image is what loading a DLL does to the file - it can be renamed but not
+    // overwritten - and runs none of its code.
+    const auto loaded_directory =
+        std::filesystem::temp_directory_path() /
+        (L"ofxr-runtime-loaded-" +
+         std::to_wstring(GetCurrentProcessId()) + L"-" +
+         std::to_wstring(GetTickCount64()));
+    const auto loaded_source = loaded_directory / L"source.dll";
+    const auto loaded_destination = loaded_directory / L"runtime" / L"layer.dll";
+    const auto write_file = [](const std::filesystem::path& path, const char* text) {
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+        stream << text;
+    };
+    const auto read_file = [](const std::filesystem::path& path) {
+        std::ifstream stream(path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(stream)),
+                           std::istreambuf_iterator<char>());
+    };
+    const auto set_aside_count = [&] {
+        std::size_t count = 0;
+        for (const auto& entry :
+             std::filesystem::directory_iterator(loaded_destination.parent_path())) {
+            if (entry.path().filename().wstring().rfind(L"layer.dll.old-", 0) == 0) {
+                ++count;
+            }
+        }
+        return count;
+    };
+    wchar_t own_path[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, own_path, MAX_PATH);
+    std::filesystem::create_directories(loaded_destination.parent_path());
+    std::filesystem::copy_file(own_path, loaded_source,
+                               std::filesystem::copy_options::overwrite_existing);
+    std::filesystem::copy_file(own_path, loaded_destination,
+                               std::filesystem::copy_options::overwrite_existing);
+    const std::string loaded_image = read_file(loaded_destination);
+    HMODULE held = LoadLibraryExW(
+        loaded_destination.c_str(), nullptr, LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+    const bool identical_while_loaded =
+        held != nullptr &&
+        install_runtime_layer_dll(loaded_source, loaded_destination) &&
+        read_file(loaded_destination) == loaded_image && set_aside_count() == 0;
+    write_file(loaded_source, "newer-layer");
+    const bool replaced_while_loaded =
+        install_runtime_layer_dll(loaded_source, loaded_destination) &&
+        read_file(loaded_destination) == "newer-layer" && set_aside_count() == 1;
+    // Still loaded, so the copy set aside survives the next install...
+    const bool kept_while_loaded =
+        install_runtime_layer_dll(loaded_source, loaded_destination) &&
+        set_aside_count() == 1;
+    if (held != nullptr) FreeLibrary(held);
+    // ...and goes at the first install after it was released.
+    const bool cleaned_after_release =
+        install_runtime_layer_dll(loaded_source, loaded_destination) &&
+        set_aside_count() == 0;
+    cleanup_error.clear();
+    std::filesystem::remove_all(loaded_directory, cleanup_error);
+    if (!identical_while_loaded || !replaced_while_loaded ||
+        !kept_while_loaded || !cleaned_after_release) {
+        std::cerr << "runtime DLL install while loaded failed: identical="
+                  << identical_while_loaded << " replaced="
+                  << replaced_while_loaded << " kept=" << kept_while_loaded
+                  << " cleaned=" << cleaned_after_release << '\n';
+        return 1;
+    }
+
     if (quote_windows_argument(L"C:\\Game\\game.exe") !=
             L"C:\\Game\\game.exe" ||
         quote_windows_argument(L"C:\\My Game\\game.exe") !=
