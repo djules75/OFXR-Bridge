@@ -170,6 +170,16 @@ bool g_destroy_pending_space = false;
 bool g_refuse_layer_mode = false;
 std::atomic<std::uint32_t> g_presenter_projection_submissions{0};
 std::atomic<std::uint32_t> g_layer_refusals{0};
+// steamvr-own-time: MSFS 2024's labelling on the throttling SteamVR. Every
+// frame is ended with a display time of the application's own, never the
+// one its xrWaitFrame returned, and the loop is sequential, so the session
+// is promoted by the SteamVR route and the layer can only tell which wait a
+// frame belongs to by elimination. The runtime rejects one inline frame's
+// display time as past, which MSFS 2024 produces after a hitch; that wait
+// must not stay pending, or no later frame of this title ever pairs again.
+bool g_own_display_time_mode = false;
+std::atomic<bool> g_reject_end_time_invalid{false};
+std::atomic<std::uint32_t> g_time_rejections{0};
 std::atomic<bool> g_swapchain_destroyed{false};
 std::atomic<unsigned> g_submission_after_destroy{0};
 DWORD g_test_application_thread_id{};
@@ -649,10 +659,20 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_end_frame(
             // accepts any displayTime, and so does the fake here.
             (!g_flight_simulator_mode &&
              !g_uevr_pipelined_display_time_mode && !g_dcs_d3d11_mode &&
+             !g_own_display_time_mode &&
              end_info->displayTime != *g_begun_display_time)) {
             return XR_ERROR_CALL_ORDER_INVALID;
         }
         g_begun_display_time.reset();
+    }
+    // The application's own frame, inline: the runtime considers its display
+    // time past. The frame is consumed above as a runtime would, and the
+    // application sees the error.
+    if (g_own_display_time_mode &&
+        GetCurrentThreadId() == g_test_application_thread_id &&
+        g_reject_end_time_invalid.exchange(false, std::memory_order_acq_rel)) {
+        g_time_rejections.fetch_add(1, std::memory_order_relaxed);
+        return XR_ERROR_TIME_INVALID;
     }
     EndFrameRecord record{};
     record.display_time = end_info->displayTime;
@@ -2123,7 +2143,8 @@ int main(int argc, char** argv) {
             "d3d11-double-wide|steamvr-inline|steamvr-presenter|"
             "flight-simulator|uevr-pipelined-time|inverted-fov|"
             "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget|"
-            "dcs|dcs-d3d11|d3d11-bridge|d3d11-bridge-acquire-ahead]\n";
+            "dcs|dcs-d3d11|d3d11-bridge|d3d11-bridge-acquire-ahead|"
+            "steamvr-own-time]\n";
         return EXIT_FAILURE;
     }
     g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
@@ -2141,8 +2162,10 @@ int main(int argc, char** argv) {
         argc == 4 && std::strcmp(argv[3], "steamvr-destroy-space") == 0;
     g_refuse_layer_mode =
         argc == 4 && std::strcmp(argv[3], "steamvr-layer-invalid") == 0;
+    g_own_display_time_mode =
+        argc == 4 && std::strcmp(argv[3], "steamvr-own-time") == 0;
     g_steamvr_presenter_mode = g_destroy_pending_space || g_dcs_mode ||
-        g_refuse_layer_mode ||
+        g_refuse_layer_mode || g_own_display_time_mode ||
         (argc == 4 && std::strcmp(argv[3], "steamvr-presenter") == 0);
     g_single_threaded_mode =
         argc == 4 && std::strcmp(argv[3], "d3d11-single-threaded") == 0;
@@ -3533,6 +3556,103 @@ int main(int argc, char** argv) {
         std::cout << (g_dcs_d3d11_mode
                           ? "OpenXR DCS D3D11 inline-only test passed\n"
                           : "OpenXR DCS pipelined-wait pairing test passed\n");
+        return EXIT_SUCCESS;
+    }
+
+    if (g_own_display_time_mode) {
+        // Sequential wait/begin/end, every frame labelled with a time of the
+        // application's own. The fake's predicted times are multiples of 100
+        // and the virtual ones the presenter serves keep that, so an offset
+        // of 37 never names a wait. The third frame is rejected by the
+        // runtime while the session is still inline, as the slip was seen;
+        // from then on the queue holds a wait no frame will ever match.
+        //
+        // Every frame after the promotion has a previous frame to pair with.
+        // A layer that keeps the orphan primes all of them, which is the
+        // reported session: a real frame and a repeat, for as long as the
+        // game ran.
+        const auto own_time = [](XrTime predicted) { return predicted + 37; };
+        constexpr int kInlineFrames = 4;
+        constexpr int kPresenterFrames = 12;
+        constexpr int kRejectedFrame = 2;
+        XrFrameState frame{XR_TYPE_FRAME_STATE};
+        XrTime last_predicted = 0;
+        bool sequence_succeeded = true;
+        bool promoted = false;
+        bool rejected_while_inline = false;
+        std::size_t records_at_promotion = 0;
+        for (int index = 0;
+             sequence_succeeded && index < kInlineFrames + kPresenterFrames;
+             ++index) {
+            sequence_succeeded =
+                XR_SUCCEEDED(wait_frame(session, &frame_wait_info, &frame)) &&
+                frame.predictedDisplayTime > last_predicted &&
+                XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
+                capture_fresh_application_image();
+            if (!sequence_succeeded) {
+                break;
+            }
+            last_predicted = frame.predictedDisplayTime;
+            if (!promoted &&
+                frame.predictedDisplayPeriod ==
+                    kFakeDisplayPeriod * g_frames_per_application_frame) {
+                promoted = true;
+                std::scoped_lock lock(g_end_records_mutex);
+                records_at_promotion = g_end_records.size();
+            }
+            if (index == kRejectedFrame) {
+                rejected_while_inline = !promoted;
+                g_reject_end_time_invalid.store(true, std::memory_order_release);
+                // The rejection reaches the application as its own error.
+                sequence_succeeded =
+                    !submit_frame(own_time(frame.predictedDisplayTime)) &&
+                    g_time_rejections.load(std::memory_order_relaxed) == 1;
+            } else {
+                sequence_succeeded =
+                    submit_frame(own_time(frame.predictedDisplayTime));
+            }
+        }
+
+        const bool teardown_succeeded =
+            XR_SUCCEEDED(end_session(session)) &&
+            XR_SUCCEEDED(destroy_swapchain(swapchain)) &&
+            XR_SUCCEEDED(destroy_session(session)) &&
+            XR_SUCCEEDED(destroy_instance(instance));
+        FreeLibrary(module);
+
+        std::size_t synthetic_after = 0;
+        std::size_t current_after = 0;
+        {
+            std::scoped_lock lock(g_end_records_mutex);
+            for (std::size_t index = records_at_promotion;
+                 index < g_end_records.size(); ++index) {
+                if (g_end_records[index].target == SubmittedTarget::synthetic) {
+                    ++synthetic_after;
+                } else if (g_end_records[index].target ==
+                           SubmittedTarget::current) {
+                    ++current_after;
+                }
+            }
+        }
+        // The frame after the rejection sheds the orphan and primes, and the
+        // first frame under the presenter may prime too; everything else
+        // pairs.
+        const bool valid = sequence_succeeded && teardown_succeeded &&
+            promoted && rejected_while_inline &&
+            g_time_rejections.load(std::memory_order_relaxed) == 1 &&
+            synthetic_after + 4 >= static_cast<std::size_t>(kPresenterFrames) &&
+            g_waited_display_times.empty() && !g_begun_display_time;
+        if (!valid) {
+            std::cerr << "SteamVR own-display-time validation failed: sequence="
+                      << sequence_succeeded << " teardown="
+                      << teardown_succeeded << " promoted=" << promoted
+                      << " rejected-inline=" << rejected_while_inline
+                      << " rejections=" << g_time_rejections.load()
+                      << " synthetic=" << synthetic_after
+                      << " current=" << current_after << '\n';
+            return EXIT_FAILURE;
+        }
+        std::cout << "OpenXR SteamVR own-display-time pairing test passed\n";
         return EXIT_SUCCESS;
     }
 

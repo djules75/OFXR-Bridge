@@ -10999,6 +10999,13 @@ struct PreparedProjectionFrame {
         // frame here left every DCS frame primed and none generated.
         // consume_application_frame drops everything up to the match, so the
         // two stay in step.
+        //
+        // A label that names none of them primes this frame, and the consume
+        // then empties the queue rather than keeping it. MSFS 2024 labels
+        // every frame with a time of its own, so for it only the
+        // one-outstanding case above ever pairs: a single wait left pending
+        // by a frame the runtime rejected kept the queue at two or more for
+        // the rest of a reported session, and every frame of it primed.
         const auto frame = std::find_if(
             state->pending_frames.begin(),
             state->pending_frames.end(),
@@ -11433,6 +11440,13 @@ void consume_application_frame(
             return candidate.display_time == display_time;
         });
     if (frame == state->pending_frames.end()) {
+        // Nothing pending names this frame, so nothing pending can be told
+        // apart from a wait whose frame is never coming. Left in place, such
+        // a wait keeps an application that labels frames with its own time
+        // (MSFS 2024) from ever being matched by elimination again, and it
+        // primed every frame of a reported session. Start over: the next wait
+        // is the only one outstanding, and the next frame pairs.
+        state->pending_frames.clear();
         return;
     }
     state->pending_frames.erase(state->pending_frames.begin(), std::next(frame));
@@ -12031,7 +12045,9 @@ XrResult layer_end_frame_impl(
                 0,
                 0,
                 0);
-            if (XR_SUCCEEDED(end_result) && end_info != nullptr) {
+            // On failure as well: the frame is over, and a wait left pending
+            // by it would outlive every frame that could have matched it.
+            if (end_info != nullptr) {
                 consume_application_frame(
                     state,
                     end_info->displayTime,
@@ -12669,6 +12685,15 @@ XrResult layer_end_frame_impl(
         // primes, and leave the quarantine for failures that really do mean
         // the resources are no longer safe to use. Quarantining cost a full
         // second of generation for each of those three frames.
+        //
+        // The frame is over either way, so its wait is consumed as it is on
+        // success. Left pending, it stayed in the queue for the rest of the
+        // session, and for a title whose labels never match a wait that
+        // meant no frame paired again.
+        consume_application_frame(
+            state,
+            current_snapshot.display_time,
+            consume_in_submission_order);
         if (result == XR_ERROR_TIME_INVALID) {
             clear_generation_continuity(state);
             return result;

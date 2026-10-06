@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.433.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.434.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -608,6 +608,16 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
                 "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-presenter-layer-invalid.log"
                 steamvr-layer-invalid)
+        # An application that labels its frames with its own display time
+        # (MSFS 2024) can only be matched to its wait by elimination. One
+        # frame the runtime rejects must not leave a wait pending for the
+        # rest of the session.
+        add_test(
+            NAME xrfg_layer_presenter_own_display_time
+            COMMAND xrfg_layer_call_chain
+                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
+                "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-presenter-own-display-time.log"
+                steamvr-own-time)
 
         add_test(
             NAME xrfg_layer_split_eye_call_chain
