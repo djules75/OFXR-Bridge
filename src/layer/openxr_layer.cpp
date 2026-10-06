@@ -842,6 +842,14 @@ struct SessionState {
     // signed and taken the short way round. Written and read only by the
     // presenter thread, between measuring it and applying it a few lines later.
     std::chrono::nanoseconds presenter_landed_error{};
+    // Real frames left before the acquisition step may take a whole scanout
+    // in one step again, and whether the step just taken is still to be
+    // held: the pace caps a hold at one period, which would drain a jump at
+    // about a millisecond a cycle - the walk under another name, measured as
+    // exactly that - so the cycle after a jump may hold two. Cooldown is
+    // presenter thread only; the flag is guarded by presenter_mutex.
+    std::uint32_t presenter_scanout_jump_cooldown{};
+    bool presenter_scanout_jump_pending{};
     // How much of the compositor's frame to leave in hand when a submission
     // lands. Fixed for the session and presenter thread only.
     //
@@ -7265,6 +7273,12 @@ void fail_pending_presenter_submissions_locked(
 // drift servo, the slot corrector and the vsync phase lock all stand down,
 // because two controllers on one variable is the failure this layer keeps
 // rediscovering.
+// Real frames between two whole-scanout jumps of the acquisition step. One
+// jump is meant to be the whole correction; if the reading is still a
+// scanout out afterwards the step walks it off as it always did, rather than
+// skipping a slot on every real frame.
+constexpr std::uint32_t kScanoutJumpCooldownFrames = 8;
+
 [[nodiscard]] bool measured_pace_active(
     const std::shared_ptr<SessionState>& state) noexcept {
     return state->steamvr_delivery && state->dispatch &&
@@ -7562,8 +7576,15 @@ void pace_presenter_submission(
             if (ready_at > entered) {
                 // Never hold longer than one period, whatever the schedule
                 // says. Pacing exists to stop submissions bunching up; it must
-                // never be able to hold the presenter back instead.
-                ready_at = std::min(ready_at, entered + period);
+                // never be able to hold the presenter back instead. The one
+                // exception is the cycle after the acquisition step took a
+                // whole scanout in one step: that hold is the step, and it is
+                // allowed two.
+                const auto cap = state->presenter_scanout_jump_pending
+                    ? period * 2
+                    : period;
+                state->presenter_scanout_jump_pending = false;
+                ready_at = std::min(ready_at, entered + cap);
                 remaining = ready_at - entered;
             }
             {
@@ -8430,9 +8451,58 @@ void continuous_presenter_main(
                         // above and never crosses zero into the rollover the
                         // API warns about. The bound is a safety rail for an
                         // absurd reading, not part of the control law.
+                        //
+                        // A whole scanout of error is taken in one step. It
+                        // arrives all at once: after a single disturbed frame
+                        // - the runtime holding this thread's wait a couple of
+                        // milliseconds, or one hand-over past the vsync - the
+                        // reading sits a scanout higher at the same phase
+                        // (16.6 ms for 3.0 at 72 Hz) and every frame handed
+                        // over there is mispresented until the scanout is
+                        // taken back. Holding the phase instead was tried and
+                        // measured: 21 to 25 of every 24 frames wrong. Walked
+                        // off a quarter at a time, the frames in between are
+                        // wrong too, about twenty per disturbance; at 3X on a
+                        // 72 Hz display, where 24 real frames a second step
+                        // this, that is most of a second, several times a
+                        // minute. Taken in one step it costs one repeated
+                        // frame. The step is the whole error, so the reading
+                        // comes out on the margin, and the usual quarter-steps
+                        // take anything left. One jump per cooldown: if the
+                        // reading is still out afterwards the walk is the
+                        // fallback, not another skipped slot.
+                        // 907: a 1 jumped, 2 far reading inside the cooldown,
+                        // walked instead; b error, c the reading.
                         const auto acquire_step_ceiling = scanout / 2;
-                        if (error > kAcquireDeadBand ||
-                            error < -kAcquireDeadBand) {
+                        const bool far_reading = error > scanout / 2;
+                        if (far_reading && state->presenter_scanout_jump_cooldown == 0) {
+                            const auto jump = std::min(error, scanout * 2);
+                            state->presenter_scanout_jump_cooldown =
+                                kScanoutJumpCooldownFrames;
+                            std::scoped_lock lock(state->presenter_mutex);
+                            state->presenter_next_submit += jump;
+                            state->presenter_scanout_jump_pending = true;
+                            xrfg::bridge_flight_logger().event(
+                                xrfg::BridgeFlightOperation::
+                                    presenter_vsync_lock,
+                                907,
+                                1,
+                                static_cast<std::uint64_t>(error.count()),
+                                remaining);
+                        } else if (error > kAcquireDeadBand ||
+                                   error < -kAcquireDeadBand) {
+                            if (far_reading) {
+                                xrfg::bridge_flight_logger().event(
+                                    xrfg::BridgeFlightOperation::
+                                        presenter_vsync_lock,
+                                    907,
+                                    2,
+                                    static_cast<std::uint64_t>(error.count()),
+                                    remaining);
+                            }
+                            if (state->presenter_scanout_jump_cooldown != 0) {
+                                --state->presenter_scanout_jump_cooldown;
+                            }
                             const auto step = std::clamp(
                                 error / 4,
                                 -acquire_step_ceiling,
@@ -8448,6 +8518,8 @@ void continuous_presenter_main(
                                 static_cast<std::uint64_t>(
                                     step.count() + scanout.count()),
                                 remaining);
+                        } else if (state->presenter_scanout_jump_cooldown != 0) {
+                            --state->presenter_scanout_jump_cooldown;
                         }
                     }
                 }
