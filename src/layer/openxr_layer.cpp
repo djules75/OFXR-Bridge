@@ -7273,10 +7273,14 @@ void fail_pending_presenter_submissions_locked(
 // drift servo, the slot corrector and the vsync phase lock all stand down,
 // because two controllers on one variable is the failure this layer keeps
 // rediscovering.
-// Real frames between two whole-scanout jumps of the acquisition step. One
-// jump is meant to be the whole correction; if the reading is still a
-// scanout out afterwards the step walks it off as it always did, rather than
-// skipping a slot on every real frame.
+// Real frames between two whole-scanout jumps of the acquisition step while
+// the reading has not come back: one jump is meant to be the whole
+// correction, and if the reading is still a scanout out afterwards the step
+// walks it off as it always did, rather than skipping a slot on every real
+// frame. A reading back near the margin ends the cooldown at once, because
+// it says the jump took. Measured on a machine where SteamVR holds the
+// presenter's wait two to three times a second, the full eight frames left
+// most disturbances inside it: 33 jumped and 52 walked in a minute.
 constexpr std::uint32_t kScanoutJumpCooldownFrames = 8;
 
 [[nodiscard]] bool measured_pace_active(
@@ -8475,6 +8479,9 @@ void continuous_presenter_main(
                         // walked instead; b error, c the reading.
                         const auto acquire_step_ceiling = scanout / 2;
                         const bool far_reading = error > scanout / 2;
+                        if (!far_reading) {
+                            state->presenter_scanout_jump_cooldown = 0;
+                        }
                         if (far_reading && state->presenter_scanout_jump_cooldown == 0) {
                             const auto jump = std::min(error, scanout * 2);
                             state->presenter_scanout_jump_cooldown =
