@@ -17,7 +17,7 @@ function Get-Average {
 function Get-Percentile {
     param([double[]]$Values, [double]$Fraction)
     if ($Values.Count -eq 0) { return $null }
-    $sorted = $Values | Sort-Object
+    $sorted = @($Values | Sort-Object)
     $index = [Math]::Min($sorted.Count - 1, [int][Math]::Floor($Fraction * $sorted.Count))
     [Math]::Round($sorted[$index], 2)
 }

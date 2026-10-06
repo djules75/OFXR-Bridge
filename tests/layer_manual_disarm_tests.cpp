@@ -45,10 +45,12 @@ int main(int argc, char** argv) {
     // "pause" as the third argument drives the tray's reversible pause in
     // place of the Disarm, and resumes afterwards.
     const bool pause_test = argc == 4 && std::string(argv[3]) == "pause";
-    // "frame-loop <runtime> <single|split> [paused]": that a session which
-    // does not pipeline its waits stays inline on Virtual Desktop and Pimax
-    // OpenXR whatever its pairs measure, and that another runtime still
-    // promotes it on bunched pairs.
+    // "frame-loop <runtime> <single|split> [paused]": that on Virtual Desktop
+    // a single-threaded session takes the presenter at its first generating
+    // frames and a split loop stays inline, that Pimax OpenXR stays inline
+    // whatever its pairs measure, and that another runtime still promotes on
+    // bunched pairs.
+    //
     const bool frame_loop_test = mode == "frame-loop";
     // "recorder": the flight recorder switched on, off and on again while a
     // session runs.
@@ -382,7 +384,12 @@ int main(int argc, char** argv) {
                       << presenter_at << std::endl;
             const bool decided_by_shape = loop_runtime != "other";
             if (!decided_by_shape && start_paused) return 1; // not a scenario
-            if (decided_by_shape)
+            if (loop_runtime == "virtual-desktop" && !split_loop)
+                // Requested on the first generating frame, started by the next,
+                // seen by the application at the wait after that.
+                require(presenter_at >= 0 && presenter_at <= 6,
+                    "a single-threaded session takes the presenter at its first generating frames on Virtual Desktop");
+            else if (decided_by_shape)
                 require(presenter_at < 0,
                     "stays inline on this runtime whatever the pairs measure");
             else

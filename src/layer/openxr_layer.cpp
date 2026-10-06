@@ -526,7 +526,9 @@ struct Dispatch {
     // Virtual Desktop's runtime or Pimax Play's ("Pimax OpenXR"): the two
     // where a session's mode is fixed by the application's frame loop and by
     // nothing measured. A title that waits for its next frame inside the
-    // current one takes the presenter, as on every runtime; every other
+    // current one takes the presenter, as on every runtime. On Virtual
+    // Desktop a title whose frame loop runs on one thread takes it too, from
+    // its first generating frame (frame_loop_takes_presenter). Every other
     // title stays inline for the whole session.
     //
     // They went by the bunched-pair detector before, and on these runtimes
@@ -11316,6 +11318,53 @@ struct InternalCycleResult {
     return true;
 }
 
+// Virtual Desktop, a frame loop on one thread: the presenter, from the first
+// generating frame, for the whole session.
+//
+// VDXR paces the first xrWaitFrame of a period and not the second, so inline
+// the real frame follows the synthetic by a fraction of a period - IL-2 Great
+// Battles at 90 Hz: 3.1 ms, 0.28 of the period, on 813 of 816 pairs - and
+// the headset runs at half rate with more latency than the presenter gave the
+// same title. Pacing the pair inline instead (V432) spaced it exactly and was
+// worse: the hold sits on the application's thread ahead of its next render,
+// so a pair costs render plus a period, and a title that renders in about a
+// period - IL-2 over a city, CPU-bound, 10.3 ms - fell from 45 to 40 a second
+// and the headset to 70. The presenter hands the real frame over on its own
+// thread while the application renders the next one, which is the only way
+// the two overlap. It is what V414-V416 did for this title, through the
+// bunched-pair detector, and what the reporter called "super smooth".
+//
+// A split loop - the wait on one thread, the end on another, No Man's Sky -
+// stays inline: on the presenter at 144 Hz it ran the GPU out of room, with
+// synthetics held three periods and fifteen continuity resets a second,
+// where inline held a steady 55 with a synthetic for each. Which mode wins
+// there depends on GPU headroom, which is not known at start-up; the thread
+// shape is, and it is the same every run.
+//
+// Decided from the runtime's name and from which thread calls which
+// function, both fixed by the application's code and seen by its second
+// frame (split_frame_loop latches on the first wait that follows an end from
+// another thread, before anything can generate). Nothing measured, nothing
+// that moves with the scene: the mode is settled at start-up and holds for
+// the session, as on Pimax OpenXR. Asked on every inline generating frame,
+// so a presenter the pause stopped, or a run of failures demoted, comes back
+// the same way. 601: the request, once per request; a the end thread, c the
+// graphics binding.
+[[nodiscard]] bool frame_loop_takes_presenter(
+    const std::shared_ptr<SessionState>& state) noexcept {
+    if (!state->dispatch->virtual_desktop_runtime || state->split_frame_loop ||
+        state->steamvr_presenter_start_requested) {
+        return false;
+    }
+    xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::presenter_transition,
+        601,
+        state->application_end_thread_id,
+        0,
+        static_cast<std::uint64_t>(state->graphics_binding));
+    return true;
+}
+
 [[nodiscard]] bool steamvr_wait_requires_continuous_presenter(
     const std::shared_ptr<SessionState>& state,
     const InternalCycleResult& cycle) noexcept {
@@ -12801,7 +12850,8 @@ XrResult layer_end_frame_impl(
                     current_cycle) ||
                 runtime_wait_lacks_pacing(state) ||
                 (!state->dispatch->inline_unless_pipelined &&
-                 inline_pair_lands_in_one_scanout(state, inline_pair_gap)))) {
+                 inline_pair_lands_in_one_scanout(state, inline_pair_gap)) ||
+                frame_loop_takes_presenter(state))) {
         // Request the promotion; do not perform it here. submit_current_cycle
         // has already submitted this frame, so seeding a freshly started
         // presenter thread with it handed a second owner to composition layers
