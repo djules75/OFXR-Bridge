@@ -3,13 +3,13 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current release: **v0.2.12.2 (internal build V427)**.
-See the [release notes](docs/releases/0.2.12.2.md). 0.2.12.2 removes a
-flicker in the left eye in MSFS 2024 with 3X Frame Gen. 0.2.12.1 lets you
-pause and resume frame generation while you play, from the tray or with a
-key you choose, switch the flight recorder on in a running game, and get the
-same behaviour every session on Virtual Desktop and Pimax OpenXR. It also
-fixes a black screen while some games load.
+Current release: **v0.2.13.1 (internal build V433)**.
+See the [release notes](docs/releases/0.2.13.1.md). 0.2.13.1 fixes the
+higher latency and the frame drops some games had on Virtual Desktop since
+0.2.12.1, and shortens the frame-rate dips SteamVR showed after a hiccup.
+0.2.12.2 removed a flicker in the left eye in MSFS 2024 with 3X Frame Gen,
+and 0.2.12.1 lets you pause and resume frame generation while you play,
+from the tray or with a key you choose.
 
 > [!WARNING]
 > **Pimax headsets: use SteamVR, not Pimax OpenXR.** Pimax Play's OpenXR
