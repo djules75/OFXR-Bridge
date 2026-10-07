@@ -9460,10 +9460,11 @@ void stop_continuous_presenter(
          state.graphics_binding == SessionGraphicsBinding::vulkan);
 }
 
-// Holds the application until the presenter has run a whole pair since it was
-// last released. Deliberately returns nothing: it is called after the frame has
-// already been handed over, so a presenter that stops or fails while this waits
-// must not turn a submitted frame into an error - it just stops waiting.
+// Holds the application until the presenter has run `presenter_frames` frames
+// since it was last released: a whole pair for a pair, one frame for a prime.
+// Deliberately returns nothing: it is called after the frame has already been
+// handed over, so a presenter that stops or fails while this waits must not
+// turn a submitted frame into an error - it just stops waiting.
 //
 // This is the gate that paces the application on the presenter path. The
 // capacity bounds in xrEndFrame sit beside it and are normally slack, so
@@ -9472,16 +9473,33 @@ void stop_continuous_presenter(
 // It is called after the pair is handed over, except in the deeper pipeline on
 // a D3D11 session, where it is called at admission, before the pair's
 // synthesis is queued; see presenter_hold_at_admission.
+//
+// A prime is held too, for one frame, and the reason is what the hold does
+// to the surplus below rather than the frame it waits for. A continuity
+// reset in a scene the application renders in a few milliseconds - a hangar,
+// a menu, a loading screen - used to let three frames reach the GPU in
+// 18 ms: the prime was not held at all, the first pair frame passed on the
+// surplus the reset's own stall had left, and only the second pair frame
+// was paced. With a game frame and two synthesis pairs queued inside those
+// 18 ms the GPU ran about 30 ms behind, the fourth frame's history capture
+// found its slot still read by the first pair's synthesis (ERROR_BUSY),
+// continuity reset again, and the next frame primed again: a cycle of
+// exactly 100 ms, 40 real and 20 synthetic images a second, that only a
+// heavier scene could break. IL-2 at 90 Hz on Virtual Desktop sat in it for
+// a whole hangar; V416's own log has the same cycle for 0.8 s of a flight
+// load. Held for one frame the prime absorbs the surplus, so the first
+// pair frame waits its two periods and nothing bursts. A prime arriving
+// on cadence passes at once: the presenter has a frame behind it already.
 void wait_for_presenter_pair(
-    const std::shared_ptr<SessionState>& state) noexcept {
+    const std::shared_ptr<SessionState>& state,
+    std::uint64_t presenter_frames) noexcept {
     try {
         // The pair rate does not follow this number: the application enqueues
         // one pair per release and the presenter spends two frames on it -
         // three with 3X - so all it sets is the phase at which the
         // application renders. The depth is not set here either - the
         // presenter enforces it where it pops a submission.
-        const std::uint64_t kPresenterFramesPerPair =
-            state->frames_per_application_frame;
+        const std::uint64_t kPresenterFramesPerPair = presenter_frames;
         const auto entered = std::chrono::steady_clock::now();
         std::unique_lock lock(state->presenter_mutex);
         state->presenter_condition.wait(lock, [&] {
@@ -9527,7 +9545,7 @@ void wait_for_presenter_pair(
         // their slot and the application at 39 a second, against 45 with
         // 5.9 ms on the same frame.
         const std::chrono::nanoseconds release_offset =
-            state->frames_per_application_frame > 2
+            presenter_frames > 2
                 ? state->triple_release_delay
                 : std::chrono::nanoseconds::zero();
         // Never record under presenter_mutex: the presenter thread takes it
@@ -12261,14 +12279,17 @@ XrResult layer_end_frame_impl(
         if (XR_FAILED(capacity_result)) {
             return capacity_result;
         }
-        if (presenter_hold_at_admission(*state) && metadata_pairable) {
+        if (presenter_hold_at_admission(*state)) {
             // The once-per-pair hold, ahead of synthesis rather than after the
             // hand-over: see presenter_hold_at_admission for why the placement
-            // matters. Only a frame that will pair is held, as it was after
-            // the hand-over; a prime costs the presenter one frame, not two.
-            // It returns without an error on a presenter failure; the enqueue
-            // below is what refuses the frame.
-            wait_for_presenter_pair(state);
+            // matters. A frame that will pair is held for the pair; one that
+            // will not - a prime, after a reset - for a single presenter
+            // frame, which is what keeps a reset from bursting (see
+            // wait_for_presenter_pair). It returns without an error on a
+            // presenter failure; the enqueue below is what refuses the frame.
+            wait_for_presenter_pair(
+                state,
+                metadata_pairable ? state->frames_per_application_frame.load() : 1U);
         }
     }
     // The synthetic is displayed one display period before the current frame,
@@ -12797,7 +12818,9 @@ XrResult layer_end_frame_impl(
         return XR_FAILED(start_result) ? start_result : result;
     }
 
-    if (!pair_ready) {
+    const bool presenter_prime = use_continuous_presenter &&
+        prepared.kind == PreparedGenerationKind::prime;
+    if (!pair_ready && !presenter_prime) {
         return result;
     }
 
@@ -12806,7 +12829,9 @@ XrResult layer_end_frame_impl(
         // frame and a pair costs two presenter frames, so without this an
         // application that renders faster than half the display rate produces
         // frames the pairing has no room for - they lose the history ring's
-        // capture slot and are rendered and thrown away.
+        // capture slot and are rendered and thrown away. A prime is held for
+        // one presenter frame, so that a reset cannot burst; see
+        // wait_for_presenter_pair.
         //
         // It sits here rather than in the virtual wait for two reasons. The
         // frame is already handed over, so the presenter has composition to
@@ -12822,7 +12847,9 @@ XrResult layer_end_frame_impl(
         // Unless this frame was already held at admission.
         frame_call_lock.unlock();
         if (!presenter_hold_at_admission(*state)) {
-            wait_for_presenter_pair(state);
+            wait_for_presenter_pair(
+                state,
+                pair_ready ? state->frames_per_application_frame.load() : 1U);
         }
         return result;
     }
