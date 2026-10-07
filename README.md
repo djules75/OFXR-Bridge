@@ -1,7 +1,20 @@
 # OFXR Bridge
 
-OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
-generated frame between two rendered frames.
+OFXR Bridge makes VR games look smoother when your PC cannot render as
+many frames as your headset displays. For every frame the game renders, it
+creates an extra in-between frame, so the headset gets **almost twice as
+many frames**, or **almost three times** with 3X Frame Gen. The goal is to
+reach your headset's refresh rate: a game running at 45 fps on a 90 Hz
+headset gets close to 90 frames a second.
+
+It is "almost" because generating frames costs some GPU time, which lowers
+the game's own frame rate a little. Generated frames can also show small
+artifacts around fast-moving objects. OFXR runs in the background from a
+tray icon, and you switch it on or off there. It works with OpenXR games
+only (see below).
+
+Technically, OFXR Bridge is an experimental OpenXR API layer. It uses
+optical flow to generate frames between the ones the game renders.
 
 Current release: **v0.2.13.1 (internal build V438)**.
 See the [release notes](docs/releases/0.2.13.1.md). 0.2.13.1 is a
