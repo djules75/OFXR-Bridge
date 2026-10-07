@@ -63,6 +63,16 @@ int main(int argc, char** argv) {
                 "repeats and compositor loss must compound");
         require(delivered_new_images(90, FpsSnapshot{}) == 90,
                 "no repeats must leave the delivered count unchanged");
+        // One flagged frame in the compositor's 0.7 s window reads 88.6 at
+        // 90 Hz, and the counter's own second is a frame either way; the
+        // overlay draws the refresh rate for both, and keeps a real loss.
+        require(displayed_rate(88.6f, 90) == 90, "one frame short must read as whole");
+        require(displayed_rate(89.3f, 90) == 90, "a window one frame short must read as whole");
+        require(displayed_rate(91.2f, 90) == 90, "a frame over must read as whole");
+        require(displayed_rate(87.0f, 90) == 87, "three frames short is a loss");
+        require(displayed_rate(45.0f, 90) == 45, "half rate is not snapped");
+        require(displayed_rate(89.0f, 0) == 89, "no refresh known leaves the rate");
+        require(displayed_rate(118.5f, 120) == 120, "the band scales with the refresh");
         for (auto position : {FpsOverlayPosition::off, FpsOverlayPosition::upper_left,
             FpsOverlayPosition::upper_right, FpsOverlayPosition::lower_left, FpsOverlayPosition::lower_right}) {
             require(parse_overlay_position(overlay_position_name(position)) == position, "position round trip");

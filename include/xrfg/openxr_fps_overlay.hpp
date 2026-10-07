@@ -36,6 +36,10 @@ public:
     // The tray's "Pause frame generation": the counter carries a pause symbol
     // while set, so a screenshot says which state it was taken in.
     void set_paused(bool paused) noexcept;
+    // The headset's scanout period as the layer knows it, so the counter can
+    // draw the refresh rate for a rate within 2% of it (displayed_rate). Any
+    // thread; 0 clears it.
+    void set_display_period(std::int64_t period_ns) noexcept;
     // Terminal for this session. Keep resources alive until normal teardown;
     // stop adding the quad or uploading textures immediately.
     void suspend() noexcept;

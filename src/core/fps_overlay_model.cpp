@@ -68,6 +68,12 @@ float delivered_new_images(float delivered, const FpsSnapshot& snapshot) noexcep
     return delivered * std::clamp(snapshot.new_content_share, 0.0f, 1.0f);
 }
 
+float displayed_rate(float rate, float refresh_hz) noexcept {
+    if (!(refresh_hz > 0.0f) || !std::isfinite(rate)) return rate;
+    const float band = refresh_hz * 0.02f;
+    return rate >= refresh_hz - band && rate <= refresh_hz + band ? refresh_hz : rate;
+}
+
 OverlayPlacement overlay_placement(
     FpsOverlayPosition position, float left, float right, float down, float up) noexcept {
     left = std::clamp(left, -1.0f, -0.1f);

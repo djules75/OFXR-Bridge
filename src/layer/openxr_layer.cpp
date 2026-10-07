@@ -5576,6 +5576,10 @@ XrResult layer_wait_frame_impl(
                 state->minimum_runtime_display_period = scanout->count();
             }
         }
+        if (!use_continuous_presenter && state->fps_overlay) {
+            state->fps_overlay->set_display_period(
+                state->minimum_runtime_display_period);
+        }
         // A runtime that is pacing this application blocks the wait for most
         // of a display period. SteamVR returns in about 1.55 ms against
         // 11.11 ms, which is not pacing anything. Count the waits that came
@@ -8043,6 +8047,10 @@ void continuous_presenter_main(
                      scanout->count() < state->presenter_display_period)) {
                     state->presenter_display_period = scanout->count();
                 }
+            }
+            if (state->fps_overlay) {
+                state->fps_overlay->set_display_period(
+                    state->presenter_display_period);
             }
         }
         state->presenter_condition.notify_all();

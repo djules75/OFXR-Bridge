@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -51,6 +52,7 @@ struct OpenXrFpsOverlay::Impl {
     std::int64_t next_refresh{};
     bool attempted{}, initialized{}, image_valid{}, acquired{}, waited{}, disabled{};
     bool paused{};
+    std::atomic<std::int64_t> display_period_ns{0};
     // The number the overlay draws is what the headset received where that
     // can be known, and what was submitted everywhere else. Only SteamVR
     // reports the former. Borrowed: the session owns it, because the presenter
@@ -334,6 +336,10 @@ struct OpenXrFpsOverlay::Impl {
                 snapshot.submitted_fps = delivered_new_images(*received, snapshot);
             }
         }
+        if (const auto period = display_period_ns.load(std::memory_order_relaxed); period > 0) {
+            snapshot.submitted_fps = displayed_rate(
+                snapshot.submitted_fps, 1.0e9f / static_cast<float>(period));
+        }
         upload(snapshot);
     }
 };
@@ -361,6 +367,10 @@ void OpenXrFpsOverlay::reset_metrics() noexcept {
     impl_->image_valid = false;
     impl_->next_refresh = 0;
     impl_->placement_valid = false;
+}
+
+void OpenXrFpsOverlay::set_display_period(std::int64_t period_ns) noexcept {
+    impl_->display_period_ns.store(period_ns > 0 ? period_ns : 0, std::memory_order_relaxed);
 }
 
 void OpenXrFpsOverlay::set_paused(bool paused) noexcept {

@@ -34,6 +34,16 @@ struct FpsSnapshot {
 // a new image; where it favours repeats this reads slightly low, never high.
 [[nodiscard]] float delivered_new_images(float delivered, const FpsSnapshot& snapshot) noexcept;
 
+// The figure the overlay draws for `rate` on a headset refreshing at
+// `refresh_hz`: the refresh rate itself when the rate is within 2% of it,
+// the rate otherwise. Both sources read one frame short every few windows
+// while the headset shows every frame: the compositor's count is a 0.7 s
+// window, so one flagged frame reads 88.6 at 90 Hz, and the counter's own
+// second is quantised to the frame. The number then alternated 89/90 on a
+// session that was whole. One frame in fifty is below what the eye sees;
+// 3% and more stays visible, because that is a real loss.
+[[nodiscard]] float displayed_rate(float rate, float refresh_hz) noexcept;
+
 // Caller serializes access. Fixed storage, monotonic wall-clock measurements;
 // successful downstream submissions are NOT evidence of physical scanout.
 //
