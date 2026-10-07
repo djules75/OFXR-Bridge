@@ -47,7 +47,10 @@ struct LauncherSettings {
     // implicit_layer.hpp). No menu entry; edit tray.ini.
     std::string excluded_processes{"PimaxHome-Win64-Shipping.exe"};
     // One private swapchain per output (see the layer's
-    // single_swapchain_rings). On by default; no menu entry.
+    // single_swapchain_rings): "Lower VRAM" in the tray menu. On by default.
+    // Off restores the two-swapchain layout every build before V410 used,
+    // which an AMD user needed: on a 9070 XT at the edge of its GPU budget
+    // the hand-over copy showed as stutter that no timing record caught.
     bool single_swapchain_rings{true};
     // The Vulkan bridge (see the layer's vulkan_session_bridge): a Vulkan
     // game's session is handed to the runtime as D3D12. On by default; no

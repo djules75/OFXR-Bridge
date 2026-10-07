@@ -56,6 +56,7 @@ enum MenuCommand : UINT {
     nvidia_scale_half = 117,
     toggle_deep_pipeline = 118,
     toggle_triple_frame_gen = 119,
+    toggle_lower_vram = 126,
     toggle_diagnostics = 120,
     overlay_off = 121,
     overlay_upper_left = 122,
@@ -1045,6 +1046,12 @@ void show_context_menu(AppState& state) {
         L"3X Frame Gen [live change]");
     AppendMenuW(
         menu,
+        MF_STRING | (state.settings.single_swapchain_rings ? MF_CHECKED : MF_UNCHECKED),
+        toggle_lower_vram,
+        L"Lower VRAM (may cause stuttering)");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(
+        menu,
         MF_STRING | (state.settings.diagnostics ? MF_CHECKED : MF_UNCHECKED),
         toggle_diagnostics,
         L"Bridge flight recorder [live change]");
@@ -1186,6 +1193,20 @@ void handle_command(AppState& state, UINT command) {
             L"rate hold full FPS more steadily. Adds one frame of latency "
             L"(about 11 ms at 90 Hz). Leave off if the game already runs "
             L"comfortably. Takes effect the next time the game starts.");
+        break;
+    case toggle_lower_vram:
+        state.settings.single_swapchain_rings = !state.settings.single_swapchain_rings;
+        update_runtime_options(state);
+        show_balloon(
+            state,
+            state.settings.single_swapchain_rings
+                ? L"Lower VRAM: on"
+                : L"Lower VRAM: off",
+            L"On, OFXR keeps one working image per output instead of two and "
+            L"uses about half a gigabyte less VRAM at high resolutions. On "
+            L"some graphics cards that showed as stutter; turn it off if you "
+            L"see any and have VRAM to spare. Takes effect the next time the "
+            L"game starts.");
         break;
     case toggle_triple_frame_gen:
         state.settings.triple_frame_gen = !state.settings.triple_frame_gen;
