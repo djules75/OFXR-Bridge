@@ -3,10 +3,14 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current release: **v0.2.13.1 (internal build V433)**.
-See the [release notes](docs/releases/0.2.13.1.md). 0.2.13.1 fixes the
-higher latency and the frame drops some games had on Virtual Desktop since
-0.2.12.1, and shortens the frame-rate dips SteamVR showed after a hiccup.
+Current release: **v0.2.13.1 (internal build V437)**.
+See the [release notes](docs/releases/0.2.13.1.md). 0.2.13.1 is a
+performance and stability release: it fixes the higher latency and the
+frame drops some games had on Virtual Desktop since 0.2.12.1, shortens the
+frame-rate dips SteamVR showed after a hiccup, stops MSFS 2024 staying
+"loaded but not generating" after one rejected frame, and adds a tray
+switch for the VRAM saving of 0.2.10.1, for the cards on which it costs
+smoothness.
 0.2.12.2 removed a flicker in the left eye in MSFS 2024 with 3X Frame Gen,
 and 0.2.12.1 lets you pause and resume frame generation while you play,
 from the tray or with a key you choose.
@@ -89,6 +93,8 @@ The current build provides:
   exchange for reaching full frame rate from half, with smoother dips
 - **3X Frame Gen** (off by default): two generated frames per game frame,
   for games at a third of your refresh rate, switchable live while you play
+- **Lower VRAM** (on by default): about half a gigabyte less VRAM at high
+  resolutions; untick it if that shows as stutter on your card
 - a pipeline built specifically for SteamVR's compositor
 - a **D3D11 bridge** (on by default): D3D11 games run on the same pipeline
   as native D3D12 games, and the OpenXR runtime never touches the game's
@@ -247,6 +253,21 @@ rate, the normal 2X mode looks better: leave this off.
   Vulkan. Tested in MSFS 2024, The Callisto Protocol, Cyberpunk 2077 and
   No Man's Sky.
 
+### Lower VRAM
+
+Tray option **Lower VRAM (may cause stuttering)**, **on by default**. Since
+0.2.10.1 the bridge keeps one working image per output instead of two,
+which saves about half a gigabyte of VRAM at high resolutions (the VRAM
+table in the troubleshooting guide assumes it on). On most cards it costs
+nothing. On some it shows as stutter that an older version did not have:
+an AMD RX 9070 XT running AMS2 at the edge of its GPU budget was smooth on
+0.2.9.1 and not on later versions, with nothing in the flight log to show
+for it, and unticking this brought the smoothness back.
+
+Untick it if you see that and have VRAM to spare. It is not a live change:
+the bridge decides the layout when the game creates its VR session, so it
+takes effect the next time the game starts.
+
 ### D3D12 games
 
 Since 0.2.12.2 the bridge takes its copy of each eye's image when the game
@@ -376,8 +397,10 @@ reaches the refresh rate is the one to play at.
 
 See the VRAM table in [Troubleshooting](docs/TROUBLESHOOTING.md#how-much-vram-ofxr-uses).
 Since 0.2.10.1 the mode no longer changes it: 2X, Prefer FPS over latency
-and 3X Frame Gen all use the same amount. The bridge also stays out of
-Pimax Home, which takes the headset whenever a game leaves VR.
+and 3X Frame Gen all use the same amount. The table assumes **Lower VRAM**
+on, which it is by default; with it off, add about 15% on D3D12 and D3D11.
+The bridge also stays out of Pimax Home, which takes the headset whenever a
+game leaves VR.
 
 ### What the tray changes on your PC
 
