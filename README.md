@@ -3,14 +3,15 @@
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
-Current release: **v0.2.13.1 (internal build V437)**.
+Current release: **v0.2.13.1 (internal build V438)**.
 See the [release notes](docs/releases/0.2.13.1.md). 0.2.13.1 is a
 performance and stability release: it fixes the higher latency and the
-frame drops some games had on Virtual Desktop since 0.2.12.1, shortens the
-frame-rate dips SteamVR showed after a hiccup, stops MSFS 2024 staying
-"loaded but not generating" after one rejected frame, and adds a tray
-switch for the VRAM saving of 0.2.10.1, for the cards on which it costs
-smoothness.
+frame drops some games had on Virtual Desktop since 0.2.12.1, stops
+hangars, menus and loading screens dropping to 60 fps after a hiccup,
+shortens the frame-rate dips SteamVR showed after a hiccup, stops MSFS
+2024 staying "loaded but not generating" after one rejected frame, and
+adds a tray switch for the VRAM saving of 0.2.10.1, for the cards on which
+it costs smoothness.
 0.2.12.2 removed a flicker in the left eye in MSFS 2024 with 3X Frame Gen,
 and 0.2.12.1 lets you pause and resume frame generation while you play,
 from the tray or with a key you choose.
