@@ -9460,6 +9460,22 @@ void stop_continuous_presenter(
          state.graphics_binding == SessionGraphicsBinding::vulkan);
 }
 
+// Whether a prime is held for one presenter frame (see wait_for_presenter_pair).
+// Everywhere but SteamVR, the one runtime whose presenter frames do not come at
+// a steady cadence: the layer steers their phase itself and jumps a whole
+// scanout when the reading goes far, SteamVR's xrEndFrame blocks while the GPU
+// is behind, and SteamVR drops the application to half rate when it judges its
+// frames late. A hold counted in those frames is not the one-period hold it is
+// elsewhere. MSFS 2024 in 3X at 90 Hz, which primes several times a second on
+// SteamVR, ran 16-26 game frames a second on two machines with the hold, with
+// SteamVR's xrEndFrame blocking over 15 ms several times a second, mostly just
+// after a prime, and one of them at half rate for most of the session, where
+// a build without the hold had run 30 on the same flight. Without it a
+// SteamVR prime is released as soon as it is handed over, as before V438.
+[[nodiscard]] bool presenter_holds_primes(const SessionState& state) noexcept {
+    return !(state.dispatch && state.dispatch->steamvr_runtime);
+}
+
 // Holds the application until the presenter has run `presenter_frames` frames
 // since it was last released: a whole pair for a pair, one frame for a prime.
 // Deliberately returns nothing: it is called after the frame has already been
@@ -9490,6 +9506,7 @@ void stop_continuous_presenter(
 // load. Held for one frame the prime absorbs the surplus, so the first
 // pair frame waits its two periods and nothing bursts. A prime arriving
 // on cadence passes at once: the presenter has a frame behind it already.
+// Not on SteamVR, where a prime is never held; see presenter_holds_primes.
 void wait_for_presenter_pair(
     const std::shared_ptr<SessionState>& state,
     std::uint64_t presenter_frames) noexcept {
@@ -12279,14 +12296,17 @@ XrResult layer_end_frame_impl(
         if (XR_FAILED(capacity_result)) {
             return capacity_result;
         }
-        if (presenter_hold_at_admission(*state)) {
+        if (presenter_hold_at_admission(*state) &&
+            (metadata_pairable || presenter_holds_primes(*state))) {
             // The once-per-pair hold, ahead of synthesis rather than after the
             // hand-over: see presenter_hold_at_admission for why the placement
             // matters. A frame that will pair is held for the pair; one that
             // will not - a prime, after a reset - for a single presenter
             // frame, which is what keeps a reset from bursting (see
-            // wait_for_presenter_pair). It returns without an error on a
-            // presenter failure; the enqueue below is what refuses the frame.
+            // wait_for_presenter_pair), except on SteamVR, where it is not
+            // held at all (presenter_holds_primes). It returns without an
+            // error on a presenter failure; the enqueue below is what refuses
+            // the frame.
             wait_for_presenter_pair(
                 state,
                 metadata_pairable ? state->frames_per_application_frame.load() : 1U);
@@ -12819,7 +12839,8 @@ XrResult layer_end_frame_impl(
     }
 
     const bool presenter_prime = use_continuous_presenter &&
-        prepared.kind == PreparedGenerationKind::prime;
+        prepared.kind == PreparedGenerationKind::prime &&
+        presenter_holds_primes(*state);
     if (!pair_ready && !presenter_prime) {
         return result;
     }
@@ -12830,8 +12851,8 @@ XrResult layer_end_frame_impl(
         // application that renders faster than half the display rate produces
         // frames the pairing has no room for - they lose the history ring's
         // capture slot and are rendered and thrown away. A prime is held for
-        // one presenter frame, so that a reset cannot burst; see
-        // wait_for_presenter_pair.
+        // one presenter frame, so that a reset cannot burst, except on
+        // SteamVR; see wait_for_presenter_pair and presenter_holds_primes.
         //
         // It sits here rather than in the virtual wait for two reasons. The
         // frame is already handed over, so the presenter has composition to
