@@ -126,8 +126,10 @@ struct ConfiguredNvidiaOptions {
 // the image's rendering has been *submitted*; an application whose
 // submission thread trails the one that releases can release first, and a
 // capture queued then holds the previous frame for that image. The runtime
-// only reads at xrEndFrame and never sees that. On unless set to 0. Read at
-// xrCreateSession.
+// only reads at xrEndFrame and never sees that. On the D3D11 bridge the
+// whole release waits for xrEndFrame instead - the copy into the runtime's
+// image and the capture together, since the copy is what the runtime shows.
+// On unless set to 0. Read at xrCreateSession.
 [[nodiscard]] bool read_capture_at_end_frame(
     const std::filesystem::path& module_directory) noexcept;
 

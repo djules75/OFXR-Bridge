@@ -170,7 +170,11 @@ enum class BridgeFlightOperation : std::uint32_t {
     // side; both moving says the runtime is not showing what it was given.
     vulkan_interop,
     // A D3D11 session bridged to a D3D12 runtime session: result is a stage
-    // or a failure code (see the layer's D3D11 bridge).
+    // or a failure code (see the layer's D3D11 bridge). Stage 4: a release
+    // deferred to the application's xrEndFrame (`[ofxr] capture_at_end_frame`)
+    // ran, the copy into the runtime's image and the capture with it; a the
+    // swapchain, b the image index, c microseconds after the application's
+    // release. A failed one carries the runtime's code, b 4 and c the index.
     d3d11_bridge,
     // Video memory the process holds on the session's adapter, around each
     // step that allocates it. result= the step (the layer's VideoMemoryStage),

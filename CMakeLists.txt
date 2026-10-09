@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.439.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.440.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -874,6 +874,20 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 "-DMODE=d3d11-bridge-acquire-ahead"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
         set_tests_properties(xrfg_layer_d3d11_bridge_acquire_ahead PROPERTIES TIMEOUT 60)
+
+        # The same bridge with an application that draws into the eye again
+        # after releasing it: the runtime image has to receive the late
+        # drawing, because the release waits for the application's xrEndFrame.
+        add_test(
+            NAME xrfg_layer_d3d11_bridge_late_paint
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_d3d11_bridge.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/d3d11-bridge-late-paint"
+                "-DMODE=d3d11-bridge-late-paint"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
+        set_tests_properties(xrfg_layer_d3d11_bridge_late_paint PROPERTIES TIMEOUT 60)
 
         # NVIDIA optical flow cannot initialise on the fake runtime's WARP
         # device, so an ini asking for it exercises the layer's fallback to

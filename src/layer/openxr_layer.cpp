@@ -926,6 +926,13 @@ struct SessionState {
     // D3D11 session it forbids the presenter; see presenter_forbidden.
     bool split_frame_loop{};
     DWORD application_end_thread_id{};
+    // The same thread, for the swapchain calls, which do not take
+    // frame_call_mutex and must not: xrEndFrame takes the swapchains' call
+    // locks under it. A bridged release is deferred only on this thread,
+    // because the deferred copy signals and flushes the application's D3D11
+    // immediate context from xrEndFrame, and that context may only be used
+    // from the thread the application uses it on.
+    std::atomic<DWORD> application_end_thread{};
     XrFrameState last_inline_frame_state{XR_TYPE_FRAME_STATE};
     bool last_inline_frame_state_valid{};
     std::mutex mutex;
@@ -992,10 +999,12 @@ struct SessionState {
     // synthesizer writes D3D12 images directly; see kStagingSlotCount.
     // Read at xrCreateSession from `[ofxr] single_swapchain_rings`.
     bool single_swapchain_rings{};
-    // Native D3D12 only: the history capture of a released application image
-    // is queued at the application's xrEndFrame, not at the release. See
-    // SwapchainState::pending_end_frame_capture. Read at xrCreateSession
-    // from `[ofxr] capture_at_end_frame`.
+    // Native D3D12: the history capture of a released application image is
+    // queued at the application's xrEndFrame, not at the release. See
+    // SwapchainState::pending_end_frame_capture. On the D3D11 bridge the
+    // whole release moves there, the copy into the runtime's image with the
+    // capture; see SwapchainState::pending_bridge_release. Read at
+    // xrCreateSession from `[ofxr] capture_at_end_frame`.
     bool capture_at_end_frame{};
     // The switch can be followed live: a binding 3X covers, and a ring it
     // fits in.
@@ -2140,6 +2149,20 @@ struct SwapchainState {
     // A second release before then replaces it: the earlier image was never
     // going to be shown. Guarded by mutex.
     std::optional<std::uint32_t> pending_end_frame_capture;
+    // SessionState::capture_at_end_frame on the D3D11 bridge: the application
+    // released an image and the whole release - the bridge's copy into the
+    // runtime's image, the history capture and the runtime's own release - is
+    // still to run, at the top of the application's xrEndFrame
+    // (release_pending_bridge_images). The copy is what the runtime shows, so
+    // unlike the native D3D12 case it cannot move without the release moving
+    // with it: the runtime's image may not be written once it has been handed
+    // back. Whatever comes first of the next xrEndFrame, the next acquire or
+    // wait on this swapchain, or its destruction ends it. Guarded by
+    // call_mutex.
+    std::optional<std::uint32_t> pending_bridge_release;
+    XrSwapchainImageReleaseInfo pending_bridge_release_info{
+        XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    std::chrono::steady_clock::time_point pending_bridge_release_at{};
     std::shared_ptr<FrameGenerationSwapchainState> frame_generation;
     // Generation costs three runtime swapchains, and a swapchain that never
     // reaches a projection layer never spends them: an application's UI quads
@@ -5215,6 +5238,7 @@ void reset_frame_bookkeeping(const std::shared_ptr<SessionState>& state) {
         state->application_begin_needs_wait = false;
         state->split_frame_loop = false;
         state->application_end_thread_id = 0;
+        state->application_end_thread.store(0, std::memory_order_relaxed);
         state->last_inline_frame_state = XrFrameState{XR_TYPE_FRAME_STATE};
         state->last_inline_frame_state_valid = false;
         state->generation_steady_state_established = false;
@@ -6019,6 +6043,9 @@ XrResult layer_destroy_swapchain_impl(XrSwapchain swapchain) {
             0);
     }
     std::scoped_lock call_lock(state->call_mutex);
+    // A bridged release still waiting for xrEndFrame is dropped: the image
+    // can no longer be shown, and the runtime's images go with the swapchain.
+    state->pending_bridge_release.reset();
     drain_swapchain_gpu(state);
     destroy_frame_generation_swapchains(state);
     {
@@ -6534,6 +6561,9 @@ XrResult layer_enumerate_swapchain_images_impl(
     return result;
 }
 
+void release_pending_bridge_image_locked(
+    const std::shared_ptr<SwapchainState>& state) noexcept;
+
 XrResult layer_acquire_swapchain_image_impl(
     XrSwapchain swapchain,
     const XrSwapchainImageAcquireInfo* acquire_info,
@@ -6544,6 +6574,12 @@ XrResult layer_acquire_swapchain_image_impl(
     }
 
     std::scoped_lock call_lock(state->call_mutex);
+    // A bridged release still waiting for xrEndFrame goes down first: the
+    // runtime has to see this swapchain's releases in the order they were
+    // made, and an application that acquires ahead of its xrEndFrame - one
+    // image rendered, the next acquired before the frame ends - would
+    // otherwise hold two images the runtime counts as unreleased.
+    release_pending_bridge_image_locked(state);
     const XrResult result = with_runtime_entry(state->session.get(), [&] {
         return state->session->dispatch->acquire_swapchain_image(
             swapchain, acquire_info, index);
@@ -6574,6 +6610,9 @@ XrResult layer_wait_swapchain_image_impl(
     }
 
     std::scoped_lock call_lock(state->call_mutex);
+    // As at the acquire: the runtime refuses a wait while an image it waited
+    // is still unreleased.
+    release_pending_bridge_image_locked(state);
     const XrResult result = with_runtime_entry(state->session.get(), [&] {
         return state->session->dispatch->wait_swapchain_image(
             swapchain, wait_info);
@@ -6601,15 +6640,15 @@ XrResult layer_wait_swapchain_image_impl(
     return result;
 }
 
-XrResult layer_release_swapchain_image_impl(
+// The release as the application made it, all the way down: the bridge's
+// copy into the runtime's image, the history capture, the runtime's own
+// release and the mirror's bookkeeping. Called under the swapchain's
+// call_mutex, from the application's xrReleaseSwapchainImage or, when a
+// bridged release was deferred, from release_pending_bridge_image_locked.
+XrResult release_swapchain_image_locked(
+    const std::shared_ptr<SwapchainState>& state,
     XrSwapchain swapchain,
     const XrSwapchainImageReleaseInfo* release_info) {
-    const auto state = find_swapchain(swapchain);
-    if (!state || state->session->dispatch->release_swapchain_image == nullptr) {
-        return XR_ERROR_HANDLE_INVALID;
-    }
-
-    std::scoped_lock call_lock(state->call_mutex);
     std::optional<std::uint32_t> candidate_index;
     std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
     std::shared_ptr<xrfg::SwapchainInterop> interop;
@@ -6669,9 +6708,12 @@ XrResult layer_release_swapchain_image_impl(
     // says the image's rendering has been submitted, and an application whose
     // submission trails its release calls makes that false for the image it
     // releases first; a capture queued here then copies the previous frame,
-    // for that eye alone. The bridges and the D3D11 interop keep their
-    // release-time capture: their copy into the runtime's image is made here
-    // too, so the two would otherwise disagree.
+    // for that eye alone. The bridges and the D3D11 interop capture beside
+    // their copy into the runtime's image, so the two always agree. On the
+    // D3D11 bridge the same case is met by running this whole release later
+    // instead (SwapchainState::pending_bridge_release): by the time it gets
+    // here at the application's xrEndFrame, copy and capture both see the
+    // finished image.
     const bool defer_capture = candidate_index && history &&
         state->session->capture_at_end_frame && !interop && !bridge &&
         !vulkan_bridge;
@@ -6803,6 +6845,117 @@ XrResult layer_release_swapchain_image_impl(
         history->discard(*pending_capture);
     }
     return result;
+}
+
+// Runs the bridged release the application's xrReleaseSwapchainImage left
+// for later (SwapchainState::pending_bridge_release), if there is one. Called
+// under the swapchain's call_mutex. The application was told its release
+// succeeded when it made it, so a failure here can only be logged.
+void release_pending_bridge_image_locked(
+    const std::shared_ptr<SwapchainState>& state) noexcept {
+    try {
+        if (!state->pending_bridge_release) {
+            return;
+        }
+        const std::uint32_t index = *state->pending_bridge_release;
+        state->pending_bridge_release.reset();
+        const XrSwapchainImageReleaseInfo release_info =
+            state->pending_bridge_release_info;
+        const auto deferred_for =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() -
+                state->pending_bridge_release_at)
+                .count();
+        const XrResult result =
+            release_swapchain_image_locked(state, state->handle, &release_info);
+        // 4: a deferred release ran. a the swapchain, b the image, c how long
+        // after the application's release. A failure is the runtime's code,
+        // with b 4 for this stage and c the image.
+        if (XR_SUCCEEDED(result)) {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::d3d11_bridge,
+                4,
+                handle_value(state->handle),
+                index,
+                deferred_for > 0 ? static_cast<std::uint64_t>(deferred_for) : 0);
+        } else {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::d3d11_bridge,
+                static_cast<std::int64_t>(result),
+                handle_value(state->handle),
+                4,
+                index);
+        }
+    } catch (...) {
+    }
+}
+
+// The top of the application's xrEndFrame: every bridged release since the
+// previous one runs now, behind everything the application submitted for the
+// frame. Under frame_call_mutex, taking each swapchain's call_mutex in turn,
+// as capture_pending_end_frame_images does.
+void release_pending_bridge_images(
+    const std::shared_ptr<SessionState>& session) noexcept {
+    try {
+        for (const auto& state : find_swapchains(session)) {
+            std::scoped_lock call_lock(state->call_mutex);
+            release_pending_bridge_image_locked(state);
+        }
+    } catch (...) {
+    }
+}
+
+// Whether an application's release on the D3D11 bridge waits for its
+// xrEndFrame (SwapchainState::pending_bridge_release). The bridge's copy
+// reads what the application's context had submitted when it signalled, and
+// at the release that may not be the whole image: IL-2 Great Battles releases
+// one eye 3.8 ms before xrEndFrame and showed a stutter in that eye alone,
+// which OpenXR Toolkit hid by releasing its own swapchains at xrEndFrame
+// (0.07 ms before it). Only on the thread that calls xrEndFrame, which is
+// where the deferred copy will use the application's context, and only for a
+// release the runtime would accept as made, so that saying it succeeded is
+// not a lie. Called under the swapchain's call_mutex.
+[[nodiscard]] bool defer_bridged_release(
+    SwapchainState& state,
+    const XrSwapchainImageReleaseInfo* release_info) noexcept {
+    if (!state.session->capture_at_end_frame || release_info == nullptr ||
+        release_info->type != XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO ||
+        release_info->next != nullptr) {
+        return false;
+    }
+    const DWORD end_thread =
+        state.session->application_end_thread.load(std::memory_order_relaxed);
+    if (end_thread == 0 || end_thread != GetCurrentThreadId()) {
+        return false;
+    }
+    std::scoped_lock lock(state.mutex);
+    return state.bridge && !state.vulkan_bridge &&
+        state.ownership_tracking_valid && state.waited_count > 0 &&
+        !state.acquired_indices.empty();
+}
+
+XrResult layer_release_swapchain_image_impl(
+    XrSwapchain swapchain,
+    const XrSwapchainImageReleaseInfo* release_info) {
+    const auto state = find_swapchain(swapchain);
+    if (!state || state->session->dispatch->release_swapchain_image == nullptr) {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+
+    std::scoped_lock call_lock(state->call_mutex);
+    // An acquire or a wait in between would have run it already; this only
+    // keeps the runtime's order should an application release twice.
+    release_pending_bridge_image_locked(state);
+    if (defer_bridged_release(*state, release_info)) {
+        {
+            std::scoped_lock lock(state->mutex);
+            state->pending_bridge_release = state->acquired_indices.front();
+        }
+        state->pending_bridge_release_info = *release_info;
+        state->pending_bridge_release_at = std::chrono::steady_clock::now();
+        return XR_SUCCESS;
+    }
+    return release_swapchain_image_locked(state, swapchain, release_info);
 }
 
 // SessionState::capture_at_end_frame: queues the history capture of every
@@ -11931,10 +12084,15 @@ XrResult layer_end_frame_impl(
     // waits. Everything this mutex protects is finished by then.
     std::unique_lock frame_call_lock(state->frame_call_mutex);
     state->application_end_thread_id = GetCurrentThreadId();
+    state->application_end_thread.store(
+        state->application_end_thread_id, std::memory_order_relaxed);
     const auto application_end_now = std::chrono::steady_clock::now();
     if (state->capture_at_end_frame) {
-        // The history captures this frame's releases left for here; before
-        // anything below reads last_released_capture.
+        // The bridged releases this frame left for here, copy and capture
+        // with them, and the history captures of the native D3D12 ones;
+        // before anything below reads last_released_capture or the frame
+        // goes down naming those images.
+        release_pending_bridge_images(state);
         capture_pending_end_frame_images(state);
         // Then mark the queue once more, behind those captures, so the join
         // below covers them and whatever the application submitted after

@@ -103,6 +103,13 @@ bool g_d3d11_bridge_mode = false;
 // ahead of the one it renders, and the first acquire is outstanding across
 // a session restart (Ready or Not's VR mod acquires before xrBeginSession).
 bool g_acquire_ahead_mode = false;
+// d3d11-bridge-late-paint: the application draws into an eye once more after
+// releasing it and before its xrEndFrame, the shape of a title whose
+// submission trails its release (IL-2 Great Battles releases one eye 3.8 ms
+// early). From the second frame on, the runtime's image has to hold the late
+// drawing: the layer defers a bridged release to xrEndFrame once it knows the
+// thread that ends frames, so the first frame is still copied at its release.
+bool g_late_paint_mode = false;
 std::atomic<bool> g_acquire_ahead_active{false};
 std::atomic<std::uint32_t> g_acquire_ahead_calls{0};
 std::atomic<bool> g_bridge_session_bound{false};
@@ -2144,13 +2151,15 @@ int main(int argc, char** argv) {
             "flight-simulator|uevr-pipelined-time|inverted-fov|"
             "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget|"
             "dcs|dcs-d3d11|d3d11-bridge|d3d11-bridge-acquire-ahead|"
-            "steamvr-own-time]\n";
+            "d3d11-bridge-late-paint|steamvr-own-time]\n";
         return EXIT_FAILURE;
     }
     g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
     g_acquire_ahead_mode =
         argc == 4 && std::strcmp(argv[3], "d3d11-bridge-acquire-ahead") == 0;
-    g_d3d11_bridge_mode = g_acquire_ahead_mode ||
+    g_late_paint_mode =
+        argc == 4 && std::strcmp(argv[3], "d3d11-bridge-late-paint") == 0;
+    g_d3d11_bridge_mode = g_acquire_ahead_mode || g_late_paint_mode ||
         (argc == 4 && std::strcmp(argv[3], "d3d11-bridge") == 0);
     g_dcs_mode = g_dcs_d3d11_mode ||
         (argc == 4 && std::strcmp(argv[3], "dcs") == 0);
@@ -3312,6 +3321,10 @@ int main(int argc, char** argv) {
                   XR_SUCCEEDED(wait_image(depth_swapchain, &image_wait_info)) &&
                   XR_SUCCEEDED(release_image(depth_swapchain, &release_info)))) &&
                 XR_SUCCEEDED(release_image(swapchain, &release_info)) &&
+                (!g_late_paint_mode ||
+                 paint_d3d11_image(
+                     d3d11_swapchain_images[acquired_index].texture,
+                     static_cast<std::uint8_t>(red + 1))) &&
                 submit_frame(application_frame.predictedDisplayTime) &&
                 wait_for_queue_idle();
             // The first frame arms and passes through, the second primes.
@@ -3323,9 +3336,12 @@ int main(int argc, char** argv) {
             // texture is in the runtime's D3D12 image after the release.
             if ((g_d3d11_bridge_mode || g_vulkan_bridge_mode) && frame_sequence_succeeded) {
                 std::uint8_t found = 0;
+                const auto expected = g_late_paint_mode && index >= 1
+                    ? static_cast<std::uint8_t>(red + 1)
+                    : red;
                 if (!d3d12_image_first_red(
                         g_application_swapchain_images[acquired_index].Get(), &found) ||
-                    found != red) {
+                    found != expected) {
                     ++pixel_failures;
                 }
             }
@@ -3368,6 +3384,7 @@ int main(int argc, char** argv) {
         if (!valid) {
             std::cerr << (g_vulkan_bridge_mode ? "Vulkan bridge" : g_vulkan_mode ? "Vulkan"
                           : g_acquire_ahead_mode ? "D3D11 bridge, acquire ahead"
+                          : g_late_paint_mode ? "D3D11 bridge, late paint"
                           : g_d3d11_bridge_mode ? "D3D11 bridge"
                                                 : "single-threaded D3D11")
                       << " validation failed: sequence="

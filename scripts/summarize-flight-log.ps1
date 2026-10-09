@@ -43,6 +43,8 @@ $submissionLastMs = $null
 $holds = @{ 400 = 0; 401 = 0; 402 = 0 }
 $deferredCaptures = 0
 $deferredCaptureFailures = 0
+$bridgedReleaseDelays = [System.Collections.Generic.List[double]]::new()
+$bridgedReleaseFailures = 0
 $delivered = [System.Collections.Generic.List[double]]::new()
 $lineNumber = 0
 
@@ -152,6 +154,16 @@ Get-Content -LiteralPath $resolved | ForEach-Object {
             if ($entry.Operation -eq 'deferred_capture') {
                 $deferredCaptures++
                 if ($entry.Result -lt 0) { $deferredCaptureFailures++ }
+            }
+            # D3D11 bridge stage 4: a release deferred to xrEndFrame ran,
+            # c microseconds after the game's release; a failed one carries
+            # the runtime's code with b 4.
+            if ($entry.Operation -eq 'd3d11_bridge') {
+                if ($entry.Result -eq 4) {
+                    $bridgedReleaseDelays.Add($entry.C / 1000.0)
+                } elseif ($entry.Result -lt 0 -and $entry.B -eq 4) {
+                    $bridgedReleaseFailures++
+                }
             }
             if ($entry.Operation -eq 'steamvr_delivery') {
                 $delivered.Add($entry.A / 1000.0)
@@ -269,8 +281,16 @@ if ($endFrameBegins.Count -gt 0) {
     if ($deferredCaptures -gt 0) {
         Write-Output ("  end-frame captures: {0}, of which {1} failed" -f
             $deferredCaptures, $deferredCaptureFailures)
-    } else {
-        Write-Output '  no end-frame captures: capture_at_end_frame was off, or the session is bridged'
+    }
+    if ($bridgedReleaseDelays.Count -gt 0 -or $bridgedReleaseFailures -gt 0) {
+        $sortedDelays = @($bridgedReleaseDelays | Sort-Object)
+        $p50 = if ($sortedDelays.Count -gt 0) { $sortedDelays[[int][Math]::Floor(0.5 * ($sortedDelays.Count - 1))] } else { 0 }
+        $p90 = if ($sortedDelays.Count -gt 0) { $sortedDelays[[int][Math]::Floor(0.9 * ($sortedDelays.Count - 1))] } else { 0 }
+        Write-Output ("  bridged releases at xrEndFrame: {0}, of which {1} failed; {2:N2} ms after the game's release (p50), {3:N2} ms (p90)" -f
+            ($bridgedReleaseDelays.Count + $bridgedReleaseFailures), $bridgedReleaseFailures, $p50, $p90)
+    }
+    if ($deferredCaptures -eq 0 -and $bridgedReleaseDelays.Count -eq 0 -and $bridgedReleaseFailures -eq 0) {
+        Write-Output '  no end-frame captures: capture_at_end_frame was off, or the build predates V440 on a bridged session'
     }
 
     if ($delivered.Count -gt 0) {

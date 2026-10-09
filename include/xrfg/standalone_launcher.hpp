@@ -71,8 +71,9 @@ struct LauncherSettings {
     // d3d11_bridge=0 in tray.ini is the one place to turn it off, for
     // diagnosing a title against the direct D3D11 path.
     bool d3d11_bridge{true};
-    // The layer's capture_at_end_frame: a D3D12 game's eye images are copied
-    // when it ends its frame, not when it releases them. On by default and
+    // The layer's capture_at_end_frame: a D3D12 game's eye images, and a
+    // D3D11 game's on the bridge, are copied when it ends its frame, not when
+    // it releases them. On by default and
     // not in the menu; capture_at_end_frame=0 in tray.ini goes back to the
     // copy at release, for comparing the two on one build.
     bool capture_at_end_frame{true};
