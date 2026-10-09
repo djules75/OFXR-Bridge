@@ -45,11 +45,13 @@ int main(int argc, char** argv) {
     // "pause" as the third argument drives the tray's reversible pause in
     // place of the Disarm, and resumes afterwards.
     const bool pause_test = argc == 4 && std::string(argv[3]) == "pause";
-    // "frame-loop <runtime> <single|split> [paused]": that on Virtual Desktop
-    // a single-threaded session takes the presenter at its first generating
-    // frames and a split loop stays inline, that Pimax OpenXR stays inline
-    // whatever its pairs measure, and that another runtime still promotes on
-    // bunched pairs.
+    // "frame-loop <runtime> <single|split|handoff> [paused]": that on Virtual
+    // Desktop a single-threaded session takes the presenter at its first
+    // generating frames and a split loop stays inline, that Pimax OpenXR stays
+    // inline whatever its pairs measure, and that another runtime still
+    // promotes on bunched pairs. "handoff", Virtual Desktop only: a
+    // single-threaded session that had the presenter moves its loop to
+    // another thread, and the presenter a pass-through stopped comes back.
     //
     const bool frame_loop_test = mode == "frame-loop";
     // "recorder": the flight recorder switched on, off and on again while a
@@ -58,7 +60,9 @@ int main(int argc, char** argv) {
     if (frame_loop_test && argc != 5 && argc != 6) return 1;
     const std::string loop_runtime = frame_loop_test ? argv[3] : "";
     const bool split_loop = frame_loop_test && std::string(argv[4]) == "split";
+    const bool handoff_loop = frame_loop_test && std::string(argv[4]) == "handoff";
     const bool start_paused = frame_loop_test && argc == 6;
+    if (handoff_loop && (loop_runtime != "virtual-desktop" || start_paused)) return 1;
     if (loop_runtime == "virtual-desktop") g_runtime_name_override = "VirtualDesktopXR (Bundled)";
     else if (loop_runtime == "pimax") g_runtime_name_override = "Pimax OpenXR";
     else if (loop_runtime == "other") g_runtime_name_override = "XRFG fake runtime";
@@ -108,7 +112,8 @@ int main(int argc, char** argv) {
         {
             std::ofstream ini(root / L"ofxr_bridge.ini");
             ini << "[ofxr]\nbackend=fidelityfx\ncontrol_event=" << ascii_control
-                << "\n[diagnostics]\nlogging_enabled=" << (marker_mode == "on" || marker_mode == "hidden" ? 1 : 0)
+                // The hand-off is read back from the flight log.
+                << "\n[diagnostics]\nlogging_enabled=" << (handoff_loop || marker_mode == "on" || marker_mode == "hidden" ? 1 : 0)
                 << "\n[overlay]\nposition=" << (!marker_mode.empty() && marker_mode != "hidden" ? "upper_right" : "off") << '\n';
         }
         require(g_d3d11_interop_mode ? initialize_d3d11() : initialize_d3d12(), "initialize GPU fixture");
@@ -395,6 +400,58 @@ int main(int argc, char** argv) {
             else
                 require(presenter_at >= 25,
                     "another runtime still promotes on bunched pairs, and not before");
+            if (handoff_loop) {
+                // IL-2 Great Battles: the whole loop moves from its loading
+                // thread to its render thread, once, which latches
+                // split_frame_loop. A presenter a pass-through stopped has to
+                // come back across that latch: IL-2 ran inline for the rest of
+                // the session after CheekyFoveatedDLSS's menu created a
+                // swapchain and the quarantine stopped its presenter. Here the
+                // stop comes first, from the quarantine this fake runtime
+                // causes - the presenter's first pair fails on it - and the
+                // hand-off lands inside that second; the latch is the same
+                // either way, and so is what has to undo it.
+                int back_at = -1;
+                std::exception_ptr failure;
+                std::thread render([&] {
+                    try {
+                        // The quarantine runs on wall time.
+                        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+                        for (int i = 0; back_at < 0 && std::chrono::steady_clock::now() < deadline; ++i) {
+                            if (frame(false, "handed-off frame") == kFakeDisplayPeriod * 2) back_at = i;
+                            Sleep(10);
+                        }
+                    } catch (...) { failure = std::current_exception(); }
+                });
+                render.join();
+                if (failure) std::rethrow_exception(failure);
+                std::cout << "frame loop handoff: presenter back at handed-off frame " << back_at << std::endl;
+                std::string log;
+                for (const auto& entry : std::filesystem::directory_iterator(root)) {
+                    if (entry.path().extension() != L".log") continue;
+                    std::ifstream stream(entry.path(), std::ios::binary);
+                    log.assign(std::istreambuf_iterator<char>(stream), {});
+                }
+                // The first presenter_transition record with this selector
+                // and these fields, at or after from.
+                const auto record = [&](std::size_t from, const char* selector, const char* fields) {
+                    const std::string key = std::string("op=presenter_transition result=") + selector + ' ';
+                    for (auto at = log.find(key, from); at != std::string::npos; at = log.find(key, at + 1)) {
+                        const auto end = log.find('\n', at);
+                        if (log.substr(at, end - at).find(fields) != std::string::npos) return at;
+                    }
+                    return std::string::npos;
+                };
+                const auto stopped = record(0, "603", " b=1 c=0");
+                require(stopped != std::string::npos,
+                    "a pass-through stops the presenter before the hand-off, to be given back");
+                const auto latched = record(stopped, "600", "");
+                require(latched != std::string::npos, "the hand-off latches split_frame_loop");
+                require(record(latched, "601", " b=1 ") != std::string::npos &&
+                        record(latched, "602", " b=1 c=1") != std::string::npos,
+                    "the presenter is given back past the latch");
+                require(back_at >= 0, "the presenter comes back after the quarantine");
+            }
             result = 0;
             throw FinishedEarly{};
         }

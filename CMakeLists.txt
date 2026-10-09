@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.441.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.442.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -561,12 +561,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             set_tests_properties(xrfg_manual_pause_${mode} PROPERTIES TIMEOUT 30)
         endforeach()
         # On Virtual Desktop a single-threaded session takes the presenter at
-        # its first generating frames and a split loop stays inline; Pimax
-        # OpenXR stays inline; another runtime still goes by the bunched-pair
-        # measurement.
+        # its first generating frames and a split loop stays inline, and one
+        # that had the presenter and then hands its loop to another thread
+        # gets back a presenter a pass-through stopped; Pimax OpenXR stays
+        # inline; another runtime still goes by the bunched-pair measurement.
         foreach(shape
                 "virtual-desktop;split" "virtual-desktop;split;paused"
                 "virtual-desktop;single" "virtual-desktop;single;paused"
+                "virtual-desktop;handoff"
                 "pimax;split" "pimax;single" "other;single")
             string(REPLACE ";" "_" shape_name "${shape}")
             add_test(NAME xrfg_frame_loop_${shape_name} COMMAND xrfg_layer_manual_disarm_tests

@@ -127,8 +127,9 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
 // The records that say what a session is, as against what it did each frame:
 // written once or on a change, tens of them in a session. These are kept in
 // memory so a file opened in the middle of a session still begins with them.
-// presenter_transition is both - its 600 and 700-range selectors describe
-// the session, its others are per pair.
+// presenter_transition is both - its 600-604 and 700-range selectors describe
+// the session (its shape, and the presenter's starts and stops, a handful in
+// a session), its others are per pair.
 [[nodiscard]] bool session_record(
     BridgeFlightOperation operation, std::int64_t result) noexcept {
     switch (operation) {
@@ -158,7 +159,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::recording:
         return true;
     case BridgeFlightOperation::presenter_transition:
-        return result == 600 || (result >= 700 && result < 800);
+        return (result >= 600 && result <= 604) ||
+            (result >= 700 && result < 800);
     default:
         return false;
     }

@@ -792,6 +792,15 @@ struct SessionState {
     // No Man's Sky stayed inline at 112 frames a second where it had held
     // 144 before the pause.
     bool presenter_restore_after_pause{}; // frame_call_mutex
+    // A pass-through frame stopped a presenter this session was running: a
+    // structural quarantine, a cooldown, the menu switched off. Lets
+    // frame_loop_takes_presenter give it back on Virtual Desktop even once
+    // split_frame_loop has latched. A title that hands its whole frame loop
+    // from a loading thread to its render thread latches there after its
+    // presenter started (IL-2 Great Battles, 24 s in), and an overlay's
+    // swapchain created later in play - CheekyFoveatedDLSS's menu - left it
+    // inline for the rest of the session. Cleared by any presenter start.
+    bool presenter_restore_after_bypass{}; // frame_call_mutex
     std::atomic<bool> menu_enabled{true};
     std::atomic<bool> generation_steady_state_established{false};
     bool manual_stop_applied{}; // frame_call_mutex; terminal for this XrSession.
@@ -923,7 +932,9 @@ struct SessionState {
     // The application's frame loop runs on two threads: xrWaitFrame has been
     // seen on a thread other than the one that calls xrEndFrame. Latched at
     // the first such wait, under frame_call_mutex. DCS World's shape. On a
-    // D3D11 session it forbids the presenter; see presenter_forbidden.
+    // D3D11 session it forbids the presenter; see presenter_forbidden. On
+    // Virtual Desktop it keeps the session inline unless it had a presenter
+    // a pass-through stopped; see frame_loop_takes_presenter.
     bool split_frame_loop{};
     DWORD application_end_thread_id{};
     // The same thread, for the swapchain calls, which do not take
@@ -5238,6 +5249,7 @@ void reset_frame_bookkeeping(const std::shared_ptr<SessionState>& state) {
         state->pipelined_presenter_mode = false;
         state->pipelined_presenter_start_requested = false;
         state->steamvr_presenter_start_requested = false;
+        state->presenter_restore_after_bypass = false;
         state->runtime_frame_waited_unbegun = false;
         state->application_begin_needs_wait = false;
         state->split_frame_loop = false;
@@ -11604,19 +11616,31 @@ struct InternalCycleResult {
 // that moves with the scene: the mode is settled at start-up and holds for
 // the session, as on Pimax OpenXR. Asked on every inline generating frame,
 // so a presenter the pause stopped, or a run of failures demoted, comes back
-// the same way. 601: the request, once per request; a the end thread, c the
-// graphics binding.
+// the same way.
+//
+// split_frame_loop can also latch after the presenter has started: a title
+// that hands its whole loop from a loading thread to its render thread, once,
+// latches at the hand-off (IL-2 Great Battles, 24 s in), and the latch never
+// stops a running presenter. What it must not do either is keep that
+// presenter from coming back after a pass-through frame stopped it - an
+// overlay's swapchain created mid-session quarantines generation for a
+// second, and IL-2 stayed inline from the moment CheekyFoveatedDLSS's menu
+// opened. So the latch refuses a presenter this session never had, and gives
+// back one a pass-through took (presenter_restore_after_bypass). 601: the
+// request, once per request; a the end thread, b 1 when it gives back the
+// presenter a pass-through stopped, c the graphics binding.
 [[nodiscard]] bool frame_loop_takes_presenter(
     const std::shared_ptr<SessionState>& state) noexcept {
-    if (!state->dispatch->virtual_desktop_runtime || state->split_frame_loop ||
-        state->steamvr_presenter_start_requested) {
+    if (!state->dispatch->virtual_desktop_runtime ||
+        state->steamvr_presenter_start_requested ||
+        (state->split_frame_loop && !state->presenter_restore_after_bypass)) {
         return false;
     }
     xrfg::bridge_flight_logger().event(
         xrfg::BridgeFlightOperation::presenter_transition,
         601,
         state->application_end_thread_id,
-        0,
+        state->presenter_restore_after_bypass ? 1 : 0,
         static_cast<std::uint64_t>(state->graphics_binding));
     return true;
 }
@@ -12260,8 +12284,17 @@ XrResult layer_end_frame_impl(
             if (adopted_frame_state) {
                 state->runtime_frame_waited_unbegun = false;
             }
+            // 602: the presenter started. a 1 in pipelined mode, b 1 when it
+            // gives back one a pass-through stopped, c split_frame_loop.
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::presenter_transition,
+                602,
+                state->pipelined_presenter_mode ? 1 : 0,
+                state->presenter_restore_after_bypass ? 1 : 0,
+                state->split_frame_loop ? 1 : 0);
             state->pipelined_presenter_start_requested = false;
             state->steamvr_presenter_start_requested = false;
+            state->presenter_restore_after_bypass = false;
             return wait_for_presenter_idle(state);
         };
     const auto bypass_generation =
@@ -12318,7 +12351,18 @@ XrResult layer_end_frame_impl(
                 stop_continuous_presenter(state);
                 if (state->pause_applied) {
                     state->presenter_restore_after_pause = true;
+                } else if (reason != GenerationPrepareReason::manual_disarmed) {
+                    state->presenter_restore_after_bypass = true;
                 }
+                // 603: a pass-through frame stopped the presenter. a the
+                // GenerationPrepareReason, b 1 when it is to be given back
+                // (frame_loop_takes_presenter), c split_frame_loop.
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::presenter_transition,
+                    603,
+                    static_cast<std::uint64_t>(reason),
+                    state->presenter_restore_after_bypass ? 1 : 0,
+                    state->split_frame_loop ? 1 : 0);
                 std::scoped_lock lock(state->mutex);
                 state->steamvr_throttled_wait_streak = 0;
                 // Both promotion routes start over, or the demotion would be
@@ -13000,6 +13044,15 @@ XrResult layer_end_frame_impl(
         if (demote) {
             // Not under state->mutex: stopping the presenter joins its thread.
             stop_continuous_presenter(state);
+            // 604: a run of failures demoted the presenter. a the last
+            // GenerationPrepareReason, c split_frame_loop. Not given back
+            // past the latch, unlike 603: generation is not working here.
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::presenter_transition,
+                604,
+                static_cast<std::uint64_t>(prepare_reason),
+                0,
+                state->split_frame_loop ? 1 : 0);
             std::scoped_lock lock(state->mutex);
             state->steamvr_throttled_wait_streak = 0;
             state->unpaced_wait_streak = 0;
