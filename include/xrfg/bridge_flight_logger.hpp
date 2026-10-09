@@ -224,6 +224,13 @@ enum class BridgeFlightOperation : std::uint32_t {
     // swapchain released more than once between two xrEndFrames is captured
     // once, at its last release.
     deferred_capture,
+    // A history capture that found its ring slot still read or written on the
+    // GPU and waited for it (D3D12HistoryCaptureWait). result is the
+    // capture's HRESULT: 0 when the wait freed the slot, ERROR_BUSY when the
+    // limit ran out and the frame lost its history as before. a the
+    // swapchain, b microseconds waited, c the limit in microseconds << 32 |
+    // the image index. Nothing is written for a capture whose slot was free.
+    history_capture_wait,
 };
 
 struct BridgeFlightToken {

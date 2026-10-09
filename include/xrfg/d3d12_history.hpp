@@ -30,6 +30,23 @@ struct D3D12HistoryCaptureTicket {
     std::uint32_t source_index{};
 };
 
+// How long a capture may wait for a busy ring slot, and what it found. A slot
+// is busy while the synthesis that read it, or the capture that last wrote
+// it, is still running on the GPU. Failing there loses the frame's history:
+// generation continuity resets and the next frame primes. When the GPU runs a
+// couple of frames behind, that reset is what keeps it behind (the frames
+// after a prime are not paced and arrive together), so a short wait for the
+// GPU is cheaper than the reset it avoids.
+struct D3D12HistoryCaptureWait {
+    // In: the longest the capture may block, in microseconds. 0 fails a busy
+    // slot at once, as before.
+    std::uint32_t limit_us{};
+    // Out: the slot was busy when the capture arrived.
+    bool slot_busy{};
+    // Out: how long the capture blocked, in microseconds.
+    std::uint64_t waited_us{};
+};
+
 struct D3D12HistoryConsumerLease {
     std::uint64_t capture_serial{};
     std::uint64_t lease_serial{};
@@ -56,12 +73,15 @@ public:
         D3D12HistoryInitializationStage* failure_stage = nullptr) noexcept;
 
     // Queues the source-to-history copy and returns after signaling its fence;
-    // it never waits for GPU completion on the release path. If the next ring
-    // slot or its allocator is still in use, ERROR_BUSY is returned and the
-    // caller must fail open rather than overwrite it.
+    // it never waits for the copy itself. If the next ring slot is still read
+    // or written on the GPU, it waits for that work for at most
+    // wait->limit_us (none without `wait`), then returns ERROR_BUSY and the
+    // caller must fail open rather than overwrite it. A slot leased to a
+    // consumer that has not submitted yet is never waited for.
     [[nodiscard]] HRESULT capture(
         std::uint32_t source_index,
-        D3D12HistoryCaptureTicket* ticket) noexcept;
+        D3D12HistoryCaptureTicket* ticket,
+        D3D12HistoryCaptureWait* wait = nullptr) noexcept;
 
     [[nodiscard]] HRESULT commit(const D3D12HistoryCaptureTicket& ticket) noexcept;
 

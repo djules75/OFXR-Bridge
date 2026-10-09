@@ -942,6 +942,10 @@ struct SessionState {
     XrTime generation_resume_display_time{};
     std::chrono::steady_clock::time_point generation_resume_wall_time{};
     XrDuration minimum_runtime_display_period{};
+    // minimum_runtime_display_period again, for the history capture's wait on
+    // a busy slot (history_capture_wait_limit_us), which runs under a
+    // swapchain's call_mutex and the gpu_mutex and so does not take `mutex`.
+    std::atomic<XrDuration> history_capture_wait_period{};
     // How long the runtime's own xrWaitFrame blocked, and how many consecutive
     // waits came back too quickly to have been pacing anything. This is what
     // the presenter's existence actually turns on; see
@@ -5256,6 +5260,7 @@ void reset_frame_bookkeeping(const std::shared_ptr<SessionState>& state) {
         state->generation_resume_display_time = 0;
         state->generation_resume_wall_time = {};
         state->minimum_runtime_display_period = 0;
+        state->history_capture_wait_period.store(0, std::memory_order_relaxed);
         state->steamvr_throttled_wait_streak = 0;
         state->unpaced_wait_streak = 0;
     }
@@ -5600,6 +5605,8 @@ XrResult layer_wait_frame_impl(
                 state->minimum_runtime_display_period = scanout->count();
             }
         }
+        state->history_capture_wait_period.store(
+            state->minimum_runtime_display_period, std::memory_order_relaxed);
         if (!use_continuous_presenter && state->fps_overlay) {
             state->fps_overlay->set_display_period(
                 state->minimum_runtime_display_period);
@@ -6645,6 +6652,46 @@ XrResult layer_wait_swapchain_image_impl(
 // release and the mirror's bookkeeping. Called under the swapchain's
 // call_mutex, from the application's xrReleaseSwapchainImage or, when a
 // bridged release was deferred, from release_pending_bridge_image_locked.
+// How long a history capture may wait for a ring slot the GPU is still
+// reading: one display period, the scanout's own (see
+// minimum_runtime_display_period), 11.1 ms before one is known and never
+// more than 20 ms. Failing a busy capture resets generation continuity, and
+// the frames after the reset's prime arrive bunched, which keeps the GPU
+// behind and the next capture busy: issue 19 (Skyrim on a Steam Frame, 72 Hz)
+// sat in that cycle at 32 real and 16 generated images a second. Measured in
+// its logs, 98-100% of the busy captures would have found their slot free
+// within one period, half of them within 6-7 ms - against the 60 ms the
+// failed frame then stalled in xrEndFrame anyway.
+[[nodiscard]] std::uint32_t history_capture_wait_limit_us(
+    const SessionState& session) noexcept {
+    constexpr XrDuration kUnknownPeriod = 11'111'111;
+    constexpr XrDuration kCeiling = 20'000'000;
+    XrDuration period =
+        session.history_capture_wait_period.load(std::memory_order_relaxed);
+    if (period <= 0) {
+        period = kUnknownPeriod;
+    }
+    return static_cast<std::uint32_t>(std::min(period, kCeiling) / 1000);
+}
+
+// Only a capture that found its slot busy is recorded; see
+// BridgeFlightOperation::history_capture_wait.
+void log_history_capture_wait(
+    const SwapchainState& state,
+    std::uint32_t image_index,
+    HRESULT result,
+    const xrfg::D3D12HistoryCaptureWait& wait) noexcept {
+    if (!wait.slot_busy) {
+        return;
+    }
+    xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::history_capture_wait,
+        result,
+        handle_value(state.handle),
+        wait.waited_us,
+        (static_cast<std::uint64_t>(wait.limit_us) << 32) | image_index);
+}
+
 XrResult release_swapchain_image_locked(
     const std::shared_ptr<SwapchainState>& state,
     XrSwapchain swapchain,
@@ -6750,7 +6797,10 @@ XrResult release_swapchain_image_locked(
                 0);
         }
         if (SUCCEEDED(capture_result)) {
-            capture_result = history->capture(*candidate_index, &ticket);
+            xrfg::D3D12HistoryCaptureWait wait{};
+            wait.limit_us = history_capture_wait_limit_us(*state->session);
+            capture_result = history->capture(*candidate_index, &ticket, &wait);
+            log_history_capture_wait(*state, *candidate_index, capture_result, wait);
         }
         if (SUCCEEDED(capture_result) && interop) {
             const HRESULT finish_result = interop->finish_capture();
@@ -7016,7 +7066,10 @@ void capture_pending_end_frame_images(
                             session->d3d12_queue.Get());
                     }
                 }
-                capture_result = history->capture(*index, &ticket);
+                xrfg::D3D12HistoryCaptureWait wait{};
+                wait.limit_us = history_capture_wait_limit_us(*session);
+                capture_result = history->capture(*index, &ticket, &wait);
+                log_history_capture_wait(*state, *index, capture_result, wait);
                 if (SUCCEEDED(capture_result)) {
                     // The image went out at its release: nothing is left
                     // to wait for before the capture becomes history.

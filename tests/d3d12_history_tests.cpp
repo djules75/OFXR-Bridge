@@ -25,6 +25,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -1839,6 +1840,119 @@ void test_capture_is_async_and_consumer_fence_blocks_reuse(D3D12WarpFixture& fix
         "history did not preserve chronological ring identity after lease retirement");
     require(operation_succeeded(history.wait_for_idle()), "asynchronous history drain failed");
     require_source_is_render_target(fixture, sources[0].Get());
+}
+
+// V441: a capture that finds its slot still read on the GPU waits for the
+// reader for at most its limit, instead of failing at once. Three slots, each
+// in a different state: a reader that finishes inside the limit, one that
+// does not, and a lease no fence will clear, which must not be waited for.
+void test_capture_waits_for_a_busy_slot_within_its_limit(D3D12WarpFixture& fixture) {
+    std::array<ComPtr<ID3D12Resource>, 3> sources{
+        create_source_texture(fixture),
+        create_source_texture(fixture),
+        create_source_texture(fixture),
+    };
+    std::array<ID3D12Resource*, 3> source_pointers{
+        sources[0].Get(),
+        sources[1].Get(),
+        sources[2].Get(),
+    };
+    xrfg::D3D12SwapchainHistory history;
+    require(
+        operation_succeeded(history.initialize(
+            fixture.device(),
+            fixture.queue(),
+            std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
+            D3D12_RESOURCE_STATE_RENDER_TARGET)),
+        "busy-wait history initialization failed");
+
+    std::array<xrfg::D3D12HistoryCaptureTicket, 3> tickets{};
+    std::array<xrfg::D3D12HistoryConsumerLease, 3> leases{};
+    std::array<ComPtr<ID3D12Fence>, 2> readers{};
+    for (std::uint32_t index = 0; index < 3; ++index) {
+        require(
+            operation_succeeded(history.capture(index, &tickets[index])) &&
+                operation_succeeded(history.commit(tickets[index])),
+            "busy-wait ring fill failed");
+        ID3D12Resource* raw_resource = nullptr;
+        ID3D12Fence* raw_producer_fence = nullptr;
+        require(
+            operation_succeeded(history.acquire_consumer(
+                tickets[index], &leases[index], &raw_resource, &raw_producer_fence)),
+            "busy-wait consumer acquisition failed");
+        ComPtr<ID3D12Resource> resource;
+        ComPtr<ID3D12Fence> producer;
+        resource.Attach(raw_resource);
+        producer.Attach(raw_producer_fence);
+        fixture.wait_for_fence(producer.Get(), tickets[index].fence_value);
+        if (index < 2) {
+            require_hresult(
+                fixture.device()->CreateFence(
+                    0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(readers[index].GetAddressOf())),
+                "ID3D12Device::CreateFence(busy-wait reader)");
+            require(
+                operation_succeeded(history.retire_consumer(leases[index], readers[index].Get(), 1)),
+                "busy-wait consumer retirement failed");
+        }
+    }
+
+    // Slot 0: its reader finishes 20 ms in, inside a 200 ms limit.
+    xrfg::D3D12HistoryCaptureWait freed{};
+    freed.limit_us = 200'000;
+    std::future<void> signaller = std::async(std::launch::async, [&readers] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        static_cast<void>(readers[0]->Signal(1));
+    });
+    xrfg::D3D12HistoryCaptureTicket ticket_freed{};
+    const HRESULT freed_result = history.capture(0, &ticket_freed, &freed);
+    signaller.get();
+    require(
+        operation_succeeded(freed_result) && freed.slot_busy &&
+            freed.waited_us >= 10'000 && freed.waited_us < 200'000 &&
+            ticket_freed.slot == tickets[0].slot && ticket_freed.serial == 4,
+        "a capture did not wait for a reader that finished inside its limit");
+    require(operation_succeeded(history.commit(ticket_freed)), "busy-wait commit failed");
+
+    // Slot 1: its reader is still running when a 30 ms limit runs out.
+    xrfg::D3D12HistoryCaptureWait expired{};
+    expired.limit_us = 30'000;
+    xrfg::D3D12HistoryCaptureTicket ticket_expired{};
+    require(
+        history.capture(1, &ticket_expired, &expired) == HRESULT_FROM_WIN32(ERROR_BUSY) &&
+            expired.slot_busy && ticket_expired.serial == 0 &&
+            expired.waited_us >= 25'000 && expired.waited_us < 500'000,
+        "a capture did not give up on a busy slot at its limit");
+    require_hresult(readers[1]->Signal(1), "ID3D12Fence::Signal(busy-wait reader)");
+    require(
+        operation_succeeded(history.capture(1, &ticket_expired, &expired)) &&
+            operation_succeeded(history.commit(ticket_expired)),
+        "a slot did not become reusable after its reader finished");
+
+    // Slot 2: leased and not yet submitted - nothing to wait for.
+    xrfg::D3D12HistoryCaptureWait leased{};
+    leased.limit_us = 200'000;
+    xrfg::D3D12HistoryCaptureTicket ticket_leased{};
+    require(
+        history.capture(2, &ticket_leased, &leased) == HRESULT_FROM_WIN32(ERROR_BUSY) &&
+            leased.slot_busy && leased.waited_us < 50'000,
+        "a capture waited for a slot held by an unsubmitted lease");
+    history.cancel_consumer(leases[2]);
+    require(
+        operation_succeeded(history.capture(2, &ticket_leased, &leased)) &&
+            operation_succeeded(history.commit(ticket_leased)),
+        "a slot did not become reusable after its lease was cancelled");
+
+    // A free slot neither waits nor reports a busy slot.
+    require(operation_succeeded(history.wait_for_idle()), "busy-wait history drain failed");
+    xrfg::D3D12HistoryCaptureWait idle{};
+    idle.limit_us = 200'000;
+    xrfg::D3D12HistoryCaptureTicket ticket_idle{};
+    require(
+        operation_succeeded(history.capture(0, &ticket_idle, &idle)) &&
+            !idle.slot_busy && idle.waited_us == 0 &&
+            operation_succeeded(history.commit(ticket_idle)),
+        "a capture into a free slot reported a wait");
+    require(operation_succeeded(history.wait_for_idle()), "busy-wait history drain failed");
 }
 
 void test_depth_capture_path(D3D12WarpFixture& fixture) {
@@ -3998,6 +4112,7 @@ int main() {
         D3D12WarpFixture fixture;
         test_stereo_capture_ring(fixture);
         test_capture_is_async_and_consumer_fence_blocks_reuse(fixture);
+        test_capture_waits_for_a_busy_slot_within_its_limit(fixture);
         test_depth_capture_path(fixture);
         test_depth_private_history_allows_shader_resource_views(fixture);
         test_rolling_frame_synthesizer(fixture);

@@ -45,6 +45,8 @@ $deferredCaptures = 0
 $deferredCaptureFailures = 0
 $bridgedReleaseDelays = [System.Collections.Generic.List[double]]::new()
 $bridgedReleaseFailures = 0
+$busyCaptureWaits = [System.Collections.Generic.List[double]]::new()
+$busyCaptureFailures = 0
 $delivered = [System.Collections.Generic.List[double]]::new()
 $lineNumber = 0
 
@@ -163,6 +165,15 @@ Get-Content -LiteralPath $resolved | ForEach-Object {
                     $bridgedReleaseDelays.Add($entry.C / 1000.0)
                 } elseif ($entry.Result -lt 0 -and $entry.B -eq 4) {
                     $bridgedReleaseFailures++
+                }
+            }
+            # V441: a capture that found its history slot busy and waited for
+            # the GPU; result 0 when the wait freed it, b microseconds waited.
+            if ($entry.Operation -eq 'history_capture_wait') {
+                if ($entry.Result -lt 0) {
+                    $busyCaptureFailures++
+                } else {
+                    $busyCaptureWaits.Add($entry.B / 1000.0)
                 }
             }
             if ($entry.Operation -eq 'steamvr_delivery') {
@@ -291,6 +302,13 @@ if ($endFrameBegins.Count -gt 0) {
     }
     if ($deferredCaptures -eq 0 -and $bridgedReleaseDelays.Count -eq 0 -and $bridgedReleaseFailures -eq 0) {
         Write-Output '  no end-frame captures: capture_at_end_frame was off, or the build predates V440 on a bridged session'
+    }
+
+    if ($busyCaptureWaits.Count -gt 0 -or $busyCaptureFailures -gt 0) {
+        $p50 = if ($busyCaptureWaits.Count -gt 0) { Get-Percentile -Values $busyCaptureWaits.ToArray() -Fraction 0.5 } else { 0 }
+        $p90 = if ($busyCaptureWaits.Count -gt 0) { Get-Percentile -Values $busyCaptureWaits.ToArray() -Fraction 0.9 } else { 0 }
+        Write-Output ("  captures that found their history slot busy: {0}; {1} waited {2:N2} ms (p50), {3:N2} ms (p90); {4} still busy at the limit and lost their history" -f
+            ($busyCaptureWaits.Count + $busyCaptureFailures), $busyCaptureWaits.Count, $p50, $p90, $busyCaptureFailures)
     }
 
     if ($delivered.Count -gt 0) {
