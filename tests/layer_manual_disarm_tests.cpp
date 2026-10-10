@@ -45,6 +45,12 @@ int main(int argc, char** argv) {
     // "pause" as the third argument drives the tray's reversible pause in
     // place of the Disarm, and resumes afterwards.
     const bool pause_test = argc == 4 && std::string(argv[3]) == "pause";
+    // "steamvr overlay": overlay swapchains created and destroyed while the
+    // session generates on the presenter, as Skyrim VR's HUD panels are; the
+    // presenter and generation carry on through them.
+    const bool overlay_test = argc == 4 && std::string(argv[3]) == "overlay";
+    if (overlay_test && mode != "steamvr") return 1;
+    g_overlay_swapchain_mode = overlay_test;
     // "frame-loop <runtime> <single|split|handoff> [paused]": that on Virtual
     // Desktop a single-threaded session takes the presenter at its first
     // generating frames and a split loop stays inline, that Pimax OpenXR stays
@@ -68,7 +74,7 @@ int main(int argc, char** argv) {
     else if (loop_runtime == "other") g_runtime_name_override = "XRFG fake runtime";
     else if (frame_loop_test) return 1;
     const std::string marker_mode =
-        argc == 4 && !pause_test && !frame_loop_test ? argv[3] : "";
+        argc == 4 && !pause_test && !overlay_test && !frame_loop_test ? argv[3] : "";
     if (!marker_mode.empty() && (mode != "d3d11" ||
         (marker_mode != "on" && marker_mode != "off" && marker_mode != "hidden"))) return 1;
     g_flight_simulator_mode = mode == "flight";
@@ -473,6 +479,41 @@ int main(int argc, char** argv) {
         require(g_synthetic_release_calls.load() > 0, "generation active before Disarm");
         if (g_steamvr_presenter_mode || g_flight_simulator_mode)
             require(current.predictedDisplayPeriod == kFakeDisplayPeriod * 2, "presenter active before Disarm");
+        if (overlay_test) {
+            // Skyrim VR (Mad God's Overhaul) creates and destroys 160x272 HUD
+            // panels every second or two in some scenes. Each creation held
+            // generation off for a second and stopped the presenter, so a
+            // Steam Frame sat at the game's own 45-50 frames a second.
+            XrSwapchainCreateInfo overlay_info = sc;
+            overlay_info.width = 160; overlay_info.height = 272; overlay_info.arraySize = 1;
+            const auto synthetic_before = g_synthetic_release_calls.load();
+            int native_waits = 0;
+            const auto run = [&](const char* what) {
+                require(XR_SUCCEEDED(begin(session, nullptr)), what);
+                capture(); submit(current.predictedDisplayTime);
+                require(wait_for_queue_idle(), what);
+                require(XR_SUCCEEDED(wait(session, nullptr, &current)), what);
+                if (current.predictedDisplayPeriod != kFakeDisplayPeriod * 2) ++native_waits;
+            };
+            for (int cycle = 0; cycle < 3; ++cycle) {
+                XrSwapchain overlay = XR_NULL_HANDLE;
+                require(XR_SUCCEEDED(create_swapchain(session, &overlay_info, &overlay)) &&
+                        overlay != swapchain, "create an overlay swapchain");
+                for (int i = 0; i < 4; ++i) run("frame with the overlay");
+                require(XR_SUCCEEDED(destroy_swapchain(overlay)), "destroy the overlay swapchain");
+                for (int i = 0; i < 4; ++i) run("frame after the overlay");
+            }
+            const auto synthetic_after = g_synthetic_release_calls.load();
+            std::cout << "steamvr overlay: " << native_waits << " waits off the presenter, "
+                      << synthetic_after - synthetic_before << " synthetics across 3 overlays" << std::endl;
+            require(native_waits == 0, "the presenter carries on through overlay swapchains");
+            // Destroying one starts continuity over - a prime, no synthetic -
+            // so not every frame generates; a held-off second would give none.
+            require(synthetic_after - synthetic_before >= 12,
+                "generation carries on through overlay swapchains");
+            result = 0;
+            throw FinishedEarly{};
+        }
 #ifdef XRFG_EMBEDDED_MENU_TEST
         using Request = int (*)(int, int, int, int, int);
         auto menu_request = reinterpret_cast<Request>(GetProcAddress(module, "OFXR_EmbeddedRequestV1"));

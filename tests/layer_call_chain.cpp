@@ -69,6 +69,13 @@ XrSwapchain g_current_swapchain_right_b = fake_handle<XrSwapchain>(0x30a);
 // has the previous one un-retired.
 XrSwapchain g_synthetic_swapchain_b = fake_handle<XrSwapchain>(0x30b);
 XrSwapchain g_synthetic_swapchain_right_b = fake_handle<XrSwapchain>(0x30c);
+// An overlay's own colour swapchain, created mid-session beside the
+// application's - a HUD panel, CheekyFoveatedDLSS's menu. Handed out, while
+// g_overlay_swapchain_mode is on, for an application-owned create after the
+// first, outside the call numbering the private slots are routed by. Never
+// enumerated or submitted: its creation is what the layer reacts to.
+XrSwapchain g_overlay_swapchain = fake_handle<XrSwapchain>(0x30e);
+bool g_overlay_swapchain_mode = false;
 XrSpace g_space = fake_handle<XrSpace>(0x404);
 std::atomic<XrSpace> g_valid_composition_space{g_space};
 std::atomic<bool> g_delay_composition_validation{false};
@@ -857,6 +864,13 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
     if (g_d3d11_bridge_mode && create_info != nullptr &&
         (create_info->usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0) {
         *swapchain = g_application_depth_swapchain;
+        return XR_SUCCESS;
+    }
+    // Only the layer asks for a transfer destination.
+    if (g_overlay_swapchain_mode && create_info != nullptr &&
+        (create_info->usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) == 0 &&
+        g_create_swapchain_calls.load(std::memory_order_acquire) > 0) {
+        *swapchain = g_overlay_swapchain;
         return XR_SUCCESS;
     }
     const std::uint32_t call =

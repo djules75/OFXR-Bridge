@@ -637,6 +637,8 @@ struct PendingApplicationFrame {
 };
 
 enum class GenerationQuarantineReason : std::int64_t {
+    // Retired in V443: creating a swapchain no longer quarantines; see
+    // layer_create_swapchain_impl. Kept so the flight-log value stays unique.
     swapchain_created = 1,
     swapchain_destroyed = 2,
     d3d11_images_changed = 3,
@@ -5739,11 +5741,6 @@ XrResult layer_create_swapchain_impl(
     }
 
     PresenterResourceLifetimeGuard presenter_guard(state);
-    const bool active_color_reconfiguration =
-        state->generation_steady_state_established &&
-        (create_info->usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) != 0 &&
-        (create_info->usageFlags &
-         XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0;
     // Bridged and multisampled: the runtime gets a single-sample swapchain
     // and the application a multisampled texture of its own, resolved at
     // release (D3D11BridgePath::resolve). Every path below sees the
@@ -6002,12 +5999,20 @@ XrResult layer_create_swapchain_impl(
         swapchain_state->vulkan_bridge = std::move(bridge);
     }
     *swapchain = created_swapchain;
-    if (active_color_reconfiguration) {
-        schedule_generation_quarantine(
-            state,
-            GenerationQuarantineReason::swapchain_created,
-            handle_value(created_swapchain));
-    }
+    // A swapchain created mid-session does not hold generation off. Nothing
+    // in flight names it - no pair, no history, no retained repeat - and
+    // generation resources are taken when a projection layer first names a
+    // swapchain: a replacement for the projection is armed by the first frame
+    // that uses it, which passes through and starts continuity over
+    // (projection_frame_generation_pending). The structural quarantine this
+    // used to schedule covered a race lazy arming has since removed, as the
+    // destroy path's did. What it cost: a second of generation for every overlay an
+    // application creates while it plays. Skyrim VR (Mad God's Overhaul)
+    // creates and destroys 160x272 HUD panels every second or two in some
+    // scenes, which kept generation off and a Steam Frame at about 50
+    // frames a second; CheekyFoveatedDLSS's menu cost a second each time it
+    // opened. GenerationQuarantineReason::swapchain_created stays, unused,
+    // so the flight-log value keeps its meaning in older logs.
     return result;
 }
 

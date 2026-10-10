@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.442.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.443.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -560,6 +560,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> ${mode} pause)
             set_tests_properties(xrfg_manual_pause_${mode} PROPERTIES TIMEOUT 30)
         endforeach()
+        # Overlay swapchains created and destroyed mid-session hold neither
+        # generation nor the presenter off.
+        add_test(NAME xrfg_overlay_swapchain_steamvr COMMAND xrfg_layer_manual_disarm_tests
+            $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> steamvr overlay)
+        set_tests_properties(xrfg_overlay_swapchain_steamvr PROPERTIES TIMEOUT 30)
         # On Virtual Desktop a single-threaded session takes the presenter at
         # its first generating frames and a split loop stays inline, and one
         # that had the presenter and then hands its loop to another thread
