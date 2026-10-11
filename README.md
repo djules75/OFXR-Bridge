@@ -16,15 +16,18 @@ only (see below).
 Technically, OFXR Bridge is an experimental OpenXR API layer. It uses
 optical flow to generate frames between the ones the game renders.
 
-Current release: **v0.2.13.1 (internal build V438)**.
-See the [release notes](docs/releases/0.2.13.1.md). 0.2.13.1 is a
-performance and stability release: it fixes the higher latency and the
-frame drops some games had on Virtual Desktop since 0.2.12.1, stops
-hangars, menus and loading screens dropping to 60 fps after a hiccup,
-shortens the frame-rate dips SteamVR showed after a hiccup, stops MSFS
-2024 staying "loaded but not generating" after one rejected frame, and
-adds a tray switch for the VRAM saving of 0.2.10.1, for the cards on which
-it costs smoothness.
+Current release: **v0.2.13.2 (internal build V443)**.
+See the [release notes](docs/releases/0.2.13.2.md). 0.2.13.2 is a
+maintenance release: MSFS 2024 on SteamVR no longer drops to half rate
+because of a 0.2.13.1 change, D3D11 games such as IL-2 Great Battles no
+longer stutter in one eye without OpenXR Toolkit, windows and HUD panels
+that appear in the headset (CheekyFoveatedDLSS's settings, Skyrim VR's HUD)
+no longer pause frame generation or cost frame rate afterwards, and the
+long dips to about 50 fps on a Steam Frame are gone.
+[0.2.13.1](docs/releases/0.2.13.1.md) fixed the higher latency and the
+frame drops some games had on Virtual Desktop since 0.2.12.1, stopped
+hangars, menus and loading screens dropping to 60 fps after a hiccup, and
+added a tray switch for the VRAM saving of 0.2.10.1.
 0.2.12.2 removed a flicker in the left eye in MSFS 2024 with 3X Frame Gen,
 and 0.2.12.1 lets you pause and resume frame generation while you play,
 from the tray or with a key you choose.
@@ -282,7 +285,7 @@ Untick it if you see that and have VRAM to spare. It is not a live change:
 the bridge decides the layout when the game creates its VR session, so it
 takes effect the next time the game starts.
 
-### D3D12 games
+### D3D12 and D3D11 games: both eyes taken at the end of the frame
 
 Since 0.2.12.2 the bridge takes its copy of each eye's image when the game
 ends its frame, not when the game hands each eye over. A game that hands the
@@ -290,9 +293,15 @@ first eye over before it has finished drawing it otherwise gave the bridge a
 picture of that eye that was one frame old, which showed as flicker in one
 eye only: reported in MSFS 2024 with 3X Frame Gen.
 
+Since 0.2.13.2 the same applies to D3D11 games on the D3D11 bridge, where
+the copy handed to your headset moves to the end of the frame as well. It
+showed as stutter in one eye in IL-2 Great Battles, which OpenXR Toolkit
+hid because it hands both eyes over at the end of the frame itself.
+
 There is no menu entry. To go back to the earlier behaviour for diagnosis,
 close the tray, set `capture_at_end_frame=0` under `[tray]` in
-`%LOCALAPPDATA%\OFXR Bridge\tray.ini` and start the tray again.
+`%LOCALAPPDATA%\OFXR Bridge\tray.ini` and start the tray again. The one
+setting covers D3D12 and D3D11 games together.
 
 ### D3D11 games
 
@@ -321,6 +330,11 @@ flashing grid of small white coded squares at high resolutions, that is its
 own eye calibration failing to lock, with or without the bridge; its
 **Standard corners** calibration method avoids it, and setting the resolution
 before launching the game helps, since every change restarts the calibration.
+
+Since 0.2.13.2, opening Cheeky's settings window in the headset (F8) no
+longer pauses frame generation, and on Virtual Desktop it no longer costs
+frame rate for the rest of the session. The same goes for any window or HUD
+panel a game or mod adds while you play.
 
 ### Vulkan games (experimental)
 
@@ -381,7 +395,10 @@ For the best results on SteamVR:
 On these two runtimes the bridge chooses how it sends frames once, from how
 the game itself is built, and keeps that choice for the whole session. A
 given game behaves the same way every time; earlier versions could switch in
-the middle of a session when the game stalled, and stay that way.
+the middle of a session when the game stalled, and stay that way. Since
+0.2.13.2, on Virtual Desktop, a game that briefly stops generating, for
+example when an overlay window opens, also goes back to the way it was
+running before.
 
 ### When the number stops short of the refresh rate
 

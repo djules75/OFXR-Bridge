@@ -1,7 +1,7 @@
 # OFXR Bridge troubleshooting
 
 > [!IMPORTANT]
-> **First, make sure you are on the latest version: 0.2.13.1.** Every
+> **First, make sure you are on the latest version: 0.2.13.2.** Every
 > release fixes problems reported here, so check the
 > [releases page](https://github.com/djules75/OFXR-Bridge/releases) before
 > anything else. The tray's menu shows the version you are running.
@@ -72,6 +72,9 @@ not loaded (Table A).
 | The number stops short of the refresh rate (110 to 115 at 120 Hz, for example), although the game runs above half of it without OFXR | Generating frames costs GPU time too, so the game needs some headroom above half the refresh rate. Lower the refresh rate, the per-eye resolution or the optical-flow resolution. Example: No Man's Sky ran at 94 FPS without OFXR; OFXR gave an even 100 at 100 Hz and 113 to 115 at 120 Hz, because a real frame plus a generated one took about 17.7 ms and 120 Hz allows 16.7. |
 | Dips only in heavy scenes | Disarm OFXR and play the same scene. If the dips are still there, lower the per-eye resolution: OFXR can't make up frames the game doesn't render. |
 | One eye flickers or shimmers and the other is fine (MSFS 2024 with 3X Frame Gen) | Fixed in 0.2.12.2. Update. |
+| One eye stutters in a D3D11 game, and the stutter goes away with OpenXR Toolkit on (IL-2 Great Battles) | Fixed in 0.2.13.2. Update. |
+| On SteamVR, lower frame rates on 0.2.13.1 than on earlier versions, with SteamVR at half your refresh rate (MSFS 2024, often with 3X Frame Gen) | Fixed in 0.2.13.2. Update. |
+| The frame rate drops when a window or HUD panel appears in the headset, and on Virtual Desktop stays low after it closes (CheekyFoveatedDLSS's F8 window, Skyrim VR's HUD on a Steam Frame) | Fixed in 0.2.13.2. Update. If it still happens, send a flight log. |
 | Stutter or drop-outs that 0.2.9.1 did not have, with VRAM to spare (seen on an AMD RX 9070 XT in AMS2) | Untick **Lower VRAM (may cause stuttering)** in the tray and restart the game. It restores the layout 0.2.9.1 used, at about 15% more VRAM. |
 | You want to know whether a problem comes from OFXR | **Disarm** and restart the game. **Pause frame generation** is not enough: a paused game still runs through OFXR, it only stops making extra frames. |
 
