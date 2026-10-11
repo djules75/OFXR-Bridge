@@ -118,8 +118,30 @@ StereoPattern run_fov_pair(D3D12WarpFixture& fixture,
     require_hresult(synth.submit_pair(b, views_b, views_b, 0, 1, &pair, marker), "valid signed FOV pair");
     require(pair.previous_serial == a.serial && pair.current_serial == b.serial,
             "signed FOV lost A/B history identity");
-    require(readback_pattern(fixture, originals[1].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET) == current,
-            "current output changed source image orientation");
+    // The real frame carries a green diagnostic marker beside the synthetic's
+    // purple one whenever diagnostics are on, so it is no longer bit-exact
+    // there. That is deliberate: the purple marker rides only on the
+    // synthetic, so a steady purple square cannot distinguish "only synthetics
+    // are shown" from "both are shown and 45 Hz reads as steady", and nothing
+    // in the flight log can either - see LOW_HEADROOM_PLAN.md section 16.
+    //
+    // Everything outside the marked rect must still be a bit-exact copy of B,
+    // which is what this assertion is for and what the mask preserves. With no
+    // marker requested the readback is untouched and the check is exactly as
+    // strict as it was.
+    const auto mask_current_marker = [&](StereoPattern pixels) {
+        if (!marker) return pixels;
+        for (UINT eye = 0; eye < kEyeCount; ++eye)
+            for (std::size_t i = 0; i < pixels[eye].size(); i += 4)
+                if (pixels[eye][i] <= 1 && pixels[eye][i + 1] >= 228 &&
+                    pixels[eye][i + 1] <= 231 && pixels[eye][i + 2] >= 49 &&
+                    pixels[eye][i + 2] <= 53 && pixels[eye][i + 3] == 255)
+                    std::copy_n(current[eye].begin() + i, 4, pixels[eye].begin() + i);
+        return pixels;
+    };
+    require(mask_current_marker(readback_pattern(fixture, originals[1].Get(),
+                D3D12_RESOURCE_STATE_RENDER_TARGET)) == current,
+            "current output changed source image orientation outside the marker");
     const auto result = readback_pattern(fixture, synthetic.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
     const auto mask_marker = [&](StereoPattern pixels) {
         if (!marker) return pixels;

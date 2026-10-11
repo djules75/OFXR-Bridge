@@ -29,7 +29,7 @@ struct Fixture {
     }
     std::filesystem::path seed(std::wstring_view version, unsigned id, bool json = true) {
         const auto path = state.local_directory / L"RuntimeLayer" / version /
-            (L"XR_APILAYER_XRFrameBridge_manual-42-" + std::to_wstring(id) + L".json");
+            (L"XR_APILAYER_OFXRAutonomous_manual-42-" + std::to_wstring(id) + L".json");
         std::filesystem::create_directories(path.parent_path());
         if (json) std::ofstream(path) << "{}";
         require(xrfg::implicit_layer::register_manifest(
@@ -46,6 +46,11 @@ struct Fixture {
 
 void cross_version_cleanup() {
     Fixture test;
+    const auto original_profile = test.state.local_directory.parent_path() / L"OFXR Bridge";
+    const auto original_manifest = original_profile / L"RuntimeLayer" / L"v444" /
+        L"XR_APILAYER_OFXRAutonomous_manual-1-1.json";
+    require(!xrfg::implicit_layer::owned_registration_path(original_manifest, test.state.local_directory),
+        "same-prefix manifests in the original tray profile are never owned by this candidate");
     const auto old = test.seed(L"v065", 1);
     const auto current = test.seed(L"v069", 2);
     const auto missing = test.seed(L"v068", 3, false);
@@ -61,7 +66,7 @@ void cross_version_cleanup() {
     require(xrfg::implicit_layer::register_manifest(
         outside, xrfg::implicit_layer::RegistryScope::current_user,
         nullptr, test.state.registry_subkey), "outside registration");
-    const auto orphan = current.parent_path() / L"XR_APILAYER_XRFrameBridge_manual-99-99.json";
+    const auto orphan = current.parent_path() / L"XR_APILAYER_OFXRAutonomous_manual-99-99.json";
     std::ofstream(orphan) << "orphan";
     const auto dll = old.parent_path() / L"XR_APILAYER_XRFrameBridge_diagnostic.dll";
     const auto ini = old.parent_path() / L"ofxr_bridge.ini";
@@ -93,16 +98,16 @@ void cross_version_cleanup() {
 
 void ownership() {
     const std::filesystem::path root = L"C:\\Users\\Test\\OFXR Bridge";
-    const auto valid = root / L"RuntimeLayer\\v065\\XR_APILAYER_XRFrameBridge_manual-32292-11205031.json";
+    const auto valid = root / L"RuntimeLayer\\v065\\XR_APILAYER_OFXRAutonomous_manual-32292-11205031.json";
     require(xrfg::implicit_layer::owned_registration_path(valid, root), "reported v065 value accepted");
     for (const auto& bad : {
-        root / L"RuntimeLayer\\v065\\XR_APILAYER_XRFrameBridge_manual-abc.json",
-        root / L"RuntimeLayer\\v065\\XR_APILAYER_XRFrameBridge_manual-1-2-3.json",
-        root / L"RuntimeLayer\\v065\\XR_APILAYER_XRFrameBridge_manual--2.json",
-        root / L"RuntimeLayer\\v065\\nested\\XR_APILAYER_XRFrameBridge_manual-1-2.json",
-        root / L"RuntimeLayer\\v065\\..\\v068\\XR_APILAYER_XRFrameBridge_manual-1-2.json",
-        root / L"RuntimeLayer\\other\\XR_APILAYER_XRFrameBridge_manual-1-2.json",
-        std::filesystem::path(L"relative\\RuntimeLayer\\v065\\XR_APILAYER_XRFrameBridge_manual-1-2.json")})
+        root / L"RuntimeLayer\\v065\\XR_APILAYER_OFXRAutonomous_manual-abc.json",
+        root / L"RuntimeLayer\\v065\\XR_APILAYER_OFXRAutonomous_manual-1-2-3.json",
+        root / L"RuntimeLayer\\v065\\XR_APILAYER_OFXRAutonomous_manual--2.json",
+        root / L"RuntimeLayer\\v065\\nested\\XR_APILAYER_OFXRAutonomous_manual-1-2.json",
+        root / L"RuntimeLayer\\v065\\..\\v068\\XR_APILAYER_OFXRAutonomous_manual-1-2.json",
+        root / L"RuntimeLayer\\other\\XR_APILAYER_OFXRAutonomous_manual-1-2.json",
+        std::filesystem::path(L"relative\\RuntimeLayer\\v065\\XR_APILAYER_OFXRAutonomous_manual-1-2.json")})
         require(!xrfg::implicit_layer::owned_registration_path(bad, root), "unsafe/unrelated path rejected");
 }
 
@@ -198,7 +203,7 @@ void runtime_stop_and_watchdog() {
     CloseHandle(event);
 
     // Missing event is fail-closed for managed DLLs; embedded INIs have no lease.
-    const auto absent = test.state.local_directory / L"RuntimeLayer\\v069\\XR_APILAYER_XRFrameBridge_manual-8-8.json";
+    const auto absent = test.state.local_directory / L"RuntimeLayer\\v069\\XR_APILAYER_OFXRAutonomous_manual-8-8.json";
     require(write_runtime_configuration(test.state, nullptr, absent), "write absent lease");
     xrfg::implicit_layer::ManualArmControl absent_reader(runtime_directory(test.state.local_directory));
     require(absent_reader.stop_requested(), "orphaned managed DLL starts disabled");

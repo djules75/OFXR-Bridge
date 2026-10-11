@@ -1,0 +1,84 @@
+{
+  "version": "V456",
+  "upstream_commit": "208a864ad9b54ca64ec136177f8bad624ba1edeb",
+  "scope": [
+    "OFXR game motion vectors",
+    "native DLSS-G"
+  ],
+  "excluded": [
+    "FSR renderer/guide selection",
+    "pure OFA",
+    "Luke AFW",
+    "R19 camera",
+    "promise/scheduler",
+    "V453 timings"
+  ],
+  "suites": [
+    {
+      "route": "new",
+      "passed": 140,
+      "seconds": 91.28
+    },
+    {
+      "route": "djules",
+      "passed": 157,
+      "seconds": 96.88
+    }
+  ],
+  "regression": {
+    "baseline_commit": "646ba4e04ffed17d889702745fc1e11edcc3c477",
+    "baseline_api_only_adaptation": "V456 signature and monotonic watermark; V455 resolver unchanged",
+    "before_exit": 1,
+    "before_failure": "right-first shared stream did not follow each color release",
+    "after_exit": 0,
+    "source_restored": true,
+    "baseline_source_sha256": "d0c43527a0a1d1d1e7056e28420c3bf4085722095bde4da06a55ac7644a65805",
+    "candidate_resolver_sha256": "2a59c8b669aa1e601efd76359a904639414c7db52bc9945a8f7383daf2a602d9",
+    "legacy_FSR_route_checks": "passed",
+    "cross_queue_selected_snapshot_receipt": "passed",
+    "producer": "D3D12 WARP with real command lists, snapshots and submission fences",
+    "native_missing_depth_bound_color_integration": "passed; original bypass/GUI assertions retained"
+  },
+  "fsr_unchanged": {
+    "baseline_commit": "646ba4e04ffed17d889702745fc1e11edcc3c477",
+    "source_files": [
+      {
+        "file": "src/d3d12/d3d12_fsr_frame_generator.cpp",
+        "canonical_sha256": "08eed49d184b8d4b5149e1a68e5f3fd74e5ed3963feda6f6f36eedfd4d6630e1",
+        "unchanged_vs_V455": true
+      },
+      {
+        "file": "src/d3d12/d3d12_fsr_frame_generator.hpp",
+        "canonical_sha256": "a755025b53e22fa884f95e3b6da4d534eb4a59ba07ad45bcf483a4435c423a02",
+        "unchanged_vs_V455": true
+      },
+      {
+        "file": "src/common/fsr_frame_generation.cpp",
+        "canonical_sha256": "779898877bae21a6432bc3ec32f27b43d6b54fe202f2e7ba7dd0fd8935b8e6bf",
+        "unchanged_vs_V455": true
+      },
+      {
+        "file": "src/d3d12/frame_synthesis.hlsl",
+        "canonical_sha256": "f1bc0c4e04746a7389ac1e8b09894ec42514d1ffa7a3df59bdda903f2d7d148f",
+        "unchanged_vs_V455": true
+      },
+      {
+        "file": "src/d3d12/native_dlssg.hlsl",
+        "canonical_sha256": "a2446da83745aea6ffb3868fecb42b470679231d862be344a92c1cb0bde12cd5",
+        "unchanged_vs_V455": true
+      },
+      {
+        "file": "src/d3d12/d3d12_frame_synthesizer.cpp",
+        "canonical_sha256": "a3854ea1b00ff80e2ccaad7ef8074119232b6a8dfc3da2b9ea794d9be65b98d2",
+        "unchanged_vs_V455": true
+      }
+    ],
+    "legacy_per_eye_resolver_branch_sha256": "037afc1cf2156ad45cff677ee8116b45f73d78ecac2b22f6d9bada505eba9378",
+    "legacy_per_eye_resolver_branch_unchanged": true,
+    "fsr_provider_byte_identical": true,
+    "fsr_provider_sha256": "12a5081257ec95b0b53ad51b4a87fb3c03f97fe0bbb59f9496968f8d50ef93a6",
+    "runtime_scope": "R15 gated out for FSR/OFA/AFW; legacy resolver checks pass",
+    "native_change_except_R15": "matching private-provider ABI45601 only; V455 recovery preserved"
+  },
+  "game_validation": "Owner V455/V456 rotation comparison pending"
+}

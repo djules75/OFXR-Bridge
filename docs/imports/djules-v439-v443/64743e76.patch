@@ -1,0 +1,230 @@
+commit 64743e76ff2ad4da4d0064128959898a6b020706
+Author:     djules75 <1819336+djules75@users.noreply.github.com>
+AuthorDate: Sat Oct 10 16:53:47 2026 +0800
+Commit:     djules75 <1819336+djules75@users.noreply.github.com>
+CommitDate: Sun Oct 11 09:27:53 2026 +0800
+
+    Do not hold generation off for a second when a swapchain is created (V443)
+    
+    Issue 19 on V441: the long dips to about 50 fps on a Steam Frame (Skyrim VR,
+    Mad God's Overhaul, SteamVR 72 Hz, D3D11 bridge, NVIDIA) still came, later.
+    V441 removed the cause the earlier logs showed - busy history captures fell
+    from 952 to 26 - and the V441 log is clean for 220 s. Every later episode
+    starts when the game creates a 160x272 colour swapchain, an overlay panel
+    added beside the projection: 26 of them in 352 s, every second or two
+    inside an episode. Each creation scheduled the one-second structural
+    quarantine (swapchain_created), and on SteamVR the pass-through frames that
+    follow stop the presenter, so generation stayed off and the game ran at its
+    own 42-48 fps with the presenter delivering 37-50 frames a second. The
+    frames carrying those overlays generate normally once the quarantine is
+    over: 265-275 s have five layers on every frame and run clean. The capture
+    waits that failed (2848, ERROR_BUSY without waiting) all fall inside these
+    quarantines.
+    
+    A swapchain created mid-session now holds nothing off. Nothing in flight
+    names it, and generation resources are taken when a projection layer first
+    names a swapchain, so a replacement for the projection is armed by the first
+    frame that uses it, which passes through and starts continuity over
+    (projection_frame_generation_pending). The quarantine covered a race lazy
+    arming has since removed - the reason the destroy path dropped its own
+    second in September (6a05294), when the creation path was left as it was.
+    Destroying a swapchain is unchanged: continuity starts over and the
+    retained repeat is dropped, as before.
+    
+    What changes: only a session that creates a colour swapchain while it is
+    already generating. An overlay costs nothing now; on Virtual Desktop it also
+    removes the second-long hitch V442 left when CheekyFoveatedDLSS's menu
+    opens. An application that creates its new projection swapchain before
+    destroying the old one restarts continuity when it first uses it, instead
+    of losing a second at the creation. One that destroys first, as MSFS 2024
+    does, never reached this quarantine: the destroy clears the steady state
+    it required. GenerationQuarantineReason::swapchain_created is kept, unused,
+    for older logs.
+    
+    Test: xrfg_overlay_swapchain_steamvr creates and destroys a 160x272 overlay
+    swapchain three times while the session generates on the presenter. Every
+    wait stays on the presenter and 18 synthetics come through; with the
+    quarantine put back, all 24 waits leave the presenter and none generate.
+    
+    ctest 89/89; presenter, DCS, frame-loop, pause, history, D3D11 bridge,
+    overlay, swapchain destroy and budget scenarios looped eight times each.
+    Not yet run in a headset.
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1f63e23..b3afd44 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,6 +1,6 @@
+ cmake_minimum_required(VERSION 3.24)
+ 
+-project(XRFrameGenerationBridge VERSION 0.442.0 LANGUAGES CXX)
++project(XRFrameGenerationBridge VERSION 0.443.0 LANGUAGES CXX)
+ 
+ if(MSVC)
+     # API layers are injected into hosts that can preload an older game-local
+@@ -560,6 +560,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> ${mode} pause)
+             set_tests_properties(xrfg_manual_pause_${mode} PROPERTIES TIMEOUT 30)
+         endforeach()
++        # Overlay swapchains created and destroyed mid-session hold neither
++        # generation nor the presenter off.
++        add_test(NAME xrfg_overlay_swapchain_steamvr COMMAND xrfg_layer_manual_disarm_tests
++            $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> steamvr overlay)
++        set_tests_properties(xrfg_overlay_swapchain_steamvr PROPERTIES TIMEOUT 30)
+         # On Virtual Desktop a single-threaded session takes the presenter at
+         # its first generating frames and a split loop stays inline, and one
+         # that had the presenter and then hands its loop to another thread
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 7edc1ef..a19a157 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -637,6 +637,8 @@ struct PendingApplicationFrame {
+ };
+ 
+ enum class GenerationQuarantineReason : std::int64_t {
++    // Retired in V443: creating a swapchain no longer quarantines; see
++    // layer_create_swapchain_impl. Kept so the flight-log value stays unique.
+     swapchain_created = 1,
+     swapchain_destroyed = 2,
+     d3d11_images_changed = 3,
+@@ -5739,11 +5741,6 @@ XrResult layer_create_swapchain_impl(
+     }
+ 
+     PresenterResourceLifetimeGuard presenter_guard(state);
+-    const bool active_color_reconfiguration =
+-        state->generation_steady_state_established &&
+-        (create_info->usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) != 0 &&
+-        (create_info->usageFlags &
+-         XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0;
+     // Bridged and multisampled: the runtime gets a single-sample swapchain
+     // and the application a multisampled texture of its own, resolved at
+     // release (D3D11BridgePath::resolve). Every path below sees the
+@@ -6002,12 +5999,20 @@ XrResult layer_create_swapchain_impl(
+         swapchain_state->vulkan_bridge = std::move(bridge);
+     }
+     *swapchain = created_swapchain;
+-    if (active_color_reconfiguration) {
+-        schedule_generation_quarantine(
+-            state,
+-            GenerationQuarantineReason::swapchain_created,
+-            handle_value(created_swapchain));
+-    }
++    // A swapchain created mid-session does not hold generation off. Nothing
++    // in flight names it - no pair, no history, no retained repeat - and
++    // generation resources are taken when a projection layer first names a
++    // swapchain: a replacement for the projection is armed by the first frame
++    // that uses it, which passes through and starts continuity over
++    // (projection_frame_generation_pending). The structural quarantine this
++    // used to schedule covered a race lazy arming has since removed, as the
++    // destroy path's did. What it cost: a second of generation for every overlay an
++    // application creates while it plays. Skyrim VR (Mad God's Overhaul)
++    // creates and destroys 160x272 HUD panels every second or two in some
++    // scenes, which kept generation off and a Steam Frame at about 50
++    // frames a second; CheekyFoveatedDLSS's menu cost a second each time it
++    // opened. GenerationQuarantineReason::swapchain_created stays, unused,
++    // so the flight-log value keeps its meaning in older logs.
+     return result;
+ }
+ 
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+index a312197..c239017 100644
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -69,6 +69,13 @@ XrSwapchain g_current_swapchain_right_b = fake_handle<XrSwapchain>(0x30a);
+ // has the previous one un-retired.
+ XrSwapchain g_synthetic_swapchain_b = fake_handle<XrSwapchain>(0x30b);
+ XrSwapchain g_synthetic_swapchain_right_b = fake_handle<XrSwapchain>(0x30c);
++// An overlay's own colour swapchain, created mid-session beside the
++// application's - a HUD panel, CheekyFoveatedDLSS's menu. Handed out, while
++// g_overlay_swapchain_mode is on, for an application-owned create after the
++// first, outside the call numbering the private slots are routed by. Never
++// enumerated or submitted: its creation is what the layer reacts to.
++XrSwapchain g_overlay_swapchain = fake_handle<XrSwapchain>(0x30e);
++bool g_overlay_swapchain_mode = false;
+ XrSpace g_space = fake_handle<XrSpace>(0x404);
+ std::atomic<XrSpace> g_valid_composition_space{g_space};
+ std::atomic<bool> g_delay_composition_validation{false};
+@@ -859,6 +866,13 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
+         *swapchain = g_application_depth_swapchain;
+         return XR_SUCCESS;
+     }
++    // Only the layer asks for a transfer destination.
++    if (g_overlay_swapchain_mode && create_info != nullptr &&
++        (create_info->usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) == 0 &&
++        g_create_swapchain_calls.load(std::memory_order_acquire) > 0) {
++        *swapchain = g_overlay_swapchain;
++        return XR_SUCCESS;
++    }
+     const std::uint32_t call =
+         g_create_swapchain_calls.fetch_add(1, std::memory_order_relaxed);
+     if (g_split_eye_mode) {
+diff --git a/tests/layer_manual_disarm_tests.cpp b/tests/layer_manual_disarm_tests.cpp
+index 01d2d06..4eac863 100644
+--- a/tests/layer_manual_disarm_tests.cpp
++++ b/tests/layer_manual_disarm_tests.cpp
+@@ -45,6 +45,12 @@ int main(int argc, char** argv) {
+     // "pause" as the third argument drives the tray's reversible pause in
+     // place of the Disarm, and resumes afterwards.
+     const bool pause_test = argc == 4 && std::string(argv[3]) == "pause";
++    // "steamvr overlay": overlay swapchains created and destroyed while the
++    // session generates on the presenter, as Skyrim VR's HUD panels are; the
++    // presenter and generation carry on through them.
++    const bool overlay_test = argc == 4 && std::string(argv[3]) == "overlay";
++    if (overlay_test && mode != "steamvr") return 1;
++    g_overlay_swapchain_mode = overlay_test;
+     // "frame-loop <runtime> <single|split|handoff> [paused]": that on Virtual
+     // Desktop a single-threaded session takes the presenter at its first
+     // generating frames and a split loop stays inline, that Pimax OpenXR stays
+@@ -68,7 +74,7 @@ int main(int argc, char** argv) {
+     else if (loop_runtime == "other") g_runtime_name_override = "XRFG fake runtime";
+     else if (frame_loop_test) return 1;
+     const std::string marker_mode =
+-        argc == 4 && !pause_test && !frame_loop_test ? argv[3] : "";
++        argc == 4 && !pause_test && !overlay_test && !frame_loop_test ? argv[3] : "";
+     if (!marker_mode.empty() && (mode != "d3d11" ||
+         (marker_mode != "on" && marker_mode != "off" && marker_mode != "hidden"))) return 1;
+     g_flight_simulator_mode = mode == "flight";
+@@ -473,6 +479,41 @@ int main(int argc, char** argv) {
+         require(g_synthetic_release_calls.load() > 0, "generation active before Disarm");
+         if (g_steamvr_presenter_mode || g_flight_simulator_mode)
+             require(current.predictedDisplayPeriod == kFakeDisplayPeriod * 2, "presenter active before Disarm");
++        if (overlay_test) {
++            // Skyrim VR (Mad God's Overhaul) creates and destroys 160x272 HUD
++            // panels every second or two in some scenes. Each creation held
++            // generation off for a second and stopped the presenter, so a
++            // Steam Frame sat at the game's own 45-50 frames a second.
++            XrSwapchainCreateInfo overlay_info = sc;
++            overlay_info.width = 160; overlay_info.height = 272; overlay_info.arraySize = 1;
++            const auto synthetic_before = g_synthetic_release_calls.load();
++            int native_waits = 0;
++            const auto run = [&](const char* what) {
++                require(XR_SUCCEEDED(begin(session, nullptr)), what);
++                capture(); submit(current.predictedDisplayTime);
++                require(wait_for_queue_idle(), what);
++                require(XR_SUCCEEDED(wait(session, nullptr, &current)), what);
++                if (current.predictedDisplayPeriod != kFakeDisplayPeriod * 2) ++native_waits;
++            };
++            for (int cycle = 0; cycle < 3; ++cycle) {
++                XrSwapchain overlay = XR_NULL_HANDLE;
++                require(XR_SUCCEEDED(create_swapchain(session, &overlay_info, &overlay)) &&
++                        overlay != swapchain, "create an overlay swapchain");
++                for (int i = 0; i < 4; ++i) run("frame with the overlay");
++                require(XR_SUCCEEDED(destroy_swapchain(overlay)), "destroy the overlay swapchain");
++                for (int i = 0; i < 4; ++i) run("frame after the overlay");
++            }
++            const auto synthetic_after = g_synthetic_release_calls.load();
++            std::cout << "steamvr overlay: " << native_waits << " waits off the presenter, "
++                      << synthetic_after - synthetic_before << " synthetics across 3 overlays" << std::endl;
++            require(native_waits == 0, "the presenter carries on through overlay swapchains");
++            // Destroying one starts continuity over - a prime, no synthetic -
++            // so not every frame generates; a held-off second would give none.
++            require(synthetic_after - synthetic_before >= 12,
++                "generation carries on through overlay swapchains");
++            result = 0;
++            throw FinishedEarly{};
++        }
+ #ifdef XRFG_EMBEDDED_MENU_TEST
+         using Request = int (*)(int, int, int, int, int);
+         auto menu_request = reinterpret_cast<Request>(GetProcAddress(module, "OFXR_EmbeddedRequestV1"));

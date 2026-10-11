@@ -1,168 +1,83 @@
 #include "xrfg/provider_api.hpp"
-
 #include <windows.h>
-
-#include <cstddef>
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <iterator>
-#include <optional>
-#include <string>
+#include <stdexcept>
 
 namespace {
-
-std::filesystem::path g_runtime_ini;
-std::optional<std::string> g_runtime_ini_original;
-
-void restore_runtime_ini() {
-    std::error_code error;
-    if (g_runtime_ini.empty()) {
-        return;
-    }
-    if (g_runtime_ini_original) {
-        std::ofstream output(g_runtime_ini, std::ios::binary | std::ios::trunc);
-        output.write(g_runtime_ini_original->data(),
-                     static_cast<std::streamsize>(g_runtime_ini_original->size()));
-    } else {
-        std::filesystem::remove(g_runtime_ini, error);
-    }
+unsigned checks{};
+void require(bool value, const char* message) {
+    ++checks;
+    if (!value) throw std::runtime_error(message);
 }
-
-void require(bool condition, const char* message) {
-    if (!condition) {
-        std::cerr << "provider API test failed: " << message << '\n';
-        std::exit(1);
-    }
-}
-
-template <typename Function>
-Function resolve(HMODULE module, const char* name) {
+template<class Function> Function resolve(HMODULE module, const char* name) {
     const auto address = GetProcAddress(module, name);
     require(address != nullptr, name);
     return reinterpret_cast<Function>(address);
 }
-
-}  // namespace
-
-int main(int argc, char** argv) {
-    require(argc == 2, "layer DLL path argument");
-    g_runtime_ini = std::filesystem::path(argv[1]).parent_path() /
-                    L"ofxr_bridge.ini";
-    if (std::filesystem::exists(g_runtime_ini)) {
-        std::ifstream input(g_runtime_ini, std::ios::binary);
-        g_runtime_ini_original.emplace(std::istreambuf_iterator<char>(input),
-                                       std::istreambuf_iterator<char>());
+}
+int main(int count, char** arguments) {
+    try {
+        require(count == 2, "autonomous layer path supplied");
+        const HMODULE module = LoadLibraryA(arguments[1]);
+        require(module != nullptr, "load actual autonomous layer");
+        using Version = std::uint32_t(*)() noexcept;
+        using Control1 = int(*)(OFXR_ControlSnapshotV1*) noexcept;
+        using Control2 = int(*)(OFXR_ControlSnapshotV2*) noexcept;
+        using Request1 = int(*)(const OFXR_ControlSettingsV1*) noexcept;
+        using Request2 = int(*)(const OFXR_ControlSettingsV2*) noexcept;
+        using Statistics1 = int(*)(OFXR_DlssMotionVectorStatisticsV1*) noexcept;
+        using Statistics2 = int(*)(OFXR_DlssGuideStatisticsV2*) noexcept;
+        using Publication2 = int(*)(const OFXR_DlssGuidePublicationV2*) noexcept;
+        const auto version1 = resolve<Version>(module, "OFXR_GetProviderApiVersionV1");
+        const auto version2 = resolve<Version>(module, "OFXR_GetProviderApiVersionV2");
+        const auto control1 = resolve<Control1>(module, "OFXR_GetControlSnapshotV1");
+        const auto control2 = resolve<Control2>(module, "OFXR_GetControlSnapshotV2");
+        const auto request1 = resolve<Request1>(module, "OFXR_RequestControlV1");
+        const auto request2 = resolve<Request2>(module, "OFXR_RequestControlV2");
+        const auto statistics1 = resolve<Statistics1>(module, "OFXR_GetDlssMotionVectorStatisticsV1");
+        const auto statistics2 = resolve<Statistics2>(module, "OFXR_GetDlssGuideStatisticsV2");
+        const auto publish2 = resolve<Publication2>(module, "OFXR_PublishDlssGuidesV2");
+        require(version1() == 1 && version2() == 2, "versioned native producer ABI");
+        for (const auto name : {"OFXR_OptiScalerProviderV1", "OFXR_RegisterOptiScalerProviderV2",
+            "OFXR_UnregisterOptiScalerProviderV2"})
+            require(GetProcAddress(module, name) == nullptr, "retired host cooperation export absent");
+        OFXR_ControlSnapshotV1 first;
+        OFXR_ControlSnapshotV2 second;
+        require(control1(&first) != 0 && first.api_version == 1, "V1 snapshot");
+        require(control2(&second) != 0 && second.api_version == 2, "V2 snapshot");
+        require(second.providers == 0, "autonomous layer requires no external provider registration");
+        require(first.desired.backend == second.desired.backend && first.revision == second.revision,
+            "both ABI generations observe identical runtime ownership");
+        require(control1(nullptr) == 0 && control2(nullptr) == 0, "null snapshots rejected");
+        first.struct_size = sizeof(first) - 1;
+        second.struct_size = sizeof(second) - 1;
+        require(control1(&first) == 0 && control2(&second) == 0, "undersized snapshots rejected");
+        OFXR_ControlSettingsV1 invalid1;
+        OFXR_ControlSettingsV2 invalid2;
+        invalid1.backend = invalid2.backend = 9;
+        require(request1(&invalid1) == 0 && request2(&invalid2) == 0, "invalid engine rejected");
+        require(request1(nullptr) == 0 && request2(nullptr) == 0, "null requests rejected");
+        invalid1.struct_size = invalid2.struct_size = 0;
+        require(request1(&invalid1) == 0 && request2(&invalid2) == 0, "undersized requests rejected");
+        OFXR_DlssMotionVectorStatisticsV1 motion;
+        OFXR_DlssGuideStatisticsV2 guides;
+        require(statistics1(&motion) != 0 && motion.api_version == 1, "native motion statistics");
+        require(statistics2(&guides) != 0 && guides.api_version == 2, "native motion/depth statistics");
+        require(statistics1(nullptr) == 0 && statistics2(nullptr) == 0, "null statistics rejected");
+        motion.struct_size = guides.struct_size = 0;
+        require(statistics1(&motion) == 0 && statistics2(&guides) == 0, "undersized statistics rejected");
+        OFXR_DlssGuidePublicationV2 empty;
+        require(publish2(nullptr) == 0 && publish2(&empty) == 0, "missing native GPU resources rejected");
+        empty.api_version = 99;
+        require(publish2(&empty) == 0, "unknown guide ABI rejected");
+        empty.api_version = 2;
+        empty.struct_size = sizeof(empty) - 1;
+        require(publish2(&empty) == 0, "undersized guide publication rejected");
+        FreeLibrary(module);
+        std::cout << checks << " autonomous native producer ABI checks passed\n";
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "native producer ABI failed: " << error.what() << '\n';
+        return 1;
     }
-    std::atexit(restore_runtime_ini);
-    const HMODULE module = LoadLibraryA(argv[1]);
-    require(module != nullptr, "load layer DLL");
-
-    using GetVersion = std::uint32_t (*)() noexcept;
-    using GetControl = int (*)(OFXR_ControlSnapshotV1*) noexcept;
-    using RequestControl = int (*)(const OFXR_ControlSettingsV1*) noexcept;
-    using GetStatistics = int (*)(OFXR_DlssMotionVectorStatisticsV1*) noexcept;
-    using RegisterV2 = int (*)(
-        const OFXR_OptiScalerProviderIdentityV2*) noexcept;
-    using UnregisterV2 = void (*)() noexcept;
-    using GetControlV2 = int (*)(OFXR_ControlSnapshotV2*) noexcept;
-    using RequestControlV2 = int (*)(
-        const OFXR_ControlSettingsV2*) noexcept;
-    using GetStatisticsV2 = int (*)(OFXR_DlssGuideStatisticsV2*) noexcept;
-    using PublishGuidesV2 = int (*)(
-        const OFXR_DlssGuidePublicationV2*) noexcept;
-
-    const auto get_version = resolve<GetVersion>(
-        module, "OFXR_GetProviderApiVersionV1");
-    const auto get_control = resolve<GetControl>(
-        module, "OFXR_GetControlSnapshotV1");
-    const auto request_control = resolve<RequestControl>(
-        module, "OFXR_RequestControlV1");
-    const auto get_statistics = resolve<GetStatistics>(
-        module, "OFXR_GetDlssMotionVectorStatisticsV1");
-    const auto get_version_v2 = resolve<GetVersion>(
-        module, "OFXR_GetProviderApiVersionV2");
-    const auto register_v2 = resolve<RegisterV2>(
-        module, "OFXR_RegisterOptiScalerProviderV2");
-    const auto unregister_v2 = resolve<UnregisterV2>(
-        module, "OFXR_UnregisterOptiScalerProviderV2");
-    const auto get_control_v2 = resolve<GetControlV2>(
-        module, "OFXR_GetControlSnapshotV2");
-    const auto request_control_v2 = resolve<RequestControlV2>(
-        module, "OFXR_RequestControlV2");
-    const auto get_statistics_v2 = resolve<GetStatisticsV2>(
-        module, "OFXR_GetDlssGuideStatisticsV2");
-    const auto publish_guides_v2 = resolve<PublishGuidesV2>(
-        module, "OFXR_PublishDlssGuidesV2");
-
-    require(get_version() == OFXR_PROVIDER_API_VERSION_V1, "API version");
-    require(GetProcAddress(module, "OFXR_OptiScalerProviderV1") == nullptr,
-        "provider marker belongs only to the cooperating OptiScaler DLL");
-
-    OFXR_ControlSnapshotV1 snapshot{};
-    require(get_control(&snapshot) != 0, "control snapshot");
-    require(snapshot.api_version == OFXR_PROVIDER_API_VERSION_V1,
-        "control snapshot version");
-    snapshot.struct_size = sizeof(snapshot) - 1;
-    require(get_control(&snapshot) == 0, "undersized control rejected");
-
-    OFXR_ControlSettingsV1 invalid{};
-    invalid.backend = 9;
-    require(request_control(&invalid) == 0, "invalid control rejected");
-
-    OFXR_DlssMotionVectorStatisticsV1 statistics{};
-    require(get_statistics(&statistics) != 0, "statistics snapshot");
-    require(statistics.api_version == OFXR_PROVIDER_API_VERSION_V1,
-        "statistics version");
-
-    require(get_version_v2() == OFXR_PROVIDER_API_VERSION_V2,
-        "V2 API version");
-    OFXR_OptiScalerProviderIdentityV2 identity{};
-    identity.capabilities = OFXR_OPTISCALER_CAP_DLSS_GUIDES_V2 |
-        OFXR_OPTISCALER_CAP_IN_GAME_MENU_V2;
-    auto invalid_identity = identity;
-    invalid_identity.magic = OFXR_OPTISCALER_PROVIDER_MAGIC_V1;
-    require(register_v2(&invalid_identity) == 0,
-        "V2 provider marker rejects wrong magic");
-    require(register_v2(&identity) != 0, "V2 provider registration");
-
-    OFXR_ControlSnapshotV2 snapshot_v2{};
-    require(get_control_v2(&snapshot_v2) != 0, "V2 control snapshot");
-    require(snapshot_v2.api_version == OFXR_PROVIDER_API_VERSION_V2 &&
-            snapshot_v2.providers == 1,
-        "V2 provider count/version");
-    require(snapshot_v2.desired.frame_generation == 0,
-        "standalone frame generation remains OFXR");
-    auto unsupported_settings = snapshot_v2.desired;
-    unsupported_settings.frame_generation = 1;
-    require(request_control_v2(&unsupported_settings) == 0,
-        "external frame-generation request rejected");
-
-    OFXR_DlssGuidePublicationV2 legacy_publication{};
-    legacy_publication.struct_size = static_cast<std::uint32_t>(
-        offsetof(OFXR_DlssGuidePublicationV2, verified_native_device));
-    require(publish_guides_v2(&legacy_publication) != 0,
-        "legacy V2 guide prefix accepted");
-    --legacy_publication.struct_size;
-    require(publish_guides_v2(&legacy_publication) == 0,
-        "undersized V2 guide prefix rejected");
-    OFXR_DlssGuidePublicationV2 extended_publication{};
-    require(publish_guides_v2(&extended_publication) != 0,
-        "extended V2 guide publication accepted");
-
-    OFXR_DlssGuideStatisticsV2 statistics_v2{};
-    require(get_statistics_v2(&statistics_v2) != 0,
-        "V2 guide statistics snapshot");
-    require(statistics_v2.api_version == OFXR_PROVIDER_API_VERSION_V2,
-        "V2 statistics version");
-    unregister_v2();
-    snapshot_v2 = {};
-    require(get_control_v2(&snapshot_v2) != 0 &&
-            snapshot_v2.providers == 0,
-        "V2 provider unregister");
-
-    FreeLibrary(module);
-    std::cout << "provider API test passed\n";
-    return 0;
 }

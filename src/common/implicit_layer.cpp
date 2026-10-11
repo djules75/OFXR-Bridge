@@ -113,6 +113,11 @@ std::wstring_view registry_scope_name(RegistryScope scope) noexcept {
     return scope == RegistryScope::local_machine ? L"HKLM" : L"HKCU";
 }
 
+namespace {
+constexpr std::wstring_view kArmSignalPrefix = L"Local\\OFXRBridgeArmStop-";
+constexpr std::wstring_view kPauseSignalPrefix = L"Local\\OFXRBridgePause-";
+}
+
 std::wstring arm_signal_name(const std::filesystem::path& manifest) {
     // Deterministic across tray/DLL versions; no user-controlled event name.
     const auto path = normalized_path(manifest);
@@ -121,7 +126,29 @@ std::wstring arm_signal_name(const std::filesystem::path& manifest) {
         if (c >= L'A' && c <= L'Z') c += L'a' - L'A';
         hash = (hash ^ static_cast<std::uint16_t>(c)) * 1099511628211ULL;
     }
-    return L"Local\\OFXRBridgeArmStop-" + std::to_wstring(hash);
+    return std::wstring(kArmSignalPrefix) + std::to_wstring(hash);
+}
+
+std::wstring pause_signal_name(const std::filesystem::path& manifest) {
+    return std::wstring(kPauseSignalPrefix) +
+        arm_signal_name(manifest).substr(kArmSignalPrefix.size());
+}
+
+void* create_pause_signal(const std::filesystem::path& manifest, std::wstring* error) noexcept {
+    try {
+        const auto name = pause_signal_name(manifest);
+        HANDLE event = CreateEventW(nullptr, TRUE, FALSE, name.c_str());
+        const auto status = GetLastError();
+        if (event == nullptr || status == ERROR_ALREADY_EXISTS) {
+            if (event) CloseHandle(event);
+            if (error) *error = registry_error(L"Creating the OFXR pause control", status);
+            return nullptr;
+        }
+        return event;
+    } catch (...) {
+        if (error) *error = L"Unable to create the OFXR pause control.";
+        return nullptr;
+    }
 }
 
 void* create_arm_signal(const std::filesystem::path& manifest, std::wstring* error) noexcept {
@@ -170,18 +197,45 @@ ManualArmControl::ManualArmControl(const std::filesystem::path& module_directory
             name.data(), static_cast<DWORD>(name.size()), ini.c_str());
         managed_ = count != 0;
         const std::wstring_view value(name.data(), count);
-        const std::wstring_view prefix = L"Local\\OFXRBridgeArmStop-";
+        const std::wstring_view prefix = kArmSignalPrefix;
         if (managed_ && count < name.size() - 1 && value.starts_with(prefix) && value.size() > prefix.size()) {
             bool valid = true;
             for (wchar_t c : value.substr(prefix.size())) valid = valid && c >= L'0' && c <= L'9';
-            if (valid) event_ = OpenEventW(SYNCHRONIZE, FALSE, name.data());
+            if (valid) {
+                event_ = OpenEventW(SYNCHRONIZE, FALSE, name.data());
+                const std::wstring pause = std::wstring(kPauseSignalPrefix) +
+                    std::wstring(value.substr(prefix.size()));
+                pause_event_ = OpenEventW(SYNCHRONIZE, FALSE, pause.c_str());
+            }
         }
     } catch (...) { managed_ = true; }
 }
-ManualArmControl::~ManualArmControl() { if (event_) CloseHandle(event_); }
+ManualArmControl::~ManualArmControl() {
+    if (event_) CloseHandle(event_);
+    if (pause_event_) CloseHandle(pause_event_);
+}
+bool ManualArmControl::pause_requested() const noexcept {
+    // No pause control is not paused: an older tray, or a test without one.
+    return pause_event_ && WaitForSingleObject(pause_event_, 0) == WAIT_OBJECT_0;
+}
 bool ManualArmControl::stop_requested() const noexcept {
     // Missing/invalid control in a managed session is Off, never fail-open.
     return managed_ && (!event_ || WaitForSingleObject(event_, 0) != WAIT_TIMEOUT);
+}
+
+ConfiguredFrameGeneration read_frame_generation(const std::filesystem::path& directory) noexcept {
+    if (directory.empty()) return ConfiguredFrameGeneration::ofxr;
+    wchar_t value[32]{};
+    const auto ini=directory / L"ofxr_bridge.ini";
+    GetPrivateProfileStringW(L"ofxr", L"frame_generation", L"ofxr", value, 32, ini.c_str());
+    return _wcsicmp(value,L"dlss") == 0 ? ConfiguredFrameGeneration::native_dlss : ConfiguredFrameGeneration::ofxr;
+}
+
+int read_native_dlssg_scale(const std::filesystem::path& directory) noexcept {
+    if (directory.empty()) return 100;
+    const auto ini = directory / L"ofxr_bridge.ini";
+    const int value = static_cast<int>(GetPrivateProfileIntW(L"ofxr", L"dlssg_resolution", 100, ini.c_str()));
+    return value >= kMinNativeDlssgScale && value <= 100 ? value : 100;
 }
 
 ConfiguredFlowBackend read_flow_backend(
@@ -195,7 +249,7 @@ ConfiguredFlowBackend read_flow_backend(
         const DWORD length = GetPrivateProfileStringW(
             L"ofxr",
             L"backend",
-            L"fidelityfx",
+            L"nvidia",
             value.data(),
             static_cast<DWORD>(value.size()),
             ini_path.c_str());
@@ -204,9 +258,219 @@ ConfiguredFlowBackend read_flow_backend(
              _wcsicmp(value.data(), L"nvof") == 0)) {
             return ConfiguredFlowBackend::nvidia;
         }
+        if (length > 0 && length < value.size() &&
+            _wcsicmp(value.data(), L"fidelityfx") == 0) {
+            return ConfiguredFlowBackend::fidelity_fx;
+        }
     } catch (...) {
     }
-    return ConfiguredFlowBackend::fidelity_fx;
+    // No key, or an unreadable file: the default, which the layer falls
+    // back from on its own where NVIDIA cannot initialise.
+    return ConfiguredFlowBackend::nvidia;
+}
+
+bool read_deep_pipeline(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (module_directory.empty()) {
+            return true;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"deep_pipeline", 1, ini_path.c_str()) != 0;
+    } catch (...) {
+        return true;
+    }
+}
+
+bool read_triple_frame_gen(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (module_directory.empty()) {
+            return false;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"triple_frame_gen", 0, ini_path.c_str()) != 0;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool read_vulkan_session_bridge(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (module_directory.empty()) {
+            return true;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"vulkan_session_bridge", 1, ini_path.c_str()) != 0;
+    } catch (...) {
+        return true;
+    }
+}
+
+bool read_single_swapchain_rings(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (module_directory.empty()) {
+            return true;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"single_swapchain_rings", 0, ini_path.c_str()) != 0;
+    } catch (...) {
+        return true;
+    }
+}
+
+bool read_capture_at_end_frame(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (module_directory.empty()) {
+            return true;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"capture_at_end_frame", 1, ini_path.c_str()) != 0;
+    } catch (...) {
+        return true;
+    }
+}
+
+std::vector<std::wstring> read_excluded_processes(
+    const std::filesystem::path& module_directory) noexcept {
+    std::vector<std::wstring> names;
+    try {
+        std::wstring value = kDefaultExcludedProcesses;
+        if (!module_directory.empty()) {
+            const auto ini_path = module_directory / L"ofxr_bridge.ini";
+            // A sentinel default tells an absent key from an empty one.
+            std::array<wchar_t, 2048> buffer{};
+            const DWORD count = GetPrivateProfileStringW(
+                L"ofxr", L"excluded_processes", L"\x01",
+                buffer.data(), static_cast<DWORD>(buffer.size()), ini_path.c_str());
+            const std::wstring_view read(buffer.data(), count);
+            if (read != L"\x01") {
+                value.assign(read);
+            }
+        }
+        std::wstring current;
+        const auto flush = [&]() {
+            while (!current.empty() && (current.back() == L' ' || current.back() == L'\t')) {
+                current.pop_back();
+            }
+            std::size_t start = 0;
+            while (start < current.size() && (current[start] == L' ' || current[start] == L'\t')) {
+                ++start;
+            }
+            if (start < current.size()) {
+                names.emplace_back(current.substr(start));
+            }
+            current.clear();
+        };
+        for (wchar_t character : value) {
+            if (character == L';' || character == L',') {
+                flush();
+            } else {
+                current.push_back(character);
+            }
+        }
+        flush();
+    } catch (...) {
+        names.clear();
+    }
+    return names;
+}
+
+bool executable_is_excluded(
+    std::wstring_view executable,
+    const std::vector<std::wstring>& excluded) noexcept {
+    try {
+        for (const std::wstring& name : excluded) {
+            if (name.size() == executable.size() &&
+                CompareStringOrdinal(
+                    name.data(), static_cast<int>(name.size()),
+                    executable.data(), static_cast<int>(executable.size()),
+                    TRUE) == CSTR_EQUAL) {
+                return true;
+            }
+        }
+    } catch (...) {
+    }
+    return false;
+}
+
+std::wstring current_executable_name() noexcept {
+    try {
+        std::array<wchar_t, 32768> buffer{};
+        const DWORD length = GetModuleFileNameW(
+            nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (length == 0 || length >= buffer.size()) {
+            return {};
+        }
+        return std::filesystem::path(std::wstring(buffer.data(), length)).filename().wstring();
+    } catch (...) {
+        return {};
+    }
+}
+
+namespace {
+constexpr wchar_t kFixedFrameMultiplierEvent[] =
+    L"Local\\OFXRBridgeFixedFrameMultiplier";
+}
+
+FixedFrameMultiplierMarker::~FixedFrameMultiplierMarker() { release(); }
+
+void FixedFrameMultiplierMarker::hold() noexcept {
+    if (event_ == nullptr) {
+        event_ = CreateEventW(nullptr, TRUE, FALSE, kFixedFrameMultiplierEvent);
+    }
+}
+
+void FixedFrameMultiplierMarker::release() noexcept {
+    if (event_ != nullptr) {
+        CloseHandle(static_cast<HANDLE>(event_));
+        event_ = nullptr;
+    }
+}
+
+bool running_session_needs_restart_for_3x() noexcept {
+    HANDLE event = OpenEventW(SYNCHRONIZE, FALSE, kFixedFrameMultiplierEvent);
+    if (event == nullptr) {
+        return false;
+    }
+    CloseHandle(event);
+    return true;
+}
+
+bool read_d3d11_bridge(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (module_directory.empty()) {
+            return false;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"d3d11_bridge", 1, ini_path.c_str()) == 1;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool read_vulkan_support(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (module_directory.empty()) {
+            return false;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"vulkan_bridge", 1, ini_path.c_str()) != 0;
+    } catch (...) {
+        return false;
+    }
 }
 
 ConfiguredNvidiaOptions read_nvidia_options(
@@ -397,7 +661,8 @@ bool manifest_registered(
 
 bool owned_manifest_path(
     const std::filesystem::path& manifest,
-    const std::filesystem::path& runtime_directory) noexcept {
+    const std::filesystem::path& runtime_directory,
+    std::wstring_view prefix) noexcept {
     try {
         const auto normalized_manifest =
             std::filesystem::absolute(manifest).lexically_normal();
@@ -409,7 +674,6 @@ bool owned_manifest_path(
             return false;
         }
         const std::wstring filename = normalized_manifest.filename().wstring();
-        const std::wstring_view prefix(kManifestPrefix);
         const std::wstring_view suffix(kManifestSuffix);
         return filename.size() > prefix.size() + suffix.size() &&
                equal_case_insensitive(
@@ -424,7 +688,8 @@ bool owned_manifest_path(
 
 bool owned_registration_path(
     const std::filesystem::path& manifest,
-    const std::filesystem::path& local_directory) noexcept {
+    const std::filesystem::path& local_directory,
+    std::wstring_view prefix) noexcept {
     try {
         if (!manifest.is_absolute() || !local_directory.is_absolute()) return false;
         for (const auto& part : manifest) {
@@ -441,9 +706,9 @@ bool owned_registration_path(
             for (std::size_t i = 1; i < version.size(); ++i)
                 if (version[i] < L'0' || version[i] > L'9') return false;
         }
-        if (!owned_manifest_path(manifest, parent)) return false;
+        if (!owned_manifest_path(manifest, parent, prefix)) return false;
         const auto name = manifest.filename().wstring();
-        const std::wstring_view prefix(kManifestPrefix), suffix(kManifestSuffix);
+        const std::wstring_view suffix(kManifestSuffix);
         const auto id = std::wstring_view(name).substr(
             prefix.size(), name.size() - prefix.size() - suffix.size());
         const auto dash = id.find(L'-');
@@ -490,7 +755,8 @@ bool cleanup_owned_registrations(
     const std::filesystem::path& local_directory,
     RegistryScope scope,
     std::wstring* error,
-    std::wstring_view registry_subkey) noexcept {
+    std::wstring_view registry_subkey,
+    std::wstring_view prefix) noexcept {
     try {
         if (error) error->clear();
         bool success = true;
@@ -519,7 +785,7 @@ bool cleanup_owned_registrations(
                     break;
                 }
                 const std::filesystem::path path(std::wstring(name.data(), count));
-                if (owned_registration_path(path, local_directory)) manifests.push_back(path);
+                if (owned_registration_path(path, local_directory, prefix)) manifests.push_back(path);
             }
             RegCloseKey(key);
         } else if (opened != ERROR_FILE_NOT_FOUND && opened != ERROR_PATH_NOT_FOUND) {
@@ -548,14 +814,14 @@ bool cleanup_owned_registrations(
             if (scan_error) fail(L"Unable to inspect OFXR manifest cache: " + directory.wstring());
         };
         if (safe_directory(local_directory) && safe_directory(root)) {
+            const std::wstring probe = std::wstring(prefix) + L"1-1.json";
             scan_directory(root, [&](const std::filesystem::path& entry) {
-                if (owned_registration_path(entry, local_directory)) {
+                if (owned_registration_path(entry, local_directory, prefix)) {
                     manifests.push_back(entry);
                 } else if (safe_directory(entry) &&
-                    owned_registration_path(entry /
-                        L"XR_APILAYER_XRFrameBridge_manual-1-1.json", local_directory)) {
+                    owned_registration_path(entry / probe, local_directory, prefix)) {
                     scan_directory(entry, [&](const std::filesystem::path& child) {
-                        if (owned_registration_path(child, local_directory))
+                        if (owned_registration_path(child, local_directory, prefix))
                             manifests.push_back(child);
                     });
                 }
@@ -599,7 +865,7 @@ bool cleanup_owned_registrations(
                     break;
                 }
                 const std::filesystem::path path(std::wstring(name.data(), count));
-                if (owned_registration_path(path, local_directory))
+                if (owned_registration_path(path, local_directory, prefix))
                     fail(L"OFXR registration remains after cleanup: " + path.wstring());
             }
             RegCloseKey(key);

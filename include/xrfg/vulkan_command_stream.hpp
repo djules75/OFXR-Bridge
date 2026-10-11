@@ -1,0 +1,66 @@
+#pragma once
+#include <vulkan/vulkan.h>
+#include <cstdint>
+#include <atomic>
+#include <memory>
+
+namespace xrfg::native_vulkan {
+enum class RecordingDisposition : unsigned char { recording, submitted, abandoned };
+// Shared identity belongs to one successful split in one recording epoch.
+// Abandonment is an exact reset/free/begin event, never an elapsed-frame guess.
+struct RecordingLifetime {
+    std::atomic<RecordingDisposition> disposition{RecordingDisposition::recording};
+    std::atomic<bool> callback_delivered{false};
+    uint64_t epoch{};
+};
+// One external D3D12-fence timeline orders prefix capture -> D3D12 work ->
+// continuation copyback. Optional suffix signal proves native copyback retired.
+struct CommandHandoff {
+    VkSemaphore timeline = VK_NULL_HANDLE;
+    uint64_t prefix_signal = 0;
+    uint64_t suffix_wait = 0;
+    uint64_t suffix_signal = 0;
+    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    std::shared_ptr<void> submission_context;
+    // Queue work must be deferred to this callback. A recording that the game
+    // never submits must never leave a D3D12 queue waiting for its prefix.
+    void (*submitted)(VkQueue,void*) noexcept = nullptr;
+    void (*abandoned)(void*) noexcept = nullptr;
+};
+struct CommandSplit {
+    VkResult result = VK_ERROR_FEATURE_NOT_PRESENT;
+    VkCommandBuffer continuation = VK_NULL_HANDLE;
+    uint64_t recording_epoch = 0;
+    std::shared_ptr<RecordingLifetime> lifetime;
+};
+bool initialize_commands(VkInstance instance,VkPhysicalDevice physical_device,
+    VkDevice device,PFN_vkGetInstanceProcAddr gipa,PFN_vkGetDeviceProcAddr gdpa);
+// Called by the autonomous loader/GDPA hook. Returns a hook only when an
+// original exists; never invents unsupported commands or mutations of pNext.
+PFN_vkVoidFunction resolve_command(VkDevice device,const char* name,
+    PFN_vkVoidFunction original) noexcept;
+// The current actual prefix/continuation for native NGX and raw copy commands.
+VkCommandBuffer native(VkCommandBuffer original) noexcept;
+// Returns only the device associated with an observed native allocation.
+VkDevice device_for(VkCommandBuffer original) noexcept;
+// External-memory ownership transfers use the observed original command-pool
+// family; the OpenXR binding's queue may belong to another family entirely.
+// UINT32_MAX means the application's allocation/pool was not observed.
+uint32_t queue_family_for(VkCommandBuffer original) noexcept;
+bool can_split(VkCommandBuffer original) noexcept;
+// Own capture resources before the first raw copy, including recordings whose
+// later split fails. References survive submission and are released outside the
+// command mutex only when the application resets/frees that exact recording.
+// Vulkan requires those disposal operations to follow GPU retirement.
+bool retain_recording(VkCommandBuffer original,std::shared_ptr<void> resources) noexcept;
+using RecordCopyback = VkResult(*)(VkCommandBuffer continuation,void* context);
+// Ends current prefix, begins an owned suffix, records optional native copyback
+// before replaying accepted bindings/push constants/dynamic state. Original
+// waits stay on prefix; application signals/fence remain on the final suffix.
+// Repeated splits on one original command buffer preserve recording order.
+CommandSplit split(VkCommandBuffer original,const CommandHandoff& handoff,
+    RecordCopyback copyback = nullptr,void* context = nullptr) noexcept;
+uint64_t recording_epoch(VkCommandBuffer original) noexcept;
+// Removes all device metadata after the application's queue work is quiescent.
+void destroy_commands(VkDevice device) noexcept;
+} // namespace xrfg::native_vulkan

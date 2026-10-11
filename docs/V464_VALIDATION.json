@@ -1,0 +1,36 @@
+{
+  "version": "V464",
+  "base": "05385dee0eeec02a14f58b0e8f6e14490221a5fb",
+  "ipc": 46401,
+  "provider_abi": 45601,
+  "suites": {
+    "new": {
+      "passed": 142,
+      "total": 142,
+      "skipped": 0,
+      "failed": 0,
+      "seconds": 92.71
+    },
+    "djules": {
+      "passed": 159,
+      "total": 159,
+      "skipped": 0,
+      "failed": 0,
+      "seconds": 98.76
+    }
+  },
+  "identical_v463_shaders": 25,
+  "unchanged_production_sources": 196,
+  "shipping_new_djules_restored_identical": 8,
+  "fsr_provider_api": "1.1.3",
+  "fsr_release_identity": "actual layer/WARP right-first regression passed",
+  "ambiguous_fsr_identity": "bypass, never discovery-order guess",
+  "hybrid_fallback": "fixed FidelityFX; duplicated controls removed; legacy profile migration",
+  "legacy_returnal_provider_compatibility": "passed",
+  "hybrid_r19_gpu": "passed",
+  "r19_default": false,
+  "vulkan_native_guides": "suspended",
+  "game_headset_validation": "MSFS/Returnal rotation confirmation pending",
+  "live_activation": false,
+  "initial_failures": "New fixture did not restore embedded enabled setting; legacy FSR missing-depth test used unsupported post-release injection. Corrected fixture cleanup/restoration and real published guides; final complete suites pass. Initial evidence retained."
+}

@@ -1,0 +1,158 @@
+{
+  "date": "2026-10-11",
+  "task": "Original stability rationale for Djules V443; static archive audit only",
+  "archive_root": "primary-archive",
+  "archive_policy": "Primary D: SSD. H: safety copy must not be used for routine work or automatic fallback.",
+  "restore_verification": "sha256-rar-test-exact-member-types-no-links",
+  "restores": [
+    {
+      "id": "pack-isolated-optiscaler-framegen-v23058-workspace-23eb81c42c77",
+      "pack": "isolated-optiscaler-framegen-v23043-v26004-supplement-20260913",
+      "members": 1012,
+      "workspace": "primary-archive/work/restored/20261011T075723810693Z-97ce74d5/work/isolated/v23058-optiscaler-ofxr-swapchain-quarantine"
+    },
+    {
+      "id": "n_d951634cf2e676a175f4",
+      "pack": "witcher-lab-20261009-work-isolated-part01",
+      "members": 1,
+      "document": "primary-archive/work/restored/20261011T075749655691Z-0faa1a3e/work/isolated/fsr-cinema-line/xrfg-v115-optiscaler-bootstrap-no-fps/docs/SWAPCHAIN_QUARANTINE_V075.md"
+    }
+  ],
+  "current": {
+    "path": "historical-workspace/work/isolated/v473-meter-live",
+    "commit": "9710d5271a5f61a1a34b5ab707ebc07e5d3ed6da",
+    "clean": true,
+    "openxr_layer_identical_to_v472": true
+  },
+  "historical_findings": [
+    {
+      "release": "V23058 -> standalone V075",
+      "fact": "Structural reconfiguration was treated as a transaction: drain resource ownership, clear stale continuity, bypass generation for one wall-clock second, then re-prime.",
+      "scope": "Color swapchain creation/destruction, enumerated image replacement, projection resource/subrect changes and hard generation/submission failures.",
+      "validation_record": "V23058 reports 39/39 combined tests; headset validation explicitly pending.",
+      "limit": "These documents do not establish that the creation timer alone fixed a specific observed crash. They describe a combined stability measure."
+    },
+    {
+      "release": "V23050",
+      "fact": "Retained live game motion-vector resources could be overwritten/reused before synthesis. Private per-stream snapshots addressed wrong images and late GPU stall/crash."
+    },
+    {
+      "release": "V23052",
+      "fact": "V23051 headset run ended with DXGI_ERROR_DEVICE_HUNG shortly after live vector-source switching. Disabling tracking freed snapshots before outstanding GPU work had been retired.",
+      "fix": "Stop publication immediately, retain snapshots, retire only after OFXR GPU work is idle; restart logical epochs safely.",
+      "limit": "This is a distinct lifetime issue, not evidence that a one-second swapchain creation timer was required."
+    },
+    {
+      "release": "V23058 source",
+      "fact": "D11 and D12 generation resources were created during swapchain image enumeration. The current projection-first lazy arming did not exist there."
+    }
+  ],
+  "current_protections": [
+    {
+      "mechanism": "Resource lifetime guard",
+      "source_line": 5696,
+      "detail": "Creation remains serialized by frame_call_mutex; active presenter is drained before taking its content lock and dropping the retained repeat. Constructor at line8968."
+    },
+    {
+      "mechanism": "Projection-first lazy arming",
+      "source_lines": [
+        6240,
+        6415,
+        13301,
+        13370
+      ],
+      "detail": "Enumeration marks eligibility pending. Actual projected first use passes through and clears continuity before generation resources are armed after downstream submission."
+    },
+    {
+      "mechanism": "Destroy and GPU retirement",
+      "source_lines": [
+        5979,
+        6010,
+        6024
+      ],
+      "detail": "Lifetime guard, continuity/repeat reset and synchronous GPU drain remain. The old destroy-only timer is already absent."
+    },
+    {
+      "mechanism": "Other quarantines",
+      "source_lines": [
+        6194,
+        6307,
+        13357
+      ],
+      "detail": "Image replacement, mapping/layout changes and hard failures retain their existing quarantine policies. V443 must not remove them."
+    }
+  ],
+  "upstream_provenance": {
+    "creation_timer_origin": "47bb2b64ed0550c68bd65bd5d2edc43466412c11",
+    "destroy_timer_removed": "6a05294e484e2115db0d6a4581b3db091084e505",
+    "v443_creation_timer_removed": "64743e76ff2ad4da4d0064128959898a6b020706",
+    "release_target": "07449429c139e5d2070b6f0855ed5323de7cee00"
+  },
+  "conclusion": {
+    "disposition": "Recommend V443 in shared lifecycle code, removing only swapchain_created quarantine scheduling.",
+    "reason": "The fixed delay compensated for early arming during structural reconfiguration. Current lazy arming plus preserved lifetime guards address that mechanism explicitly. Creation of an unused overlay does not justify a generation outage.",
+    "must_preserve": [
+      "Presenter/resource locks and GPU retirement",
+      "Pair and retained-repeat lifetime rules",
+      "Projection-first arming and first-frame passthrough",
+      "Other quarantine reasons",
+      "Vector snapshot ownership and safe switching",
+      "Provider-specific admission and pacing"
+    ],
+    "benefit": "Avoid repeated one-second generation outages when an application creates color overlay swapchains or creates a new projection before destroying the old one.",
+    "risk": "Lifecycle regression if an Autonomous-specific queued/director/AFW path is assumed equivalent without coverage. Existing guard/reset costs can remain; no zero-hitch or measured latency claim.",
+    "runtime_gate": "Before sealing an implementation: cover overlay create/destroy during generation, both projection replacement orders, D11/D12 image re-enumeration, presenter repeats, queued/director and FSR/AFW consumers, pending/failing GPU work and surviving hard-failure quarantines.",
+    "not_proven": "This static review is not a new headset stability test. Historical 39/39 and upstream V443 tests are records, not local reruns."
+  },
+  "owner_scopes": {
+    "V439": "Djules only",
+    "V440": "Shared ordinary D3D11 bridge",
+    "V441": "Djules ordinary input-history only",
+    "V442": "Djules Virtual Desktop only",
+    "V443": "Shared creation-only timer removal; preserve all actual safety mechanisms"
+  },
+  "production_edits": false,
+  "builds_or_runtime_tests_performed": false,
+  "evidence": [
+    {
+      "path": "primary-archive/work/restored/20261011T075723810693Z-97ce74d5/work/isolated/v23058-optiscaler-ofxr-swapchain-quarantine/V23058_NOTES.md",
+      "bytes": 1493,
+      "sha256": "c419b69083b903ced5dfc3c38d64f2a27f25cc7cb7d29e417a4481a819e78849"
+    },
+    {
+      "path": "primary-archive/work/restored/20261011T075723810693Z-97ce74d5/work/isolated/v23058-optiscaler-ofxr-swapchain-quarantine/README-V23058.txt",
+      "bytes": 1150,
+      "sha256": "f5f8e80b912d916ba570ec599ec4aa633c34dbcc7184d0731123c06f87677b04"
+    },
+    {
+      "path": "primary-archive/work/restored/20261011T075723810693Z-97ce74d5/work/isolated/v23058-optiscaler-ofxr-swapchain-quarantine/V23050_NOTES.md",
+      "bytes": 1320,
+      "sha256": "30a9141040d17b2fc02fa3c75dec3c5b10c5c78db19e43bd37c2987b4687fe69"
+    },
+    {
+      "path": "primary-archive/work/restored/20261011T075723810693Z-97ce74d5/work/isolated/v23058-optiscaler-ofxr-swapchain-quarantine/V23052_NOTES.md",
+      "bytes": 1474,
+      "sha256": "26364d86e5e7a6df369d3bcea5ac91c9a22e130ad7de58d372af54f00d3a8a2b"
+    },
+    {
+      "path": "primary-archive/work/restored/20261011T075723810693Z-97ce74d5/work/isolated/v23058-optiscaler-ofxr-swapchain-quarantine/V23054_NOTES.md",
+      "bytes": 1466,
+      "sha256": "fc9eb1c920b72e48399e09c1f4c833cebca8473c506a9f36df89130a0d1df0ab"
+    },
+    {
+      "path": "primary-archive/work/restored/20261011T075723810693Z-97ce74d5/work/isolated/v23058-optiscaler-ofxr-swapchain-quarantine/third_party/ofxr/src/layer/openxr_layer.cpp",
+      "bytes": 218223,
+      "sha256": "c75c7ff9f4720a383121b4d97eb6ae496d7d749febfb437f118ca6ce045c0156"
+    },
+    {
+      "path": "primary-archive/work/restored/20261011T075749655691Z-0faa1a3e/work/isolated/fsr-cinema-line/xrfg-v115-optiscaler-bootstrap-no-fps/docs/SWAPCHAIN_QUARANTINE_V075.md",
+      "bytes": 1129,
+      "sha256": "8f8e034e3f1b368ddda9aef2aebea2455d5a0bf2163c92d03ca2e9640bf68512"
+    },
+    {
+      "path": "historical-workspace/work/isolated/v473-meter-live/src/layer/openxr_layer.cpp",
+      "bytes": 758286,
+      "sha256": "abbe3f0791b85effc383506a15fa01ffa36afcac0622020b1e92cfcb88a38813"
+    }
+  ]
+}

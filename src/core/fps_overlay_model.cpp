@@ -7,6 +7,8 @@
 namespace xrfg {
 
 FpsOverlayPosition parse_overlay_position(std::string_view value) noexcept {
+    if (value == "elliott_controller") return FpsOverlayPosition::elliott_controller;
+    if (value == "elliott_bottom") return FpsOverlayPosition::elliott_bottom;
     if (value == "off") return FpsOverlayPosition::off;
     if (value == "upper_left") return FpsOverlayPosition::upper_left;
     if (value == "lower_left") return FpsOverlayPosition::lower_left;
@@ -16,6 +18,8 @@ FpsOverlayPosition parse_overlay_position(std::string_view value) noexcept {
 
 const char* overlay_position_name(FpsOverlayPosition position) noexcept {
     switch (position) {
+    case FpsOverlayPosition::elliott_controller: return "elliott_controller";
+    case FpsOverlayPosition::elliott_bottom: return "elliott_bottom";
     case FpsOverlayPosition::off: return "off";
     case FpsOverlayPosition::upper_left: return "upper_left";
     case FpsOverlayPosition::lower_left: return "lower_left";
@@ -26,34 +30,46 @@ const char* overlay_position_name(FpsOverlayPosition position) noexcept {
 
 FpsCounter::Bucket& FpsCounter::bucket(std::int64_t now) noexcept {
     now = std::max<std::int64_t>(now, 0);
-    if (start_ns_ < 0) start_ns_ = now;
+    if (start_ns_ < 0 || now < start_ns_) start_ns_ = now;
     const auto epoch = now / 100'000'000;
     auto& entry = buckets_[static_cast<std::size_t>(epoch) % buckets_.size()];
     if (entry.epoch != epoch) entry = Bucket{epoch};
     return entry;
 }
 
-void FpsCounter::submitted(std::int64_t now, bool synthetic) noexcept {
+void FpsCounter::submitted(std::int64_t now, bool synthetic, bool new_content) noexcept {
+    if (!new_content) return;
     auto& entry = bucket(now);
     ++entry.output;
-    if (synthetic) last_synthetic_ns_ = now;
+    if (synthetic) ++entry.generated;
+    else ++entry.real;
+    if (synthetic) last_synthetic_ns_ = std::max(last_synthetic_ns_,now);
 }
 
 FpsSnapshot FpsCounter::snapshot(std::int64_t now) const noexcept {
     FpsSnapshot result;
     if (start_ns_ < 0 || now < start_ns_) return result;
+    result.sample_valid = true;
     const auto epoch = now / 100'000'000;
     const auto window_start = std::max(start_ns_, (epoch - 9) * 100'000'000);
     const float seconds = std::max(0.1f, static_cast<float>(now - window_start) * 1e-9f);
     for (const auto& entry : buckets_) {
         if (entry.epoch < 0 || entry.epoch > epoch || entry.epoch < epoch - 9) continue;
         result.submitted_fps += static_cast<float>(entry.output) / seconds;
+        result.real_fps += static_cast<float>(entry.real) / seconds;
+        result.generated_fps += static_cast<float>(entry.generated) / seconds;
     }
     // Hysteresis across alternating S/B slots; no green merely because armed,
     // initialized, primed, repeated, or because an attempted S failed.
     result.active = last_synthetic_ns_ >= 0 && now >= last_synthetic_ns_ &&
         now - last_synthetic_ns_ < 500'000'000;
     return result;
+}
+
+float displayed_rate(float rate, float refresh_hz) noexcept {
+    if (!(refresh_hz > 0.0f) || !std::isfinite(rate)) return rate;
+    const float band = refresh_hz * 0.02f;
+    return rate >= refresh_hz - band && rate <= refresh_hz + band ? refresh_hz : rate;
 }
 
 OverlayPlacement overlay_placement(
@@ -116,9 +132,12 @@ std::vector<std::uint32_t> rasterize_fps_overlay(
     };
     // Premultiplied alpha: transparent black outside opaque digit strokes.
     std::vector<std::uint32_t> pixels(static_cast<std::size_t>(width) * height, 0);
-    const auto status = snapshot.active ? color(64, 235, 112) : color(255, 80, 80);
+    const auto status = !snapshot.active ? color(255, 80, 80)
+        : snapshot.afw_active ? color(50, 140, 255)
+                              : color(64, 235, 112);
     const unsigned scale = std::min(width / 24, height / 12);
-    const float rate = std::isfinite(snapshot.submitted_fps) ? snapshot.submitted_fps : 0.0f;
+    const float measured = snapshot.delivered_valid ? snapshot.delivered_fps : snapshot.submitted_fps;
+    const float rate = std::isfinite(measured) ? measured : 0.0f;
     char text[4]{};
     const auto length = static_cast<unsigned>(std::snprintf(text, sizeof(text), "%d",
         static_cast<int>(std::clamp(rate, 0.0f, 999.0f) + 0.5f)));

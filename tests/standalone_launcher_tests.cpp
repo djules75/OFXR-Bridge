@@ -21,7 +21,41 @@ int main() {
     using namespace xrfg::standalone;
 
     const LauncherSettings release_defaults;
+    xrfg::autonomous::Settings autonomous;
+    autonomous.backend = 3;
+    autonomous.frame_generation = 1;
+    autonomous.afw_mode = 2;
+    autonomous.nr_enabled = true;
+    autonomous.scale = 0;
+    const auto autonomous_ini = build_runtime_ini(release_defaults, autonomous, 128, true);
+    if (!contains(autonomous_ini, "nvidia_route=djules") ||
+        !contains(autonomous_ini, "nvidia_input_scale=100") ||
+        !contains(autonomous_ini, "frame_generation=fsr3") ||
+        !contains(autonomous_ini, "motion_vectors=dlss") ||
+        !contains(autonomous_ini, "luke_afw_mode=2") ||
+        contains(autonomous_ini, "luke_afw=1") ||
+        !contains(autonomous_ini, "max_file_mb=128") ||
+        !contains(autonomous_ini, "single_swapchain_rings=0")) return 1;
+    autonomous.lower_vram = 1;
+    if (!contains(build_runtime_ini(release_defaults, autonomous), "single_swapchain_rings=1")) return 1;
+    autonomous.lower_vram = 0;
+
     const std::string default_runtime_ini = build_runtime_ini(release_defaults);
+    if (release_defaults.frame_generation != FrameGeneration::ofxr ||
+        !contains(default_runtime_ini, "frame_generation=ofxr")) return 1;
+    LauncherSettings native_settings;
+    native_settings.frame_generation = FrameGeneration::native_dlss;
+    if (parse_settings(serialize_settings(native_settings)).frame_generation != FrameGeneration::native_dlss ||
+        !contains(build_runtime_ini(native_settings), "frame_generation=dlss") ||
+        parse_settings("[tray]\nframe_generation=unknown\n").frame_generation != FrameGeneration::ofxr) return 1;
+    // Native DLSS FG runs at full resolution unless chosen otherwise.
+    if (release_defaults.native_scale != 100 ||
+        !contains(default_runtime_ini, "dlssg_resolution=100")) return 1;
+    LauncherSettings reduced_settings;
+    reduced_settings.native_scale = 67;
+    if (parse_settings(serialize_settings(reduced_settings)).native_scale != 67 ||
+        !contains(build_runtime_ini(reduced_settings), "dlssg_resolution=67") ||
+        parse_settings("[tray]\ndlssg_resolution=7\n").native_scale != 100) return 1;
     if (release_defaults.overlay_position != xrfg::FpsOverlayPosition::upper_right ||
         !contains(default_runtime_ini, "[overlay]\r\nposition=upper_right")) return 1;
     for (auto position : {xrfg::FpsOverlayPosition::off, xrfg::FpsOverlayPosition::upper_left,
@@ -32,11 +66,27 @@ int main() {
             !contains(build_runtime_ini(option), std::string("[overlay]\r\nposition=") +
                 xrfg::overlay_position_name(position))) return 1;
     }
-    if (release_defaults.backend != FlowBackend::fidelity_fx ||
+    if (release_defaults.backend != FlowBackend::nvidia ||
         release_defaults.nvidia_preset != NvidiaPerformancePreset::medium ||
         release_defaults.nvidia_input_scale != NvidiaInputScale::half ||
         release_defaults.nvidia_bidirectional || release_defaults.diagnostics ||
-        !contains(default_runtime_ini, "[ofxr]\r\nbackend=fidelityfx") ||
+        !release_defaults.deep_pipeline ||
+        release_defaults.triple_frame_gen ||
+        release_defaults.excluded_processes != "PimaxHome-Win64-Shipping.exe" ||
+        !contains(default_runtime_ini, "excluded_processes=PimaxHome-Win64-Shipping.exe") ||
+        release_defaults.single_swapchain_rings ||
+        !contains(default_runtime_ini, "single_swapchain_rings=0") ||
+        !release_defaults.vulkan_session_bridge ||
+        !contains(default_runtime_ini, "vulkan_session_bridge=1") ||
+        !contains(default_runtime_ini, "triple_frame_gen=0") ||
+        !contains(default_runtime_ini, "deep_pipeline=1") ||
+        !release_defaults.vulkan_support ||
+        !release_defaults.d3d11_bridge ||
+        !contains(default_runtime_ini, "vulkan_bridge=1") ||
+        !contains(default_runtime_ini, "d3d11_bridge=1") ||
+        !release_defaults.capture_at_end_frame ||
+        !contains(default_runtime_ini, "capture_at_end_frame=1") ||
+        !contains(default_runtime_ini, "[ofxr]\r\nbackend=nvidia") ||
         !contains(default_runtime_ini, "motion_vectors=dlss") ||
         !contains(default_runtime_ini, "nvidia_preset=medium") ||
         !contains(default_runtime_ini, "nvidia_input_scale=50") ||
@@ -45,19 +95,107 @@ int main() {
         return 1;
     }
 
+    // The two diagnostics knobs the tray has no UI for. They were hardcoded
+    // here, so arming rewrote the file whole and a hand-edited max_file_mb
+    // survived only until the next arm. The tray now reads them back out of the
+    // existing runtime INI and passes them through.
+    if (!contains(default_runtime_ini, "max_file_mb=32") ||
+        !contains(default_runtime_ini, "flush_each_event=0")) {
+        std::cerr << "diagnostics defaults failed\n";
+        return 1;
+    }
+    const std::string carried = build_runtime_ini(release_defaults, 512, true);
+    if (!contains(carried, "max_file_mb=512") ||
+        !contains(carried, "flush_each_event=1")) {
+        std::cerr << "diagnostics overrides not carried into the runtime ini\n";
+        return 1;
+    }
+
     LauncherSettings settings;
-    settings.backend = FlowBackend::nvidia;
+    // Every value away from its default, so the round trip proves parsing.
+    settings.backend = FlowBackend::fidelity_fx;
     settings.nvidia_preset = NvidiaPerformancePreset::slow;
     settings.nvidia_input_scale = NvidiaInputScale::half;
     settings.nvidia_bidirectional = true;
+    settings.deep_pipeline = false;
+    settings.triple_frame_gen = true;
+    settings.excluded_processes = "Home.exe; Other-Shipping.exe";
+    settings.single_swapchain_rings = false;
+    settings.vulkan_session_bridge = false;
+    settings.vulkan_support = false;
+    settings.d3d11_bridge = false;
+    settings.capture_at_end_frame = false;
     settings.diagnostics = true;
+    settings.pause_hotkey = "shift+scrolllock";
     const std::string serialized = serialize_settings(settings);
     const LauncherSettings parsed = parse_settings(serialized);
-    if (parsed.backend != FlowBackend::nvidia ||
+    if (parsed.backend != FlowBackend::fidelity_fx ||
         parsed.nvidia_preset != NvidiaPerformancePreset::slow ||
         parsed.nvidia_input_scale != NvidiaInputScale::half ||
-        !parsed.nvidia_bidirectional || !parsed.diagnostics) {
+        !parsed.nvidia_bidirectional || parsed.deep_pipeline ||
+        !parsed.triple_frame_gen ||
+        parsed.excluded_processes != "Home.exe; Other-Shipping.exe" ||
+        parsed.single_swapchain_rings || parsed.vulkan_session_bridge ||
+        parsed.vulkan_support || parsed.d3d11_bridge ||
+        parsed.capture_at_end_frame || !parsed.diagnostics ||
+        !contains(build_runtime_ini(parsed), "capture_at_end_frame=0")) {
         std::cerr << "standalone settings round-trip failed\n";
+        return 1;
+    }
+    using xrfg::standalone::Hotkey;
+    using xrfg::standalone::hotkey_display_name;
+    using xrfg::standalone::parse_hotkey;
+    if (release_defaults.pause_hotkey != "ctrl+alt+f7" ||
+        parsed.pause_hotkey != "shift+scrolllock" ||
+        parse_settings("[tray]\r\npause_hotkey= Ctrl+Alt+F9 \r\n").pause_hotkey != "ctrl+alt+f9" ||
+        parse_hotkey("ctrl+alt+f7") != Hotkey{3, 0x76} ||
+        parse_hotkey(" Alt + Control + F7 ") != Hotkey{3, 0x76} ||
+        parse_hotkey("shift+scrolllock") != Hotkey{4, 0x91} ||
+        parse_hotkey("f24") != Hotkey{0, 0x87} ||
+        parse_hotkey("ctrl+shift+p") != Hotkey{6, 'P'} ||
+        parse_hotkey("win+0") != Hotkey{8, '0'} ||
+        hotkey_display_name("ctrl+alt+f7") != "Ctrl + Alt + F7" ||
+        hotkey_display_name("shift+pagedown") != "Shift + Page Down" ||
+        xrfg::standalone::hotkey_setting(Hotkey{3, 0x76}) != std::string("ctrl+alt+f7") ||
+        xrfg::standalone::hotkey_setting(Hotkey{6, 'P'}) != std::string("ctrl+shift+p") ||
+        xrfg::standalone::hotkey_setting(Hotkey{4, 0x22}) != std::string("shift+pagedown") ||
+        xrfg::standalone::hotkey_setting(Hotkey{0, 0x76}) != std::string("f7") ||
+        // Whatever the user picks: a bare letter, an arrow, a numpad key,
+        // and a key with no name, by its code.
+        xrfg::standalone::hotkey_setting(Hotkey{0, 'P'}) != std::string("p") ||
+        xrfg::standalone::hotkey_setting(Hotkey{2, 0x25}) != std::string("ctrl+left") ||
+        xrfg::standalone::hotkey_setting(Hotkey{0, 0x6B}) != std::string("numpadadd") ||
+        xrfg::standalone::hotkey_setting(Hotkey{1, 0xBA}) != std::string("alt+vkba") ||
+        parse_hotkey("p") != Hotkey{0, 'P'} ||
+        parse_hotkey("7") != Hotkey{0, '7'} ||
+        parse_hotkey("Alt+VKBA") != Hotkey{1, 0xBA} ||
+        hotkey_display_name("numpad5") != "Num 5" ||
+        hotkey_display_name("alt+vkba") != "Alt + Key 0xba" ||
+        xrfg::standalone::hotkey_setting(Hotkey{2, 0}) ||
+        xrfg::standalone::hotkey_setting(Hotkey{2, 0xFF}) ||
+        std::string(xrfg::standalone::kDefaultPauseHotkey) != release_defaults.pause_hotkey ||
+        !hotkey_display_name("off").empty()) {
+        std::cerr << "pause hotkey parsing failed\n";
+        return 1;
+    }
+    for (const char* refused : {"", "off", "none", "ctrl", "ctrl+", "+f7",
+             "ctrl+ctrl+f7", "f7+ctrl", "f0", "f25", "ctrl+f7+f8", "ctrl+banana",
+             "vk00", "vkff", "vkzz", "vk1"}) {
+        if (parse_hotkey(refused)) {
+            std::cerr << "pause hotkey accepted: " << refused << '\n';
+            return 1;
+        }
+    }
+
+    // A tray.ini from before Vulkan support was on by default carries the
+    // vulkan_support=0 every save wrote; it must not keep the option off.
+    // Only the new key, set by hand, turns it off.
+    if (!parse_settings("[tray]\r\nvulkan_support=0\r\n").vulkan_support ||
+        parse_settings("[tray]\r\nvulkan_bridge=0\r\n").vulkan_support ||
+        !parse_settings("[tray]\r\nvulkan_bridge=1\r\n").vulkan_support ||
+        !contains(serialize_settings(LauncherSettings{}), "\r\nvulkan_bridge=1\r\n") ||
+        contains(serialize_settings(LauncherSettings{}), "vulkan_support")) {
+        std::cerr << "vulkan setting migration failed\n";
         return 1;
     }
 
@@ -77,10 +215,17 @@ int main() {
     }
 
     const std::string runtime_ini = build_runtime_ini(settings);
-    if (!contains(runtime_ini, "[ofxr]\r\nbackend=nvidia") ||
+    if (!contains(runtime_ini, "[ofxr]\r\nbackend=fidelityfx") ||
         !contains(runtime_ini, "nvidia_preset=slow") ||
         !contains(runtime_ini, "nvidia_input_scale=50") ||
         !contains(runtime_ini, "nvidia_bidirectional=1") ||
+        !contains(runtime_ini, "deep_pipeline=0") ||
+        !contains(runtime_ini, "triple_frame_gen=1") ||
+        !contains(runtime_ini, "excluded_processes=Home.exe; Other-Shipping.exe") ||
+        !contains(runtime_ini, "single_swapchain_rings=0") ||
+        !contains(runtime_ini, "vulkan_session_bridge=0") ||
+        !contains(runtime_ini, "vulkan_bridge=0") ||
+        !contains(runtime_ini, "d3d11_bridge=0") ||
         !contains(runtime_ini, "[diagnostics]\r\nlogging_enabled=1") ||
         contains(runtime_ini, "one_shot") ||
         contains(runtime_ini, "manifest=")) {
@@ -91,14 +236,14 @@ int main() {
     const std::filesystem::path runtime_directory =
         L"C:\\Users\\Test\\OFXR Bridge\\RuntimeLayer\\v030";
     const std::filesystem::path implicit_manifest = runtime_directory /
-        L"XR_APILAYER_XRFrameBridge_manual-42-99.json";
+        L"XR_APILAYER_OFXRAutonomous_manual-42-99.json";
     if (!xrfg::implicit_layer::owned_manifest_path(
             implicit_manifest, runtime_directory) ||
         xrfg::implicit_layer::owned_manifest_path(
             runtime_directory / L"different-layer.json", runtime_directory) ||
         xrfg::implicit_layer::owned_manifest_path(
             runtime_directory.parent_path() /
-                L"XR_APILAYER_XRFrameBridge_manual-42-99.json",
+                L"XR_APILAYER_OFXRAutonomous_manual-42-99.json",
             runtime_directory)) {
         std::cerr << "owned manifest path validation failed\n";
         return 1;
@@ -238,6 +383,106 @@ int main() {
         std::cerr << "runtime DLL replacement failed\n";
         return 1;
     }
+
+    // A cached layer some process still has loaded: overwriting it fails,
+    // which used to block re-arming. Mapping a copy of this executable as an
+    // image is what loading a DLL does to the file - it can be renamed but not
+    // overwritten - and runs none of its code.
+    const auto loaded_directory =
+        std::filesystem::temp_directory_path() /
+        (L"ofxr-runtime-loaded-" +
+         std::to_wstring(GetCurrentProcessId()) + L"-" +
+         std::to_wstring(GetTickCount64()));
+    const auto loaded_source = loaded_directory / L"source.dll";
+    const auto loaded_destination = loaded_directory / L"runtime" / L"layer.dll";
+    const auto write_file = [](const std::filesystem::path& path, const char* text) {
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+        stream << text;
+    };
+    const auto read_file = [](const std::filesystem::path& path) {
+        std::ifstream stream(path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(stream)),
+                           std::istreambuf_iterator<char>());
+    };
+    const auto set_aside_count = [&] {
+        std::size_t count = 0;
+        for (const auto& entry :
+             std::filesystem::directory_iterator(loaded_destination.parent_path())) {
+            if (entry.path().filename().wstring().rfind(L"layer.dll.old-", 0) == 0) {
+                ++count;
+            }
+        }
+        return count;
+    };
+    wchar_t own_path[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, own_path, MAX_PATH);
+    std::filesystem::create_directories(loaded_destination.parent_path());
+    std::filesystem::copy_file(own_path, loaded_source,
+                               std::filesystem::copy_options::overwrite_existing);
+    std::filesystem::copy_file(own_path, loaded_destination,
+                               std::filesystem::copy_options::overwrite_existing);
+    const std::string loaded_image = read_file(loaded_destination);
+    HMODULE held = LoadLibraryExW(
+        loaded_destination.c_str(), nullptr, LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+    const bool identical_while_loaded =
+        held != nullptr &&
+        install_runtime_layer_dll(loaded_source, loaded_destination) &&
+        read_file(loaded_destination) == loaded_image && set_aside_count() == 0;
+    write_file(loaded_source, "newer-layer");
+    const bool replaced_while_loaded =
+        install_runtime_layer_dll(loaded_source, loaded_destination) &&
+        read_file(loaded_destination) == "newer-layer" && set_aside_count() == 1;
+    // Still loaded, so the copy set aside survives the next install...
+    const bool kept_while_loaded =
+        install_runtime_layer_dll(loaded_source, loaded_destination) &&
+        set_aside_count() == 1;
+    if (held != nullptr) FreeLibrary(held);
+    // ...and goes at the first install after it was released.
+    const bool cleaned_after_release =
+        install_runtime_layer_dll(loaded_source, loaded_destination) &&
+        set_aside_count() == 0;
+    cleanup_error.clear();
+    std::filesystem::remove_all(loaded_directory, cleanup_error);
+    if (!identical_while_loaded || !replaced_while_loaded ||
+        !kept_while_loaded || !cleaned_after_release) {
+        std::cerr << "runtime DLL install while loaded failed: identical="
+                  << identical_while_loaded << " replaced="
+                  << replaced_while_loaded << " kept=" << kept_while_loaded
+                  << " cleaned=" << cleaned_after_release << '\n';
+        return 1;
+    }
+
+    // Complete helper staging is file-only: never load or register a runtime.
+    const auto support_fixture = std::filesystem::temp_directory_path() /
+        (L"ofxr-runtime-support-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+            std::to_wstring(GetTickCount64()));
+    const auto support_source = support_fixture / L"package";
+    const auto support_cache = support_fixture / L"cache";
+    std::filesystem::create_directories(support_source);
+    std::wstring support_error;
+    if (stage_runtime_support_files(support_source, support_cache, &support_error) ||
+        support_error.find(L"ofxr_amd_fidelityfx_framegeneration_dx12.dll") == std::wstring::npos ||
+        std::filesystem::exists(support_cache)) return 1;
+    const wchar_t* required_support[]{L"ofxr_amd_fidelityfx_framegeneration_dx12.dll",
+        L"PDAFWPlugin.dll", L"nvngx.dll_dlssnr.dll", L"nvngx.dll_dlssg.dll"};
+    for (const auto* name : required_support) write_file(support_source / name, "required-helper");
+    if (!stage_runtime_support_files(support_source, support_cache, &support_error) ||
+        std::filesystem::exists(support_cache / L"nvngx_dlssnr.dll")) return 1;
+    for (const auto* name : required_support)
+        if (read_file(support_cache / name) != "required-helper") return 1;
+    write_file(support_source / L"nvngx_dlssnr.dll", "user-supplied-NR");
+    if (!stage_runtime_support_files(support_source, support_cache, &support_error) ||
+        read_file(support_cache / L"nvngx_dlssnr.dll") != "user-supplied-NR") return 1;
+    for (const auto* name : required_support) {
+        std::filesystem::remove(support_source / name);
+        std::filesystem::remove(support_cache / name);
+    }
+    std::filesystem::remove(support_source / L"nvngx_dlssnr.dll");
+    std::filesystem::remove(support_cache / L"nvngx_dlssnr.dll");
+    std::filesystem::remove(support_source);
+    std::filesystem::remove(support_cache);
+    std::filesystem::remove(support_fixture);
 
     if (quote_windows_argument(L"C:\\Game\\game.exe") !=
             L"C:\\Game\\game.exe" ||

@@ -9,6 +9,8 @@
 
 namespace xrfg {
 
+struct TwoFrameImageInfo;
+
 enum class D3D12HistoryInitializationStage : std::uint32_t {
     complete = 0,
     arguments = 1,
@@ -28,6 +30,16 @@ struct D3D12HistoryCaptureTicket {
     std::uint64_t fence_value{};
     std::uint32_t slot{};
     std::uint32_t source_index{};
+};
+
+struct D3D12HistoryCaptureWait {
+    // In: the longest the capture may block, in microseconds. 0 fails a busy
+    // slot at once, as before.
+    std::uint32_t limit_us{};
+    // Out: the slot was busy when the capture arrived.
+    bool slot_busy{};
+    // Out: how long the capture blocked, in microseconds.
+    std::uint64_t waited_us{};
 };
 
 struct D3D12HistoryConsumerLease {
@@ -56,12 +68,14 @@ public:
         D3D12HistoryInitializationStage* failure_stage = nullptr) noexcept;
 
     // Queues the source-to-history copy and returns after signaling its fence;
-    // it never waits for GPU completion on the release path. If the next ring
-    // slot or its allocator is still in use, ERROR_BUSY is returned and the
-    // caller must fail open rather than overwrite it.
+    // The default never waits. An explicit wait budget applies only to a
+    // submitted reader/writer of the next slot, never an active CPU lease.
+    // It does not wait for this new copy. ERROR_BUSY fails open at the limit.
     [[nodiscard]] HRESULT capture(
         std::uint32_t source_index,
-        D3D12HistoryCaptureTicket* ticket) noexcept;
+        D3D12HistoryCaptureTicket* ticket,
+        const TwoFrameImageInfo* diagnostic_info = nullptr,
+        D3D12HistoryCaptureWait* wait = nullptr) noexcept;
 
     [[nodiscard]] HRESULT commit(const D3D12HistoryCaptureTicket& ticket) noexcept;
 
@@ -88,6 +102,9 @@ public:
     [[nodiscard]] HRESULT invalidate() noexcept;
 
     [[nodiscard]] bool initialized() const noexcept;
+    // Diagnostic observation only; a pending CPU observation is legal when
+    // the GPU consumer enqueues a producer-fence wait.
+    [[nodiscard]] std::uint64_t diagnostic_completed_value() const noexcept;
 
 private:
     struct Impl;

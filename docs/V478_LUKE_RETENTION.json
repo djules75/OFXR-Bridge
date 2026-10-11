@@ -1,0 +1,286 @@
+{
+  "owner_baseline": "optiscaler/v33018",
+  "later_retained_endpoint": "optiscaler/v33034-accepted",
+  "rows": [
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_afw.hpp",
+      "autonomous": "include/xrfg/luke_afw.hpp",
+      "v33018_sha256": "c2d058959a38b8ee9373950fd35e0e99fcfcd3ef343eed540fa9fb9182f83f32",
+      "v33034_sha256": "c2d058959a38b8ee9373950fd35e0e99fcfcd3ef343eed540fa9fb9182f83f32",
+      "v478_sha256": "c2d058959a38b8ee9373950fd35e0e99fcfcd3ef343eed540fa9fb9182f83f32",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_afw_startup.hpp",
+      "autonomous": "include/xrfg/luke_afw_startup.hpp",
+      "v33018_sha256": "absent-in-V33018",
+      "v33034_sha256": "7a17c494db4922eeb35afacb034847253c89e7649b0ff3783e5928ae7bf41c35",
+      "v478_sha256": "7a17c494db4922eeb35afacb034847253c89e7649b0ff3783e5928ae7bf41c35",
+      "same_as_v33018": false,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_camera_origin.hpp",
+      "autonomous": "include/xrfg/luke_camera_origin.hpp",
+      "v33018_sha256": "absent-in-V33018",
+      "v33034_sha256": "aa0e09656f394421d88763fc14f7eeade61fa19ac95c510d9875b4f05f3919bb",
+      "v478_sha256": "aa0e09656f394421d88763fc14f7eeade61fa19ac95c510d9875b4f05f3919bb",
+      "same_as_v33018": false,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_camera_units.hpp",
+      "autonomous": "include/xrfg/luke_camera_units.hpp",
+      "v33018_sha256": "b415026c310156e0fd1c10baec5ceba4e3c0891e352a7906807c4e45e6bc1c61",
+      "v33034_sha256": "b415026c310156e0fd1c10baec5ceba4e3c0891e352a7906807c4e45e6bc1c61",
+      "v478_sha256": "b415026c310156e0fd1c10baec5ceba4e3c0891e352a7906807c4e45e6bc1c61",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_color_origin.hpp",
+      "autonomous": "include/xrfg/luke_color_origin.hpp",
+      "v33018_sha256": "bdac737187ab8dd9dd4974b929ded88fbbb9cad61fc44c6ce1065eb4040cfb32",
+      "v33034_sha256": "c5df97d58d2c230fb8088e8f6fa81297b2ec52d200646cf77266698456b8e7db",
+      "v478_sha256": "c5df97d58d2c230fb8088e8f6fa81297b2ec52d200646cf77266698456b8e7db",
+      "same_as_v33018": false,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_color_token.hpp",
+      "autonomous": "include/xrfg/luke_color_token.hpp",
+      "v33018_sha256": "1017aa4db5da4b198dc856da520838d724bf28ce624fbb3c8bd2be27cd0d8818",
+      "v33034_sha256": "1017aa4db5da4b198dc856da520838d724bf28ce624fbb3c8bd2be27cd0d8818",
+      "v478_sha256": "1017aa4db5da4b198dc856da520838d724bf28ce624fbb3c8bd2be27cd0d8818",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_counter_probe.hpp",
+      "autonomous": "include/xrfg/luke_counter_probe.hpp",
+      "v33018_sha256": "4e1d35d40f19359ce5624529ed8999724adeeb1c257a0fe26cf34914f62210a5",
+      "v33034_sha256": "4e1d35d40f19359ce5624529ed8999724adeeb1c257a0fe26cf34914f62210a5",
+      "v478_sha256": "4e1d35d40f19359ce5624529ed8999724adeeb1c257a0fe26cf34914f62210a5",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_depth_format.hpp",
+      "autonomous": "include/xrfg/luke_depth_format.hpp",
+      "v33018_sha256": "1eca9d50fd9969d3d1b6fbe4e5640164b72ea59720645815ecb8fc85243d1ae6",
+      "v33034_sha256": "1eca9d50fd9969d3d1b6fbe4e5640164b72ea59720645815ecb8fc85243d1ae6",
+      "v478_sha256": "1eca9d50fd9969d3d1b6fbe4e5640164b72ea59720645815ecb8fc85243d1ae6",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_guide_eye.hpp",
+      "autonomous": "include/xrfg/luke_guide_eye.hpp",
+      "v33018_sha256": "729bb513e24f6ba6e00b472146f2e108bbcf7aba676d6a3d51270f5fdbbcf742",
+      "v33034_sha256": "729bb513e24f6ba6e00b472146f2e108bbcf7aba676d6a3d51270f5fdbbcf742",
+      "v478_sha256": "729bb513e24f6ba6e00b472146f2e108bbcf7aba676d6a3d51270f5fdbbcf742",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_guide_window.hpp",
+      "autonomous": "include/xrfg/luke_guide_window.hpp",
+      "v33018_sha256": "3e9228d97416b900fb893a83b4a35119760d93c88d87bfd39dc79e8abba7ce49",
+      "v33034_sha256": "3e9228d97416b900fb893a83b4a35119760d93c88d87bfd39dc79e8abba7ce49",
+      "v478_sha256": "3e9228d97416b900fb893a83b4a35119760d93c88d87bfd39dc79e8abba7ce49",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_ingress_devices.hpp",
+      "autonomous": "include/xrfg/luke_ingress_devices.hpp",
+      "v33018_sha256": "38691403aa7bc9eb72776aceac2af81c39e7c3bb72ee23af1f3708996b64cb02",
+      "v33034_sha256": "38691403aa7bc9eb72776aceac2af81c39e7c3bb72ee23af1f3708996b64cb02",
+      "v478_sha256": "38691403aa7bc9eb72776aceac2af81c39e7c3bb72ee23af1f3708996b64cb02",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_motion_format.hpp",
+      "autonomous": "include/xrfg/luke_motion_format.hpp",
+      "v33018_sha256": "6439250858e2142142d15e725d5f60e4c0fb2c627f15341a1e72b03c40148e1e",
+      "v33034_sha256": "6439250858e2142142d15e725d5f60e4c0fb2c627f15341a1e72b03c40148e1e",
+      "v478_sha256": "6439250858e2142142d15e725d5f60e4c0fb2c627f15341a1e72b03c40148e1e",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_native_motion.hpp",
+      "autonomous": "include/xrfg/luke_native_motion.hpp",
+      "v33018_sha256": "6616debf29df7994dc10874b6f16f89206ece8feb18cd4bd5ae9b515040fc85e",
+      "v33034_sha256": "7a6402bbbb314147a88acce084a4b63dfe85e439d6af106b94b284330ea869a0",
+      "v478_sha256": "7a6402bbbb314147a88acce084a4b63dfe85e439d6af106b94b284330ea869a0",
+      "same_as_v33018": false,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_physical_projection.hpp",
+      "autonomous": "include/xrfg/luke_physical_projection.hpp",
+      "v33018_sha256": "379c082e93f1d93813b8dee462ad2a9b92d65dca8c5b7a69a807bfebefa0a38a",
+      "v33034_sha256": "379c082e93f1d93813b8dee462ad2a9b92d65dca8c5b7a69a807bfebefa0a38a",
+      "v478_sha256": "379c082e93f1d93813b8dee462ad2a9b92d65dca8c5b7a69a807bfebefa0a38a",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_pose_camera.hpp",
+      "autonomous": "include/xrfg/luke_pose_camera.hpp",
+      "v33018_sha256": "561701048ff0237978e68a7cab4ceb39d778acb00fe9a98e5b2164ac953358e6",
+      "v33034_sha256": "976c88f163ed0d47038bdbd76804d93ed19014710b8da09751c7c790ae393e66",
+      "v478_sha256": "584de3e088fd64d37b271769955a2e5d1a6551b1adab02630451a2d80d9d2eab",
+      "same_as_v33018": false,
+      "same_as_v33034": false
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_projection_ray.hpp",
+      "autonomous": "include/xrfg/luke_projection_ray.hpp",
+      "v33018_sha256": "6c3ef2047d3f5452912e7c65aa7f2a24986f37fc6a5dc12fb1e175ed3428a15b",
+      "v33034_sha256": "6c3ef2047d3f5452912e7c65aa7f2a24986f37fc6a5dc12fb1e175ed3428a15b",
+      "v478_sha256": "6c3ef2047d3f5452912e7c65aa7f2a24986f37fc6a5dc12fb1e175ed3428a15b",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_recording_scope.hpp",
+      "autonomous": "include/xrfg/luke_recording_scope.hpp",
+      "v33018_sha256": "d8ff49687e0d2d9727d05e081572e89f6d535e2c84906209ccd229f2ee8357d9",
+      "v33034_sha256": "d8ff49687e0d2d9727d05e081572e89f6d535e2c84906209ccd229f2ee8357d9",
+      "v478_sha256": "d8ff49687e0d2d9727d05e081572e89f6d535e2c84906209ccd229f2ee8357d9",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_render_identity.hpp",
+      "autonomous": "include/xrfg/luke_render_identity.hpp",
+      "v33018_sha256": "5d18af21a9f0c43cfb1eac5a364a57fc10bf9828b9dbc367fd72f58509a02f1c",
+      "v33034_sha256": "5d18af21a9f0c43cfb1eac5a364a57fc10bf9828b9dbc367fd72f58509a02f1c",
+      "v478_sha256": "5d18af21a9f0c43cfb1eac5a364a57fc10bf9828b9dbc367fd72f58509a02f1c",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_world_scale.hpp",
+      "autonomous": "include/xrfg/luke_world_scale.hpp",
+      "v33018_sha256": "56754811d664a41eb692002df7fddcb55a6c0703bd0b75ccd7856cbaed409e7b",
+      "v33034_sha256": "56754811d664a41eb692002df7fddcb55a6c0703bd0b75ccd7856cbaed409e7b",
+      "v478_sha256": "56754811d664a41eb692002df7fddcb55a6c0703bd0b75ccd7856cbaed409e7b",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/include/xrfg/luke_world_scale_config.hpp",
+      "autonomous": "include/xrfg/luke_world_scale_config.hpp",
+      "v33018_sha256": "f4b29c9add1b49daa406aea43a6cc9c231ec7cfc6ce5e234e6d8bcc9f0b7441a",
+      "v33034_sha256": "3cfbf73e712cfe69ef18ecac33a11ac78f60d041b30834783d71d31da6dd8174",
+      "v478_sha256": "1b531b0574850a872c679c9fe7b2eb0b6c0ef8fd30e3ffbd4d0130d2e0c7f342",
+      "same_as_v33018": false,
+      "same_as_v33034": false
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/src/d3d12/luke_afw.cpp",
+      "autonomous": "src/d3d12/luke_afw.cpp",
+      "v33018_sha256": "f6fda3cd7e88943cce0408f6555e4037dd1f5a79d8f8179bd171f785524d58bd",
+      "v33034_sha256": "23c7efcf96d2e2bd80679435157d2789cc31c0c362cd2c1966fa3e76653557f3",
+      "v478_sha256": "d70e12eb1c50cdcaa289baeb8ca3af70cb9db4527fef4981a0de0660a14c6c93",
+      "same_as_v33018": false,
+      "same_as_v33034": false
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/src/d3d12/luke_color_origin.cpp",
+      "autonomous": "src/d3d12/luke_color_origin.cpp",
+      "v33018_sha256": "3c512d24de70dd9d60e8f56e4cd59c0d7fe734b7ab74e97fb88470c474349792",
+      "v33034_sha256": "230e99e82def948e9a3137b291030a234847dd65e7fa61d98e9f7b9b6ce4d270",
+      "v478_sha256": "230e99e82def948e9a3137b291030a234847dd65e7fa61d98e9f7b9b6ce4d270",
+      "same_as_v33018": false,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/src/d3d12/luke_depth_convert.hlsl",
+      "autonomous": "src/d3d12/luke_depth_convert.hlsl",
+      "v33018_sha256": "88f863baac257c84d3c10d5e1250b8f4a2672493fbb46584956d889196747c55",
+      "v33034_sha256": "755241114f25692ba304d58fb4f68375d773503ede6c47a1d66f7ce18679bf5d",
+      "v478_sha256": "755241114f25692ba304d58fb4f68375d773503ede6c47a1d66f7ce18679bf5d",
+      "same_as_v33018": false,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/src/d3d12/luke_compose_motion.hlsl",
+      "autonomous": "src/d3d12/luke_compose_motion.hlsl",
+      "v33018_sha256": "67352e30b03b6a8eb17d86e9e899d6714071f8b9c111c33e27939e9d647956ad",
+      "v33034_sha256": "2e4626424e655860e89ce13fc341fe23a27e9afdd840bd43a382f84579c4bc6d",
+      "v478_sha256": "2e4626424e655860e89ce13fc341fe23a27e9afdd840bd43a382f84579c4bc6d",
+      "same_as_v33018": false,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/third_party/ofxr/src/layer/luke_counter_probe.cpp",
+      "autonomous": "src/layer/luke_counter_probe.cpp",
+      "v33018_sha256": "a979bf62d71b8fa06304be31c072f93ba6932423019d584cb925452af4f6259d",
+      "v33034_sha256": "a979bf62d71b8fa06304be31c072f93ba6932423019d584cb925452af4f6259d",
+      "v478_sha256": "a979bf62d71b8fa06304be31c072f93ba6932423019d584cb925452af4f6259d",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/OptiScaler/hooks/LukeNativeSceneCamera.h",
+      "autonomous": "include/xrfg/native_ingress/LukeNativeSceneCamera.h",
+      "v33018_sha256": "21339d8044f30116ee20fab05e9a6968d27f5c4783275eef6da6c88319b704e4",
+      "v33034_sha256": "21339d8044f30116ee20fab05e9a6968d27f5c4783275eef6da6c88319b704e4",
+      "v478_sha256": "8a9b1fd6882b018a0228ef6c193648aab0a7819548f239aff843f5923ae4d1a5",
+      "same_as_v33018": false,
+      "same_as_v33034": false
+    },
+    {
+      "source": "optiscaler/OptiScaler/hooks/KcdCameraPacket.h",
+      "autonomous": "include/xrfg/native_ingress/KcdCameraPacket.h",
+      "v33018_sha256": "38df341e09ca96419a877ad1c640d9c11a19a7c0a9a4d50d54d20087d919e958",
+      "v33034_sha256": "38df341e09ca96419a877ad1c640d9c11a19a7c0a9a4d50d54d20087d919e958",
+      "v478_sha256": "38df341e09ca96419a877ad1c640d9c11a19a7c0a9a4d50d54d20087d919e958",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/OptiScaler/hooks/D3D_DeviceOwner.h",
+      "autonomous": "include/xrfg/native_ingress/D3D_DeviceOwner.h",
+      "v33018_sha256": "037cfeb7c4fa14d06d194d142eafdc21cbfb7cc8fb970bc1505d84cd0f8c20df",
+      "v33034_sha256": "037cfeb7c4fa14d06d194d142eafdc21cbfb7cc8fb970bc1505d84cd0f8c20df",
+      "v478_sha256": "037cfeb7c4fa14d06d194d142eafdc21cbfb7cc8fb970bc1505d84cd0f8c20df",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/OptiScaler/hooks/LukeAERMotionSnapshot.h",
+      "autonomous": "include/xrfg/native_ingress/contracts/LukeAERMotionSnapshot.h",
+      "v33018_sha256": "absent-in-V33018",
+      "v33034_sha256": "7076c999c411d0375f1b0af25992aced94694a987b67bbcae38a26d80ce66208",
+      "v478_sha256": "7076c999c411d0375f1b0af25992aced94694a987b67bbcae38a26d80ce66208",
+      "same_as_v33018": false,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/OptiScaler/hooks/LukeCaptureParameters.h",
+      "autonomous": "include/xrfg/native_ingress/contracts/LukeCaptureParameters.h",
+      "v33018_sha256": "d9680e6dfe1c86e942d231b2aa2020a28f55a082e054bf62343d033fa5f89216",
+      "v33034_sha256": "d9680e6dfe1c86e942d231b2aa2020a28f55a082e054bf62343d033fa5f89216",
+      "v478_sha256": "d9680e6dfe1c86e942d231b2aa2020a28f55a082e054bf62343d033fa5f89216",
+      "same_as_v33018": true,
+      "same_as_v33034": true
+    },
+    {
+      "source": "optiscaler/OptiScaler/hooks/LukeVulkanProducer.h",
+      "autonomous": "include/xrfg/native_ingress/contracts/LukeVulkanProducer.h",
+      "v33018_sha256": "e0e4db845f1eac63fc15c9a6703c1dcac7d1c533999cffb68468f79d823d7b5f",
+      "v33034_sha256": "c3ebdeac82f5420d22a005cdbd64b9adf79ef4e0b9aad0e40659144d5016445b",
+      "v478_sha256": "c3ebdeac82f5420d22a005cdbd64b9adf79ef4e0b9aad0e40659144d5016445b",
+      "same_as_v33018": false,
+      "same_as_v33034": true
+    }
+  ],
+  "notes": "Keep all later game fixes; selectively restore HFW Forward sign. Existing native-ingress SafetyHook/standalone paths remain adaptations. Vulkan ingress remains suspended."
+}

@@ -46,6 +46,7 @@ foreach(required IN ITEMS
         "phase=I op=swapchain_eligibility"
         "phase=I op=projection_mapping"
         "phase=I op=generation_prepare"
+        "phase=I op=session_state"
         "phase=B op=downstream_first_end_frame"
         "phase=E op=downstream_first_end_frame"
         "phase=B op=internal_wait_frame"

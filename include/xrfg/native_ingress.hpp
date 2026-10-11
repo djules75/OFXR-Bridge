@@ -1,0 +1,28 @@
+#pragma once
+#include "dlss_motion_vectors.hpp"
+#include <cstdint>
+
+namespace xrfg::native_ingress {
+// Native production, never newest-frame camera recovery. The current Streamline
+// frame/viewport or KCD list-bound packet owns all camera/history metadata.
+bool luke_detected() noexcept;
+bool apply_camera(DlssMotionVectorPublication& publication,
+    ID3D12GraphicsCommandList* command_list) noexcept;
+void configure_queue(ID3D12CommandQueue* queue) noexcept;
+void install_device(ID3D12Device* device) noexcept;
+// Bind only a native queue that actually executes an observed game SR/RR list.
+// Layer-created queues and queue creation alone are not producer evidence.
+void observe_luke_production(ID3D12GraphicsCommandList* list) noexcept;
+bool query_luke_context(ID3D12Device** device, ID3D12CommandQueue** queue) noexcept;
+void poll_streamline() noexcept;
+void poll_d3d11_ngx() noexcept;
+// The public NGX SDK intentionally makes native handles opaque. Each observed
+// creation receives a process-unique NR key; never inspect private handle bytes.
+std::uint32_t allocate_handle_key() noexcept;
+void stop_queue(ID3D12CommandQueue* queue) noexcept;
+struct Statistics {
+    bool luke{}, streamline{};
+    std::uint64_t camera_accepted{}, camera_rejected{}, submissions{};
+};
+Statistics statistics() noexcept;
+}

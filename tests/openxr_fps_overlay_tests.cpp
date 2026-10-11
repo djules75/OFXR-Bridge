@@ -1,4 +1,5 @@
 #include "xrfg/openxr_fps_overlay.hpp"
+#include "xrfg/autonomous_control.hpp"
 #include <openxr/openxr_platform.h>
 #include <windows.h>
 #include <dxgi1_6.h>
@@ -44,6 +45,13 @@ std::vector<ComPtr<ID3D11Texture2D>> textures11;
 unsigned created{}, destroyed{}, space_created{}, space_destroyed{}, acquires{}, waits{}, releases{}, ends{};
 unsigned acquired_index{}, last_released{}, width{}, height{};
 bool timeout_next = true, fail_end{}, unsupported{}, d3d11{};
+unsigned clock_conversions{};
+bool clock_available=true;
+bool display_clock(void*, XrTime, std::int64_t& out) {
+    ++clock_conversions;
+    out=xrfg::interface_clock_ns()-5'000'000;
+    return clock_available;
+}
 const XrCompositionLayerBaseHeader* expected_layer{};
 const void* expected_next{};
 unsigned expected_count{1}, observed_count{};
@@ -209,7 +217,9 @@ std::size_t pixel_count(std::uint32_t wanted) {
 int main(int argc, char** argv) {
     const auto ini = std::filesystem::temp_directory_path() /
         (L"ofxr-overlay-test-" + std::to_wstring(GetCurrentProcessId()) + L".ini");
+    const auto profile=std::filesystem::temp_directory_path()/(L"ofxr-overlay-profile-"+std::to_wstring(GetCurrentProcessId()));
     try {
+        std::filesystem::create_directories(profile);SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",profile.c_str());
         d3d11 = argc > 1 && std::string(argv[1]) == "d3d11";
         if (d3d11) {
             check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
@@ -234,7 +244,7 @@ int main(int argc, char** argv) {
         write_position(ini, L"upper_right");
         {
             xrfg::OpenXrFpsOverlay overlay(handle<XrInstance>(1), session, 1, get, end,
-                device.Get(), queue.Get(), device11.Get(), ini);
+                device.Get(), queue.Get(), device11.Get(), ini, false, nullptr, nullptr, display_clock);
             overlay.application_frame(&info);
             check(acquires == 1 && waits == 1 && releases == 0, "timeout ownership violated");
             check(overlay.end_frame(&info, false) == XR_SUCCESS && observed_count == 1, "uninitialized quad submitted");
@@ -264,6 +274,24 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(600));
             fail_end = true;
             check(overlay.end_frame(&info, true) == XR_ERROR_RUNTIME_FAILURE && !overlay.metrics().active, "failed end marked active");
+            // The physical S slot still exists, but its content is a copy of B.
+            // Exercise the actual overlay submission/bitmap boundary on both APIs.
+            overlay.reset_metrics();
+            auto native_bypass=std::make_shared<xrfg::D3D12NativeFrameResult>();
+            native_bypass->outputs=1;native_bypass->skip=1;native_bypass->detail=5;
+            native_bypass->mask.store(0,std::memory_order_release);
+            const std::array native_results{native_bypass};
+            check(overlay.end_frame(&info,true,true,native_results)==XR_SUCCESS,
+                "native copy physical submission failed");
+            check(!overlay.metrics().active && overlay.metrics().submitted_fps==0,
+                "native copy must neither add FPS nor turn green");
+            std::this_thread::sleep_for(std::chrono::milliseconds(260));
+            overlay.application_frame(&info);
+            check(pixel_count(0xff5050ffu)>100 && pixel_count(0xff70eb40u)==0,
+                "copied native S rendered a green bitmap");
+            check(overlay.end_frame(&info,false,true,native_results)==XR_SUCCESS &&
+                overlay.metrics().submitted_fps>0 && !overlay.metrics().active,
+                "real B after native copy must count once and remain red");
             for (auto name : {L"upper_left", L"lower_left", L"lower_right", L"upper_right", L"off"}) {
                 write_position(ini, name);
                 std::this_thread::sleep_for(std::chrono::milliseconds(260));
@@ -313,6 +341,77 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(260));
             overlay.application_frame(&info);
             check(overlay.end_frame(&info, true) == XR_SUCCESS && observed_count == 2, "overlay visible before manual stop");
+            // Exercise production latency admission, rate limit and hidden gate
+            // on the exact same runtime composition path as the GPU counter.
+            using namespace xrfg::autonomous;
+            RuntimeStatus runtime{};runtime.sessions=runtime.ready=1;report_runtime(runtime);
+            set_interface_visible(InterfaceSurface::desktop,true);
+            const auto entry=xrfg::interface_clock_ns()-25'000'000;
+            auto cycle=std::make_shared<xrfg::InterfaceCycle>(entry-30'000'000);
+            cycle->call(entry-30'000'000,entry-25'000'000);
+            cycle->call(entry,entry+1'000'000);
+            xrfg::InterfaceFrameStamp stamp{400,entry,entry-10'000'000,cycle};
+            fail_end=true;check(XR_FAILED(overlay.end_frame(&info,false,true,{},0,stamp)),"failed downstream sample");
+            check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS,"successful retry of same frame");
+            auto conversions=clock_conversions;
+            check(overlay.end_frame(&info,true,true,{},0,stamp)==XR_SUCCESS &&
+                overlay.end_frame(&info,false,false,{},0,stamp)==XR_SUCCESS && clock_conversions==conversions,"synthetic/repeat never convert display clock");
+            // Complete the app-facing tail after the downstream runtime call.
+            const auto returned=xrfg::interface_clock_ns();
+            cycle->call(entry+1'000'000,returned);cycle->producer_returned(returned);
+            std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&info);
+            auto measured=snapshot().runtime.telemetry;
+            check(measured.delay_valid && measured.ofxr_delay_ms>=25 && measured.cpu_valid &&
+                measured.presentation_valid && measured.presentation_ms<=-5,"real frame pipeline and late display clock are published");
+            check(measured.cycle_valid && measured.ofxr_time_valid && measured.cycle_length_ms>=55 &&
+                measured.ofxr_time_ms>=30, "same accepted frame publishes complete cycle after app tail returns");
+            const auto publication=measured.updated_ms;overlay.application_frame(&info);
+            check(snapshot().runtime.telemetry.updated_ms==publication,"telemetry publication limited to 4 Hz");
+            overlay.reset_metrics();clock_available=false;
+            stamp={401,xrfg::interface_clock_ns()-5'000'000,0};
+            check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS,"no clock extension remains a valid real submission");
+            overlay.application_frame(&info);measured=snapshot().runtime.telemetry;
+            check(measured.delay_valid && !measured.presentation_valid && !measured.cpu_valid,"clock conversion absence yields independent N/A sources");
+            // Pair-slot estimate through the actual runtime submission wrapper,
+            // independently of unavailable XrTime clock conversion.
+            overlay.reset_metrics();overlay.set_display_period(10'000'000);
+            auto estimate_start=xrfg::interface_clock_ns()-5'000'000;
+            auto estimate_cycle=std::make_shared<xrfg::InterfaceCycle>(estimate_start);
+            stamp={403,estimate_start,0,estimate_cycle};
+            fail_end=true;check(XR_FAILED(overlay.end_frame(&info,true,true,{},0,stamp)),"failed synthetic has no slot receipt");
+            check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS,"real without successful synthetic remains valid");
+            estimate_cycle->producer_returned(xrfg::interface_clock_ns());
+            float estimate{};check(!estimate_cycle->read_estimated(xrfg::interface_clock_ns(),estimate),"failed synthetic cannot enable estimated cycle");
+            overlay.reset_metrics();estimate_start=xrfg::interface_clock_ns()-5'000'000;
+            estimate_cycle=std::make_shared<xrfg::InterfaceCycle>(estimate_start);stamp={404,estimate_start,0,estimate_cycle};
+            conversions=clock_conversions;
+            check(overlay.end_frame(&info,true,true,{},0,stamp)==XR_SUCCESS,"successful synthetic receipt");
+            check(clock_conversions==conversions,"slot estimate never converts a synthetic display clock");
+            check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS,"matching real receipt");
+            estimate_cycle->producer_returned(xrfg::interface_clock_ns());
+            std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&info);
+            measured=snapshot().runtime.telemetry;
+            check(measured.cycle_valid && measured.cycle_estimated_valid && measured.cycle_estimated_ms>=14 &&
+                measured.cycle_estimated_ms>measured.cycle_length_ms+5 && !measured.presentation_valid,
+                "real composition path publishes measured plus estimated cycle without clock extension");
+            // A pending NGX decision contributes only after existing nonblocking
+            // content polling confirms actual generation; a native copy never does.
+            overlay.reset_metrics();estimate_start=xrfg::interface_clock_ns()-5'000'000;
+            estimate_cycle=std::make_shared<xrfg::InterfaceCycle>(estimate_start);stamp={405,estimate_start,0,estimate_cycle};
+            auto pending=std::make_shared<xrfg::D3D12NativeFrameResult>();pending->outputs=1;
+            std::array native{pending};
+            check(overlay.end_frame(&info,true,true,native,0,stamp)==XR_SUCCESS,"pending native receipt");
+            const auto real_clock=xrfg::interface_clock_ns();
+            check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS,"native real receipt");
+            estimate_cycle->producer_returned(xrfg::interface_clock_ns());
+            check(!estimate_cycle->read_estimated(real_clock,estimate),"unconfirmed native cannot invent display slots");
+            pending->mask.store(1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&info);
+            check(snapshot().runtime.telemetry.cycle_estimated_valid,"native confirmation retains original acceptance receipt for slot estimate");
+            set_interface_visible(InterfaceSurface::desktop,false);conversions=clock_conversions;
+            stamp={402,xrfg::interface_clock_ns(),0};
+            check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS && clock_conversions==conversions,"hidden UI cannot read display clock");
+            clock_available=true;
             const auto uploads_before_stop = releases;
             overlay.suspend();
             check(!overlay.marker_placement(), "manual stop left diagnostic marker enabled");
@@ -332,7 +431,7 @@ int main(int argc, char** argv) {
             overlay.application_frame(&info);
             check(overlay.end_frame(&info, false) == XR_SUCCESS && observed_count == 2, "optional API failure broke game");
         }
-        std::filesystem::remove(ini);
+        std::filesystem::remove(ini);std::filesystem::remove(xrfg::autonomous::configuration_path());std::filesystem::remove(profile);
         std::cout << "Overlay " << (d3d11 ? "D3D11" : "D3D12")
                   << " GPU colors, composition, timeout ownership, live controls, counters and lifetime passed\n";
         return 0;

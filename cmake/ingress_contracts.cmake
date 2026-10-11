@@ -1,0 +1,5 @@
+if(XRFG_BUILD_TESTS AND TARGET xrfg_three_slot_director_tests)
+    target_compile_definitions(xrfg_three_slot_director_tests PRIVATE XRFG_NATIVE_INGRESS_TESTS)
+    add_test(NAME xrfg_native_vulkan_transport COMMAND xrfg_three_slot_director_tests native-vulkan-transport)
+    set_tests_properties(xrfg_native_vulkan_transport PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+endif()

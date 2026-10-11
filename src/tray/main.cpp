@@ -1,5 +1,7 @@
 #include "xrfg/implicit_layer.hpp"
 #include "xrfg/standalone_launcher.hpp"
+#include "xrfg/autonomous_control.hpp"
+#include "xrfg/autonomous_ui.hpp"
 #include "resource.h"
 
 #include <windows.h>
@@ -26,33 +28,30 @@
 
 namespace {
 
-constexpr wchar_t kWindowClass[] = L"OFXRBridgeTrayWindow";
-constexpr wchar_t kApplicationName[] = L"OFXR Bridge";
+constexpr wchar_t kWindowClass[] = L"OFXRAutonomousTrayWindow";
+constexpr wchar_t kApplicationName[] = L"OFXR 0.3.0 (v474)";
 constexpr wchar_t kCleanupArgument[] = L"--cleanup-manual-arm";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kTrayId = 1;
+constexpr int kPauseHotkeyId = 1;
 constexpr UINT kArmPollMilliseconds = 250;
 constexpr std::uint32_t kImplementationVersion = XRFG_IMPLEMENTATION_VERSION;
-constexpr wchar_t kDonateUrl[] = L"https://ko-fi.com/tig3rmast3r";
+// One Donate entry each, creator first, as in the About box and the README.
+constexpr wchar_t kDonateCreatorUrl[] = L"https://ko-fi.com/tig3rmast3r";
+constexpr wchar_t kDonateMaintainerUrl[] = L"https://ko-fi.com/djules";
+// The pause symbol beside the menu's "Resume frame generation", orange so a
+// glance at the menu says generation is off. The FPS overlay's pause symbol
+// is the same colour.
+constexpr COLORREF kPausedColor = RGB(230, 115, 0);
 
 enum MenuCommand : UINT {
     toggle_arm = 90,
-    backend_fidelity_fx = 110,
-    backend_nvidia_slow = 111,
-    backend_nvidia_medium = 112,
-    backend_nvidia_fast = 113,
-    toggle_nvidia_bidirectional = 114,
-    nvidia_scale_full = 115,
-    nvidia_scale_three_quarter = 116,
-    nvidia_scale_half = 117,
-    toggle_diagnostics = 120,
-    overlay_off = 121,
-    overlay_upper_left = 122,
-    overlay_upper_right = 123,
-    overlay_lower_left = 124,
-    overlay_lower_right = 125,
+    toggle_pause = 91,
+    change_pause_key = 92,
+    show_settings = 100,
     open_logs = 130,
-    donate = 139,
+    donate_creator = 138,
+    donate_maintainer = 139,
     show_about = 140,
     exit_application = 150,
 };
@@ -65,9 +64,18 @@ struct AppState {
     std::filesystem::path local_directory;
     std::filesystem::path settings_path;
     std::filesystem::path armed_manifest;
+    // The Vulkan layer's manifest, registered beside the OpenXR one while
+    // Vulkan support is on; empty otherwise.
+    std::filesystem::path armed_vulkan_manifest;
     xrfg::implicit_layer::RegistryScope armed_scope{
         xrfg::implicit_layer::RegistryScope::current_user};
     HANDLE arm_signal{};
+    // Set while "Pause frame generation" is on. Made with the arm and closed
+    // with it, so every arm starts resumed; null if it could not be made.
+    HANDLE pause_signal{};
+    bool paused{};
+    // The `pause_hotkey` of tray.ini is held system-wide, while armed only.
+    bool pause_hotkey_registered{};
     // Alternate namespace used by lifecycle tests, never read from user INI.
     std::wstring registry_subkey{xrfg::implicit_layer::kRegistrySubkey};
     HICON armed_icon{};
@@ -202,12 +210,73 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     } catch (...) { /* Cleanup must not depend on diagnostic I/O. */ }
 }
 
+// The newest ofxr_bridge.ini under any other version's cache folder.
+//
+// The two diagnostics knobs are carried forward from the file arming is about
+// to overwrite, which keeps a hand edit across an arm - but a version bump
+// creates an empty folder, so the lookup finds nothing and silently falls back
+// to the defaults. A capture setting deliberately raised for an investigation
+// was then reset by the next build, and the resulting logs were truncated
+// without anything saying so.
+[[nodiscard]] std::filesystem::path previous_runtime_configuration(
+    const std::filesystem::path& local_directory,
+    const std::filesystem::path& destination) {
+    std::error_code code;
+    const auto root = xrfg::standalone::runtime_version_directory(
+        local_directory,
+        kImplementationVersion).parent_path();
+    std::filesystem::path newest;
+    std::filesystem::file_time_type newest_at{};
+    for (const auto& entry :
+         std::filesystem::directory_iterator(root, code)) {
+        if (code || !entry.is_directory(code)) {
+            continue;
+        }
+        const auto candidate = entry.path() / L"ofxr_bridge.ini";
+        if (candidate == destination ||
+            !std::filesystem::exists(candidate, code)) {
+            continue;
+        }
+        const auto at = std::filesystem::last_write_time(candidate, code);
+        if (code) {
+            continue;
+        }
+        if (newest.empty() || at > newest_at) {
+            newest = candidate;
+            newest_at = at;
+        }
+    }
+    return newest;
+}
+
 [[nodiscard]] bool write_runtime_configuration(
     const AppState& state,
     std::wstring* error,
     const std::filesystem::path& arm_manifest = {}) {
     const auto& manifest = arm_manifest.empty() ? state.armed_manifest : arm_manifest;
-    std::string configuration = xrfg::standalone::build_runtime_ini(state.settings);
+    // Carry forward the two diagnostics knobs the tray has no UI for. Arming
+    // rewrites this file whole, so hardcoding them here is what made a
+    // hand-edited max_file_mb survive exactly until the next arm.
+    const auto destination =
+        runtime_directory(state.local_directory) / L"ofxr_bridge.ini";
+    // This version's file if it has one, otherwise the newest any other version
+    // left behind, so the knobs survive a version bump as well as an arm.
+    std::error_code exists_code;
+    const auto source = std::filesystem::exists(destination, exists_code)
+        ? destination
+        : previous_runtime_configuration(state.local_directory, destination);
+    const unsigned max_file_mb = GetPrivateProfileIntW(
+        L"diagnostics",
+        L"max_file_mb",
+        static_cast<INT>(xrfg::standalone::kDefaultMaxFileMb),
+        source.empty() ? destination.c_str() : source.c_str());
+    const bool flush_each_event = GetPrivateProfileIntW(
+        L"diagnostics",
+        L"flush_each_event",
+        0,
+        source.empty() ? destination.c_str() : source.c_str()) != 0;
+    std::string configuration = xrfg::standalone::build_runtime_ini(
+        state.settings, xrfg::autonomous::snapshot().desired, max_file_mb, flush_each_event);
     if (!manifest.empty()) {
         const auto control = xrfg::implicit_layer::arm_signal_name(manifest);
         std::string ascii_control;
@@ -215,16 +284,15 @@ void log_lifecycle(const std::filesystem::path& local_directory,
         configuration.insert(std::string("[ofxr]\r\n").size(),
             "control_event=" + ascii_control + "\r\n");
     }
-    return write_text_atomic(
-        runtime_directory(state.local_directory) / L"ofxr_bridge.ini",
-        configuration,
-        error);
+    return write_text_atomic(destination, configuration, error);
 }
 
 [[nodiscard]] bool prepare_runtime_layer(
     AppState& state,
     std::filesystem::path* manifest,
+    std::filesystem::path* vulkan_manifest,
     std::wstring* error) {
+    if (vulkan_manifest) vulkan_manifest->clear();
     try {
         const auto source_dll = state.executable_directory / L"ofxr" /
             L"XR_APILAYER_XRFrameBridge_diagnostic.dll";
@@ -244,6 +312,16 @@ void log_lifecycle(const std::filesystem::path& local_directory,
             if (error) *error = last_error_message(L"Installing the runtime layer");
             return false;
         }
+#ifdef XRFG_NATIVE_DLSSG
+        const auto source_dlss = state.executable_directory / L"ofxr" / L"nvngx_dlssg.dll";
+        if (!xrfg::standalone::install_runtime_layer_dll(source_dlss, directory / L"nvngx_dlssg.dll")) {
+            if (error) *error = L"Installing the bundled NVIDIA DLSS Frame Generation runtime failed.";
+            return false;
+        }
+#endif
+
+        if (!xrfg::standalone::stage_runtime_support_files(
+                state.executable_directory / L"ofxr", directory, error)) return false;
 
         static std::uint64_t last_arm_id = 0;
         last_arm_id = std::max<std::uint64_t>(last_arm_id + 1, GetTickCount64());
@@ -256,6 +334,13 @@ void log_lifecycle(const std::filesystem::path& local_directory,
         *manifest = generated_manifest;
         state.arm_signal = xrfg::implicit_layer::create_arm_signal(generated_manifest, error);
         if (!state.arm_signal) return false;
+        // Not worth refusing the arm over: without it the menu entry is grey.
+        std::wstring pause_error;
+        state.pause_signal = xrfg::implicit_layer::create_pause_signal(
+            generated_manifest, &pause_error);
+        state.paused = false;
+        if (!state.pause_signal)
+            log_lifecycle(state.local_directory, L"pause-control", pause_error);
         if (!write_text_atomic(
                 generated_manifest,
                 xrfg::standalone::build_implicit_layer_manifest(
@@ -266,6 +351,43 @@ void log_lifecycle(const std::filesystem::path& local_directory,
             return false;
         }
         *manifest = generated_manifest;
+        if (state.settings.vulkan_support && vulkan_manifest) {
+            // The queue-serialising Vulkan layer goes beside the OpenXR one,
+            // in the same version folder, with a manifest of the same shape.
+            const auto source_vulkan_dll = state.executable_directory / L"ofxr" /
+                xrfg::implicit_layer::kVulkanLayerDll;
+            if (!std::filesystem::is_regular_file(source_vulkan_dll)) {
+                if (error) {
+                    *error = L"The bundled OFXR Vulkan layer is missing:\r\n" +
+                             source_vulkan_dll.wstring();
+                }
+                remove_manifest_file(generated_manifest);
+                return false;
+            }
+            const auto runtime_vulkan_dll =
+                directory / xrfg::implicit_layer::kVulkanLayerDll;
+            if (!xrfg::standalone::install_runtime_layer_dll(
+                    source_vulkan_dll, runtime_vulkan_dll)) {
+                if (error) *error = last_error_message(L"Installing the Vulkan layer");
+                remove_manifest_file(generated_manifest);
+                return false;
+            }
+            const std::wstring vulkan_manifest_name =
+                std::wstring(xrfg::implicit_layer::kVulkanManifestPrefix) +
+                std::to_wstring(GetCurrentProcessId()) + L"-" +
+                std::to_wstring(last_arm_id) +
+                xrfg::implicit_layer::kManifestSuffix;
+            const auto generated_vulkan_manifest = directory / vulkan_manifest_name;
+            if (!write_text_atomic(
+                    generated_vulkan_manifest,
+                    xrfg::standalone::build_vulkan_layer_manifest(
+                        runtime_vulkan_dll, kImplementationVersion),
+                    error)) {
+                remove_manifest_file(generated_manifest);
+                return false;
+            }
+            *vulkan_manifest = generated_vulkan_manifest;
+        }
         return true;
     } catch (...) {
         if (error) *error = L"Unable to prepare the manual OpenXR layer.";
@@ -277,7 +399,8 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     const AppState& state,
     const std::filesystem::path& manifest,
     xrfg::implicit_layer::RegistryScope scope,
-    std::wstring* error) {
+    std::wstring* error,
+    const std::filesystem::path& vulkan_manifest = {}) {
     std::wstring command = xrfg::standalone::quote_windows_argument(
         (state.executable_directory / L"OFXRBridgeTray.exe").wstring());
     command += L" ";
@@ -288,6 +411,10 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     command += std::to_wstring(GetCurrentProcessId());
     command += L" ";
     command += xrfg::implicit_layer::registry_scope_name(scope);
+    if (!vulkan_manifest.empty()) {
+        command += L" ";
+        command += xrfg::standalone::quote_windows_argument(vulkan_manifest.wstring());
+    }
     std::vector<wchar_t> mutable_command(command.begin(), command.end());
     mutable_command.push_back(L'\0');
 
@@ -334,45 +461,34 @@ void log_lifecycle(const std::filesystem::path& local_directory,
                 *error += detail;
             }
         }
+        // The Vulkan layer's registrations, in the loader's own key.
+        std::wstring vulkan_detail;
+        if (!xrfg::implicit_layer::cleanup_owned_registrations(
+                state.local_directory, scope, &vulkan_detail,
+                xrfg::implicit_layer::kVulkanRegistrySubkey,
+                xrfg::implicit_layer::kVulkanManifestPrefix)) {
+            success = false;
+            if (error) {
+                if (!error->empty()) *error += L"\r\n";
+                *error += xrfg::implicit_layer::registry_scope_name(scope);
+                *error += L" (Vulkan): ";
+                *error += vulkan_detail;
+            }
+        }
     }
     return success;
 }
 
 [[nodiscard]] std::wstring tray_tooltip(const AppState& state) {
-    std::wstring tooltip = state.armed ? L"OFXR Bridge ARMED - " : L"OFXR Bridge - ";
-    if (state.settings.backend == xrfg::standalone::FlowBackend::nvidia) {
-        switch (state.settings.nvidia_preset) {
-        case xrfg::standalone::NvidiaPerformancePreset::fast:
-            tooltip += L"NVIDIA Fast (test)";
-            break;
-        case xrfg::standalone::NvidiaPerformancePreset::slow:
-            tooltip += L"NVIDIA Slow";
-            break;
-        case xrfg::standalone::NvidiaPerformancePreset::medium:
-        default:
-            tooltip += L"NVIDIA Medium";
-            break;
-        }
-        tooltip += state.settings.nvidia_bidirectional
-            ? L" + bidirectional"
-            : L" + forward";
-        switch (state.settings.nvidia_input_scale) {
-        case xrfg::standalone::NvidiaInputScale::three_quarter:
-            tooltip += L" @ 75%";
-            break;
-        case xrfg::standalone::NvidiaInputScale::half:
-            tooltip += L" @ 50%";
-            break;
-        case xrfg::standalone::NvidiaInputScale::full:
-        default:
-            tooltip += L" @ 100%";
-            break;
-        }
-    } else {
-        tooltip += L"FidelityFX";
-    }
-    if (state.settings.diagnostics) {
-        tooltip += L" - recorder on";
+    std::wstring tooltip = std::wstring(kApplicationName) + (state.paused ? L" - paused"
+        : state.armed ? L" - active" : L" - inactive");
+    const auto desired = xrfg::autonomous::snapshot().desired;
+    if (desired.frame_generation == 2) tooltip += L" - DLSS FG";
+    else if (desired.frame_generation == 1) tooltip += L" - FSR 3.1";
+    else if (desired.frame_generation == 3) tooltip += L" - Hybrid";
+    else {
+        const wchar_t* engines[]{L" - FidelityFX", L" - NVIDIA reference", L" - NVIDIA new", L" - NVIDIA djules"};
+        tooltip += engines[std::clamp(desired.backend, 0, 3)];
     }
     return tooltip;
 }
@@ -410,6 +526,40 @@ void show_balloon(
     return Shell_NotifyIconW(NIM_ADD, &state.icon) != FALSE;
 }
 
+// Takes tray.ini's `pause_hotkey` for as long as the bridge is armed. The key
+// is the tray's and not the layer's: nothing is added to the game, and the
+// same chord works in every title. A key another program already holds is
+// left to it; the menu entry still works.
+void register_pause_hotkey(AppState& state) {
+    if (state.pause_hotkey_registered || state.window == nullptr ||
+        state.pause_signal == nullptr) return;
+    const auto hotkey = xrfg::standalone::parse_hotkey(state.settings.pause_hotkey);
+    if (!hotkey) return;
+    state.pause_hotkey_registered = RegisterHotKey(
+        state.window, kPauseHotkeyId, hotkey->modifiers | MOD_NOREPEAT,
+        hotkey->key) != FALSE;
+    if (!state.pause_hotkey_registered)
+        log_lifecycle(state.local_directory, L"pause-hotkey",
+            last_error_message(L"Registering the pause key"));
+}
+
+void unregister_pause_hotkey(AppState& state) {
+    if (!state.pause_hotkey_registered) return;
+    UnregisterHotKey(state.window, kPauseHotkeyId);
+    state.pause_hotkey_registered = false;
+}
+
+// Ends the pause with the arm it belonged to. A running session keeps its own
+// handle, and by now the arm signal has stopped it for good.
+void close_pause_signal(AppState& state) {
+    unregister_pause_hotkey(state);
+    if (state.pause_signal) {
+        CloseHandle(state.pause_signal);
+        state.pause_signal = nullptr;
+    }
+    state.paused = false;
+}
+
 [[nodiscard]] bool disarm_bridge(
     AppState& state,
     std::wstring* error) {
@@ -433,8 +583,10 @@ void show_balloon(
         CloseHandle(state.arm_signal);
         state.arm_signal = nullptr;
     }
+    close_pause_signal(state);
     state.armed = false;
     state.armed_manifest.clear();
+    state.armed_vulkan_manifest.clear();
     state.armed_scope = xrfg::implicit_layer::RegistryScope::current_user;
     refresh_tray_icon(state);
     return true;
@@ -445,10 +597,22 @@ void show_balloon(
     if (!disarm_bridge(state, error)) return false;
 
     std::filesystem::path manifest;
+    std::filesystem::path vulkan_manifest;
     const auto scope = xrfg::implicit_layer::preferred_registry_scope();
-    if (!prepare_runtime_layer(state, &manifest, error) ||
+    if (!prepare_runtime_layer(state, &manifest, &vulkan_manifest, error) ||
         !xrfg::implicit_layer::register_manifest(
-            manifest, scope, error, state.registry_subkey)) {
+            manifest, scope, error, state.registry_subkey) ||
+        (!vulkan_manifest.empty() &&
+         !xrfg::implicit_layer::register_manifest(
+             vulkan_manifest, scope, error,
+             xrfg::implicit_layer::kVulkanRegistrySubkey))) {
+        if (!vulkan_manifest.empty()) {
+            std::wstring cleanup_error;
+            if (!xrfg::implicit_layer::retire_manifest(
+                    vulkan_manifest, scope, &cleanup_error,
+                    xrfg::implicit_layer::kVulkanRegistrySubkey))
+                log_lifecycle(state.local_directory, L"arm-failure-cleanup", cleanup_error);
+        }
         if (!manifest.empty()) {
             std::wstring cleanup_error;
             if (!xrfg::implicit_layer::retire_manifest(
@@ -460,10 +624,16 @@ void show_balloon(
             CloseHandle(state.arm_signal);
             state.arm_signal = nullptr;
         }
+        close_pause_signal(state);
         return false;
     }
-    if (!spawn_cleanup_helper(state, manifest, scope, error)) {
+    if (!spawn_cleanup_helper(state, manifest, scope, error, vulkan_manifest)) {
         std::wstring ignored;
+        if (!vulkan_manifest.empty()) {
+            static_cast<void>(xrfg::implicit_layer::retire_manifest(
+                vulkan_manifest, scope, &ignored,
+                xrfg::implicit_layer::kVulkanRegistrySubkey));
+        }
         static_cast<void>(xrfg::implicit_layer::retire_manifest(
             manifest, scope, &ignored, state.registry_subkey));
         if (state.arm_signal) {
@@ -471,9 +641,11 @@ void show_balloon(
             CloseHandle(state.arm_signal);
             state.arm_signal = nullptr;
         }
+        close_pause_signal(state);
         return false;
     }
     state.armed = true;
+    register_pause_hotkey(state);
     state.armed_manifest = manifest;
     state.armed_scope = scope;
     log_lifecycle(state.local_directory,
@@ -483,164 +655,224 @@ void show_balloon(
     refresh_tray_icon(state);
     show_balloon(
         state,
-        L"OFXR Bridge armed",
+        L"OFXR 0.3.0 armed",
         L"The bridge will remain enabled for OpenXR applications until you disarm it or exit the tray.");
     return true;
 }
 
-void update_runtime_options(AppState& state, bool overlay_change = false) {
-    save_settings(state);
-    if (state.armed) {
-        std::wstring error;
-        if (!write_runtime_configuration(state, &error)) {
-            show_error(state.window, error);
+// `running_message`: what the balloon says for an option a running game
+// follows; without one the option is for the next session.
+// The pause symbol shown beside "Resume frame generation": two orange bars on
+// a transparent square the size of a check mark. A 32-bit premultiplied
+// bitmap set as the entry's item bitmap is the one way to colour an entry
+// that leaves the popup in the system's own menu style; an owner-drawn entry
+// puts the whole menu in the flat unthemed one.
+[[nodiscard]] HBITMAP create_pause_bitmap() {
+    const int size = std::max(GetSystemMetrics(SM_CXMENUCHECK), 8);
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = size;
+    info.bmiHeader.biHeight = -size;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(
+        nullptr, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (bitmap == nullptr || bits == nullptr) return bitmap;
+    auto* pixels = static_cast<std::uint32_t*>(bits);
+    std::fill_n(pixels, static_cast<std::size_t>(size) * size, 0U);
+    const std::uint32_t ink = 0xff000000U |
+        (static_cast<std::uint32_t>(GetRValue(kPausedColor)) << 16) |
+        (static_cast<std::uint32_t>(GetGValue(kPausedColor)) << 8) |
+        GetBValue(kPausedColor);
+    const int bar = std::max(size / 5, 2);
+    const int gap = std::max(size / 5, 2);
+    const int left = (size - 2 * bar - gap) / 2;
+    const int top = size / 5;
+    for (int y = top; y < size - top; ++y) {
+        for (int x = 0; x < bar; ++x) {
+            pixels[y * size + left + x] = ink;
+            pixels[y * size + left + bar + gap + x] = ink;
         }
     }
-    refresh_tray_icon(state);
-    if (state.armed) {
-        show_balloon(
-            state,
-            L"OFXR options saved",
-            overlay_change ? L"The FPS overlay position updates in running applications."
-                : L"The new optical-flow settings will be used by the next OpenXR session.");
+    return bitmap;
+}
+
+// What the "Current key binding" entry and the dialog call a setting.
+[[nodiscard]] std::wstring pause_key_display(std::string_view setting) {
+    const std::string name = xrfg::standalone::hotkey_display_name(setting);
+    if (name.empty()) return L"none";
+    return std::wstring(name.begin(), name.end());
+}
+
+// The dialog's own state: the setting it opened on and the one it closed on.
+struct PauseKeyDialog {
+    std::string setting;
+};
+
+// The hotkey control's value for a chord, and back. Its modifier flags are
+// not RegisterHotKey's, and it marks the navigation keys as extended.
+[[nodiscard]] WORD hotkey_control_value(const xrfg::standalone::Hotkey& hotkey) {
+    BYTE flags = 0;
+    if (hotkey.modifiers & MOD_SHIFT) flags |= HOTKEYF_SHIFT;
+    if (hotkey.modifiers & MOD_CONTROL) flags |= HOTKEYF_CONTROL;
+    if (hotkey.modifiers & MOD_ALT) flags |= HOTKEYF_ALT;
+    switch (hotkey.key) {
+    case VK_INSERT: case VK_DELETE: case VK_HOME: case VK_END:
+    case VK_PRIOR: case VK_NEXT:
+    case VK_LEFT: case VK_UP: case VK_RIGHT: case VK_DOWN:
+    case VK_DIVIDE: case VK_NUMLOCK:
+        flags |= HOTKEYF_EXT;
+        break;
+    default:
+        break;
+    }
+    return MAKEWORD(static_cast<BYTE>(hotkey.key), flags);
+}
+
+[[nodiscard]] xrfg::standalone::Hotkey hotkey_from_control(WORD value) {
+    xrfg::standalone::Hotkey hotkey;
+    hotkey.key = LOBYTE(value);
+    const BYTE flags = HIBYTE(value);
+    if (flags & HOTKEYF_SHIFT) hotkey.modifiers |= MOD_SHIFT;
+    if (flags & HOTKEYF_CONTROL) hotkey.modifiers |= MOD_CONTROL;
+    if (flags & HOTKEYF_ALT) hotkey.modifiers |= MOD_ALT;
+    return hotkey;
+}
+
+INT_PTR CALLBACK pause_key_dialog_procedure(
+    HWND dialog, UINT message, WPARAM wparam, LPARAM lparam) {
+    constexpr int kAvailabilityProbeId = 0x7F01;
+    const HWND box = GetDlgItem(dialog, IDC_PAUSE_KEY_HOTKEY);
+    const auto show = [&](const std::string& setting) {
+        const auto hotkey = xrfg::standalone::parse_hotkey(setting);
+        SendMessageW(box, HKM_SETHOTKEY, hotkey ? hotkey_control_value(*hotkey) : 0, 0);
+    };
+    switch (message) {
+    case WM_INITDIALOG: {
+        SetWindowLongPtrW(dialog, DWLP_USER, lparam);
+        const auto* state = reinterpret_cast<const PauseKeyDialog*>(lparam);
+        // No rules on the box: any key, with or without modifiers, is the
+        // user's to choose. The dialog's text says what a bare key costs.
+        show(state->setting);
+        SetDlgItemTextW(dialog, IDC_PAUSE_KEY_STATUS,
+            (L"Current key binding: " + pause_key_display(state->setting)).c_str());
+        SetForegroundWindow(dialog);
+        SetFocus(box);
+        return FALSE; // the focus is set
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wparam)) {
+        case IDC_PAUSE_KEY_DEFAULT:
+            show(xrfg::standalone::kDefaultPauseHotkey);
+            SetFocus(box);
+            return TRUE;
+        case IDC_PAUSE_KEY_NONE:
+            SendMessageW(box, HKM_SETHOTKEY, 0, 0);
+            SetFocus(box);
+            return TRUE;
+        case IDOK: {
+            auto* state = reinterpret_cast<PauseKeyDialog*>(
+                GetWindowLongPtrW(dialog, DWLP_USER));
+            const WORD value = LOWORD(SendMessageW(box, HKM_GETHOTKEY, 0, 0));
+            if (LOBYTE(value) == 0) {
+                state->setting = "off";
+                EndDialog(dialog, IDOK);
+                return TRUE;
+            }
+            const auto hotkey = hotkey_from_control(value);
+            const auto setting = xrfg::standalone::hotkey_setting(hotkey);
+            if (!setting) {
+                SetDlgItemTextW(dialog, IDC_PAUSE_KEY_STATUS,
+                    L"That key cannot be used. Choose a different one.");
+                SetFocus(box);
+                return TRUE;
+            }
+            // Asked of the system now, while the dialog can still say so:
+            // the tray's own registration is released for as long as this
+            // dialog is open, so a refusal is another program's.
+            if (!RegisterHotKey(dialog, kAvailabilityProbeId,
+                    hotkey.modifiers | MOD_NOREPEAT, hotkey.key)) {
+                SetDlgItemTextW(dialog, IDC_PAUSE_KEY_STATUS,
+                    L"Another program already uses that combination. "
+                    L"Choose a different one.");
+                SetFocus(box);
+                return TRUE;
+            }
+            UnregisterHotKey(dialog, kAvailabilityProbeId);
+            state->setting = *setting;
+            EndDialog(dialog, IDOK);
+            return TRUE;
+        }
+        case IDCANCEL:
+            EndDialog(dialog, IDCANCEL);
+            return TRUE;
+        default:
+            return FALSE;
+        }
+    default:
+        return FALSE;
+    }
+}
+
+// Stores a new key and takes it at once if the bridge is armed.
+void apply_pause_hotkey(AppState& state, const std::string& setting) {
+    unregister_pause_hotkey(state);
+    state.settings.pause_hotkey = setting;
+    save_settings(state);
+    if (state.armed) register_pause_hotkey(state);
+    log_lifecycle(state.local_directory, L"pause-hotkey-changed");
+}
+
+void change_pause_hotkey(AppState& state) {
+    // Released while the dialog is open, or pressing the current chord in
+    // the box would pause the game instead of reaching the box.
+    unregister_pause_hotkey(state);
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_HOTKEY_CLASS};
+    InitCommonControlsEx(&controls);
+    PauseKeyDialog dialog{state.settings.pause_hotkey};
+    const INT_PTR answer = DialogBoxParamW(
+        GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_PAUSE_KEY), state.window,
+        pause_key_dialog_procedure, reinterpret_cast<LPARAM>(&dialog));
+    if (answer == IDOK) {
+        apply_pause_hotkey(state, dialog.setting);
+    } else if (state.armed) {
+        register_pause_hotkey(state);
     }
 }
 
 void show_context_menu(AppState& state) {
     HMENU menu = CreatePopupMenu();
-    HMENU backend_menu = CreatePopupMenu();
-    HMENU nvidia_scale_menu = CreatePopupMenu();
-    if (menu == nullptr || backend_menu == nullptr ||
-        nvidia_scale_menu == nullptr) {
-        if (nvidia_scale_menu) DestroyMenu(nvidia_scale_menu);
-        if (backend_menu) DestroyMenu(backend_menu);
-        if (menu) DestroyMenu(menu);
-        return;
+    if (!menu) return;
+    AppendMenuW(menu, MF_STRING, show_settings, L"Settings...");
+    SetMenuDefaultItem(menu, show_settings, FALSE);
+    AppendMenuW(menu, MF_STRING | (state.armed ? MF_CHECKED : MF_UNCHECKED),
+        toggle_arm, L"Enable");
+    AppendMenuW(menu, MF_STRING | (state.armed ? MF_UNCHECKED : MF_CHECKED),
+        toggle_arm, L"Disable");
+    AppendMenuW(menu, MF_STRING | (state.armed && state.pause_signal ? MF_ENABLED : MF_GRAYED),
+        toggle_pause, state.paused ? L"Resume frame generation" : L"Pause frame generation");
+    std::wstring binding = L"Pause key: " + pause_key_display(state.settings.pause_hotkey);
+    AppendMenuW(menu, MF_STRING, change_pause_key, binding.c_str());
+    HBITMAP pause_bitmap = state.paused ? create_pause_bitmap() : nullptr;
+    if (pause_bitmap) {
+        MENUITEMINFOW item{sizeof(item)};
+        item.fMask = MIIM_BITMAP;
+        item.hbmpItem = pause_bitmap;
+        SetMenuItemInfoW(menu, toggle_pause, FALSE, &item);
     }
-
-    AppendMenuW(
-        menu,
-        MF_STRING | (state.armed ? MF_CHECKED : MF_UNCHECKED),
-        toggle_arm,
-        state.armed
-            ? L"Disarm bridge"
-            : L"Arm bridge until manual disarm");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(
-        backend_menu,
-        MF_STRING |
-            (state.settings.backend == xrfg::standalone::FlowBackend::fidelity_fx
-                 ? MF_CHECKED
-                 : MF_UNCHECKED),
-        backend_fidelity_fx,
-        L"FidelityFX");
-    AppendMenuW(
-        backend_menu,
-        MF_STRING |
-            (state.settings.backend == xrfg::standalone::FlowBackend::nvidia &&
-                     state.settings.nvidia_preset ==
-                         xrfg::standalone::NvidiaPerformancePreset::fast
-                 ? MF_CHECKED
-                 : MF_UNCHECKED),
-        backend_nvidia_fast,
-        L"NVIDIA Fast (test)");
-    AppendMenuW(
-        backend_menu,
-        MF_STRING |
-            (state.settings.backend == xrfg::standalone::FlowBackend::nvidia &&
-                     state.settings.nvidia_preset ==
-                         xrfg::standalone::NvidiaPerformancePreset::medium
-                 ? MF_CHECKED
-                 : MF_UNCHECKED),
-        backend_nvidia_medium,
-        L"NVIDIA Medium");
-    AppendMenuW(
-        backend_menu,
-        MF_STRING |
-            (state.settings.backend == xrfg::standalone::FlowBackend::nvidia &&
-                     state.settings.nvidia_preset ==
-                         xrfg::standalone::NvidiaPerformancePreset::slow
-                 ? MF_CHECKED
-                 : MF_UNCHECKED),
-        backend_nvidia_slow,
-        L"NVIDIA Slow (best quality)");
-    AppendMenuW(backend_menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(
-        backend_menu,
-        MF_STRING |
-            (state.settings.nvidia_bidirectional ? MF_CHECKED : MF_UNCHECKED),
-        toggle_nvidia_bidirectional,
-        L"NVIDIA bidirectional consistency");
-    AppendMenuW(
-        menu,
-        MF_POPUP,
-        reinterpret_cast<UINT_PTR>(backend_menu),
-        L"Optical flow backend");
-    AppendMenuW(
-        nvidia_scale_menu,
-        MF_STRING |
-            (state.settings.nvidia_input_scale ==
-                     xrfg::standalone::NvidiaInputScale::full
-                 ? MF_CHECKED
-                 : MF_UNCHECKED),
-        nvidia_scale_full,
-        L"100% (full resolution)");
-    AppendMenuW(
-        nvidia_scale_menu,
-        MF_STRING |
-            (state.settings.nvidia_input_scale ==
-                     xrfg::standalone::NvidiaInputScale::three_quarter
-                 ? MF_CHECKED
-                 : MF_UNCHECKED),
-        nvidia_scale_three_quarter,
-        L"75%");
-    AppendMenuW(
-        nvidia_scale_menu,
-        MF_STRING |
-            (state.settings.nvidia_input_scale ==
-                     xrfg::standalone::NvidiaInputScale::half
-                 ? MF_CHECKED
-                 : MF_UNCHECKED),
-        nvidia_scale_half,
-        L"50%");
-    AppendMenuW(
-        menu,
-        MF_POPUP,
-        reinterpret_cast<UINT_PTR>(nvidia_scale_menu),
-        L"NVIDIA OFA resolution");
-    AppendMenuW(
-        menu,
-        MF_STRING | (state.settings.diagnostics ? MF_CHECKED : MF_UNCHECKED),
-        toggle_diagnostics,
-        L"Bridge flight recorder");
-    HMENU overlay_menu = CreatePopupMenu();
-    if (overlay_menu) {
-        const struct { UINT command; xrfg::FpsOverlayPosition position; const wchar_t* text; } entries[]{
-            {overlay_upper_left, xrfg::FpsOverlayPosition::upper_left, L"Upper left"},
-            {overlay_upper_right, xrfg::FpsOverlayPosition::upper_right, L"Upper right"},
-            {overlay_lower_left, xrfg::FpsOverlayPosition::lower_left, L"Lower left"},
-            {overlay_lower_right, xrfg::FpsOverlayPosition::lower_right, L"Lower right"},
-            {overlay_off, xrfg::FpsOverlayPosition::off, L"Off"}};
-        for (const auto& entry : entries) {
-            if (entry.position == xrfg::FpsOverlayPosition::off) AppendMenuW(overlay_menu, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(overlay_menu, MF_STRING |
-                (state.settings.overlay_position == entry.position ? MF_CHECKED : MF_UNCHECKED),
-                entry.command, entry.text);
-        }
-        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(overlay_menu), L"FPS overlay");
-    }
-    AppendMenuW(menu, MF_STRING, open_logs, L"Open bridge logs");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, donate, L"Donate");
+    AppendMenuW(menu, MF_STRING, open_logs, L"Open logs");
     AppendMenuW(menu, MF_STRING, show_about, L"About");
     AppendMenuW(menu, MF_STRING, exit_application, L"Exit");
-
     POINT cursor{};
     GetCursorPos(&cursor);
     SetForegroundWindow(state.window);
     TrackPopupMenu(menu, TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, state.window, nullptr);
     PostMessageW(state.window, WM_NULL, 0, 0);
     DestroyMenu(menu);
+    if (pause_bitmap) DeleteObject(pause_bitmap);
 }
 
 void handle_command(AppState& state, UINT command) {
@@ -658,63 +890,35 @@ void handle_command(AppState& state, UINT command) {
             }
         }
         break;
-    case backend_fidelity_fx:
-        state.settings.backend = xrfg::standalone::FlowBackend::fidelity_fx;
-        update_runtime_options(state);
+    case toggle_pause:
+        if (!state.armed || !state.pause_signal) break;
+        if (state.paused ? ResetEvent(state.pause_signal)
+                         : SetEvent(state.pause_signal)) {
+            state.paused = !state.paused;
+            log_lifecycle(state.local_directory, state.paused ? L"pause" : L"resume");
+            refresh_tray_icon(state);
+            if (state.paused) {
+                show_balloon(
+                    state,
+                    L"Frame generation paused",
+                    L"Running games still go through the bridge. To rule OFXR out, disarm and restart the game.");
+            } else {
+                show_balloon(
+                    state,
+                    L"Frame generation resumed",
+                    L"Running games generate frames again.");
+            }
+        } else {
+            show_error(
+                state.window, last_error_message(L"Switching the frame generation pause"));
+        }
         break;
-    case backend_nvidia_fast:
-        state.settings.backend = xrfg::standalone::FlowBackend::nvidia;
-        state.settings.nvidia_preset =
-            xrfg::standalone::NvidiaPerformancePreset::fast;
-        update_runtime_options(state);
+    case change_pause_key:
+        change_pause_hotkey(state);
         break;
-    case backend_nvidia_slow:
-        state.settings.backend = xrfg::standalone::FlowBackend::nvidia;
-        state.settings.nvidia_preset =
-            xrfg::standalone::NvidiaPerformancePreset::slow;
-        update_runtime_options(state);
-        break;
-    case backend_nvidia_medium:
-        state.settings.backend = xrfg::standalone::FlowBackend::nvidia;
-        state.settings.nvidia_preset =
-            xrfg::standalone::NvidiaPerformancePreset::medium;
-        update_runtime_options(state);
-        break;
-    case toggle_nvidia_bidirectional:
-        state.settings.nvidia_bidirectional =
-            !state.settings.nvidia_bidirectional;
-        update_runtime_options(state);
-        break;
-    case nvidia_scale_full:
-        state.settings.nvidia_input_scale =
-            xrfg::standalone::NvidiaInputScale::full;
-        update_runtime_options(state);
-        break;
-    case nvidia_scale_three_quarter:
-        state.settings.nvidia_input_scale =
-            xrfg::standalone::NvidiaInputScale::three_quarter;
-        update_runtime_options(state);
-        break;
-    case nvidia_scale_half:
-        state.settings.nvidia_input_scale =
-            xrfg::standalone::NvidiaInputScale::half;
-        update_runtime_options(state);
-        break;
-    case overlay_off:
-    case overlay_upper_left:
-    case overlay_upper_right:
-    case overlay_lower_left:
-    case overlay_lower_right:
-        state.settings.overlay_position = command == overlay_off ? xrfg::FpsOverlayPosition::off
-            : command == overlay_upper_left ? xrfg::FpsOverlayPosition::upper_left
-            : command == overlay_lower_left ? xrfg::FpsOverlayPosition::lower_left
-            : command == overlay_lower_right ? xrfg::FpsOverlayPosition::lower_right
-            : xrfg::FpsOverlayPosition::upper_right;
-        update_runtime_options(state, true);
-        break;
-    case toggle_diagnostics:
-        state.settings.diagnostics = !state.settings.diagnostics;
-        update_runtime_options(state);
+    case show_settings:
+        if (!xrfg::autonomous::show_settings_window(state.window))
+            show_error(state.window, L"Could not open the settings window.");
         break;
     case open_logs: {
         const auto directory = runtime_directory(state.local_directory);
@@ -724,13 +928,16 @@ void handle_command(AppState& state, UINT command) {
             state.window, L"open", directory.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         break;
     }
-    case donate:
+    case donate_creator:
+    case donate_maintainer:
         ShellExecuteW(
-            state.window, L"open", kDonateUrl, nullptr, nullptr, SW_SHOWNORMAL);
+            state.window, L"open",
+            command == donate_creator ? kDonateCreatorUrl : kDonateMaintainerUrl,
+            nullptr, nullptr, SW_SHOWNORMAL);
         break;
     case show_about: {
         wchar_t version_label[64]{};
-        swprintf_s(version_label, L"OFXR Bridge V%03u", kImplementationVersion);
+        swprintf_s(version_label, L"OFXR 0.3.0 (v%03u)", kImplementationVersion);
         TASKDIALOGCONFIG dialog{};
         dialog.cbSize = sizeof(dialog);
         dialog.hwndParent = state.window;
@@ -742,9 +949,16 @@ void handle_command(AppState& state, UINT command) {
         dialog.pszWindowTitle = kApplicationName;
         dialog.pszMainInstruction = version_label;
         dialog.pszContent =
-            L"Licensed under LGPL-3.0-or-later.\r\n\r\n"
-            L"<a href=\"https://github.com/tig3rmast3r/OFXR-Bridge\">"
-            L"github.com/tig3rmast3r/OFXR-Bridge</a>";
+            L"Created by tig3rmast3r, the original author of OFXR.\r\n"
+            L"Support him: <a href=\"https://ko-fi.com/tig3rmast3r\">"
+            L"ko-fi.com/tig3rmast3r</a>\r\n\r\n"
+            L"Further improvements and collaboration by Djules.\r\n"
+            L"Support him: <a href=\"https://ko-fi.com/djules\">"
+            L"ko-fi.com/djules</a>\r\n\r\n"
+            L"DLSS and Hybrid Framegen Integration by Elliotttate.\r\n\r\n"
+            L"Licensed under LGPL-3.0-or-later.\r\n"
+            L"<a href=\"https://github.com/djules75/OFXR-Bridge\">"
+            L"github.com/djules75/OFXR-Bridge</a>";
         dialog.hMainIcon = state.disarmed_icon;
         dialog.pfCallback = [](
             HWND window,
@@ -765,8 +979,13 @@ void handle_command(AppState& state, UINT command) {
             };
         if (FAILED(TaskDialogIndirect(&dialog, nullptr, nullptr, nullptr))) {
             const std::wstring message = std::wstring(version_label) +
-                L"\r\n\r\nLicense: LGPL-3.0-or-later\r\n"
-                L"https://github.com/tig3rmast3r/OFXR-Bridge";
+                L"\r\n\r\nCreated by tig3rmast3r, the original author of OFXR.\r\n"
+                L"Support him: https://ko-fi.com/tig3rmast3r\r\n\r\n"
+                L"Further improvements and collaboration by Djules.\r\n"
+                L"Support him: https://ko-fi.com/djules\r\n\r\n"
+                L"DLSS and Hybrid Framegen Integration by Elliotttate.\r\n\r\n"
+                L"License: LGPL-3.0-or-later\r\n"
+                L"https://github.com/djules75/OFXR-Bridge";
             MessageBoxW(
                 state.window,
                 message.c_str(),
@@ -809,11 +1028,14 @@ LRESULT CALLBACK window_procedure(
         if (lparam == WM_RBUTTONUP || lparam == WM_CONTEXTMENU) {
             show_context_menu(*state);
         } else if (lparam == WM_LBUTTONDBLCLK) {
-            handle_command(*state, toggle_arm);
+            handle_command(*state, show_settings);
         }
         return 0;
     case WM_COMMAND:
         handle_command(*state, LOWORD(wparam));
+        return 0;
+    case WM_HOTKEY:
+        if (wparam == kPauseHotkeyId) handle_command(*state, toggle_pause);
         return 0;
     case WM_CLOSE: {
         std::wstring error;
@@ -827,7 +1049,7 @@ LRESULT CALLBACK window_procedure(
     case WM_QUERYENDSESSION: {
         std::wstring error;
         if (!disarm_bridge(*state, &error)) {
-            ShutdownBlockReasonCreate(window, L"OFXR Bridge could not disable its OpenXR registrations.");
+            ShutdownBlockReasonCreate(window, L"OFXR 0.3.0 could not disable its OpenXR registrations.");
             return FALSE;
         }
         ShutdownBlockReasonDestroy(window);
@@ -845,6 +1067,7 @@ LRESULT CALLBACK window_procedure(
         }
         return 0;
     case WM_DESTROY: {
+        xrfg::autonomous::close_settings_window();
         std::wstring error;
         if (!disarm_bridge(*state, &error))
             log_lifecycle(state->local_directory, L"destroy-cleanup", error);
@@ -861,9 +1084,17 @@ LRESULT CALLBACK window_procedure(
     HANDLE parent, const std::filesystem::path& manifest,
     const std::filesystem::path& local_directory, std::wstring* error,
     xrfg::implicit_layer::RegistryScope scope,
-    std::wstring_view registry_subkey = xrfg::implicit_layer::kRegistrySubkey) {
+    std::wstring_view registry_subkey = xrfg::implicit_layer::kRegistrySubkey,
+    const std::filesystem::path& vulkan_manifest = {}) {
     if (!xrfg::implicit_layer::owned_registration_path(manifest, local_directory)) {
         if (error) *error = L"Cleanup watchdog refused an unowned manifest.";
+        return false;
+    }
+    if (!vulkan_manifest.empty() &&
+        !xrfg::implicit_layer::owned_registration_path(
+            vulkan_manifest, local_directory,
+            xrfg::implicit_layer::kVulkanManifestPrefix)) {
+        if (error) *error = L"Cleanup watchdog refused an unowned Vulkan manifest.";
         return false;
     }
     while (xrfg::implicit_layer::manifest_registered(manifest, scope, registry_subkey)) {
@@ -871,8 +1102,21 @@ LRESULT CALLBACK window_procedure(
             break;
     }
     // Scoped to this arm only: an old helper must never revoke a newer arm.
-    return xrfg::implicit_layer::retire_manifest(
+    bool retired = xrfg::implicit_layer::retire_manifest(
         manifest, scope, error, registry_subkey);
+    if (!vulkan_manifest.empty()) {
+        std::wstring vulkan_error;
+        if (!xrfg::implicit_layer::retire_manifest(
+                vulkan_manifest, scope, &vulkan_error,
+                xrfg::implicit_layer::kVulkanRegistrySubkey)) {
+            retired = false;
+            if (error) {
+                if (!error->empty()) *error += L"\r\n";
+                *error += vulkan_error;
+            }
+        }
+    }
+    return retired;
 }
 
 [[nodiscard]] std::optional<int> run_cleanup_helper() {
@@ -885,11 +1129,13 @@ LRESULT CALLBACK window_procedure(
         LocalFree(arguments);
         return std::nullopt;
     }
-    if (argument_count != 5) {
+    if (argument_count != 5 && argument_count != 6) {
         LocalFree(arguments);
         return EXIT_FAILURE;
     }
     const std::filesystem::path manifest(arguments[2]);
+    const std::filesystem::path vulkan_manifest(
+        argument_count == 6 ? arguments[5] : L"");
     wchar_t* end = nullptr;
     const unsigned long parsed_pid = std::wcstoul(arguments[3], &end, 10);
     const bool valid_pid = end != arguments[3] && end != nullptr && *end == L'\0' &&
@@ -907,7 +1153,7 @@ LRESULT CALLBACK window_procedure(
 
     std::filesystem::path directory;
     try {
-        directory = runtime_directory(local_app_data() / L"OFXR Bridge");
+        directory = runtime_directory(local_app_data() / L"OFXR Autonomous");
     } catch (...) {
         return EXIT_FAILURE;
     }
@@ -918,29 +1164,61 @@ LRESULT CALLBACK window_procedure(
     HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(parsed_pid));
     std::wstring error;
     const bool cleaned = watch_registered_arm(parent, manifest,
-        local_app_data() / L"OFXR Bridge", &error, scope);
+        local_app_data() / L"OFXR Autonomous", &error, scope,
+        xrfg::implicit_layer::kRegistrySubkey, vulkan_manifest);
     if (parent != nullptr) {
         CloseHandle(parent);
     }
-    log_lifecycle(local_app_data() / L"OFXR Bridge", L"watchdog-cleanup", error);
+    log_lifecycle(local_app_data() / L"OFXR Autonomous", L"watchdog-cleanup", error);
     return cleaned ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 } // namespace
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
+    // This entry point displays the panel without creating an activation,
+    // changing registrations, writing tray configuration or loading the layer.
+    if (arguments && (wcsstr(arguments, L"--settings-only") || wcsstr(arguments, L"--settings-smoke") ||
+        wcsstr(arguments, L"--settings-preview"))) {
+        if (!xrfg::autonomous::show_settings_window(nullptr)) return EXIT_FAILURE;
+        if (wcsstr(arguments, L"--settings-preview")) {
+            int argument_count = 0;
+            auto** parsed_arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count);
+            bool captured = false;
+            if (parsed_arguments) {
+                for (int index = 1; index + 1 < argument_count; ++index)
+                    if (std::wstring_view(parsed_arguments[index]) == L"--settings-preview")
+                        captured = xrfg::autonomous::save_settings_preview(parsed_arguments[index + 1]);
+                LocalFree(parsed_arguments);
+            }
+            xrfg::autonomous::close_settings_window();
+            return captured ? EXIT_SUCCESS : EXIT_FAILURE;
+        }
+        UINT_PTR smoke_timer = 0;
+        if (wcsstr(arguments, L"--settings-smoke"))
+            smoke_timer = SetTimer(nullptr, 0, 1500,
+                [](HWND, UINT, UINT_PTR timer, DWORD) { KillTimer(nullptr, timer); PostQuitMessage(0); });
+        MSG panel_message{};
+        while (GetMessageW(&panel_message, nullptr, 0, 0) > 0) {
+            TranslateMessage(&panel_message);
+            DispatchMessageW(&panel_message);
+        }
+        if (smoke_timer) KillTimer(nullptr, smoke_timer);
+        xrfg::autonomous::close_settings_window();
+        return static_cast<int>(panel_message.wParam);
+    }
     if (const auto helper_result = run_cleanup_helper()) {
         return *helper_result;
     }
 
-    HANDLE single_instance = CreateMutexW(nullptr, TRUE, L"Local\\OFXRBridgeTray");
+    HANDLE single_instance = CreateMutexW(nullptr, TRUE, L"Local\\OFXRAutonomousTrayV474");
     if (single_instance == nullptr) {
         return EXIT_FAILURE;
     }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBoxW(
             nullptr,
-            L"OFXR Bridge is already running in the notification area.",
+            L"OFXR 0.3.0 is already running in the notification area.",
             kApplicationName,
             MB_OK | MB_ICONINFORMATION);
         CloseHandle(single_instance);
@@ -950,7 +1228,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     AppState state;
     try {
         state.executable_directory = executable_directory();
-        state.local_directory = local_app_data() / L"OFXR Bridge";
+        state.local_directory = local_app_data() / L"OFXR Autonomous";
         state.settings_path = state.local_directory / L"tray.ini";
         std::wstring cleanup_error;
         if (!cleanup_all_owned_registrations(state, &cleanup_error)) {
@@ -964,7 +1242,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     } catch (...) {
         MessageBoxW(
             nullptr,
-            L"OFXR Bridge could not initialize its local configuration.",
+            L"OFXR 0.3.0 could not initialize its local configuration.",
             kApplicationName,
             MB_OK | MB_ICONERROR);
         CloseHandle(single_instance);
@@ -977,7 +1255,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (state.armed_icon == nullptr || state.disarmed_icon == nullptr) {
         MessageBoxW(
             nullptr,
-            L"OFXR Bridge could not load its notification icons.",
+            L"OFXR 0.3.0 could not load its notification icons.",
             kApplicationName,
             MB_OK | MB_ICONERROR);
         CloseHandle(single_instance);
@@ -1016,6 +1294,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         return EXIT_FAILURE;
     }
 
+    // Normal startup auto-arms through the same validated path as Enable.
+    // Settings-only/preview and watchdog helpers returned before this point.
+    std::wstring auto_arm_error;
+    if (!arm_bridge(state, &auto_arm_error)) {
+        log_lifecycle(state.local_directory, L"startup-auto-arm", auto_arm_error);
+        show_error(state.window, auto_arm_error);
+    }
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
         TranslateMessage(&message);

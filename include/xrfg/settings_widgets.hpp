@@ -1,0 +1,37 @@
+#pragma once
+
+#include "xrfg/autonomous_control.hpp"
+
+namespace xrfg::autonomous {
+void apply_settings_style();
+
+// Keep one state per ImGui context. Pending edits are rebased onto changes from
+// the other UI, and publication merges only edited fields under the IPC mutex.
+struct SettingsWidgetState {
+    Settings draft{};
+    Settings base{};
+    std::uint64_t observed_revision{};
+    bool initialized{};
+    bool dirty{};
+    bool scale_editing{};
+    bool save_failed{};
+};
+
+struct SettingsWidgetOptions {
+    bool compact{}; // tighter spacing for the in-headset 1024 x 768 surface
+    bool defer_publication{}; // containing menu publishes after its drag/size footer
+};
+
+void synchronize_settings_widgets(SettingsWidgetState& ui, const Snapshot& state) noexcept;
+bool publish_settings_widgets(SettingsWidgetState& ui) noexcept;
+// Close/focus-loss is also the end of an edit; commit a held resolution even
+// when the hidden menu will not draw the release event.
+void finish_settings_widget_edits(SettingsWidgetState& ui) noexcept;
+
+// The caller owns the current ImGui context, frame and containing window. This
+// function owns no GPU or platform resources and draws the same options in both
+// locations. Returns true when a changed draft was successfully published.
+bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& state,
+    SettingsWidgetOptions options = {});
+
+} // namespace xrfg::autonomous

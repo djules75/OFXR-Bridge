@@ -4,46 +4,11 @@
 
 #include <cstdint>
 
-// Versioned process-local ABI used by optional producers such as OptiScaler.
+// Versioned process-local ABI used by optional producers including the native ingress.
 // The OpenXR layer owns all state and GPU snapshot lifetime; producers only
 // publish inputs and send UI requests while both modules share one process.
 constexpr std::uint32_t OFXR_PROVIDER_API_VERSION_V1 = 1;
 constexpr std::uint32_t OFXR_PROVIDER_API_VERSION_V2 = 2;
-// ASCII "OFXROPT1". This identity deliberately does not contain a product or
-// file version: stock OptiScaler builds can never satisfy this contract by
-// merely sharing a filename or changing their version resource.
-constexpr std::uint64_t OFXR_OPTISCALER_PROVIDER_MAGIC_V1 =
-    0x4F4658524F505431ULL;
-// ASCII "OFXROPT2". This permanent marker identifies an OFXR-aware
-// OptiScaler independently of its filename and product/file version.
-constexpr std::uint64_t OFXR_OPTISCALER_PROVIDER_MAGIC_V2 =
-    0x4F4658524F505432ULL;
-
-enum OFXR_OptiScalerProviderCapabilityV1 : std::uint64_t {
-    OFXR_OPTISCALER_CAP_DLSS_MOTION_VECTORS_V1 = 1ULL << 0,
-    OFXR_OPTISCALER_CAP_IN_GAME_MENU_V1 = 1ULL << 1,
-};
-
-struct OFXR_OptiScalerProviderIdentityV1 {
-    std::uint32_t struct_size{sizeof(OFXR_OptiScalerProviderIdentityV1)};
-    std::uint32_t api_version{OFXR_PROVIDER_API_VERSION_V1};
-    std::uint64_t magic{OFXR_OPTISCALER_PROVIDER_MAGIC_V1};
-    std::uint64_t capabilities{};
-};
-
-enum OFXR_OptiScalerProviderCapabilityV2 : std::uint64_t {
-    OFXR_OPTISCALER_CAP_DLSS_GUIDES_V2 = 1ULL << 0,
-    OFXR_OPTISCALER_CAP_IN_GAME_MENU_V2 = 1ULL << 1,
-    OFXR_OPTISCALER_CAP_FSR_FRAME_GENERATION_V2 = 1ULL << 2,
-};
-
-struct OFXR_OptiScalerProviderIdentityV2 {
-    std::uint32_t struct_size{sizeof(OFXR_OptiScalerProviderIdentityV2)};
-    std::uint32_t api_version{OFXR_PROVIDER_API_VERSION_V2};
-    std::uint64_t magic{OFXR_OPTISCALER_PROVIDER_MAGIC_V2};
-    std::uint64_t capabilities{};
-};
-
 struct OFXR_ControlSettingsV1 {
     std::uint32_t struct_size{sizeof(OFXR_ControlSettingsV1)};
     std::int32_t enabled{1};
@@ -206,11 +171,6 @@ struct OFXR_DlssGuideStatisticsV2 {
     std::uint32_t fsr_status{};
 };
 
-using PFN_OFXR_OptiScalerProviderV1 = int (*)(
-    OFXR_OptiScalerProviderIdentityV1* identity) noexcept;
-using PFN_OFXR_OptiScalerProviderV2 = int (*)(
-    OFXR_OptiScalerProviderIdentityV2* identity) noexcept;
-
 #if defined(OFXR_PROVIDER_API_EXPORTS)
 #define OFXR_LAYER_API __declspec(dllexport)
 #else
@@ -235,9 +195,6 @@ OFXR_LAYER_API void OFXR_RetireDlssMotionVectorStreamV1(
 OFXR_LAYER_API int OFXR_GetDlssMotionVectorStatisticsV1(
     OFXR_DlssMotionVectorStatisticsV1* statistics) noexcept;
 OFXR_LAYER_API std::uint32_t OFXR_GetProviderApiVersionV2() noexcept;
-OFXR_LAYER_API int OFXR_RegisterOptiScalerProviderV2(
-    const OFXR_OptiScalerProviderIdentityV2* identity) noexcept;
-OFXR_LAYER_API void OFXR_UnregisterOptiScalerProviderV2() noexcept;
 OFXR_LAYER_API int OFXR_GetControlSnapshotV2(
     OFXR_ControlSnapshotV2* snapshot) noexcept;
 OFXR_LAYER_API int OFXR_RequestControlV2(

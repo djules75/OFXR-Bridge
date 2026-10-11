@@ -1,0 +1,37 @@
+{
+  "version": "V465",
+  "base": "41f7a7247e32ff2ab085d431c06101ce0c2eee0c",
+  "ipc": 46501,
+  "provider_abi": 45601,
+  "suites": {
+    "new": {
+      "passed": 143,
+      "total": 143,
+      "skipped": 0,
+      "failed": 0,
+      "seconds": 90.64
+    },
+    "djules": {
+      "passed": 160,
+      "total": 160,
+      "skipped": 0,
+      "failed": 0,
+      "seconds": 96.9
+    }
+  },
+  "identical_v464_shader_bytecodes": 25,
+  "unchanged_production_sources": 199,
+  "shipping_new_djules_restored_identical": 8,
+  "fsr_provider_api": "1.1.3",
+  "measurement": "CPU/API request from WaitFrame entry through later real runtime acceptance and producer End return, same immutable frame ticket",
+  "producer_calls": "Union wall time includes API logger tail, runtime calls and all producer waits; concurrent eye calls counted once",
+  "logging_required": false,
+  "gpu_timestamps_or_new_gpu_waits": false,
+  "renderer_or_scheduler_change": false,
+  "legacy_returnal_provider_compatibility": "passed",
+  "r19_default": false,
+  "vulkan_native_guides": "suspended",
+  "game_headset_validation": "Owner option latency comparison pending; V464 FSR rotation confirmation remains pending",
+  "live_activation": false,
+  "initial_failures": "No compile or test failures; complete intermediate new suites passed before tightening telemetry handoff and API boundary coverage"
+}

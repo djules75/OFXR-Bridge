@@ -1,2 +1,9 @@
 * text=auto
 *.ico binary
+# Preserve imported shader bytes, vendor text and licence formatting.
+src/neural/DlssNr_Shader.h whitespace=-blank-at-eol,-blank-at-eof
+src/ui/vendor/imgui/imstb_*.h whitespace=-blank-at-eol
+licenses/*.txt whitespace=-blank-at-eof
+
+# Preserve the imported NVIDIA SDK declaration bytes and their notices.
+include/xrfg/native_ingress/streamline1/*.h -text
