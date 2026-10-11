@@ -2,6 +2,7 @@
 #include "xrfg/luke_depth_format.hpp"
 #include "xrfg/luke_motion_format.hpp"
 #include "xrfg/luke_native_motion.hpp"
+#include "xrfg/luke_afw_continuity.hpp"
 #include "xrfg/luke_recording_scope.hpp"
 #include "xrfg/luke_guide_window.hpp"
 #include "xrfg/luke_physical_projection.hpp"
@@ -373,6 +374,8 @@ struct LukeAfwSynthesizer::Impl {
     std::uint64_t next_submission_fence{1};
     EyeFrameBuffers eye_buffers{};
     std::array<CameraData, 2> previous_source_camera{};
+    std::uint64_t last_evaluated_publication{};
+    unsigned last_evaluated_eye{2};
     std::array<std::uint64_t, 2> previous_source_stream{};
     std::array<std::uint64_t, 2> previous_source_epoch{};
     std::array<std::uint64_t, 2> previous_source_publication{};
@@ -1239,8 +1242,23 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             luke_native_motion_constants(guide,motion_crop_x,motion_crop_y,native_motion,native_failure);
         bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,native_failure,950,guide.publication,
             guide.previous_same_native_camera?guide.previous_same_native_camera->publication:0);
-        if(native_camera_contract && !have_native_motion)
+        if(native_camera_contract && !have_native_motion) {
+            const auto now=GetTickCount64();
+            auto& last=impl_->input_rejection_report_ticks[63];
+            if(!last || now-last>=1000) {
+                last=now;
+                for(unsigned i=0;i<3;++i) {
+                    const auto value=i==0?dlss_native_camera_history(guide):
+                        i==1 && guide.previous_opposite_guide?dlss_native_camera_history(*guide.previous_opposite_guide):
+                        guide.previous_same_native_camera.value_or(DlssNativeCameraHistory{});
+                    std::uint32_t w{};std::memcpy(&w,&value.projection[11],sizeof(w));
+                    const std::uint64_t flags=(value.valid?1:0)|(value.reset?2:0)|(value.jittered?4:0)|
+                        (static_cast<std::uint64_t>(value.token)<<32);
+                    bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,i,953,w,flags);
+                }
+            }
             return HRESULT_FROM_WIN32(ERROR_NOT_READY);
+        }
 
         // The allocator, plugin eye buffers and private depth/motion targets
         // are reused by the next evaluation. V23181 skipped that evaluation
@@ -1295,6 +1313,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             impl_->frame_buffers_ready = false;
             impl_->previous_source_publication = {};
             impl_->previous_source_camera = {};
+            impl_->last_evaluated_publication = 0;
+            impl_->last_evaluated_eye = 2;
             impl_->depth_calibration_reset_pending = true;
         }
         CameraData camera{};
@@ -1353,6 +1373,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             impl_->color_description = color_desc;
             impl_->frame_buffers_ready = true;
             impl_->previous_source_publication = {};
+            impl_->last_evaluated_publication = 0;
+            impl_->last_evaluated_eye = 2;
         }
         if (impl_->depth.texture == nullptr ||
             impl_->depth_width != cropped_depth_width ||
@@ -1699,7 +1721,12 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         params.motion_scale[1] = guide.scale_y *
             static_cast<float>(guide.output_height) /
             static_cast<float>(guide.motion_height);
-        params.mode = static_cast<FrameWarpMode>(settings.mode);
+        const int effective_mode = luke_afw_effective_mode(settings.mode,
+            guide.publication, impl_->last_evaluated_publication,
+            source_eye, impl_->last_evaluated_eye);
+        params.mode = static_cast<FrameWarpMode>(effective_mode);
+        bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+            effective_mode, 952, guide.publication, impl_->last_evaluated_publication);
         const std::uint32_t interpreted_eye = source_eye;
         params.eye_index = source_eye == 0 ? EyeLeft : EyeRight;
         params.camera_data = &camera;
@@ -1717,7 +1744,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             contract.previous_serial = guide.previous_serial;
             contract.source_eye = static_cast<std::int32_t>(source_eye);
             contract.destination_eye = static_cast<std::int32_t>(1U - source_eye);
-            contract.mode = settings.mode;
+            contract.mode = effective_mode;
             contract.motion_vectors_type = params.motion_vectors_type;
             contract.ignore_motion_threshold =
                 params.ignore_motion_threshold;
@@ -1920,6 +1947,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         }
         if (SUCCEEDED(result)) {
             impl_->last_submission_fence = fence_value;
+            impl_->last_evaluated_publication = guide.publication;
+            impl_->last_evaluated_eye = source_eye;
             impl_->previous_source_camera[source_eye] = camera;
             impl_->previous_source_stream[source_eye] = guide.stream;
             impl_->previous_source_epoch[source_eye] = guide.epoch;

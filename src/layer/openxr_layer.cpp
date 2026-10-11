@@ -7056,6 +7056,8 @@ XrResult release_swapchain_image_locked(
     std::uint64_t diagnostic_capture = 0;
     if (candidate_index && state->session->frame_capture &&
         ((pending_capture && d3d11_interop) || state->session->frame_capture->ring_active()) &&
+        (!state->session->frame_capture->ring_active() ||
+            (state->dlss_logical_eye_count==2 && state->dlss_logical_eye_index.has_value())) &&
         state->session->frame_capture->active() && *candidate_index < state->enumerated_d3d11_images.size()) {
         if(!gpu_lock.owns_lock())gpu_lock=std::unique_lock<std::mutex>(state->session->gpu_mutex);
         diagnostic_capture = state->session->frame_capture->source(handle_value(state->handle),

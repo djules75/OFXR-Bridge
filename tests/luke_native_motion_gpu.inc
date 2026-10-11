@@ -16,6 +16,7 @@
     D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};pd.pRootSignature=root.Get();pd.CS={g_xrfg_luke_compose_motion_shader,sizeof(g_xrfg_luke_compose_motion_shader)};
     ComPtr<ID3D12PipelineState> pipeline;check(device->CreateComputePipelineState(&pd,IID_PPV_ARGS(&pipeline)));
     unsigned scenarios=0;
+    for(bool left_handed:{false,true})
     for(auto format:{DXGI_FORMAT_R16G16_FLOAT,DXGI_FORMAT_R32G32_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R32G32B32A32_FLOAT})
     for(unsigned scenario=0;scenario<11;++scenario) {
         auto current=texture(10,8,format,D3D12_RESOURCE_FLAG_NONE,D3D12_RESOURCE_STATE_COPY_DEST);
@@ -23,13 +24,14 @@
         auto output=texture(3,2,xrfg::kLukeAfwMotionFormat,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         auto copied=texture(3,2,xrfg::kLukeAfwMotionFormat,D3D12_RESOURCE_FLAG_NONE,D3D12_RESOURCE_STATE_COPY_DEST);
         xrfg::DlssMotionVectorFrame g{};auto middle=std::make_shared<xrfg::DlssMotionVectorFrame>();
-        auto init=[](xrfg::DlssMotionVectorFrame& f,unsigned serial) {
+        auto init=[&](xrfg::DlssMotionVectorFrame& f,unsigned serial) {
             f.stream=10;f.epoch=3;f.serial=serial;f.publication=serial+10;f.camera_frame_token=serial+20;
             f.camera_frame_token_valid=f.camera_data_valid=f.camera_matrices_valid=true;
             f.motion_width=f.depth_width=8;f.motion_height=f.depth_height=6;f.output_width=16;f.output_height=12;
             f.camera_right={1,0,0};f.camera_up={0,1,0};f.camera_forward={0,0,-1};
             f.camera_view_to_clip[0]=f.camera_view_to_clip[5]=1;f.camera_view_to_clip[11]=-1;f.camera_view_to_clip[14]=.1F;
             f.camera_clip_to_view[0]=f.camera_clip_to_view[5]=1;f.camera_clip_to_view[11]=10;f.camera_clip_to_view[14]=-1;
+            if(left_handed) {f.camera_view_to_clip[11]=1;f.camera_clip_to_view[14]=1;}
         };
         init(g,5);init(*middle,4);xrfg::DlssMotionVectorFrame old{};init(old,3);
         g.previous_serial=3;g.motion_x=g.motion_y=1;g.scale_x=g.scale_y=4;
@@ -45,7 +47,8 @@
             middle->jitter_x=.25F;middle->jitter_y=.125F;old.jitter_x=-.25F;old.jitter_y=-.125F;
             for(auto* f:{middle.get(),&old}) {
                 f->camera_view_to_clip[8]=-2*f->jitter_x/8;f->camera_view_to_clip[9]=2*f->jitter_y/6;
-                f->camera_clip_to_view[12]=f->camera_view_to_clip[8];f->camera_clip_to_view[13]=f->camera_view_to_clip[9];
+                if(left_handed) {f->camera_view_to_clip[8]=-f->camera_view_to_clip[8];f->camera_view_to_clip[9]=-f->camera_view_to_clip[9];}
+                f->camera_clip_to_view[12]=f->camera_view_to_clip[8]*(left_handed?-1.F:1.F);f->camera_clip_to_view[13]=f->camera_view_to_clip[9]*(left_handed?-1.F:1.F);
             }
         }
         g.motion_vectors=current;g.motion_snapshot_device=device;
@@ -68,8 +71,9 @@
             const double pz=-1-target.camera_position[2]*10*z;
             const double vx=std::cos(angle)*px-std::sin(angle)*pz;
             const double vz=std::sin(angle)*px+std::cos(angle)*pz;
-            return std::array<float,2>{float(((vx/-vz-target.camera_view_to_clip[8]-nx)*4-target.jitter_x)/g.scale_x),
-                float(((py/-vz-target.camera_view_to_clip[9]-ny)*-3-target.jitter_y)/g.scale_y)};
+            const float projection_sign=left_handed?1.F:-1.F;
+            return std::array<float,2>{float(((vx/-vz+projection_sign*target.camera_view_to_clip[8]-nx)*4-target.jitter_x)/g.scale_x),
+                float(((py/-vz+projection_sign*target.camera_view_to_clip[9]-ny)*-3-target.jitter_y)/g.scale_y)};
         };
         const std::array<float,2> object=scenario==3?std::array<float,2>{.125F,-.0625F}:std::array<float,2>{};
         const auto c=[&](unsigned x,unsigned y) {
@@ -135,6 +139,7 @@
         ++g.previous_same_native_camera->publication;admission(2);--g.previous_same_native_camera->publication;
         middle->reset=true;admission(3);middle->reset=false;
         g.jittered=true;admission(3);g.jittered=false;
+        const float w=g.camera_view_to_clip[11];g.camera_view_to_clip[11]=0;admission(3);g.camera_view_to_clip[11]=w;
         const float saved_jitter=middle->jitter_x;middle->jitter_x=NAN;admission(3);middle->jitter_x=saved_jitter;
         --middle->camera_frame_token;admission(4);++middle->camera_frame_token;
         ++middle->motion_width;admission(5);--middle->motion_width;

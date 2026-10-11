@@ -38,8 +38,10 @@ inline bool transform(const DlssNativeCameraHistory& current,
     const DlssNativeCameraHistory& target,std::array<float,16>& output) noexcept {
     Matrix source{},destination{},to_target{};source[3][3]=destination[3][3]=1;
     for(unsigned r=0;r<3;++r) {
-        source[r][0]=current.right[r];source[r][1]=current.up[r];source[r][2]=-current.forward[r];
-        destination[r][0]=target.right[r];destination[r][1]=target.up[r];destination[r][2]=-target.forward[r];
+        source[r][0]=current.right[r];source[r][1]=current.up[r];
+        source[r][2]=std::copysign(1.F,current.projection[11])*current.forward[r];
+        destination[r][0]=target.right[r];destination[r][1]=target.up[r];
+        destination[r][2]=std::copysign(1.F,target.projection[11])*target.forward[r];
         // Subtract world origins in double before rotation; no 2km float cancellation.
         source[r][3]=double(current.position[r])-target.position[r];
     }
@@ -93,7 +95,7 @@ inline bool luke_native_motion_constants(const DlssMotionVectorFrame& guide,
     for(const auto* f:{&current,&middle,&older}) {
         if(!f->valid || !f->token || f->reset || f->jittered ||
             !std::isfinite(f->jitter_x) || !std::isfinite(f->jitter_y) ||
-            std::abs(f->projection[11]+1.F)>1e-5F)return false;
+            std::abs(std::abs(f->projection[11])-1.F)>1e-5F)return false;
         for(const auto* values:{&f->projection,&f->inverse_projection})
             for(float v:*values)if(!std::isfinite(v))return false;
         for(const auto* values:{&f->position,&f->right,&f->up,&f->forward})

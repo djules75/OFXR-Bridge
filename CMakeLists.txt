@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.482.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.483.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1205,4 +1205,14 @@ if(XRFG_BUILD_TESTS AND TARGET xrfg_three_slot_director_tests)
     add_custom_command(TARGET xrfg_three_slot_director_tests POST_BUILD COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${XRFG_AFW_RUNTIME}" "$<TARGET_FILE_DIR:xrfg_three_slot_director_tests>/PDAFWPlugin.dll")
     add_test(NAME xrfg_luke_standalone_context COMMAND xrfg_three_slot_director_tests luke-standalone-context)
     set_tests_properties(xrfg_luke_standalone_context PROPERTIES TIMEOUT 30)
+endif()
+
+if(WIN32 AND XRFG_BUILD_TESTS)
+ add_executable(xrfg_luke_provider_continuity_tests tests/luke_provider_continuity_tests.cpp)
+ target_include_directories(xrfg_luke_provider_continuity_tests PRIVATE include)
+ target_compile_features(xrfg_luke_provider_continuity_tests PRIVATE cxx_std_20)
+ target_compile_definitions(xrfg_luke_provider_continuity_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+ target_link_libraries(xrfg_luke_provider_continuity_tests PRIVATE d3d12 dxgi)
+ add_test(NAME xrfg_luke_provider_continuity COMMAND xrfg_luke_provider_continuity_tests "${XRFG_AFW_RUNTIME}")
+ set_tests_properties(xrfg_luke_provider_continuity PROPERTIES TIMEOUT 30)
 endif()

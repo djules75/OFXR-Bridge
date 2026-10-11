@@ -5,6 +5,7 @@
 #include "luke_compose_motion_shader.hpp"
 #include "xrfg/luke_motion_format.hpp"
 #include "xrfg/luke_native_motion.hpp"
+#include "xrfg/luke_afw_continuity.hpp"
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -25,6 +26,17 @@ D3D12_RESOURCE_BARRIER barrier(ID3D12Resource* r, D3D12_RESOURCE_STATES a, D3D12
     x.Transition={r,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,a,b}; return x;
 }
 int main() { try {
+    expect(xrfg::luke_afw_effective_mode(3,785,783,0,0)==1);
+    expect(xrfg::luke_afw_effective_mode(3,804,802,1,1)==1);
+    expect(xrfg::luke_afw_effective_mode(3,815,813,0,0)==1);
+    expect(xrfg::luke_afw_effective_mode(3,1253,1251,0,0)==1);
+    expect(xrfg::luke_afw_effective_mode(3,1268,1266,1,1)==1);
+    expect(xrfg::luke_afw_effective_mode(3,1279,1277,0,0)==1);
+    expect(xrfg::luke_afw_effective_mode(3,1301,1299,0,0)==1);
+    expect(xrfg::luke_afw_effective_mode(3,786,785,1,0)==3);
+    expect(xrfg::luke_afw_effective_mode(3,10,9,0,0)==1);
+    expect(xrfg::luke_afw_effective_mode(2,10,8,0,1)==1);
+    expect(xrfg::luke_afw_effective_mode(1,10,8,0,0)==1);
     ComPtr<ID3D12Debug> debug; if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) debug->EnableDebugLayer();
     ComPtr<IDXGIFactory4> factory;check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));
     ComPtr<IDXGIAdapter> warp;check(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp)));
