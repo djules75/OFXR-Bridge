@@ -205,7 +205,7 @@ matches are separate; FSR/XeSS source-upscaler ingress is not implemented.
 
 Late injection can miss the game's first NGX initialization and already-created guide resources. Actual RTX 4090 testing showed that a second NGX initialization does **not** repair native DLSS-G provider discovery after the first initialization omitted its path. A fresh OpenXR session alone does not establish correct startup order for UEVR. The menu does not change this limitation.
 
-Run `OFXRBridgeTray.exe`: it starts **disarmed**. Double-click the tray icon to open settings, choose **Activate** explicitly, then start a fresh OpenXR game. `--settings-only` opens the panel without activating or registering the layer. Preferences and runtime cache use the separate `%LOCALAPPDATA%/OFXR Autonomous` profile. See [Italian testing instructions](TESTING_IT.md) and the [runtime contract](AUTONOMOUS_CONTRACT.md).
+Run `OFXRBridgeTray.exe`: it starts **disarmed**. Double-click the tray icon to open settings, choose **Activate** explicitly, then start a fresh OpenXR game. `--settings-only` opens the panel without activating or registering the layer. Preferences and runtime cache use the separate `%LOCALAPPDATA%/OFXR Autonomous` profile. See [Testing instructions](TESTING_IT.md) and the [runtime contract](AUTONOMOUS_CONTRACT.md).
 
 Keep this package layout intact:
 
