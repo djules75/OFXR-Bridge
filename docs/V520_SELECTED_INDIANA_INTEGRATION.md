@@ -23,3 +23,5 @@ The private release ships the merged V520 ZIP, exact source archive, checksums,
 build/validation provenance and the unchanged accepted original V701 ZIP.
 No public export, live installation, registration, tray activation or game INI
 change is performed as part of publication.
+
+Final engineering validation: optimized VS2022 x64 Release builds; 182/182 applicable regression checks pass in 123.91s, zero skips. Includes real GPU director/ownership, original public/native guide transactions, Outlaws startup, DOOM/Indiana Vulkan transport including adversarial D24 words, both native temporal spans and all three AFW modes through bundled and actual-game KCD/Indiana providers. Only the existing invalid default CPU mock director setup is excluded as described above. Packaged loader and exact source/ZIP/DLL-PDB checks follow during sealing; this is not a combined game/headset verdict.
