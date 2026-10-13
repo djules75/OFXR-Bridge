@@ -1,5 +1,6 @@
 #include "xrfg/d3d11_d3d12_interop.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
+#include "xrfg/two_frame_capture.hpp"
 
 #include <windows.h>
 #include <dxgi1_2.h>
@@ -938,6 +939,34 @@ HRESULT D3D11D3D12SwapchainInterop::capture_published_current(
         impl_->last_d3d11_access_value = ready;
         return impl_->d3d12_queue->Wait(impl_->d3d12_fence.Get(), ready);
     } catch (...) { return E_FAIL; }
+}
+
+HRESULT D3D11D3D12SwapchainInterop::diagnostic_capture_published_current(
+    const D3D11PublicationReceipt& receipt,
+    const TwoFrameImageInfo& info) noexcept {
+    if (!two_frame_capture_images_active()) return S_FALSE;
+    try {
+        Microsoft::WRL::ComPtr<ID3D12Device> device;
+        Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
+        Microsoft::WRL::ComPtr<ID3D12Resource> mirror;
+        {
+            std::scoped_lock lock(mutex_);
+            if (!impl_ || receipt.current_destination_index >=
+                    impl_->shared_current_destinations.size()) return E_INVALIDARG;
+            device = impl_->d3d12_device;
+            queue = impl_->d3d12_queue;
+            mirror = impl_->shared_current_destinations[receipt.current_destination_index].d3d12;
+        }
+        // Read the actual acquired D11 image, not the intermediate D12 mirror.
+        const HRESULT captured = capture_published_current(receipt);
+        if (FAILED(captured)) return captured;
+        const HRESULT recorded = two_frame_capture_record_queue(info,
+            device.Get(), queue.Get(), mirror.Get(), D3D12_RESOURCE_STATE_COMMON);
+        const HRESULT retired = finish_capture();
+        return FAILED(recorded) ? recorded : retired;
+    } catch (...) {
+        return E_FAIL;
+    }
 }
 
 HRESULT D3D11D3D12SwapchainInterop::publish(

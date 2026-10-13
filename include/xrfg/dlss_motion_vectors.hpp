@@ -12,6 +12,9 @@
 namespace xrfg {
 
 struct DlssMotionVectorPublication {
+    // In-process producer receipt:1=current->N-1,2=current->same-eye N-2.
+    // KCD REALVR's replaced native input has already removed eye alternation.
+    std::uint32_t raw_motion_native_span{1};
     std::uint64_t stream{};
     ID3D12Resource* output{};
     ID3D12Resource* motion_vectors{};
@@ -93,8 +96,10 @@ struct DlssNativeCameraHistory {
     std::array<float,3> position{},right{},up{},forward{};
     std::array<float,16> projection{},inverse_projection{};
     std::uint64_t native_production_sequence{};
+    std::uint32_t raw_motion_native_span{1};
 };
 struct DlssMotionVectorFrame {
+    std::uint32_t raw_motion_native_span{1};
     std::uint64_t stream{};
     std::uint64_t epoch{};
     std::uint64_t serial{};
@@ -191,7 +196,7 @@ inline DlssNativeCameraHistory dlss_native_camera_history(const DlssMotionVector
         f.camera_frame_token_valid&&f.camera_data_valid&&f.camera_matrices_valid,
         f.reset,f.jittered,f.jitter_x,f.jitter_y,f.camera_position,f.camera_right,
         f.camera_up,f.camera_forward,f.camera_view_to_clip,f.camera_clip_to_view,
-        f.native_production_sequence};
+        f.native_production_sequence,f.raw_motion_native_span};
 }
 
 constexpr std::uint32_t kDlssMotionVectorEyeCount = 2;

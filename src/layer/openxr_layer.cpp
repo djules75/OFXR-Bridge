@@ -12001,6 +12001,32 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 if (FAILED(afw_result)) break;
             }
         }
+        if (afw_evaluated && SUCCEEDED(afw_result) &&
+            xrfg::two_frame_capture_images_active()) {
+            std::scoped_lock gpu_lock(session->gpu_mutex);
+            for (const Entry& entry : entries) {
+                xrfg::TwoFrameImageInfo terminal{};
+                terminal.stage = "afw_xr_terminal_eye";
+                terminal.stream = source.guide->stream;
+                terminal.capture_serial = source.guide->publication;
+                terminal.swapchain = handle_value(entry.generation->current[kAfwScratchSlot].handle);
+                terminal.display_time = snapshot.display_time;
+                terminal.eye = static_cast<std::int32_t>(entry.logical_eye);
+                terminal.width = entry.swapchain->create_info.width;
+                terminal.height = entry.swapchain->create_info.height;
+                const HRESULT diagnostic = entry.generation->d3d11_interop->
+                    diagnostic_capture_published_current(entry.publication, terminal);
+                // Diagnostic failures are receipts, never AFW admission failures.
+                xrfg::two_frame_capture_timeline("afw_terminal_result", diagnostic,
+                    source.guide->publication, snapshot.display_time, entry.logical_eye);
+                xrfg::two_frame_capture_timeline("afw_terminal_index", entry.logical_eye,
+                    source.guide->publication, snapshot.display_time,
+                    entry.publication.current_destination_index);
+                xrfg::two_frame_capture_timeline("afw_terminal_fence", entry.logical_eye,
+                    source.guide->publication, snapshot.display_time,
+                    entry.publication.copy_complete_value);
+            }
+        }
         if (afw_evaluated && SUCCEEDED(afw_result) && capture_temporal_input) {
             // This is the terminal D3D11 XR output, not the intermediate
             // D3D12 AFW render target. Both eyes have been published. Snapshot
@@ -13989,6 +14015,8 @@ XrResult layer_end_frame_impl(
         if (!build_afw_terminal_submission(end_info, current_snapshot, afw_produced,
                 afw_terminal_submission, afw_terminal_snapshot))
             return bypass_generation(GenerationPrepareReason::generated_end_info_failed);
+        if (xrfg::two_frame_capture_images_active())
+            log_luke_projection_poses(&afw_terminal_submission.info, frame_serial, 11);
         startup_observation.candidate = afw_produced.startup_candidate;
         startup_observation.held = afw_produced.held_afw_pair != nullptr;
         if (!inputs.empty()) {

@@ -16,6 +16,7 @@
     D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};pd.pRootSignature=root.Get();pd.CS={g_xrfg_luke_compose_motion_shader,sizeof(g_xrfg_luke_compose_motion_shader)};
     ComPtr<ID3D12PipelineState> pipeline;check(device->CreateComputePipelineState(&pd,IID_PPV_ARGS(&pipeline)));
     unsigned scenarios=0;
+    for(unsigned native_span:{1u,2u})
     for(bool left_handed:{false,true})
     for(auto format:{DXGI_FORMAT_R16G16_FLOAT,DXGI_FORMAT_R32G32_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R32G32B32A32_FLOAT})
     for(unsigned scenario=0;scenario<14;++scenario) {
@@ -26,6 +27,7 @@
         xrfg::DlssMotionVectorFrame g{};auto middle=std::make_shared<xrfg::DlssMotionVectorFrame>();
         auto init=[&](xrfg::DlssMotionVectorFrame& f,unsigned serial) {
             f.stream=10;f.epoch=3;f.serial=serial;f.publication=serial+10;f.camera_frame_token=serial+20;
+            f.raw_motion_native_span=native_span;
             f.camera_frame_token_valid=f.camera_data_valid=f.camera_matrices_valid=true;
             f.motion_width=f.depth_width=8;f.motion_height=f.depth_height=6;f.output_width=16;f.output_height=12;
             f.camera_right={1,0,0};f.camera_up={0,1,0};f.camera_forward={0,0,-1};
@@ -94,7 +96,8 @@
         const std::array<float,2> object=(scenario==3 || scenario==13)?std::array<float,2>{.125F,-.0625F}:std::array<float,2>{};
         const auto c=[&](unsigned x,unsigned y) {
             if(scenario==7 && x==2 && y==2)return std::array<float,2>{NAN,0};
-            auto v=camera(*middle,mid_yaw,x,y,d(x,y));v[0]+=object[0];v[1]+=object[1];return v;
+            auto v=native_span==2?camera(old,old_yaw,x,y,d(x,y)):camera(*middle,mid_yaw,x,y,d(x,y));
+            v[0]+=object[0];v[1]+=object[1];return v;
         };
         check(allocator->Reset());check(list->Reset(allocator.Get(),nullptr));
         std::array<ComPtr<ID3D12Resource>,2> uploads;
@@ -155,6 +158,10 @@
         ++g.previous_same_native_camera->publication;admission(2);--g.previous_same_native_camera->publication;
         middle->reset=true;admission(3);middle->reset=false;
         g.jittered=true;admission(3);g.jittered=false;
+        g.raw_motion_native_span=9;admission(3);g.raw_motion_native_span=native_span;
+        middle->raw_motion_native_span=native_span==1?2:1;admission(3);middle->raw_motion_native_span=native_span;
+        g.previous_same_native_camera->raw_motion_native_span=native_span==1?2:1;admission(3);
+        g.previous_same_native_camera->raw_motion_native_span=native_span;
         const float w=g.camera_view_to_clip[11];g.camera_view_to_clip[11]=0;admission(3);g.camera_view_to_clip[11]=w;
         const float saved_jitter=middle->jitter_x;middle->jitter_x=NAN;admission(3);middle->jitter_x=saved_jitter;
         --middle->camera_frame_token;admission(4);++middle->camera_frame_token;

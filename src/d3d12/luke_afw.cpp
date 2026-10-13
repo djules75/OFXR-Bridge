@@ -387,6 +387,7 @@ struct LukeAfwSynthesizer::Impl {
     Microsoft::WRL::ComPtr<ID3D12PipelineState> depth_calibration_pipeline;
     Microsoft::WRL::ComPtr<ID3D12Resource> depth_remap_state;
     struct DepthCalibrationContract {
+        std::uint32_t raw_motion_native_span{1};
         bool valid{};
         std::uint64_t stream{}, epoch{};
         std::array<float, 16> projection{};
@@ -636,7 +637,10 @@ struct LukeAfwSynthesizer::Impl {
             return barrier;
         };
         const auto& middle = guide.previous_opposite_guide;
+        // This calibration fits consecutive alternating-eye disparity. An
+        // already same-eye native field cannot observe that stereo remap.
         const bool stereo_depth_valid = temporal_valid && middle &&
+            guide.raw_motion_native_span==1&&middle->raw_motion_native_span==1&&
             middle->motion_vectors && guide.motion_vectors &&
             middle->motion_vectors.Get() != guide.motion_vectors.Get() &&
             middle->motion_width == guide.motion_width &&
@@ -753,6 +757,7 @@ struct LukeAfwSynthesizer::Impl {
             guide.motion_width, guide.motion_height,
             static_cast<UINT>(color_description.Width), color_description.Height};
         if (!contract.valid || contract.stream != guide.stream ||
+            contract.raw_motion_native_span != guide.raw_motion_native_span ||
             contract.epoch != guide.epoch || contract.inverted != depth_inverted ||
             contract.output_format != color_description.Format || contract.window != window ||
             std::memcmp(contract.projection.data(), guide.camera_view_to_clip.data(),
@@ -760,6 +765,7 @@ struct LukeAfwSynthesizer::Impl {
             depth_calibration_reset_pending = true;
             contract.valid = true;
             contract.stream = guide.stream;
+            contract.raw_motion_native_span = guide.raw_motion_native_span;
             contract.epoch = guide.epoch;
             contract.projection = guide.camera_view_to_clip;
             contract.window = window;
@@ -1801,6 +1807,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             contract.native_history_jitter_x=native_motion.jitter_difference[0];
             contract.native_history_jitter_y=native_motion.jitter_difference[1];
             contract.raw_camera_motion_included = guide.raw_camera_motion_included;
+            contract.raw_motion_native_span = guide.raw_motion_native_span;
             contract.raw_clip_to_previous_clip = guide.raw_clip_to_previous_clip;
             contract.motion_temporal_valid = temporal_camera_valid;
             contract.motion_previous_publication = impl_->previous_source_publication[source_eye];
@@ -1897,6 +1904,17 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             if (!copy_compatible_color(generated_desc, destination_desc)) {
                 result = E_INVALIDARG;
             } else {
+                if (two_frame_capture_images_active()) {
+                    TwoFrameImageInfo returned{};
+                    returned.stage = "afw_plugin_returned_eye";
+                    returned.stream = guide.stream;
+                    returned.capture_serial = guide.publication;
+                    returned.eye = static_cast<std::int32_t>(1U - source_eye);
+                    returned.width = static_cast<std::uint32_t>(color_desc.Width);
+                    returned.height = color_desc.Height;
+                    two_frame_capture_record_ng_x(returned, impl_->device.Get(),
+                        command_list, generated.texture, generated.initial_state);
+                }
                 copy(impl_->renderer, command_list, destination, generated,
                     color_box, 0, 0);
                 report_stage(AfwStage::output_copied, S_OK, source_eye,

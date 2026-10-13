@@ -38,6 +38,7 @@ struct Shot {
     std::uint64_t bytes{};
     ComPtr<ID3D12Resource> readback;
     ComPtr<ID3D12CommandList> producer_list;
+    ComPtr<ID3D12CommandAllocator> owned_allocator;
     ComPtr<ID3D12Fence> fence;
     std::uint64_t fence_value{};
     HRESULT status{S_OK};
@@ -339,7 +340,7 @@ void write_session(const std::shared_ptr<Session>& session) {
         "\tmotion_temporal_valid\tmotion_previous_publication\tmotion_middle_publication"
         "\tmotion_current_to_middle_same\tmotion_current_to_previous_same\tmotion_current_to_middle_opposite"
         "\tdepth_native_history_valid\tdepth_native_previous_publication\tdepth_current_to_native_previous"
-        "\tcamera_forward_sign\tcamera_up_sign\n";
+        "\tcamera_forward_sign\tcamera_up_sign\traw_motion_native_span\n";
     const auto write_array = [&guide_manifest](const auto& values) {
         for (std::size_t i = 0; i < values.size(); ++i) {
             if (i) guide_manifest << ',';
@@ -409,7 +410,7 @@ void write_session(const std::shared_ptr<Session>& session) {
         guide_manifest << c.depth_native_history_valid << '\t'
             << c.depth_native_previous_publication << '\t';
         write_array(c.depth_current_to_native_previous); guide_manifest << '\t';
-        guide_manifest << c.camera_forward_sign << '\t' << c.camera_up_sign << '\n';
+        guide_manifest << c.camera_forward_sign << '\t' << c.camera_up_sign << '\t' << c.raw_motion_native_span << '\n';
     }
     const auto deadline = std::chrono::steady_clock::now() +
         std::chrono::seconds(15);
@@ -475,6 +476,9 @@ void write_session(const std::shared_ptr<Session>& session) {
     summary << "V23286 AFW/OFXR frame-slot and projection-pose audit.\n"
         << "Trigger: F8; capture ends after two AFW evaluations or eight XR frames.\n"
         << "NGX source, AFW inputs, OpenXR eyes, camera matrices and xr-timeline.tsv.\n"
+        << "V601: afw_plugin_returned_eye -> afw_generated_eye -> afw_xr_terminal_eye.\n"
+        << "xr_final_eye is the application source release BEFORE AFW.\n"
+        << "Terminal eyes carry original publication, XR swapchain, pose interval, acquired index and fence receipts.\n"
         << "Raw images include D3D12 row padding; see manifest.tsv.\n"
         << "Max images=48, max total readback=1.25 GiB. Dropped images="
         << session->dropped_images << "\n";
@@ -566,6 +570,10 @@ void two_frame_capture_mark_afw_evaluation() noexcept {
 
 bool two_frame_capture_active() noexcept {
     return diagnostic_ring_enabled.load(std::memory_order_relaxed) || manager().active_frame.load() != 0;
+}
+
+bool two_frame_capture_images_active() noexcept {
+    return manager().active_frame.load() != 0;
 }
 
 void two_frame_capture_timeline(
@@ -671,6 +679,56 @@ void two_frame_capture_record_ng_x(
         record_copy(*shot, list, source, source_state);
         if (SUCCEEDED(shot->status)) shot->producer_list = list;
     } catch (...) {
+    }
+}
+
+HRESULT two_frame_capture_record_queue(
+    const TwoFrameImageInfo& info, ID3D12Device* device,
+    ID3D12CommandQueue* queue, ID3D12Resource* source,
+    D3D12_RESOURCE_STATES source_state) noexcept {
+    try {
+        std::shared_ptr<Session> session;
+        std::uint32_t frame{};
+        {
+            auto& state = manager();
+            std::scoped_lock lock(state.mutex);
+            session = state.session;
+            frame = state.active_frame;
+        }
+        if (!session || !frame) return S_FALSE;
+        if (!device || !queue || !source) return E_INVALIDARG;
+        auto shot = prepare_shot(session, frame, info, device, source);
+        if (!shot) return E_OUTOFMEMORY;
+        if (FAILED(shot->status)) return shot->status;
+        shot->status = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+            IID_PPV_ARGS(shot->owned_allocator.GetAddressOf()));
+        ComPtr<ID3D12GraphicsCommandList> list;
+        if (SUCCEEDED(shot->status))
+            shot->status = device->CreateCommandList(queue->GetDesc().NodeMask,
+                D3D12_COMMAND_LIST_TYPE_DIRECT, shot->owned_allocator.Get(), nullptr,
+                IID_PPV_ARGS(list.GetAddressOf()));
+        if (SUCCEEDED(shot->status)) {
+            record_copy(*shot, list.Get(), source, source_state);
+            const HRESULT closed = list->Close();
+            if (SUCCEEDED(shot->status)) shot->status = closed;
+        }
+        // Provision completion before submitting; a failed allocation must
+        // never strand a diagnostic list whose allocator is released early.
+        if (SUCCEEDED(shot->status))
+            shot->status = device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                IID_PPV_ARGS(shot->fence.GetAddressOf()));
+        if (FAILED(shot->status)) return shot->status;
+        shot->producer_list = list;
+        ID3D12CommandList* lists[]{list.Get()};
+        queue->ExecuteCommandLists(1, lists);
+        shot->status = queue->Signal(shot->fence.Get(), 1);
+        if (SUCCEEDED(shot->status)) shot->fence_value = 1;
+        else session->safe_to_release.store(false);
+        // The retained list is owned, not awaiting an intercepted submission.
+        // Keep it until session retirement alongside its allocator.
+        return shot->status;
+    } catch (...) {
+        return E_FAIL;
     }
 }
 

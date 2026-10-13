@@ -159,8 +159,10 @@ bool outlaws_public_process() {
 }
 class KcdCameraInvocationScope;
 template<class T> ComPtr<T> native(T* object);
+bool same(IUnknown*,IUnknown*);
 std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList*,const NVSDK_NGX_Handle*,
-    const NVSDK_NGX_Parameter*,std::uint64_t,std::uint64_t,KcdCameraInvocationScope*,std::uint32_t,bool*,const Feature*);
+    const NVSDK_NGX_Parameter*,std::uint64_t,std::uint64_t,KcdCameraInvocationScope*,std::uint32_t,bool*,const Feature*,
+    ID3D12Resource* = nullptr);
 // REAL VR's public handle can predate interception and own two physical-eye
 // RR handles. Its exact synchronous invocation proves production ownership,
 // independently of any creation dimensions or flags. A late lifetime is never
@@ -409,14 +411,15 @@ public:
 };
 class KcdCameraInvocationScope;
 std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList*,const NVSDK_NGX_Handle*,
-    const NVSDK_NGX_Parameter*,std::uint64_t,std::uint64_t,KcdCameraInvocationScope*,std::uint32_t,bool*,const Feature* = nullptr);
+    const NVSDK_NGX_Parameter*,std::uint64_t,std::uint64_t,KcdCameraInvocationScope*,std::uint32_t,bool*,const Feature* = nullptr,
+    ID3D12Resource*);
 HRESULT complete_color(ID3D12GraphicsCommandList*,const NVSDK_NGX_Parameter*,
     const std::shared_ptr<const DlssMotionVectorFrame>&,bool);
 HRESULT complete_color_resource(ID3D12GraphicsCommandList*,ID3D12Resource*,
     const std::shared_ptr<const DlssMotionVectorFrame>&,bool);
-// Freeze the accepted publisher's entire public transaction before the injector
-// can replace the guides, not only its scene camera. The actual unique native
-// production still owns the clock; public preparation only predicts that value.
+// Preserve the original scene camera and final caller Output before REALVR.
+// KCD guides/scalars are frozen at the unique typed DLSS entry, matching the
+// selected OptiScaler D12 publisher. The actual native production owns the clock.
 class KcdCameraInvocationScope {
     inline static thread_local KcdCameraInvocationScope* current_{};
     KcdCameraInvocationScope* parent_{};
@@ -432,6 +435,8 @@ class KcdCameraInvocationScope {
     const NVSDK_NGX_Handle* public_handle_{};
     ID3D12GraphicsCommandList* public_command_{};
     const NVSDK_NGX_Parameter* public_parameters_{};
+    ComPtr<ID3D12Resource> public_output_;
+    ComPtr<ID3D12Resource> public_motion_;
     std::shared_ptr<const DlssMotionVectorFrame> public_frame_;
     std::uint64_t predicted_sequence_{};
     unsigned native_claims_{};
@@ -523,18 +528,59 @@ public:
                 if(current==UINT64_MAX) {abort();return;}
                 predicted_sequence_=current+1;
             }
-            bool snapshot_attempted{};
-            public_frame_=capture(public_command_,public_handle_,public_parameters_,predicted_sequence_,
-                kKcdPublicStreamNamespace|production_,this,production_,&snapshot_attempted);
-            // Publisher failure may follow a successfully recorded partial
-            // snapshot. Its destination pool must not be recycled pre-Execute.
-            if(!public_frame_&&snapshot_attempted)abort();
+            public_output_=native(get<ID3D12Resource*>(public_parameters_,NVSDK_NGX_Parameter_Output));
+            public_motion_=native(get<ID3D12Resource*>(public_parameters_,NVSDK_NGX_Parameter_MotionVectors));
+            if(!public_output_) {abort();return;}
+            // F8 witnesses the original GPU bits before in-place wrapper edits.
+            // This predicted identity is confirmed only by the unique native claim.
+            if(two_frame_capture_images_active()) {
+                TwoFrameGuideContract boundary{};boundary.stage="kcd_before_public_contract";
+                boundary.stream=kKcdPublicStreamNamespace|production_;boundary.serial=predicted_sequence_;
+                boundary.motion_width=boundary.depth_width=width_;
+                boundary.motion_height=boundary.depth_height=height_;
+                boundary.output_width=creator_.out_width;boundary.output_height=creator_.out_height;
+                if(creator_.flags_known&&(creator_.flags&NVSDK_NGX_DLSS_Feature_Flags_MVLowRes)==0) {
+                    boundary.motion_width=creator_.out_width;boundary.motion_height=creator_.out_height;
+                }
+                boundary.depth_crop_x=get<UINT>(public_parameters_,NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X);
+                boundary.depth_crop_y=get<UINT>(public_parameters_,NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y);
+                boundary.scale_x=get<float>(public_parameters_,NVSDK_NGX_Parameter_MV_Scale_X,1);
+                boundary.scale_y=get<float>(public_parameters_,NVSDK_NGX_Parameter_MV_Scale_Y,1);
+                boundary.jitter_x=get<float>(public_parameters_,NVSDK_NGX_Parameter_Jitter_Offset_X);
+                boundary.jitter_y=get<float>(public_parameters_,NVSDK_NGX_Parameter_Jitter_Offset_Y);
+                boundary.reset=get<int>(public_parameters_,NVSDK_NGX_Parameter_Reset)!=0;
+                boundary.jittered=(creator_.flags&NVSDK_NGX_DLSS_Feature_Flags_MVJittered)!=0;
+                boundary.frame_time_delta_ms=get<float>(public_parameters_,NVSDK_NGX_Parameter_FrameTimeDeltaInMsec,16.6667F);
+                boundary.camera_position=receipt_.camera.position;boundary.camera_view_to_clip=receipt_.camera.projection;
+                two_frame_capture_guide_contract(boundary);
+                auto command=native(public_command_);ComPtr<ID3D12Device> reported,device;
+                if(command&&SUCCEEDED(command->GetDevice(IID_PPV_ARGS(&reported)))&&
+                    SUCCEEDED(d3d_native::allocation_owner(reported.Get(),device))) {
+                    for(unsigned i=0;i<2;++i) {
+                        auto guide=native(get<ID3D12Resource*>(public_parameters_,i?
+                            NVSDK_NGX_Parameter_Depth:NVSDK_NGX_Parameter_MotionVectors));
+                        if(!guide)continue;
+                        TwoFrameImageInfo info{};info.stage=i?"kcd_before_public_depth":"kcd_before_public_motion";
+                        info.stream=kKcdPublicStreamNamespace|production_;info.capture_serial=predicted_sequence_;
+                        info.scale_x=get<float>(public_parameters_,NVSDK_NGX_Parameter_MV_Scale_X,1);
+                        info.scale_y=get<float>(public_parameters_,NVSDK_NGX_Parameter_MV_Scale_Y,1);
+                        info.jitter_x=get<float>(public_parameters_,NVSDK_NGX_Parameter_Jitter_Offset_X);
+                        info.jitter_y=get<float>(public_parameters_,NVSDK_NGX_Parameter_Jitter_Offset_Y);
+                        two_frame_capture_record_ng_x(info,device.Get(),command.Get(),guide.Get(),
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                        two_frame_capture_timeline("kcd_public_guide_resource",i,info.stream,
+                            predicted_sequence_,reinterpret_cast<std::uint64_t>(guide.Get()));
+                    }
+                }
+            }
         }catch(...) {abort();}
     }
-    // true means the public transaction is authoritative, including failed
-    // preparation. Never capture replacement native guides in that case.
+    // The public camera/lifetime/final-color transaction remains authoritative.
+    // Only its exact unique typed descendant may snapshot native input guides.
     bool consume_public_frame(std::uint64_t sequence,const void* list,const void* device,
-        std::uint32_t production,std::shared_ptr<const DlssMotionVectorFrame>& frame) noexcept {
+        std::uint32_t production,std::shared_ptr<const DlssMotionVectorFrame>& frame,
+        ID3D12GraphicsCommandList* command,const NVSDK_NGX_Handle* handle,
+        const NVSDK_NGX_Parameter* parameters,const Feature& feature) noexcept {
         if(!owner_||!owner_->prepared_)return false;
         auto& owner=*owner_;
         if(owner.aborted_||owner.native_claims_++||owner.list_!=list||owner.device_!=device||
@@ -545,7 +591,41 @@ public:
             std::scoped_lock lock(state().mutex);
             if(!owner.live_locked()) {owner.abort();return true;}
         }catch(...) {owner.abort();return true;}
-        frame=owner.public_frame_;return true;
+        try {
+            bool snapshot_attempted{};
+            owner.public_frame_=capture(command,handle,parameters,sequence,kKcdPublicStreamNamespace|production,
+                this,production,&snapshot_attempted,&feature,owner.public_output_.Get());
+            if(!owner.public_frame_&&snapshot_attempted)owner.abort();
+            frame=owner.public_frame_;
+            if(two_frame_capture_images_active()) {
+                two_frame_capture_timeline("kcd_native_guide_claim",frame?1:0,
+                    kKcdPublicStreamNamespace|production,sequence,frame?frame->publication:0);
+                for(unsigned i=0;i<2;++i) {
+                    auto guide=native(get<ID3D12Resource*>(parameters,i?
+                        NVSDK_NGX_Parameter_Depth:NVSDK_NGX_Parameter_MotionVectors));
+                    two_frame_capture_timeline("kcd_native_guide_resource",i,kKcdPublicStreamNamespace|production,
+                        sequence,reinterpret_cast<std::uint64_t>(guide.Get()));
+                    if(frame&&guide) {
+                        auto native_command=native(command);
+                        TwoFrameImageInfo info{};info.stage=i?"kcd_at_native_depth":"kcd_at_native_motion";
+                        info.stream=frame->stream;info.capture_serial=sequence;
+                        info.scale_x=frame->scale_x;info.scale_y=frame->scale_y;
+                        info.jitter_x=frame->jitter_x;info.jitter_y=frame->jitter_y;
+                        two_frame_capture_record_ng_x(info,frame->verified_producer_device.Get(),
+                            native_command.Get(),guide.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                    }
+                }
+                two_frame_capture_timeline("kcd_motion_native_span",frame?frame->raw_motion_native_span:0,
+                    kKcdPublicStreamNamespace|production,sequence,frame?frame->publication:0);
+            }
+        }catch(...) {owner.abort();}
+        return true;
+    }
+    std::uint32_t raw_motion_native_span(ID3D12Resource* motion) const noexcept {
+        // Owner V602 matched-camera pixel audit verifies the KCD REALVR
+        // replacement is N-2 same-eye motion. An unchanged original resource
+        // retains the consecutive N-1 contract; other ingress has no owner.
+        return owner_&&owner_->public_motion_&&motion&&!same(owner_->public_motion_.Get(),motion)?2U:1U;
     }
     void complete_native(NVSDK_NGX_Result result,bool can_complete) noexcept {
         if(!owner_||!owner_->prepared_)return;
@@ -565,7 +645,10 @@ public:
                 const bool hdr=creator_.flags_known&&(creator_.flags&NVSDK_NGX_DLSS_Feature_Flags_IsHDR)!=0;
                 // The injector may leave its private Output in the parameter map.
                 // Its caller's original final target was retained before forwarding.
-                if(complete_color_resource(public_command_,public_frame_->output.Get(),public_frame_,hdr)!=S_OK)abort();
+                const auto completed=complete_color_resource(public_command_,public_output_.Get(),public_frame_,hdr);
+                if(two_frame_capture_images_active())two_frame_capture_timeline("kcd_public_guide_completion",
+                    completed,kKcdPublicStreamNamespace|production_,predicted_sequence_,public_frame_->publication);
+                if(completed!=S_OK)abort();
             }
         }catch(...) {abort();}
     }
@@ -632,7 +715,7 @@ void update_uevr_projection() {
 std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* list,const NVSDK_NGX_Handle* handle,
     const NVSDK_NGX_Parameter* p,std::uint64_t production_sequence,std::uint64_t guide_stream,
     KcdCameraInvocationScope* invocation_camera=nullptr,std::uint32_t public_production=0,bool* snapshot_attempted=nullptr,
-    const Feature* invocation_feature) {
+    const Feature* invocation_feature,ID3D12Resource* final_caller_output) {
     if(snapshot_attempted)*snapshot_attempted=false;
     auto& s=state(); if(!s.active.load())return {};
     const auto call=++s.calls;
@@ -659,6 +742,10 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     if(!known || (feature.type!=NVSDK_NGX_Feature_SuperSampling&&
         feature.type!=NVSDK_NGX_Feature_RayReconstruction))return {};
     auto output_owner=native(get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_Output));
+    if(final_caller_output&&!output_owner)return {};
+    // KCD's native guides accompany the completed original public color.
+    // Retain its existing output/marker identity; never stamp a private SR target.
+    if(final_caller_output)output_owner=final_caller_output;
     auto* output=output_owner.Get();
     auto motion=native(get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_MotionVectors));
     auto depth=native(get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_Depth));
@@ -692,6 +779,7 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     }
     const auto od=output->GetDesc(), mv=motion->GetDesc(), dz=depth->GetDesc();
     DlssMotionVectorPublication g{};
+    if(final_caller_output&&invocation_camera)g.raw_motion_native_span=invocation_camera->raw_motion_native_span(motion.Get());
     // Scoped camera values replace apply_camera's camera read, while its Luke
     // snapshot-lifetime contract must still protect all queued GPU consumers.
     g.protect_snapshot_lifetime=luke;
@@ -805,6 +893,21 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     }
     if(snapshot_attempted)*snapshot_attempted=true;
     auto frame=publish_dlss_motion_vectors(g);
+    if(final_caller_output&&two_frame_capture_images_active()) {
+        TwoFrameGuideContract boundary{};boundary.stage="kcd_native_input_contract";
+        boundary.stream=g.stream;boundary.serial=production_sequence;boundary.publication=frame?frame->publication:0;
+        boundary.motion_width=g.motion_width;boundary.motion_height=g.motion_height;
+        boundary.depth_width=g.depth_width;boundary.depth_height=g.depth_height;
+        boundary.output_width=g.output_width;boundary.output_height=g.output_height;
+        boundary.motion_crop_x=g.motion_x;boundary.motion_crop_y=g.motion_y;
+        boundary.depth_crop_x=g.depth_x;boundary.depth_crop_y=g.depth_y;
+        boundary.scale_x=g.scale_x;boundary.scale_y=g.scale_y;
+        boundary.jitter_x=g.jitter_x;boundary.jitter_y=g.jitter_y;
+        boundary.reset=g.reset;boundary.jittered=g.jittered;boundary.frame_time_delta_ms=g.frame_time_delta_ms;
+        boundary.raw_motion_native_span=g.raw_motion_native_span;
+        boundary.camera_position=g.camera_position;boundary.camera_view_to_clip=g.camera_view_to_clip;
+        two_frame_capture_guide_contract(boundary);
+    }
     if(luke&&embedded::afw_snapshot().desired.mode!=0)embedded::report_afw_ingress(bool(frame),exact_camera);
     const HRESULT removed=md->GetDeviceRemovedReason();
     if(FAILED(removed))log("device_removed",static_cast<UINT>(removed),call);
@@ -1078,7 +1181,7 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
     bool public_transaction{};
     if(sr)try {
         if(kcd_production)public_transaction=invocation_camera.consume_public_frame(production_sequence,
-            native_list_identity.Get(),native_device_identity.Get(),public_production,frame);
+            native_list_identity.Get(),native_device_identity.Get(),public_production,frame,list,h,p,evaluation_metadata);
         if(outlaws_family)public_transaction=OutlawsPublicInvocationScope::consume_public_frame(evaluation_metadata,p,
             production_sequence,native_list_identity.Get(),native_device_identity.Get(),frame);
         if(!public_transaction&&(!logical_production || production_sequence))frame=capture(list,h,p,production_sequence,guide_stream,

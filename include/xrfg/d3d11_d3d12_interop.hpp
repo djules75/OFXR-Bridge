@@ -12,6 +12,8 @@
 
 namespace xrfg {
 
+struct TwoFrameImageInfo;
+
 enum class D3D11InteropInitializationStage : std::uint32_t {
     complete = 0,
     arguments = 1,
@@ -116,6 +118,12 @@ public:
     // release, then capture history and finish_capture. GPU ordering only.
     [[nodiscard]] HRESULT capture_published_current(
         const D3D11PublicationReceipt& receipt) noexcept;
+
+    // F8-only witness of the actual acquired XR image, paired to its immutable
+    // receipt. Does not consume or advance the temporal synthesis history.
+    [[nodiscard]] HRESULT diagnostic_capture_published_current(
+        const D3D11PublicationReceipt& receipt,
+        const TwoFrameImageInfo& info) noexcept;
 
     // Called immediately after the synthesizer submission on the same D3D12
     // queue. Queues a D3D11 wait and mip-zero copies into the acquired private

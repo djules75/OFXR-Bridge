@@ -94,6 +94,9 @@ inline bool luke_native_motion_constants(const DlssMotionVectorFrame& guide,
         middle.publication+1!=current.publication || older.publication+2!=current.publication ||
         guide.previous_serial!=older.serial)return false;
     failure=3;
+    if((guide.raw_motion_native_span!=1&&guide.raw_motion_native_span!=2)||
+        middle.raw_motion_native_span!=current.raw_motion_native_span||
+        older.raw_motion_native_span!=current.raw_motion_native_span)return false;
     for(const auto* f:{&current,&middle,&older}) {
         if(!f->valid || !f->token || f->reset || f->jittered ||
             !std::isfinite(f->jitter_x) || !std::isfinite(f->jitter_y) ||
@@ -130,7 +133,11 @@ inline bool luke_native_motion_constants(const DlssMotionVectorFrame& guide,
         std::uint64_t(guide.motion_x)+guide.motion_width>d.Width || std::uint64_t(guide.motion_y)+guide.motion_height>d.Height)return false;
     out.source_base={guide.motion_x,guide.motion_y};out.crop={crop_x,crop_y};
     out.extent={float(guide.motion_width),float(guide.motion_height)};out.scale={guide.scale_x,guide.scale_y};
-    out.jitter_difference={middle.jitter_x-older.jitter_x,middle.jitter_y-older.jitter_y};failure=9;
+    // N-2 input already carries its same-eye jitter difference. Only N-1 input
+    // needs the missing middle->older jitter interval added to reconstruction.
+    out.jitter_difference=guide.raw_motion_native_span==2?std::array<float,2>{0,0}:
+        std::array<float,2>{middle.jitter_x-older.jitter_x,middle.jitter_y-older.jitter_y};
+    out.padding[0]=float(guide.raw_motion_native_span);failure=9;
     // DOOM's original pre-wrapper packet supplies DOWN, while its captured
     // motion/depth raster and projection use view UP. Decode all three native
     // cameras exactly as the scene camera does; never flip the motion field.

@@ -16,6 +16,8 @@ std::uint32_t two_frame_capture_begin_end_frame() noexcept;
 void two_frame_capture_finish_end_frame(std::uint32_t frame) noexcept;
 void two_frame_capture_mark_afw_evaluation() noexcept;
 [[nodiscard]] bool two_frame_capture_active() noexcept;
+// Full-resolution F8 session only; the rolling F9 ring has its own witnesses.
+[[nodiscard]] bool two_frame_capture_images_active() noexcept;
 void two_frame_capture_timeline(
     const char* stream,
     std::int64_t code,
@@ -42,6 +44,7 @@ struct TwoFrameImageInfo {
 };
 
 struct TwoFrameGuideContract {
+    std::uint32_t raw_motion_native_span{1};
     const char* stage{};
     std::uint64_t stream{};
     std::uint64_t publication{};
@@ -107,6 +110,13 @@ void two_frame_capture_record_ng_x(
     ID3D12Device* device,
     ID3D12GraphicsCommandList* list,
     ID3D12Resource* source,
+    D3D12_RESOURCE_STATES source_state) noexcept;
+
+// Diagnostic copy on an already ordered queue. Retains its allocator/list
+// through the readback fence and leaves the source in its original state.
+[[nodiscard]] HRESULT two_frame_capture_record_queue(
+    const TwoFrameImageInfo& info, ID3D12Device* device,
+    ID3D12CommandQueue* queue, ID3D12Resource* source,
     D3D12_RESOURCE_STATES source_state) noexcept;
 
 // Called after the native ExecuteCommandLists hook, never before it.

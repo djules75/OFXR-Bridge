@@ -156,15 +156,16 @@ int main(int argc,char** argv) {try {
             kind==D3D12_HEAP_TYPE_UPLOAD?D3D12_RESOURCE_STATE_GENERIC_READ:D3D12_RESOURCE_STATE_COPY_DEST,
             nullptr,IID_PPV_ARGS(&result)),"fixture buffer");return result;};
     bool all_camera_bits_match=true,all_mode_pixels_match=true;
-    for(const auto& scene:scenes) for(int mode:{1,2,3}) {
+    for(const auto& scene:scenes) for(unsigned span:{1u,2u}) for(int mode:{1,2,3}) {
         xrfg::LukeAfwSynthesizer synth;check(synth.initialize(device.Get(),queue.Get(),std::filesystem::path(argv[1])),"full AFW provider initialization");
         std::vector<std::shared_ptr<DlssMotionVectorFrame>> frames;
         std::vector<ComPtr<ID3D12Resource>> colors;
         xrfg::LukeCameraOrigin origin;require(origin.update(1,1,{0,0,0}).has_value(),"oracle camera origin");
         double error_sum{};std::uint64_t samples{};double basis_error{};bool basis_bits_match=true;
         for(unsigned n=1;n<=18;++n) {
-            const auto current=camera(n,scene),previous=camera(n? n-1:0,scene);
+            const auto current=camera(n,scene),previous=camera(n>=span?n-span:0,scene);
             auto frame=std::make_shared<DlssMotionVectorFrame>();frame->stream=1;frame->epoch=1;
+            frame->raw_motion_native_span=span;
             frame->serial=frame->publication=frame->camera_frame_token=frame->native_production_sequence=n;
             frame->previous_serial=n>=3?n-2:0;
             frame->camera_data_valid=frame->camera_matrices_valid=frame->camera_frame_token_valid=true;
@@ -267,7 +268,7 @@ int main(int argc,char** argv) {try {
             readback->Unmap(0,nullptr);
         }
         const double mae=error_sum/double(samples);
-        std::cout<<"KCD rotated plane scene="<<scene.name<<" mode="<<mode<<" RGB_MAE="<<mae
+        std::cout<<"KCD rotated plane scene="<<scene.name<<" native_span="<<span<<" mode="<<mode<<" RGB_MAE="<<mae
             <<" inverseView_max_error="<<basis_error<<" bit_exact="<<basis_bits_match
             <<" actual_provider_gain="<<provider.gain_x<<','<<provider.gain_y
             <<" actual_motion_crop="<<provider.expected_width<<'x'<<provider.expected_height<<'\n';

@@ -9,7 +9,8 @@ cbuffer Composition : register(b0)
     float2 GuideExtent;
     float2 RawScale;
     float2 JitterDifference;
-    float2 Padding;
+    float RawNativeSpan;
+    float Padding;
     column_major float4x4 ToOpposite;
     column_major float4x4 ToSame;
     column_major float4x4 StereoInterval;
@@ -39,9 +40,10 @@ void ComposeLukeSameEyeMotion(uint3 thread_id : SV_DispatchThreadID)
         opposite.w<=1e-8 || same.w<=1e-8 || stereo.w<=1e-8 || stereo_far.w<=1e-8) {
         SameEyeMotion[thread_id.xy]=InvalidMotion; return;
     }
-    float2 difference=(same.xy/same.w-opposite.xy/opposite.w-
+    float4 raw_previous=RawNativeSpan==2.0?same:opposite;
+    float2 difference=(same.xy/same.w-raw_previous.xy/raw_previous.w-
         (stereo.xy/stereo.w-stereo_far.xy/stereo_far.w))*float2(0.5,-0.5);
-    // raw - camera(current->opposite) + camera(current->same): object motion
+    // raw - camera(current->its declared previous) + camera(current->same): object motion
     // remains native. Depth at THIS pixel never samples another surface's field.
     float2 result=raw+(difference*GuideExtent+JitterDifference)/RawScale;
     if(!all(isfinite(result)) || any(abs(result)>65504.0))

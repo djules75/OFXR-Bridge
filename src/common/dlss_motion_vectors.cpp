@@ -548,6 +548,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->camera_frame_token = publication.camera_frame_token;
         frame->camera_frame_token_valid = publication.camera_frame_token_valid;
         frame->native_production_sequence = publication.native_production_sequence;
+        frame->raw_motion_native_span = publication.raw_motion_native_span;
         frame->depth_x = publication.depth_x;
         frame->depth_y = publication.depth_y;
         frame->source_depth_x = publication.depth_x;
@@ -631,6 +632,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
             contract.camera_right = frame->camera_right;
             contract.view_to_clip = frame->camera_view_to_clip;
             contract.raw_camera_motion_included = frame->raw_camera_motion_included;
+            contract.raw_motion_native_span = frame->raw_motion_native_span;
             contract.raw_clip_to_previous_clip = frame->raw_clip_to_previous_clip;
             contract.raw_previous_clip_to_clip = frame->raw_previous_clip_to_clip;
             contract.clip_to_view = frame->camera_clip_to_view;

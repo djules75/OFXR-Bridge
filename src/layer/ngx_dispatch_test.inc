@@ -360,9 +360,9 @@ const NVSDK_NGX_Handle* actual_outlaws_sr_handle{};
 void actual_kcd_native_parameter_observer(const NVSDK_NGX_Parameter* parameters) {
     const auto& c=*actual_ngx_capture_context;
     const auto& p=*c.parameters;
-    if(parameters!=c.parameters||p.motion!=c.injector_motion||p.depth!=c.injector_depth||
-        p.output!=c.injector_output||p.input_color!=c.composited_color||p.reset!=1||
-        p.scale_x!=91.F||p.scale_y!=92.F||p.jitter_x!=9.F||p.jitter_y!=-8.F||p.frame_time!=333.F)
+    if(parameters!=c.parameters||p.motion!=(c.expect_capture?c.injector_motion:nullptr)||p.depth!=c.injector_depth||
+        p.output!=c.injector_output||p.input_color!=c.composited_color||p.reset!=0||
+        p.scale_x!=1.25F||p.scale_y!=.75F||p.jitter_x!=-.375F||p.jitter_y!=.25F||p.frame_time!=19.F)
         throw std::runtime_error("KCD public transaction changed the original injector's modified native parameters");
 }
 void actual_fixture_copy(ID3D12GraphicsCommandList* list,ID3D12Resource* destination,
@@ -490,10 +490,10 @@ NVSDK_NGX_Result actual_family_core(ID3D12GraphicsCommandList* list,const NVSDK_
         actual_fixture_copy(list,c.public_depth,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
             c.injector_depth,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         auto& modified=*static_cast<DispatchParameters*>(const_cast<NVSDK_NGX_Parameter*>(parameters));
-        modified.motion=c.injector_motion;modified.depth=c.injector_depth;modified.output=c.injector_output;
+        modified.motion=c.expect_capture?c.injector_motion:nullptr;modified.depth=c.injector_depth;modified.output=c.injector_output;
         modified.input_color=c.composited_color;
-        modified.reset=1;modified.scale_x=91;modified.scale_y=92;
-        modified.jitter_x=9;modified.jitter_y=-8;modified.frame_time=333;
+        modified.reset=0;modified.scale_x=1.25F;modified.scale_y=.75F;
+        modified.jitter_x=-.375F;modified.jitter_y=.25F;modified.frame_time=19;
     }
     auto result=actual_realvr_evaluate(list,actual_family_use_alias?actual_family_alias:actual_family_direct,parameters,callback);
     if(test_kcd_scene_camera&&actual_kcd_negative==KcdNegative::second_child)
@@ -860,7 +860,8 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
                 check(readbacks[i]->Map(0,&range,&bytes),"private snapshot map");
                 const unsigned native_frame=(i&1)?previous->camera_frame_token:current->camera_frame_token;
                 const unsigned pixel_bytes=i<2?8:4;
-                const float expected[]{i<2?.125F+.01F*native_frame:.125F*native_frame,-.25F};
+                const float expected[]{scene_camera?(i<2?8.F+native_frame:.875F):
+                    (i<2?.125F+.01F*native_frame:.125F*native_frame),scene_camera?9.F+native_frame:-.25F};
                 for(unsigned y=0;y<3;++y)for(unsigned x=0;x<7;++x)
                     require(!std::memcmp(static_cast<char*>(bytes)+footprints[i].Offset+y*footprints[i].Footprint.RowPitch+x*pixel_bytes,
                         expected,pixel_bytes),"private current/previous motion or depth changed GPU bits");
@@ -1036,13 +1037,14 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
                 same(context.frame->producer_queue.Get(),queue.Get())&&same(context.frame->producer_command_list.Get(),list.Get()),
                 "actual capture lost one of its queried owners, exact list/queue or owned snapshots");
             if(scene_camera&&n!=12)require(std::abs(context.frame->camera_position[0]-expected_scene_position)<.001F&&
-                std::abs(context.frame->camera_position[0]-999.F)>100.F&&context.frame->scale_x==1&&context.frame->scale_y==1&&
-                context.frame->jitter_x==.125F&&context.frame->jitter_y==-.25F&&!context.frame->reset&&
-                context.frame->frame_time_delta_ms==17.F&&
+                std::abs(context.frame->camera_position[0]-999.F)>100.F&&context.frame->scale_x==1.25F&&context.frame->scale_y==.75F&&
+                context.frame->jitter_x==-.375F&&context.frame->jitter_y==.25F&&!context.frame->reset&&
+                context.frame->frame_time_delta_ms==19.F&&context.frame->output.Get()==color.Get()&&
+                context.frame->raw_motion_native_span==2&&
                 !std::memcmp(context.frame->camera_position.data(),expected_scene_camera.position.data(),sizeof(float)*3)&&
                 !std::memcmp(context.frame->camera_view_to_clip.data(),expected_scene_camera.projection.data(),sizeof(float)*16)&&
                 !std::memcmp(context.frame->camera_clip_to_view.data(),expected_scene_camera.inverse_projection.data(),sizeof(float)*16),
-                "typed SR borrowed injector bindings/guides/scalars instead of its original public caller transaction");
+                "typed SR lost original camera/final Output or did not snapshot its actual native input scalars");
             if(outlaws&&n!=12)require(context.frame->camera_frame_token==n&&
                 std::abs(context.frame->camera_position[0]-expected_scene_position)<.001F&&
                 std::abs(context.frame->camera_position[0]-999.F)>100.F&&
@@ -1430,7 +1432,7 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
         std::cout<<"Actual native NGX capture: original scoped SL camera/NGX callback, four queried GPU owners, exact CRC colors/submission histories and callback-reused generation PASS\n";
         if(logical_family&&!outlaws)std::cout<<"KCD public source: full engine4/core2/REALVR3/native0 chain, direct/recovered native geometry, eleven strict ABA productions/calibration, actual capture miss and callback-reused public retirement PASS\n";
         if(outlaws)std::cout<<"Outlaws public RR: actual title-selected marked cached late-public3/native1 dispatch, no invented creation geometry, alternating native handles/exact SL camera, logical ABA clock/calibration, true capture gap and callback-reused creator lifetime PASS\n";
-        if(scene_camera)std::cout<<"KCD scene camera: original public CBV/GPU guides/scalars frozen before real wrapper in-place overwrite, unchanged modified native delegation, deferred final caller color CRC, strict list/once/gap and fenced private GPU bits/lifetime PASS\n";
+        if(scene_camera)std::cout<<"KCD scene camera: original public CBV/final Output, actual typed-native GPU guides/scalars after wrapper replacement and in-place edits, unchanged native delegation, deferred caller color CRC, strict list/once/gap and fenced private GPU bits/lifetime PASS\n";
         if(selector)std::cout<<"Luke private ingress: actual selector and original Execute, exact private CRC/current/N-1 fenced owners and GPU bits/lifetimes, unsubmitted and foreign rejection PASS\n";
         return 0;
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
