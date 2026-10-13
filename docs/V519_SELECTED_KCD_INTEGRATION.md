@@ -6,8 +6,9 @@ row correction, sparse marker copyback and batched independent eye marker reads.
 No V514-V518 HUD implementation is included. Original source tags and ZIPs
 remain unchanged; see the shared KCD selection and milestone mapping.
 
-Runtime remains pending for the merged DLL. Original KCD V603 still has the
-owner-reported distant-tree wobble; this merge does not claim to fix it.
+Runtime remains pending for the merged DLL. Original KCD V603 is owner-accepted:
+the owner confirms on 2026-10-14 that the problem is resolved, V603 matches
+OptiScaler and is the final KCD version. Earlier unresolved notes are superseded.
 Mandatory depth-aware native subtraction/same-eye reconstruction/AFW Normal,
 guide/color ownership, route separation and external provider ABI are retained.
 

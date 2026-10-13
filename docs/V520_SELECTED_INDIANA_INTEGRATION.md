@@ -9,8 +9,9 @@ optimizations remain present. Functional AFW still uses mandatory depth-aware
 native subtraction and same-eye reconstruction in Normal motion mode.
 
 Original V701 was accepted by the owner for Indiana. V520 is a new combined
-DLL; its game/headset validation remains pending. KCD distant-tree wobble is
-still reported and is not reclassified by the merge. No additional FPS gain,
+DLL; its game/headset validation remains pending. Original KCD V603 is also
+owner-accepted: the owner confirms the problem resolved and parity with
+OptiScaler on 2026-10-14. Earlier unresolved notes are superseded. No additional FPS gain,
 HUD exclusion or all-game acceptance is claimed.
 
 HUD V514-V518 source/ancestry/artifacts and the local failed mock-director
