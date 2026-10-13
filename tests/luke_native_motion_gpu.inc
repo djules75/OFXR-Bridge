@@ -19,7 +19,7 @@
     for(unsigned native_span:{1u,2u})
     for(bool left_handed:{false,true})
     for(auto format:{DXGI_FORMAT_R16G16_FLOAT,DXGI_FORMAT_R32G32_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R32G32B32A32_FLOAT})
-    for(unsigned scenario=0;scenario<14;++scenario) {
+    for(unsigned scenario=0;scenario<17;++scenario) {
         auto current=texture(10,8,format,D3D12_RESOURCE_FLAG_NONE,D3D12_RESOURCE_STATE_COPY_DEST);
         auto depth=texture(3,2,DXGI_FORMAT_R32_FLOAT,D3D12_RESOURCE_FLAG_NONE,D3D12_RESOURCE_STATE_COPY_DEST);
         auto output=texture(3,2,xrfg::kLukeAfwMotionFormat,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -39,16 +39,17 @@
         g.previous_serial=3;g.motion_x=g.motion_y=1;g.scale_x=g.scale_y=4;
         if(scenario==10){g.scale_x=8;g.scale_y=2;}
         middle->camera_position[0]=scenario==1?.05F:-.05F;
-        const float mid_yaw=(scenario==2 || scenario==3 || scenario==13)?.015F:scenario==8?3.141592653589793F:0;
-        const float old_yaw=(scenario==2 || scenario==3 || scenario==13)?.03F:0;
+        const float mid_yaw=(scenario==2 || scenario==3 || scenario==13 || scenario==14 || scenario==16)?.015F:scenario==8?3.141592653589793F:0;
+        const float old_yaw=(scenario==2 || scenario==3 || scenario==13 || scenario==14 || scenario==16)?.03F:0;
         auto yaw=[](xrfg::DlssMotionVectorFrame& f,float angle) {
             f.camera_right={std::cos(angle),0,-std::sin(angle)};
             f.camera_forward={-std::sin(angle),0,-std::cos(angle)};
         };yaw(*middle,mid_yaw);yaw(old,old_yaw);
-        const bool doom_pitch=scenario>=11;
-        const float mid_pitch=doom_pitch?(scenario==12?-.02F:.02F):0;
+        const bool native_view_rows=scenario>=14;
+        const bool doom_pitch=scenario>=11&&!native_view_rows;
+        const float mid_pitch=(doom_pitch||native_view_rows)?(scenario==12 || scenario==15?-.02F:scenario==14?0:.02F):0;
         const float old_pitch=2*mid_pitch;
-        if(doom_pitch) {
+        if(doom_pitch||native_view_rows) {
             // Independent right/down/physical-forward producer with real pitch.
             const auto packet=[](xrfg::DlssMotionVectorFrame& f,float y,float p) {
                 f.camera_right={std::cos(y),0,-std::sin(y)};
@@ -56,6 +57,12 @@
                 f.camera_forward={-std::sin(y)*std::cos(p),std::sin(p),-std::cos(y)*std::cos(p)};
             };
             packet(g,0,0);packet(*middle,mid_yaw,mid_pitch);packet(old,old_yaw,old_pitch);
+            if(native_view_rows)for(auto* camera:{&g,middle.get(),&old}) {
+                // Independent right/up/view-Z rows, matching Streamline's
+                // declared inverse view. Keep both projection handednesses.
+                for(float& value:camera->camera_up)value=-value;
+                for(float& value:camera->camera_forward)value*=left_handed?1.F:-1.F;
+            }
         }
         if(scenario==4) {
             middle->jitter_x=.25F;middle->jitter_y=.125F;old.jitter_x=-.25F;old.jitter_y=-.125F;
@@ -70,7 +77,8 @@
         g.resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         g.previous_opposite_guide=middle;g.previous_same_native_camera=xrfg::dlss_native_camera_history(old);
         xrfg::LukeNativeMotionConstants constants{};unsigned failure{};
-        const auto axes=doom_pitch?xrfg::LukeProducerCameraAxes::right_down_forward:xrfg::LukeProducerCameraAxes::view;
+        const auto axes=native_view_rows?xrfg::LukeProducerCameraAxes::native_view_rows:
+            doom_pitch?xrfg::LukeProducerCameraAxes::right_down_forward:xrfg::LukeProducerCameraAxes::view;
         expect(xrfg::luke_native_motion_constants(g,2,2,constants,failure,axes) && failure==0);
         const auto d=[&](unsigned x,unsigned y) {
             if(scenario==5)return 0.F;
@@ -93,7 +101,7 @@
             return std::array<float,2>{float(((vx/-vz+projection_sign*target.camera_view_to_clip[8]-nx)*4-target.jitter_x)/g.scale_x),
                 float(((vy/-vz+projection_sign*target.camera_view_to_clip[9]-ny)*-3-target.jitter_y)/g.scale_y)};
         };
-        const std::array<float,2> object=(scenario==3 || scenario==13)?std::array<float,2>{.125F,-.0625F}:std::array<float,2>{};
+        const std::array<float,2> object=(scenario==3 || scenario==13 || scenario==16)?std::array<float,2>{.125F,-.0625F}:std::array<float,2>{};
         const auto c=[&](unsigned x,unsigned y) {
             if(scenario==7 && x==2 && y==2)return std::array<float,2>{NAN,0};
             auto v=native_span==2?camera(old,old_yaw,x,y,d(x,y)):camera(*middle,mid_yaw,x,y,d(x,y));

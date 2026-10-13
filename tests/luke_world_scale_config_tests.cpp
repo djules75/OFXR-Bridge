@@ -30,13 +30,13 @@ int main() {
     check(xrfg::luke_world_scale_from_ini(ini) == 1.1F,
         "Indiana reads its validated scale");
     check(xrfg::luke_game_camera_config_from_ini(ini).axes ==
-        xrfg::LukeProducerCameraAxes::view,
-        "Indiana retains its accepted producer view basis");
+        xrfg::LukeProducerCameraAxes::native_view_rows,
+        "Indiana retains accepted scene view rows and declares the same native-history basis");
     write("[DOOMTDA]\nUnused=1\n[INDY]\nWorldScale=1.1\n");
     check(xrfg::luke_world_scale_from_ini(ini) == 1.1F,
         "Unused DOOM section must not override the active Indiana section");
     check(xrfg::luke_game_camera_config_from_ini(ini).axes ==
-        xrfg::LukeProducerCameraAxes::view,
+        xrfg::LukeProducerCameraAxes::native_view_rows,
         "An inactive DOOM section must not select its camera convention");
     write("[GOT]\nWorldScale=1.0\n");
     check(xrfg::luke_world_scale_from_ini(ini) == 1.0F,

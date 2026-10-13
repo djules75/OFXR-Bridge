@@ -36,13 +36,14 @@ inline bool inverse(Matrix a,Matrix& out) noexcept {
     return true;
 }
 inline bool transform(const DlssNativeCameraHistory& current,
-    const DlssNativeCameraHistory& target,std::array<float,16>& output,float up_sign=1.F) noexcept {
+    const DlssNativeCameraHistory& target,std::array<float,16>& output,float up_sign=1.F,
+    bool native_view_rows=false) noexcept {
     Matrix source{},destination{},to_target{};source[3][3]=destination[3][3]=1;
     for(unsigned r=0;r<3;++r) {
         source[r][0]=current.right[r];source[r][1]=up_sign*current.up[r];
-        source[r][2]=std::copysign(1.F,current.projection[11])*current.forward[r];
+        source[r][2]=(native_view_rows?1.F:std::copysign(1.F,current.projection[11]))*current.forward[r];
         destination[r][0]=target.right[r];destination[r][1]=up_sign*target.up[r];
-        destination[r][2]=std::copysign(1.F,target.projection[11])*target.forward[r];
+        destination[r][2]=(native_view_rows?1.F:std::copysign(1.F,target.projection[11]))*target.forward[r];
         // Subtract world origins in double before rotation; no 2km float cancellation.
         source[r][3]=double(current.position[r])-target.position[r];
     }
@@ -142,8 +143,12 @@ inline bool luke_native_motion_constants(const DlssMotionVectorFrame& guide,
     // motion/depth raster and projection use view UP. Decode all three native
     // cameras exactly as the scene camera does; never flip the motion field.
     const float up_sign=axes==LukeProducerCameraAxes::right_down_forward?-1.F:1.F;
-    if(!native_motion_detail::transform(current,middle,out.opposite,up_sign) ||
-        !native_motion_detail::transform(current,older,out.same,up_sign))return false;
+    // Indiana's declared cameraFwd is already the view-to-world third row.
+    // Preserve it at all three endpoints, as in the accepted OptiScaler scene
+    // camera. Projection handedness is not a reason to reflect that row again.
+    const bool native_view_rows=axes==LukeProducerCameraAxes::native_view_rows;
+    if(!native_motion_detail::transform(current,middle,out.opposite,up_sign,native_view_rows) ||
+        !native_motion_detail::transform(current,older,out.same,up_sign,native_view_rows))return false;
     failure=0;return true;
 }
 }

@@ -13,6 +13,7 @@
 #include "xrfg/native_ingress/streamline_camera.hpp"
 #include "xrfg/two_frame_capture.hpp"
 #include "vulkan_device_request.hpp"
+#include "vulkan_d24_decode_shader.hpp"
 #include <nvsdk_ngx_vk.h>
 #include <safetyhook.hpp>
 #include <wrl/client.h>
@@ -33,12 +34,20 @@ namespace xrfg::native_vulkan {
 namespace {
 using Microsoft::WRL::ComPtr;
 struct Device;
+struct D24Decoder {
+    ComPtr<ID3D12RootSignature> root;
+    ComPtr<ID3D12PipelineState> pipeline;
+};
 enum Role{color,motion,depth,output,role_count};
 #if defined(XRFG_NATIVE_INGRESS_TESTS)
 std::uint64_t tested_native_output_copyback_pixels{};
 #endif
 struct Surface {
     ComPtr<ID3D12Resource> buffer,texture;
+    ComPtr<ID3D12Resource> packed_depth;
+    ComPtr<ID3D12DescriptorHeap> depth_views;
+    std::shared_ptr<D24Decoder> depth_decoder;
+    UINT depth_view_stride{};
     VkBuffer imported{};VkDeviceMemory memory{};
     NVSDK_NGX_ImageViewInfo_VK source{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
@@ -68,6 +77,7 @@ struct Device {
     VulkanSessionBinding binding{};
     PFN_vkGetInstanceProcAddr gipa{};PFN_vkGetDeviceProcAddr gdpa{};
     ComPtr<ID3D12Device> owner;ComPtr<ID3D12CommandQueue> queue;
+    std::shared_ptr<D24Decoder> depth_decoder;
     VkPhysicalDeviceMemoryProperties memory{};
     std::recursive_mutex mutex;
     std::vector<std::shared_ptr<Slot>> slots;
@@ -417,11 +427,12 @@ DXGI_FORMAT format(VkFormat f,Role role) {
         if(f==VK_FORMAT_R16G16B16A16_SFLOAT)return DXGI_FORMAT_R16G16B16A16_FLOAT;
         if(f==VK_FORMAT_R32G32_SFLOAT)return DXGI_FORMAT_R32G32_FLOAT;return DXGI_FORMAT_UNKNOWN;}
     if(role==depth){if(f==VK_FORMAT_D32_SFLOAT||f==VK_FORMAT_D32_SFLOAT_S8_UINT||f==VK_FORMAT_R32_SFLOAT)return DXGI_FORMAT_R32_FLOAT;
+        if(f==VK_FORMAT_D24_UNORM_S8_UINT)return DXGI_FORMAT_R32_FLOAT;
         if(f==VK_FORMAT_D16_UNORM||f==VK_FORMAT_R16_UNORM)return DXGI_FORMAT_R16_UNORM;return DXGI_FORMAT_UNKNOWN;}
     return dxgi_format_for_vulkan(f);
 }
 unsigned pixel_bytes(DXGI_FORMAT f) {
-    switch(f){case DXGI_FORMAT_R16_UNORM:return 2;case DXGI_FORMAT_R16G16_FLOAT:case DXGI_FORMAT_R16G16_SNORM:case DXGI_FORMAT_R32_FLOAT:
+    switch(f){case DXGI_FORMAT_R16_UNORM:return 2;case DXGI_FORMAT_R16G16_FLOAT:case DXGI_FORMAT_R16G16_SNORM:case DXGI_FORMAT_R32_FLOAT:case DXGI_FORMAT_R32_UINT:
     case DXGI_FORMAT_R8G8B8A8_UNORM:case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:case DXGI_FORMAT_B8G8R8A8_UNORM:
     case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:case DXGI_FORMAT_R10G10B10A2_UNORM:case DXGI_FORMAT_R11G11B10_FLOAT:return 4;
     case DXGI_FORMAT_R32G32_FLOAT:case DXGI_FORMAT_R16G16B16A16_FLOAT:return 8;
@@ -431,10 +442,50 @@ void d12_barrier(ID3D12GraphicsCommandList* list,ID3D12Resource* r,D3D12_RESOURC
     if(from==to)return;D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     b.Transition={r,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,from,to};list->ResourceBarrier(1,&b);
 }
+HRESULT initialize_d24_decoder(Device& d,Surface& s,D3D12_RESOURCE_DESC texture) {
+    if(!d.depth_decoder) {
+        auto decoder=std::make_shared<D24Decoder>();
+        std::array<D3D12_DESCRIPTOR_RANGE,2> ranges{};
+        std::array<D3D12_ROOT_PARAMETER,3> parameters{};
+        for(unsigned i=0;i<2;++i) {
+            ranges[i].RangeType=i?D3D12_DESCRIPTOR_RANGE_TYPE_UAV:D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            ranges[i].NumDescriptors=1;
+            parameters[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            parameters[i].DescriptorTable={1,&ranges[i]};
+        }
+        parameters[2].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        parameters[2].Constants.Num32BitValues=2;
+        D3D12_ROOT_SIGNATURE_DESC description{};description.NumParameters=3;description.pParameters=parameters.data();
+        ComPtr<ID3DBlob> blob,errors;
+        HRESULT result=D3D12SerializeRootSignature(&description,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&errors);
+        if(SUCCEEDED(result))result=d.owner->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&decoder->root));
+        if(FAILED(result))return result;
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};pipeline.pRootSignature=decoder->root.Get();
+        pipeline.CS={g_xrfg_vulkan_d24_decode_shader,sizeof(g_xrfg_vulkan_d24_decode_shader)};
+        result=d.owner->CreateComputePipelineState(&pipeline,IID_PPV_ARGS(&decoder->pipeline));
+        if(FAILED(result))return result;d.depth_decoder=std::move(decoder);
+    }
+    D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+    texture.Format=DXGI_FORMAT_R32_UINT;texture.Flags=D3D12_RESOURCE_FLAG_NONE;
+    HRESULT result=d.owner->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&texture,D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&s.packed_depth));
+    if(FAILED(result))return result;
+    D3D12_DESCRIPTOR_HEAP_DESC views{};views.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;views.NumDescriptors=2;views.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    result=d.owner->CreateDescriptorHeap(&views,IID_PPV_ARGS(&s.depth_views));if(FAILED(result))return result;
+    auto cpu=s.depth_views->GetCPUDescriptorHandleForHeapStart();
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Format=DXGI_FORMAT_R32_UINT;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.Texture2D.MipLevels=1;
+    d.owner->CreateShaderResourceView(s.packed_depth.Get(),&srv,cpu);
+    cpu.ptr+=d.owner->GetDescriptorHandleIncrementSize(views.Type);
+    s.depth_view_stride=d.owner->GetDescriptorHandleIncrementSize(views.Type);
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};uav.Format=DXGI_FORMAT_R32_FLOAT;uav.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
+    d.owner->CreateUnorderedAccessView(s.texture.Get(),nullptr,&uav,cpu);
+    s.depth_decoder=d.depth_decoder;return S_OK;
+}
 HRESULT surface(Device& d,Surface& target,const NVSDK_NGX_ImageViewInfo_VK& source,Role role) {
     Surface s;
     struct Cleanup{Device& device;Surface& surface;bool kept{};~Cleanup(){if(!kept)destroy_surface(device,surface);}} cleanup{d,s};
     const auto f=format(source.Format,role);const auto bpp=pixel_bytes(f);
+    const bool d24=role==depth&&source.Format==VK_FORMAT_D24_UNORM_S8_UINT;
     const auto failed=[&](unsigned stage,HRESULT result,VkResult native_result=VK_SUCCESS) {
         if(ingress_reason(7,role)) {
             auto& flight=bridge_flight_logger();
@@ -452,10 +503,14 @@ HRESULT surface(Device& d,Surface& target,const NVSDK_NGX_ImageViewInfo_VK& sour
     if(!create_buffer||!requirements||!import_properties||!allocate||!bind)return failed(2,E_NOINTERFACE);
     D3D12_RESOURCE_DESC texture{};texture.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;texture.Width=source.Width;
     texture.Height=source.Height;texture.DepthOrArraySize=texture.MipLevels=1;texture.Format=f;texture.SampleDesc.Count=1;
-    if(role==color||role==output)texture.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if(role==color||role==output||d24)texture.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
     HRESULT result=d.owner->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&texture,D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&s.texture));
     if(FAILED(result))return failed(3,result);
+    if(d24) {
+        result=initialize_d24_decoder(d,s,texture);if(FAILED(result))return failed(3,result);
+        texture=s.packed_depth->GetDesc();
+    }
     UINT64 bytes{};d.owner->GetCopyableFootprints(&texture,0,1,0,&s.footprint,nullptr,nullptr,&bytes);
     VkExternalMemoryBufferCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
     external.handleTypes=VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
@@ -526,7 +581,7 @@ VkImageAspectFlags transport_aspects(VkFormat format,VkImageAspectFlags declared
     // Transfers address the image's format-defined plane, not that default.
     switch(format) {
     case VK_FORMAT_D16_UNORM:case VK_FORMAT_D32_SFLOAT:return VK_IMAGE_ASPECT_DEPTH_BIT;
-    case VK_FORMAT_D32_SFLOAT_S8_UINT:return copy_plane?VK_IMAGE_ASPECT_DEPTH_BIT:
+    case VK_FORMAT_D24_UNORM_S8_UINT:case VK_FORMAT_D32_SFLOAT_S8_UINT:return copy_plane?VK_IMAGE_ASPECT_DEPTH_BIT:
         VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT;
     default:return declared;
     }
@@ -579,6 +634,26 @@ bool copy_native(Device& d,Surface& s,VkCommandBuffer cmd,bool to_native,Role ro
     s.native_used=true;return true;
 }
 void copy_d12(ID3D12GraphicsCommandList* list,Surface& s,bool to_buffer,const LukeColorOriginRect* rectangle=nullptr) {
+    // D24 arrives as packed unsigned words, never as IEEE floats. Decode only
+    // the low 24 bits into the standard depth guide on this existing list.
+    if(s.packed_depth&&!to_buffer) {
+        D3D12_TEXTURE_COPY_LOCATION buffer{};buffer.pResource=s.buffer.Get();buffer.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;buffer.PlacedFootprint=s.footprint;
+        D3D12_TEXTURE_COPY_LOCATION packed{};packed.pResource=s.packed_depth.Get();packed.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        d12_barrier(list,s.buffer.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE);
+        d12_barrier(list,s.packed_depth.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);
+        list->CopyTextureRegion(&packed,0,0,0,&buffer,nullptr);
+        d12_barrier(list,s.packed_depth.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        d12_barrier(list,s.texture.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        ID3D12DescriptorHeap* heaps[]{s.depth_views.Get()};list->SetDescriptorHeaps(1,heaps);
+        list->SetComputeRootSignature(s.depth_decoder->root.Get());list->SetPipelineState(s.depth_decoder->pipeline.Get());
+        auto gpu=s.depth_views->GetGPUDescriptorHandleForHeapStart();list->SetComputeRootDescriptorTable(0,gpu);
+        gpu.ptr+=s.depth_view_stride;list->SetComputeRootDescriptorTable(1,gpu);
+        const UINT extent[]{s.source.Width,s.source.Height};list->SetComputeRoot32BitConstants(2,2,extent,0);
+        list->Dispatch((extent[0]+7)/8,(extent[1]+7)/8,1);
+        d12_barrier(list,s.texture.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COMMON);
+        d12_barrier(list,s.packed_depth.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
+        d12_barrier(list,s.buffer.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON);return;
+    }
     D3D12_TEXTURE_COPY_LOCATION buffer{};buffer.pResource=s.buffer.Get();buffer.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;buffer.PlacedFootprint=s.footprint;
     D3D12_TEXTURE_COPY_LOCATION texture{};texture.pResource=s.texture.Get();texture.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     d12_barrier(list,s.buffer.Get(),D3D12_RESOURCE_STATE_COMMON,to_buffer?D3D12_RESOURCE_STATE_COPY_DEST:D3D12_RESOURCE_STATE_COPY_SOURCE);

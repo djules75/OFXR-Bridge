@@ -13,6 +13,9 @@ enum class LukeProducerCameraAxes {
     view,
     right_down_forward,
     physical_forward,
+    // Verified Streamline view rows at both scene and native-history ingress.
+    // Unlike legacy native receipts, the third row is already view Z.
+    native_view_rows,
 };
 
 // The rows are local right, up and back vectors in world coordinates. Map the
@@ -72,6 +75,7 @@ enum class LukeProducerCameraAxes {
     view = producer;
     switch (axes) {
     case LukeProducerCameraAxes::view:
+    case LukeProducerCameraAxes::native_view_rows:
         break;
     case LukeProducerCameraAxes::physical_forward:
         // OptiScaler V33018: physical viewing direction becomes view Z

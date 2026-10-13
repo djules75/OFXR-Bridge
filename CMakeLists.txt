@@ -209,6 +209,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     set(XRFG_LUKE_DEPTH_CONVERT_HEADER "${XRFG_GENERATED_SHADER_DIR}/luke_depth_convert_shader.hpp")
     set(XRFG_LUKE_DEPTH_CALIBRATE_HEADER "${XRFG_GENERATED_SHADER_DIR}/luke_depth_calibrate_shader.hpp")
     set(XRFG_LUKE_COMPOSE_MOTION_HEADER "${XRFG_GENERATED_SHADER_DIR}/luke_compose_motion_shader.hpp")
+    set(XRFG_VULKAN_D24_DECODE_HEADER "${XRFG_GENERATED_SHADER_DIR}/vulkan_d24_decode_shader.hpp")
     add_custom_command(
         OUTPUT
             "${XRFG_GAME_MOTION_SYNTHESIZE_PIXEL_HEADER}"
@@ -232,6 +233,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_LUKE_DEPTH_CONVERT_HEADER}"
             "${XRFG_LUKE_DEPTH_CALIBRATE_HEADER}"
             "${XRFG_LUKE_COMPOSE_MOTION_HEADER}"
+            "${XRFG_VULKAN_D24_DECODE_HEADER}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeGameMotionMidpointPS
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
@@ -313,6 +315,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_LUKE_DEPTH_CALIBRATE_HEADER}" /Vn g_xrfg_luke_depth_calibrate_shader
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/luke_depth_convert.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E DecodeDepth
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_VULKAN_D24_DECODE_HEADER}" /Vn g_xrfg_vulkan_d24_decode_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/ingress/vulkan_d24_decode.hlsl"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E ComposeLukeSameEyeMotion
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_LUKE_COMPOSE_MOTION_HEADER}" /Vn g_xrfg_luke_compose_motion_shader
@@ -322,6 +328,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/fsr_cinema_projection.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/luke_depth_convert.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/luke_compose_motion.hlsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/ingress/vulkan_d24_decode.hlsl"
         VERBATIM)
 
     add_library(xrfg_d3d12_history STATIC
@@ -359,7 +366,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_LUKE_DEPTH_CONVERT_HEADER}"
         "${XRFG_LUKE_DEPTH_CALIBRATE_HEADER}"
-        "${XRFG_LUKE_COMPOSE_MOTION_HEADER}")
+        "${XRFG_LUKE_COMPOSE_MOTION_HEADER}"
+        "${XRFG_VULKAN_D24_DECODE_HEADER}")
     foreach(stage decide compose)
         set(header "${XRFG_GENERATED_SHADER_DIR}/guide_composer_${stage}_shader.hpp")
         if(stage STREQUAL "decide")
@@ -577,6 +585,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     target_include_directories(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE "${XRFG_DLSS_SDK_ROOT}/include" "${XRFG_DEPENDENCY_ROOT}/Streamline")
     target_include_directories(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE
         include
+        "${XRFG_GENERATED_SHADER_DIR}"
         "${XRFG_OPENXR_SDK_ROOT}/include")
     target_link_libraries(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE
         xrfg_core
@@ -1213,6 +1222,7 @@ if(XRFG_BUILD_TESTS AND XRFG_BUILD_LAYER)
     foreach(t xrfg_three_slot_director_tests xrfg_three_slot_d3d12_tests xrfg_openxr_elliott_meter_tests)
         target_sources(${t} PRIVATE src/layer/ngx_guide_capture.cpp src/ingress/native_ingress.cpp src/ingress/streamline_camera.cpp src/ingress/d3d11_native_ingress.cpp src/ingress/vulkan_native_ingress.cpp src/ingress/vulkan_command_stream.cpp)
         target_include_directories(${t} PRIVATE "${XRFG_DLSS_SDK_ROOT}/include" "${XRFG_DEPENDENCY_ROOT}/Streamline")
+        target_include_directories(${t} PRIVATE "${XRFG_GENERATED_SHADER_DIR}")
         target_link_libraries(${t} PRIVATE xrfg_autonomous_control xrfg_neural_rendering safetyhook version)
         target_compile_definitions(${t} PRIVATE XRFG_NATIVE_DLSSG)
     endforeach()
@@ -1313,6 +1323,21 @@ if(WIN32 AND XRFG_BUILD_TESTS)
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
   set_tests_properties(xrfg_luke_kcd_quality_bundled PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
       PASS_REGULAR_EXPRESSION "KCD full quality:")
+  add_test(NAME xrfg_luke_indiana_quality_bundled COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/indiana-quality-bundled" -DTITLE=INDY
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_indiana_quality_bundled PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+      PASS_REGULAR_EXPRESSION "Indiana full quality:")
+  set(XRFG_INDIANA_GAME_AFW_PROVIDER "" CACHE FILEPATH "Optional read-only actual Indiana PDAFW provider")
+  if(EXISTS "${XRFG_INDIANA_GAME_AFW_PROVIDER}")
+   add_test(NAME xrfg_luke_indiana_quality_game COMMAND "${CMAKE_COMMAND}"
+       "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_INDIANA_GAME_AFW_PROVIDER}"
+       "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/indiana-quality-game" -DTITLE=INDY
+       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+   set_tests_properties(xrfg_luke_indiana_quality_game PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+       PASS_REGULAR_EXPRESSION "Indiana full quality:")
+  endif()
   set(XRFG_KCD_GAME_AFW_PROVIDER "" CACHE FILEPATH "Optional read-only actual KCD PDAFW provider for quality comparison")
   if(EXISTS "${XRFG_KCD_GAME_AFW_PROVIDER}")
    add_test(NAME xrfg_luke_kcd_quality_game COMMAND "${CMAKE_COMMAND}"

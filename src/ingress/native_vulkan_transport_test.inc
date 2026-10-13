@@ -432,6 +432,7 @@ struct TransportProbe {
     std::shared_ptr<Device> device;std::shared_ptr<Slot> captured;
     VkCommandPool pool{};VkCommandBuffer command{};VkImage image{};VkImageView image_view{};VkDeviceMemory image_memory{};VkFence finished{};
     HostBuffer upload,readback;ComPtr<ID3D12Resource> d12_readback;ComPtr<ID3D12Fence> progress;
+    uint64_t public_readback_value{100};
     ComPtr<ID3D12InfoQueue> debug;std::array<unsigned char,width*height*8> expected{};
     bool bootstrap{},rgba_motion{};
     Role capture_role{motion};
@@ -844,7 +845,7 @@ struct PublicGuideGpuProbe {
     static constexpr unsigned ow=512,oh=32;
     struct Image {VkImage image{};VkImageView view{};VkDeviceMemory memory{};
         NVSDK_NGX_Resource_VK resource{};VkImageLayout layout{VK_IMAGE_LAYOUT_UNDEFINED};};
-    TransportProbe& hardware;std::array<Image,5> images;
+    TransportProbe& hardware;std::array<Image,5> images;VkFormat depth_format;
     OriginalParameters parameters{nullptr,{}};
     HostBuffer readback;HMODULE streamline{};
     decltype(&sl1::slSetConstants) set_constants{};decltype(&sl1::slEvaluateFeature) evaluate_sl{};
@@ -855,7 +856,7 @@ struct PublicGuideGpuProbe {
     bool no_child{},reset_before_child{};unsigned native_calls{},public_calls{};std::uint64_t before_publication{};
     Evaluate saved_native{};bool saved_typed{};
     inline static PublicGuideGpuProbe* current{};
-    explicit PublicGuideGpuProbe(TransportProbe& probe):hardware(probe){}
+    explicit PublicGuideGpuProbe(TransportProbe& probe,VkFormat format=VK_FORMAT_D32_SFLOAT):hardware(probe),depth_format(format){}
     void barrier(Image& image,VkCommandBuffer command,VkImageLayout layout) {
         VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.image=image.image;
         b.subresourceRange=image.resource.Resource.ImageViewInfo.SubresourceRange;
@@ -870,8 +871,9 @@ struct PublicGuideGpuProbe {
         auto& image=images[role];const auto final=role==output||role==4?VK_IMAGE_LAYOUT_GENERAL:VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         barrier(image,command,VK_IMAGE_LAYOUT_GENERAL);VkClearColorValue value{};std::copy(values.begin(),values.end(),value.float32);
         auto range=image.resource.Resource.ImageViewInfo.SubresourceRange;
-        if(image.resource.Resource.ImageViewInfo.Format==VK_FORMAT_D32_SFLOAT) {
-            range.aspectMask=VK_IMAGE_ASPECT_DEPTH_BIT;VkClearDepthStencilValue depth_value{values[0],0};
+        if(image.resource.Resource.ImageViewInfo.Format==VK_FORMAT_D32_SFLOAT||image.resource.Resource.ImageViewInfo.Format==VK_FORMAT_D24_UNORM_S8_UINT) {
+            range.aspectMask=transport_aspects(image.resource.Resource.ImageViewInfo.Format,range.aspectMask,depth,false);
+            VkClearDepthStencilValue depth_value{values[0],0xa7};
             hardware.raw<PFN_vkCmdClearDepthStencilImage>("vkCmdClearDepthStencilImage")(native(command),image.image,VK_IMAGE_LAYOUT_GENERAL,&depth_value,1,&range);
         } else hardware.raw<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(native(command),image.image,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);
         if(final!=VK_IMAGE_LAYOUT_GENERAL)barrier(image,command,final);
@@ -880,7 +882,7 @@ struct PublicGuideGpuProbe {
         auto& image=images[role];VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};info.imageType=VK_IMAGE_TYPE_2D;
         info.format=format;info.extent={width,height,1};info.mipLevels=info.arrayLayers=1;info.samples=VK_SAMPLE_COUNT_1_BIT;
         info.tiling=VK_IMAGE_TILING_OPTIMAL;info.usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_STORAGE_BIT;
-        if(format==VK_FORMAT_D32_SFLOAT)info.usage&=~VK_IMAGE_USAGE_STORAGE_BIT;
+        if(format==VK_FORMAT_D32_SFLOAT||format==VK_FORMAT_D24_UNORM_S8_UINT)info.usage&=~VK_IMAGE_USAGE_STORAGE_BIT;
         require_transport(hardware.cached_image_create(hardware.native_device,&info,nullptr,&image.image),"public guide GPU image allocation");
         VkMemoryRequirements need{};hardware.raw<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(hardware.native_device,image.image,&need);
         VkMemoryAllocateInfo memory{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};memory.allocationSize=need.size;
@@ -889,7 +891,7 @@ struct PublicGuideGpuProbe {
         require_transport(hardware.raw<PFN_vkBindImageMemory>("vkBindImageMemory")(hardware.native_device,image.image,image.memory,0),"public guide GPU image binding");
         VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};view.image=image.image;view.viewType=VK_IMAGE_VIEW_TYPE_2D;
         view.format=format;view.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
-        if(format==VK_FORMAT_D32_SFLOAT)view.subresourceRange.aspectMask=VK_IMAGE_ASPECT_DEPTH_BIT;
+        if(format==VK_FORMAT_D32_SFLOAT||format==VK_FORMAT_D24_UNORM_S8_UINT)view.subresourceRange.aspectMask=VK_IMAGE_ASPECT_DEPTH_BIT;
         require_transport(hardware.raw<PFN_vkCreateImageView>("vkCreateImageView")(hardware.native_device,&view,nullptr,&image.view),"public guide GPU image view");
         image.resource=NVSDK_NGX_Create_ImageView_Resource_VK(image.view,image.image,view.subresourceRange,format,width,height,role>=output);
         // Exact DOOM receipt: valid D32 depth view, but NGX's range says COLOR.
@@ -961,7 +963,7 @@ struct PublicGuideGpuProbe {
             transport_aspects(VK_FORMAT_D32_SFLOAT_S8_UINT,VK_IMAGE_ASPECT_COLOR_BIT,depth,false)==(VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT)&&
             transport_aspects(VK_FORMAT_D32_SFLOAT_S8_UINT,VK_IMAGE_ASPECT_COLOR_BIT,depth,true)==VK_IMAGE_ASPECT_DEPTH_BIT,
             "depth transport must preserve color depth and isolate packed depth/stencil correctly");
-        make(depth,VK_FORMAT_D32_SFLOAT,16,8);make(output,VK_FORMAT_R8G8B8A8_UNORM,ow,oh);make(4,VK_FORMAT_R8G8B8A8_UNORM,ow,oh);
+        make(depth,depth_format,16,8);make(output,VK_FORMAT_R8G8B8A8_UNORM,ow,oh);make(4,VK_FORMAT_R8G8B8A8_UNORM,ow,oh);
         const auto old_bytes=hardware.byte_count;hardware.byte_count=ow*oh*4;readback=hardware.host_buffer(VK_BUFFER_USAGE_TRANSFER_DST_BIT);hardware.byte_count=old_bytes;
         wchar_t executable[32768]{};GetModuleFileNameW(nullptr,executable,32768);auto root=std::filesystem::path(executable).parent_path();
         for(unsigned i=0;i<7&&!streamline;++i,root=root.parent_path())for(const auto* configuration:{L"Release",L""}) {
@@ -1010,19 +1012,26 @@ struct PublicGuideGpuProbe {
             D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_READBACK;D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
             buffer.Width=sizes[i];buffer.Height=buffer.DepthOrArraySize=buffer.MipLevels=buffer.SampleDesc.Count=1;buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
             require_transport(hardware.device->owner->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&reads[i])),"original guide GPU readback");
-            const auto original_state=i>=2?D3D12_RESOURCE_STATE_COMMON:D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            const auto original_state=i>=2?D3D12_RESOURCE_STATE_COMMON:i==1?frame->depth_resource_state:frame->resource_state;
             d12_barrier(list.Get(),sources[i],original_state,D3D12_RESOURCE_STATE_COPY_SOURCE);
             D3D12_TEXTURE_COPY_LOCATION from{},to{};from.pResource=sources[i];from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
             to.pResource=reads[i].Get();to.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;to.PlacedFootprint=footprints[i];list->CopyTextureRegion(&to,0,0,0,&from,nullptr);
             d12_barrier(list.Get(),sources[i],D3D12_RESOURCE_STATE_COPY_SOURCE,original_state);}
         require_transport(list->Close(),"original guide GPU readback close");ID3D12CommandList* submitted[]{list.Get()};hardware.device->queue->ExecuteCommandLists(1,submitted);
-        require_transport(hardware.device->queue->Signal(hardware.progress.Get(),100+serial),"original guide GPU readback completion");hardware.wait_private(100+serial);
+        const auto completion=++hardware.public_readback_value;
+        require_transport(hardware.device->queue->Signal(hardware.progress.Get(),completion),"original guide GPU readback completion");hardware.wait_private(completion);
         const std::array<std::uint16_t,2> expected_motion{0x3400,0xb800};const float expected_depth=.75F,expected_late=.125F;
         for(unsigned i=0;i<3;++i){void* bytes{};const D3D12_RANGE range{0,SIZE_T(sizes[i])};require_transport(reads[i]->Map(0,&range,&bytes),"original guide GPU map");
-            for(unsigned y=0;y<8;++y)for(unsigned x=0;x<16;++x)require_transport(!std::memcmp(static_cast<char*>(bytes)+footprints[i].Offset+
-                y*footprints[i].Footprint.RowPitch+x*4,i==2?static_cast<const void*>(&expected_late):
+            for(unsigned y=0;y<8;++y)for(unsigned x=0;x<16;++x) {
+                const auto* pixel=static_cast<char*>(bytes)+footprints[i].Offset+y*footprints[i].Footprint.RowPitch+x*4;
+                if(i&&depth_format==VK_FORMAT_D24_UNORM_S8_UINT) {
+                    float value{};std::memcpy(&value,pixel,4);
+                    require_transport(std::isfinite(value)&&std::abs(value-(i==2?expected_late:expected_depth))<=1.F/16777215.F,
+                        "D24 normalized guide includes stencil/undefined bits or lost depth precision");
+                } else require_transport(!std::memcmp(pixel,i==2?static_cast<const void*>(&expected_late):
                     i?static_cast<const void*>(&expected_depth):expected_motion.data(),4),
-                "protected early guides or independent late depth witness changed");D3D12_RANGE no_write{};reads[i]->Unmap(0,&no_write);}
+                    "protected early guides or independent late depth witness changed");
+            }D3D12_RANGE no_write{};reads[i]->Unmap(0,&no_write);}
         void* native_bytes{};D3D12_RANGE native_range{0,SIZE_T(sizes[3])};
         require_transport(reads[3]->Map(0,&native_range,&native_bytes),"native color witness GPU map");
         const std::array<unsigned char,4> native_color{37,73,113,255};
@@ -1030,6 +1039,54 @@ struct PublicGuideGpuProbe {
             static_cast<char*>(native_bytes)+footprints[3].Offset+y*footprints[3].Footprint.RowPitch+x*4,native_color.data(),4),
             "native color witness captured wrapper final color instead of actual private native output");
         D3D12_RANGE native_no_write{};reads[3]->Unmap(0,&native_no_write);
+    }
+    void verify_d24_words() {
+        // Exercise every depth bit, extremes and adversarial upper bytes on
+        // the actual production decoder. Vulkan may zero its undefined X8.
+        Surface decoded;
+        require_transport(surface(*hardware.device,decoded,images[depth].resource.Resource.ImageViewInfo,depth),"D24 word decoder surface");
+        ComPtr<ID3D12Resource> upload,read;
+        D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width=decoded.footprint.Footprint.RowPitch*8;buffer.Height=buffer.DepthOrArraySize=buffer.MipLevels=buffer.SampleDesc.Count=1;
+        buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_UPLOAD;
+        require_transport(hardware.device->owner->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,IID_PPV_ARGS(&upload)),"D24 word upload");
+        heap.Type=D3D12_HEAP_TYPE_READBACK;
+        require_transport(hardware.device->owner->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&read)),"D24 word readback");
+        const auto word=[](unsigned pixel) {
+            const uint32_t low=pixel%32<24?(1u<<(pixel%32)):pixel%32==24?0u:pixel%32==25?0xffffffu:((pixel*123457u)&0xffffffu);
+            return low|((pixel*73u&255u)<<24);
+        };
+        void* bytes{};D3D12_RANGE no_read{};
+        require_transport(upload->Map(0,&no_read,&bytes),"D24 word upload map");std::memset(bytes,0,size_t(buffer.Width));
+        for(unsigned y=0;y<8;++y)for(unsigned x=0;x<16;++x) {
+            const auto bits=word(y*16+x);std::memcpy(static_cast<char*>(bytes)+y*decoded.footprint.Footprint.RowPitch+x*4,&bits,4);
+        }
+        upload->Unmap(0,nullptr);
+        ComPtr<ID3D12CommandAllocator> allocator;ComPtr<ID3D12GraphicsCommandList> list;
+        require_transport(hardware.device->owner->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&allocator)),"D24 word allocator");
+        require_transport(hardware.device->owner->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),nullptr,IID_PPV_ARGS(&list)),"D24 word list");
+        d12_barrier(list.Get(),decoded.buffer.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);
+        list->CopyBufferRegion(decoded.buffer.Get(),0,upload.Get(),0,buffer.Width);
+        d12_barrier(list.Get(),decoded.buffer.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COMMON);
+        copy_d12(list.Get(),decoded,false);
+        d12_barrier(list.Get(),decoded.texture.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION from{},to{};from.pResource=decoded.texture.Get();from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        to.pResource=read.Get();to.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;to.PlacedFootprint=decoded.footprint;to.PlacedFootprint.Footprint.Format=DXGI_FORMAT_R32_FLOAT;
+        list->CopyTextureRegion(&to,0,0,0,&from,nullptr);
+        require_transport(list->Close(),"D24 word close");ID3D12CommandList* lists[]{list.Get()};hardware.device->queue->ExecuteCommandLists(1,lists);
+        const auto completion=++hardware.public_readback_value;
+        require_transport(hardware.device->queue->Signal(hardware.progress.Get(),completion),"D24 word completion");hardware.wait_private(completion);
+        D3D12_RANGE range{0,size_t(buffer.Width)};require_transport(read->Map(0,&range,&bytes),"D24 word map");
+        for(unsigned y=0;y<8;++y)for(unsigned x=0;x<16;++x) {
+            float actual{};std::memcpy(&actual,static_cast<char*>(bytes)+y*decoded.footprint.Footprint.RowPitch+x*4,4);
+            const double expected=double(word(y*16+x)&0xffffffu)/16777215.0;
+            if(!std::isfinite(actual)||std::abs(double(actual)-expected)>1.0/16777215.0)
+                std::cerr<<"D24 decode pixel="<<x<<','<<y<<" word="<<word(y*16+x)<<" actual="<<actual<<" expected="<<expected<<'\n';
+            require_transport(std::isfinite(actual)&&std::abs(double(actual)-expected)<=1.0/16777215.0,"D24 decoder lost depth bits or included undefined upper byte");
+        }
+        D3D12_RANGE no_write{};read->Unmap(0,&no_write);destroy_surface(*hardware.device,decoded);
+        std::cout<<"D24 production GPU decoder:128 words, every depth bit, zero/one, changing undefined upper bytes PASS\n";
     }
     void run(unsigned serial,bool abandoned=false,bool reset_child=false) {
         const auto copyback_pixels_before=tested_native_output_copyback_pixels;
@@ -1061,11 +1118,23 @@ struct PublicGuideGpuProbe {
         barrier(images[output],hardware.command,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);VkBufferImageCopy region{};
         region.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.imageExtent={ow,oh,1};
         hardware.observed<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(hardware.command,images[output].image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,readback.buffer,1,&region);
-        barrier(images[output],hardware.command,VK_IMAGE_LAYOUT_GENERAL);require_transport(hardware.observed<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(hardware.command),"end actual public wrapper continuation");
+        barrier(images[output],hardware.command,VK_IMAGE_LAYOUT_GENERAL);
+        if(depth_format==VK_FORMAT_D24_UNORM_S8_UINT) {
+            barrier(images[depth],hardware.command,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            VkBufferImageCopy stencil{};stencil.imageSubresource={VK_IMAGE_ASPECT_STENCIL_BIT,0,0,1};stencil.imageExtent={16,8,1};
+            hardware.observed<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(hardware.command,images[depth].image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,hardware.readback.buffer,1,&stencil);
+            barrier(images[depth],hardware.command,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+        require_transport(hardware.observed<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(hardware.command),"end actual public wrapper continuation");
         require_transport(hardware.raw<PFN_vkResetFences>("vkResetFences")(hardware.native_device,1,&hardware.finished),"reset public GPU suffix fence");
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=1;submit.pCommandBuffers=&hardware.command;
         require_transport(hardware.observed<PFN_vkQueueSubmit>("vkQueueSubmit")(hardware.native_queue,1,&submit,hardware.finished),"submit original public guide/color transaction");
         require_transport(hardware.raw<PFN_vkWaitForFences>("vkWaitForFences")(hardware.native_device,1,&hardware.finished,VK_TRUE,5000000000ULL),"wait original public GPU transaction");
+        if(depth_format==VK_FORMAT_D24_UNORM_S8_UINT) {
+            void* stencil{};require_transport(hardware.raw<PFN_vkMapMemory>("vkMapMemory")(hardware.native_device,hardware.readback.memory,0,128,0,&stencil),"D24 stencil witness");
+            for(unsigned i=0;i<128;++i)require_transport(static_cast<unsigned char*>(stencil)[i]==0xa7,"depth transport modified native stencil");
+            hardware.raw<PFN_vkUnmapMemory>("vkUnmapMemory")(hardware.native_device,hardware.readback.memory);
+        }
         require_transport(tested_native_output_copyback_pixels-copyback_pixels_before==kLukeOriginWidth*kLukeOriginHeight,
             "active AFW native copyback still transfers the full output instead of exact marker pixels");
         void* bytes{};require_transport(hardware.raw<PFN_vkMapMemory>("vkMapMemory")(hardware.native_device,readback.memory,0,ow*oh*4,0,&bytes),"map final original public Vulkan color");
@@ -1096,6 +1165,7 @@ struct PublicGuideGpuProbe {
         require_transport(hardware.observed<PFN_vkResetCommandBuffer>("vkResetCommandBuffer")(hardware.command,0),"retire exact completed public original recording");
     }
     void verify(){setup();
+        if(depth_format==VK_FORMAT_D24_UNORM_S8_UINT)verify_d24_words();
         // The regular transport may already own a completed matching RG16
         // slot (Indiana). Isolate its pool so the cold rollback is genuinely
         // false->true->false on a new production slot, for both game routes.
@@ -1103,7 +1173,13 @@ struct PublicGuideGpuProbe {
         hardware.device->slots.insert(hardware.device->slots.end(),previous_slots.begin(),previous_slots.end());
         run(1);run(2);run(3,true);run(3,false,true);run(4);run(5);
         require_transport(native_calls==5&&public_calls==7,"public transaction duplicated original calls or compacted actual production");
-        std::cout<<"Native Vulkan public transaction GPU: original Motion/depth bits+scalars+SL camera before in-place wrapper overwrite; final original Output composite+CRC after private SR/copyback; exact original reset/abandon and recovered same slot PASS\n";
+        if(hardware.debug)for(UINT64 index=0;index<hardware.debug->GetNumStoredMessages();++index) {
+            SIZE_T bytes{};hardware.debug->GetMessage(index,nullptr,&bytes);std::vector<unsigned char> storage(bytes);
+            auto* message=reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+            if(SUCCEEDED(hardware.debug->GetMessage(index,message,&bytes))&&(message->Severity==D3D12_MESSAGE_SEVERITY_ERROR||message->Severity==D3D12_MESSAGE_SEVERITY_CORRUPTION))
+                throw std::runtime_error(message->pDescription);
+        }
+        std::cout<<"Native Vulkan public transaction GPU depth format="<<depth_format<<": original Motion/depth+scalars+SL camera before in-place wrapper overwrite; final original Output composite+CRC after private SR/copyback; exact original reset/abandon and recovered same slot PASS\n";
         const auto observer=reinterpret_cast<void(*)(decltype(&sl_observer))>(GetProcAddress(streamline,"TestObserver"));observer(nullptr);
         const auto lifetime=hooks().public_lifetimes.find(public_handle);if(lifetime!=hooks().public_lifetimes.end())retire_dlss_motion_vector_stream(kVulkanPublicStreamNamespace|lifetime->second->identity);
         hooks().public_lifetimes.erase(public_handle);hooks().features.erase(native_handle);
@@ -1136,7 +1212,9 @@ int run_buffer_transport_test(bool bootstrap) {
         verify_image_entry_contract();for(unsigned variant=0;variant<4;++variant) {
             const auto role=variant==1?color:variant==2?output:motion;
             auto* probe=new TransportProbe;probe->bootstrap=bootstrap;probe->capture_role=role;probe->rgba_motion=variant==3;
-            probe->setup();probe->verify();if(bootstrap&&variant==0){PublicGuideGpuProbe transaction(*probe);transaction.verify();}
+            probe->setup();probe->verify();if(bootstrap&&variant==0)for(auto format:{VK_FORMAT_D32_SFLOAT,VK_FORMAT_D24_UNORM_S8_UINT}) {
+                PublicGuideGpuProbe transaction(*probe,format);transaction.verify();
+            }
             probe->cleanup();delete probe;
             std::cout<<"Native Vulkan exact GPU role="<<role<<" format="<<(variant==3?"RGBA16":role==motion?"RG16":"R11G11B10")
                 <<" pixels=128 bytes_per_pixel="<<(variant==3?8:4)<<" PASS\n";

@@ -15,7 +15,8 @@ struct LukeGameCameraConfig {
 // conversion to view right/up/back. KCD's native packet decoder exposes
 // physical forward (-inverse-view Z), as in accepted OptiScaler V33011.
 // Horizon retains V33018's physical-forward convention; other titles keep
-// their later accepted view-row contracts.
+// their later accepted view-row contracts. Indiana supplies native view rows
+// directly, as proved by OptiScaler V30078 and the V700 captured clip history.
 inline LukeGameCameraConfig luke_game_camera_config_from_ini(
     const std::filesystem::path& ini) noexcept {
     wchar_t sections[32768]{};
@@ -39,7 +40,9 @@ inline LukeGameCameraConfig luke_game_camera_config_from_ini(
             ? LukeProducerCameraAxes::right_down_forward
             : ((_wcsicmp(section, L"HFW") == 0 || _wcsicmp(section, L"KCD2") == 0)
                 ? LukeProducerCameraAxes::physical_forward
-                : LukeProducerCameraAxes::view);
+                : (_wcsicmp(section, L"INDY") == 0
+                    ? LukeProducerCameraAxes::native_view_rows
+                    : LukeProducerCameraAxes::view));
         found = true;
     }
     return result;

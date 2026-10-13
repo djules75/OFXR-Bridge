@@ -131,6 +131,7 @@ int main(int argc,char** argv) {try {
     using namespace quality;
     require(argc==2,"provider path argument missing");
     const auto config=xrfg::luke_game_camera_config_from_ini(xrfg::luke_host_game_directory()/L"RealVR.ini");
+    const bool indiana=config.axes==xrfg::LukeProducerCameraAxes::native_view_rows;
     require(config.world_scale==1,"isolated KCD WorldScale fixture missing");
     ComPtr<ID3D12Debug> debug;if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
     ComPtr<ID3D12Device> device;check(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device)),"hardware device");
@@ -171,6 +172,7 @@ int main(int argc,char** argv) {try {
             frame->camera_data_valid=frame->camera_matrices_valid=frame->camera_frame_token_valid=true;
             frame->camera_position=current.packet.position;frame->camera_right=current.packet.right;
             frame->camera_up=current.packet.up;frame->camera_forward=current.packet.forward;
+            if(indiana)for(float& value:frame->camera_forward)value=-value;
             frame->camera_view_to_clip=current.packet.projection;frame->camera_clip_to_view=current.packet.inverse_projection;
             frame->camera_near=current.packet.near_plane;frame->camera_far=current.packet.far_plane;
             frame->camera_fov_vertical=current.packet.fov;frame->depth_inverted=frame->depth_infinite=true;
@@ -286,5 +288,5 @@ int main(int argc,char** argv) {try {
     CloseHandle(event);
     require(all_camera_bits_match,"KCD plugin camera reflects decoded inverseView instead of preserving its actual view basis");
     require(all_mode_pixels_match,"full PDAFW rotated static-world reconstruction diverges from independent same-time peer oracle");
-    std::cout<<"KCD full quality: actual decoded camera, depth/Normal-motion shaders and PDAFW three modes match independent rotated-plane peer PASS\n";return 0;
+    std::cout<<(indiana?"Indiana full quality:":"KCD full quality:")<<" actual decoded camera, depth/Normal-motion shaders and PDAFW three modes match independent rotated-plane peer PASS\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
