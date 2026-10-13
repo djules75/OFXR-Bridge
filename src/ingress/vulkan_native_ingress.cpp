@@ -34,6 +34,9 @@ namespace {
 using Microsoft::WRL::ComPtr;
 struct Device;
 enum Role{color,motion,depth,output,role_count};
+#if defined(XRFG_NATIVE_INGRESS_TESTS)
+std::uint64_t tested_native_output_copyback_pixels{};
+#endif
 struct Surface {
     ComPtr<ID3D12Resource> buffer,texture;
     VkBuffer imported{};VkDeviceMemory memory{};
@@ -290,9 +293,10 @@ public:
         if(current_){current_->final_capture_=std::move(completion);current_->native_handle_=handle;current_->native_identity_=identity;}
     }
     static bool mark_original(ID3D12GraphicsCommandList* list,ID3D12Resource* resource,
-        const std::shared_ptr<const DlssMotionVectorFrame>& frame,ID3D12Device* device,LukeColorOriginRect rectangle)noexcept;
+        const std::shared_ptr<const DlssMotionVectorFrame>& frame,ID3D12Device* device,LukeColorOriginRect rectangle,
+        LukeColorOriginRect* written_rectangle=nullptr)noexcept;
     static VkResult copy_original(VkCommandBuffer,const std::shared_ptr<Device>&,const std::shared_ptr<Slot>&,
-        const std::shared_ptr<const DlssMotionVectorFrame>&,uint32_t)noexcept;
+        const std::shared_ptr<const DlssMotionVectorFrame>&,uint32_t,const LukeColorOriginRect* rectangle=nullptr)noexcept;
     static bool refuse_child()noexcept {
         if(!current_)return false;current_->reject();return true;
     }
@@ -527,8 +531,12 @@ VkImageAspectFlags transport_aspects(VkFormat format,VkImageAspectFlags declared
     default:return declared;
     }
 }
-bool copy_native(Device& d,Surface& s,VkCommandBuffer cmd,bool to_native,Role role,uint32_t native_family) {
+bool copy_native(Device& d,Surface& s,VkCommandBuffer cmd,bool to_native,Role role,uint32_t native_family,
+    const LukeColorOriginRect* rectangle=nullptr) {
     if(!s.imported)return false;
+    if(rectangle&&(!to_native||role!=output||!rectangle->width||!rectangle->height||
+        std::uint64_t(rectangle->x)+rectangle->width>s.source.Width||
+        std::uint64_t(rectangle->y)+rectangle->height>s.source.Height))return false;
     auto barrier=api<PFN_vkCmdPipelineBarrier>(d,"vkCmdPipelineBarrier");
     auto from_image=api<PFN_vkCmdCopyImageToBuffer>(d,"vkCmdCopyImageToBuffer");
     auto to_image=api<PFN_vkCmdCopyBufferToImage>(d,"vkCmdCopyBufferToImage");if(!barrier||!from_image||!to_image)return false;
@@ -552,6 +560,15 @@ bool copy_native(Device& d,Surface& s,VkCommandBuffer cmd,bool to_native,Role ro
     // Packed depth/stencil transports only the actual depth plane.
     region.imageSubresource.aspectMask=transport_aspects(s.source.Format,region.imageSubresource.aspectMask,role,true);
     region.imageExtent={s.source.Width,s.source.Height,1};
+    if(rectangle) {
+        region.bufferOffset+=std::uint64_t(rectangle->y)*s.footprint.Footprint.RowPitch+
+            std::uint64_t(rectangle->x)*pixel_bytes(s.footprint.Footprint.Format);
+        region.imageOffset={int32_t(rectangle->x),int32_t(rectangle->y),0};
+        region.imageExtent={rectangle->width,rectangle->height,1};
+    }
+#if defined(XRFG_NATIVE_INGRESS_TESTS)
+    if(to_native&&role==output)tested_native_output_copyback_pixels+=std::uint64_t(region.imageExtent.width)*region.imageExtent.height;
+#endif
     if(to_native)to_image(cmd,s.imported,s.source.Image,image.newLayout,1,&region);
     else from_image(cmd,s.source.Image,image.newLayout,s.imported,1,&region);
     image.srcAccessMask=image.dstAccessMask;image.dstAccessMask=role==output?VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT:VK_ACCESS_SHADER_READ_BIT;
@@ -561,12 +578,16 @@ bool copy_native(Device& d,Surface& s,VkCommandBuffer cmd,bool to_native,Role ro
     barrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,1,&buffer,1,&image);
     s.native_used=true;return true;
 }
-void copy_d12(ID3D12GraphicsCommandList* list,Surface& s,bool to_buffer) {
+void copy_d12(ID3D12GraphicsCommandList* list,Surface& s,bool to_buffer,const LukeColorOriginRect* rectangle=nullptr) {
     D3D12_TEXTURE_COPY_LOCATION buffer{};buffer.pResource=s.buffer.Get();buffer.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;buffer.PlacedFootprint=s.footprint;
     D3D12_TEXTURE_COPY_LOCATION texture{};texture.pResource=s.texture.Get();texture.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     d12_barrier(list,s.buffer.Get(),D3D12_RESOURCE_STATE_COMMON,to_buffer?D3D12_RESOURCE_STATE_COPY_DEST:D3D12_RESOURCE_STATE_COPY_SOURCE);
     d12_barrier(list,s.texture.Get(),D3D12_RESOURCE_STATE_COMMON,to_buffer?D3D12_RESOURCE_STATE_COPY_SOURCE:D3D12_RESOURCE_STATE_COPY_DEST);
-    if(to_buffer)list->CopyTextureRegion(&buffer,0,0,0,&texture,nullptr);else list->CopyTextureRegion(&texture,0,0,0,&buffer,nullptr);
+    if(to_buffer&&rectangle) {
+        const D3D12_BOX box{rectangle->x,rectangle->y,0,rectangle->x+rectangle->width,rectangle->y+rectangle->height,1};
+        list->CopyTextureRegion(&buffer,rectangle->x,rectangle->y,0,&texture,&box);
+    } else if(to_buffer)list->CopyTextureRegion(&buffer,0,0,0,&texture,nullptr);
+    else list->CopyTextureRegion(&texture,0,0,0,&buffer,nullptr);
     d12_barrier(list,s.texture.Get(),to_buffer?D3D12_RESOURCE_STATE_COPY_SOURCE:D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COMMON);
     d12_barrier(list,s.buffer.Get(),to_buffer?D3D12_RESOURCE_STATE_COPY_DEST:D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON);
 }
@@ -794,7 +815,8 @@ std::shared_ptr<OriginalPublicCapture> prepare_original_public_capture(
     return capture;
 }
 bool PublicFeatureInvocationScope::mark_original(ID3D12GraphicsCommandList* list,ID3D12Resource* resource,
-    const std::shared_ptr<const DlssMotionVectorFrame>& frame,ID3D12Device* device,LukeColorOriginRect rectangle)noexcept {
+    const std::shared_ptr<const DlssMotionVectorFrame>& frame,ID3D12Device* device,LukeColorOriginRect rectangle,
+    LukeColorOriginRect* written_rectangle)noexcept {
     try {
         auto* owner=current_;if(!owner||!owner->original_capture_||!frame||!resource)return false;
         if(recording_epoch(owner->original_capture_->recording)!=owner->original_capture_->receipt->epoch)return false;
@@ -811,11 +833,12 @@ bool PublicFeatureInvocationScope::mark_original(ID3D12GraphicsCommandList* list
         const auto found=hooks().image_usage.find(receipt.resolved.Resource.ImageViewInfo.Image);
         if(found==hooks().image_usage.end()||found->second.creation!=receipt.allocation.creation||found->second.device!=owner->device_)return false;
         return SUCCEEDED(mark_luke_color_origin(list,resource,frame->color_origin_token,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,device,rectangle));
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,device,rectangle,DXGI_FORMAT_UNKNOWN,written_rectangle));
     }catch(...){return false;}
 }
 VkResult PublicFeatureInvocationScope::copy_original(VkCommandBuffer command,const std::shared_ptr<Device>& d,
-    const std::shared_ptr<Slot>& s,const std::shared_ptr<const DlssMotionVectorFrame>& frame,uint32_t family)noexcept {
+    const std::shared_ptr<Slot>& s,const std::shared_ptr<const DlssMotionVectorFrame>& frame,uint32_t family,
+    const LukeColorOriginRect* rectangle)noexcept {
     try {
         auto* owner=current_;if(!owner||!owner->original_capture_||!frame)return VK_ERROR_INITIALIZATION_FAILED;
         // This short guard covers the actual final VkImage copyback recording,
@@ -833,7 +856,7 @@ VkResult PublicFeatureInvocationScope::copy_original(VkCommandBuffer command,con
             capture.device!=d||capture.slot!=s||capture.family!=family||
             allocation==hooks().image_usage.end()||allocation->second.creation!=receipt.allocation.creation||
             allocation->second.device!=owner->device_)return VK_ERROR_INITIALIZATION_FAILED;
-        return copy_native(*d,s->surfaces[output],command,true,output,family)?VK_SUCCESS:VK_ERROR_INITIALIZATION_FAILED;
+        return copy_native(*d,s->surfaces[output],command,true,output,family,rectangle)?VK_SUCCESS:VK_ERROR_INITIALIZATION_FAILED;
     }catch(...){return VK_ERROR_INITIALIZATION_FAILED;}
 }
 template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const NVSDK_NGX_Handle* handle,
@@ -1050,7 +1073,7 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
             reinterpret_cast<std::uint64_t>(s->diagnostic_native_color.source.Image),
             reinterpret_cast<std::uint64_t>(s->surfaces[output].source.Image));
     }
-    auto finish=[d,s,g,frame,pre_nr,recording,native_family,p,original_capture,native_color_probe,native_color_result,identity=f.identity,handle]()mutable->bool {
+    auto finish=[d,s,g,frame,pre_nr,nr_enabled=nr.enabled,recording,native_family,p,original_capture,native_color_probe,native_color_result,identity=f.identity,handle]()mutable->bool {
         std::unique_lock device_lock(d->mutex,std::defer_lock);
         if(original_capture)device_lock.lock();
         if(original_capture) {
@@ -1107,20 +1130,29 @@ template<unsigned Index>NVSDK_NGX_Result evaluate(VkCommandBuffer original,const
         for(auto role:{motion,depth})d12_barrier(list,s->surfaces[role].texture.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         d12_barrier(list,s->surfaces[output].texture.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         Parameters final_parameters(original_capture?original_capture->parameters.get():p,s.get());
-        neural_rendering::after_sr(identity,list,&final_parameters,d->queue.Get());
+        if(nr_enabled)neural_rendering::after_sr(identity,list,&final_parameters,d->queue.Get());
         bool marker=true;
+        LukeColorOriginRect written_rectangle{};
         if(frame&&g.protect_snapshot_lifetime&&embedded::afw_snapshot().desired.mode!=0) {
             if(original_capture)marker=PublicFeatureInvocationScope::mark_original(list,g.output,frame,d->owner.Get(),
-                {g.output_x,g.output_y,g.output_width,g.output_height});
+                {g.output_x,g.output_y,g.output_width,g.output_height},&written_rectangle);
             else mark_luke_color_origin(list,g.output,frame->color_origin_token,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,d->owner.Get(),
                 {g.output_x,g.output_y,g.output_width,g.output_height});
         }
         d12_barrier(list,s->surfaces[output].texture.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COMMON);
         for(auto role:{motion,depth})d12_barrier(list,s->surfaces[role].texture.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
-        copy_d12(list,s->surfaces[output],true);
+        // AFW consumes final XR color, not this native HDR surface. With NR
+        // inactive the only modified pixels are the exact written marker bands.
+        // Keep the full incoming image/snapshots, but return only that rectangle.
+        const bool marker_only=original_capture&&marker&&!nr_enabled&&written_rectangle.width&&written_rectangle.height;
+        if(frame&&(frame->native_production_sequence<=8||frame->native_production_sequence%300==0))
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,marker_only?1:0,1191,
+                marker_only?std::uint64_t(written_rectangle.width)*written_rectangle.height*pixel_bytes(s->surfaces[output].footprint.Footprint.Format):0,
+                std::uint64_t(s->surfaces[output].source.Width)*s->surfaces[output].source.Height*pixel_bytes(s->surfaces[output].footprint.Footprint.Format));
+        copy_d12(list,s->surfaces[output],true,marker_only?&written_rectangle:nullptr);
         Copyback copy{d.get(),&s->surfaces[output],output,native_family};
-        if(original_capture)copy.guarded=[d,s,frame,native_family](VkCommandBuffer command){
-            return PublicFeatureInvocationScope::copy_original(command,d,s,frame,native_family);};
+        if(original_capture)copy.guarded=[d,s,frame,native_family,marker_only,written_rectangle](VkCommandBuffer command){
+            return PublicFeatureInvocationScope::copy_original(command,d,s,frame,native_family,marker_only?&written_rectangle:nullptr);};
         if(device_lock.owns_lock())device_lock.unlock();
         const auto transferred=handoff(d,s,1,g.stream,recording,copy,frame!=nullptr&&marker);
         if(transferred.result!=VK_SUCCESS)ingress_reason(8,static_cast<std::uint64_t>(transferred.result));

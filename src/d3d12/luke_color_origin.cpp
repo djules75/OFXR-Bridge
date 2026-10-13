@@ -220,7 +220,8 @@ static void report_origin_layout(bool writer, unsigned reason,
 
 HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* color,
     std::uint32_t token, D3D12_RESOURCE_STATES state, ID3D12Device* native_device,
-    LukeColorOriginRect rect, DXGI_FORMAT proven_color_view) noexcept {
+    LukeColorOriginRect rect, DXGI_FORMAT proven_color_view, LukeColorOriginRect* written_rectangle) noexcept {
+    if (written_rectangle) *written_rectangle = {};
     try {
         if (!list || !color || !token) return E_INVALIDARG;
         const auto desc = color->GetDesc();
@@ -271,6 +272,16 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
                 list->CopyTextureRegion(&destination, x + cell * 2, y, 0, &source, nullptr);
             }
         }
+        if (written_rectangle) {
+            UINT left=desc.Width,top=desc.Height,right=0,bottom=0;
+            for(unsigned band=0;band<layout.band_count;++band) {
+                const auto& area=layout.bands[band];
+                left=std::min(left,rect.x+area.x);top=std::min(top,rect.y+area.y);
+                right=std::max(right,rect.x+area.x+area.width);
+                bottom=std::max(bottom,rect.y+area.y+area.height);
+            }
+            *written_rectangle={left,top,right-left,bottom-top};
+        }
         if (state != D3D12_RESOURCE_STATE_COPY_DEST) {
             auto barrier = transition(color, D3D12_RESOURCE_STATE_COPY_DEST, state);
             list->ResourceBarrier(1, &barrier);
@@ -309,7 +320,14 @@ HRESULT read_luke_color_origin(ID3D12CommandQueue* queue, ID3D12Resource* color,
         HRESULT result = get_reader(queue, reader);
         if (FAILED(result)) return report.finish(result);
         std::scoped_lock lock(reader->mutex);
+        const bool reader_timing = bridge_flight_logger().ram_enabled() || bridge_flight_logger().enabled();
+        if (reader_timing)
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                S_OK, 120, reinterpret_cast<std::uint64_t>(reader.get()), reader->last_fence);
         result = wait_reader(*reader, timeout_ms);
+        if (reader_timing)
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                result, 121, reinterpret_cast<std::uint64_t>(reader.get()), reader->last_fence);
         if (FAILED(result)) return report.finish(result); // Retire before any allocator/readback reuse.
         auto roi_desc = original; roi_desc.Width = layout.scan.width;
         roi_desc.Height = layout.scan.height; roi_desc.MipLevels = 1;
@@ -352,14 +370,13 @@ HRESULT read_luke_color_origin(ID3D12CommandQueue* queue, ID3D12Resource* color,
         result = queue->Signal(reader->fence.Get(), value);
         if (FAILED(result)) { reader->poisoned = true; return report.finish(result); }
         reader->last_fence = value;
-        // RAM only: correlate each phase by (reader address, fence value).
+        // F9/RAM: correlate each phase by (reader address, fence value).
         // 123->124 is queued GPU readiness; 124->125 is Map/luma/CRC decode.
-        const bool ram_reader_timing = bridge_flight_logger().ram_enabled();
-        if (ram_reader_timing)
+        if (reader_timing)
             bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
                 result, 123, reinterpret_cast<std::uint64_t>(reader.get()), value);
         result = wait_reader(*reader, timeout_ms);
-        if (ram_reader_timing)
+        if (reader_timing)
             bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
                 result, 124, reinterpret_cast<std::uint64_t>(reader.get()), value);
         if (FAILED(result)) {
@@ -391,7 +408,7 @@ HRESULT read_luke_color_origin(ID3D12CommandQueue* queue, ID3D12Resource* color,
         const D3D12_RANGE no_write{0, 0}; reader->readback->Unmap(0, &no_write);
         const HRESULT decode_status = ambiguous ? HRESULT_FROM_WIN32(ERROR_INVALID_DATA)
             : exact_token ? S_OK : HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
-        if (ram_reader_timing)
+        if (reader_timing)
             bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
                 decode_status, 125, reinterpret_cast<std::uint64_t>(reader.get()), value);
         if (ambiguous) return report.finish(HRESULT_FROM_WIN32(ERROR_INVALID_DATA));

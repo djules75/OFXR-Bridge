@@ -1032,6 +1032,7 @@ struct PublicGuideGpuProbe {
         D3D12_RANGE native_no_write{};reads[3]->Unmap(0,&native_no_write);
     }
     void run(unsigned serial,bool abandoned=false,bool reset_child=false) {
+        const auto copyback_pixels_before=tested_native_output_copyback_pixels;
         no_child=abandoned;reset_before_child=reset_child;reset_parameters();VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         std::array<VkImageLayout,5> original_layouts{};for(unsigned i=0;i<images.size();++i)original_layouts[i]=images[i].layout;
         require_transport(hardware.observed<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(hardware.command,&begin),"begin original public GPU recording");
@@ -1065,11 +1066,26 @@ struct PublicGuideGpuProbe {
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=1;submit.pCommandBuffers=&hardware.command;
         require_transport(hardware.observed<PFN_vkQueueSubmit>("vkQueueSubmit")(hardware.native_queue,1,&submit,hardware.finished),"submit original public guide/color transaction");
         require_transport(hardware.raw<PFN_vkWaitForFences>("vkWaitForFences")(hardware.native_device,1,&hardware.finished,VK_TRUE,5000000000ULL),"wait original public GPU transaction");
+        require_transport(tested_native_output_copyback_pixels-copyback_pixels_before==kLukeOriginWidth*kLukeOriginHeight,
+            "active AFW native copyback still transfers the full output instead of exact marker pixels");
         void* bytes{};require_transport(hardware.raw<PFN_vkMapMemory>("vkMapMemory")(hardware.native_device,readback.memory,0,ow*oh*4,0,&bytes),"map final original public Vulkan color");
         std::uint32_t token{};std::array<float,ow> row{};
         for(unsigned y=0;y<oh;++y){for(unsigned x=0;x<ow;++x)row[x]=luke_origin_luma(static_cast<const std::byte*>(bytes)+(y*ow+x)*4,DXGI_FORMAT_R8G8B8A8_UNORM);
             const auto decoded=decode_luke_origin_row(row);require_transport(!decoded.ambiguous,"final original public color token ambiguous");if(decoded.token){require_transport(!token||token==decoded.token,"final public output contains competing tokens");token=decoded.token;}}
         const std::array<unsigned char,4> composite{40,51,63,255};
+        // Marker-only copyback must preserve every native pixel outside the
+        // actual bands, including nonzero row/column offsets and row padding.
+        LukeColorOriginLayout marker_layout{};
+        require_transport(compact_luke_origin_layout(ow,oh,ow,oh,marker_layout),"public marker layout");
+        for(unsigned y=0;y<oh;++y)for(unsigned x=0;x<ow;++x) {
+            bool marker_pixel=false;
+            for(unsigned band=0;band<marker_layout.band_count;++band) {
+                const auto& rect=marker_layout.bands[band];
+                marker_pixel|=x>=rect.x&&x<rect.x+rect.width&&y>=rect.y&&y<rect.y+rect.height;
+            }
+            if(!marker_pixel)require_transport(!std::memcmp(static_cast<unsigned char*>(bytes)+(y*ow+x)*4,
+                composite.data(),4),"marker-only copyback overwrote unchanged wrapper composite pixels");
+        }
         const auto* actual=static_cast<unsigned char*>(bytes)+(oh-1)*ow*4;
         if(serial==1||std::memcmp(actual,composite.data(),4))std::cout<<"Public final GPU RGBA="<<unsigned(actual[0])<<','<<unsigned(actual[1])<<','
             <<unsigned(actual[2])<<','<<unsigned(actual[3])<<" expected="<<unsigned(composite[0])<<','<<unsigned(composite[1])<<','

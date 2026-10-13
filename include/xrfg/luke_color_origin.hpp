@@ -271,7 +271,8 @@ void configure_luke_color_origin_extent(unsigned color_width, unsigned color_hei
 HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* color,
     std::uint32_t token, D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
     ID3D12Device* native_device = nullptr, LukeColorOriginRect rect = {},
-    DXGI_FORMAT proven_color_view = DXGI_FORMAT_UNKNOWN) noexcept;
+    DXGI_FORMAT proven_color_view = DXGI_FORMAT_UNKNOWN,
+    LukeColorOriginRect* written_rectangle = nullptr) noexcept;
 // Reads only the compact corner ROI in one GPU submission/fence/map. Every
 // row is independently CRC-checked; distinct valid tokens reject the batch.
 // Missing/ambiguous/expired marker is an error; no selected-metadata fallback.
