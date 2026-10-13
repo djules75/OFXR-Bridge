@@ -12,8 +12,10 @@ struct LukeGameCameraConfig {
 };
 // The unique WorldScale-bearing section identifies the active Luke title.
 // DOOM supplies right/down/forward rows; its entire input camera basis needs
-// conversion to view right/up/back. Horizon retains the owner's working
-// V33018 physical-forward convention; other titles keep later accepted rows.
+// conversion to view right/up/back. KCD's native packet decoder exposes
+// physical forward (-inverse-view Z), as in accepted OptiScaler V33011.
+// Horizon retains V33018's physical-forward convention; other titles keep
+// their later accepted view-row contracts.
 inline LukeGameCameraConfig luke_game_camera_config_from_ini(
     const std::filesystem::path& ini) noexcept {
     wchar_t sections[32768]{};
@@ -35,7 +37,7 @@ inline LukeGameCameraConfig luke_game_camera_config_from_ini(
         result.world_scale = scale;
         result.axes = _wcsicmp(section, L"DOOMTDA") == 0
             ? LukeProducerCameraAxes::right_down_forward
-            : (_wcsicmp(section, L"HFW") == 0
+            : ((_wcsicmp(section, L"HFW") == 0 || _wcsicmp(section, L"KCD2") == 0)
                 ? LukeProducerCameraAxes::physical_forward
                 : LukeProducerCameraAxes::view);
         found = true;

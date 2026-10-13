@@ -6,6 +6,13 @@
 
 namespace xrfg::native_vulkan {
 enum class RecordingDisposition : unsigned char { recording, submitted, abandoned };
+// Receipt for an observed original recording, even before any split exists.
+// Submitted means the original driver accepted Submit1/2, not GPU retirement.
+// Disposal abandons only an epoch that was never successfully submitted.
+struct RecordingReceipt {
+    std::atomic<RecordingDisposition> disposition{RecordingDisposition::recording};
+    uint64_t epoch{};
+};
 // Shared identity belongs to one successful split in one recording epoch.
 // Abandonment is an exact reset/free/begin event, never an elapsed-frame guess.
 struct RecordingLifetime {
@@ -62,6 +69,10 @@ unsigned split_refusal(VkCommandBuffer original) noexcept;
 // command mutex only when the application resets/frees that exact recording.
 // Vulkan requires those disposal operations to follow GPU retirement.
 bool retain_recording(VkCommandBuffer original,std::shared_ptr<void> resources) noexcept;
+// Obtain before raw copies. The same original/owned continuation shares this
+// exact epoch receipt; failed driver submission leaves it recording. It adds
+// no segments, callbacks, waits or submission mutations.
+std::shared_ptr<RecordingReceipt> recording_receipt(VkCommandBuffer original) noexcept;
 using RecordCopyback = VkResult(*)(VkCommandBuffer continuation,void* context);
 // Ends current prefix, begins an owned suffix, records optional native copyback
 // before replaying accepted bindings/push constants/dynamic state. Original

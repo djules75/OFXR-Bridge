@@ -866,6 +866,12 @@ struct SessionState {
     // Luke AFW capability is independent of the currently selected AFW mode.
     // The latter may be Off while ordinary OFXR generation remains enabled.
     bool luke_afw_enabled{};
+    // Outlaws' initial VR texture constructor excludes the native producer.
+    // Spend cold setup there, on its original SINGLETHREADED D11 owner, and
+    // permanently close that window before the first application Wait/Begin.
+    bool luke_outlaws_preframe{};
+    bool luke_outlaws_frame_started{}; // frame_call_mutex
+    bool luke_outlaws_eager_budget{}; // frame_call_mutex
     // Physical separation from ONE runtime pair, not cross-time AER poses.
     std::optional<float> luke_xr_eye_baseline; // mutex
     std::optional<bool> luke_afw_previous_selected; // frame_call_mutex
@@ -1991,6 +1997,15 @@ struct SwapchainState {
 
 using QueryLukeRossD3D12Context = int (*)(
     ID3D12Device**, ID3D12CommandQueue**) noexcept;
+#ifdef XRFG_NATIVE_INGRESS_TESTS
+std::filesystem::path test_luke_bootstrap_provider;
+#endif
+std::filesystem::path luke_bootstrap_provider() {
+#ifdef XRFG_NATIVE_INGRESS_TESTS
+    if(!test_luke_bootstrap_provider.empty())return test_luke_bootstrap_provider;
+#endif
+    return current_layer_directory()/L"PDAFWPlugin.dll";
+}
 
 // A Luke D11 session consumes native D12 productions, but must not append
 // OFA/interop waits to the game's rendering queue. Its next native submission
@@ -3219,6 +3234,7 @@ create_d3d11_frame_generation_swapchains(
 void initialize_late_luke_context(const std::shared_ptr<SessionState>& session) noexcept {
     if(!session || !session->luke_afw_enabled || session->graphics_binding!=SessionGraphicsBinding::d3d11 ||
         (session->graphics_binding_capabilities&8ULL)!=0 || session->application_frame_in_progress)return;
+    if(session->luke_outlaws_preframe&&session->luke_outlaws_frame_started)return;
     try {
         if(!session->luke_vulkan_device)
             session->luke_vulkan_device=xrfg::native_vulkan::configure_luke_owner(session->d3d12_device.Get(),session->d3d12_queue.Get());
@@ -3247,7 +3263,7 @@ void initialize_late_luke_context(const std::shared_ptr<SessionState>& session) 
             if(FAILED(queue_result)){session->luke_context_failed_queue=queue.Get();return;}
         }
         auto afw=std::make_shared<xrfg::LukeAfwSynthesizer>();
-        const auto result=afw->initialize(device.Get(),execution_queue.Get(),current_layer_directory()/L"PDAFWPlugin.dll");
+        const auto result=afw->initialize(device.Get(),execution_queue.Get(),luke_bootstrap_provider());
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::synthesis_initialize,
             result,0xAF023245ULL,session->luke_afw_odd_serial_is_left?1ULL:0ULL,1);
         if(FAILED(result)){session->luke_context_failed_queue=queue.Get();return;}
@@ -3333,6 +3349,8 @@ void release_session_generation_budget(
                 return true;
             }
         }
+        if(state->session->luke_outlaws_preframe&&state->session->luke_outlaws_frame_started)
+            return true; // Missing startup preparation remains original real-frame bypass.
         const std::uint64_t auxiliary =
             (static_cast<std::uint64_t>(state->enumerated_image_count) << 32) |
             state->create_info.arraySize;
@@ -3448,6 +3466,14 @@ void release_session_generation_budget(
         return false;
     }
     return true;
+}
+
+void seal_outlaws_initialization(SessionState& state) noexcept {
+    if(!state.luke_outlaws_preframe||state.luke_outlaws_frame_started)return;
+    state.luke_outlaws_frame_started=true;
+    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+        (state.graphics_binding_capabilities&8ULL)?S_OK:HRESULT_FROM_WIN32(ERROR_NOT_READY),
+        1000,handle_value(state.handle),state.luke_outlaws_eager_budget);
 }
 
 // Whether any swapchain this frame submits as a projection view still owes the
@@ -4973,6 +4999,9 @@ XrResult layer_create_session_impl(
         }
     }
 
+    state->luke_outlaws_preframe=state->luke_afw_enabled&&
+        state->graphics_binding==SessionGraphicsBinding::d3d11&&
+        _wcsicmp(xrfg::implicit_layer::current_executable_name().c_str(),L"Outlaws.exe")==0;
     XrSessionCreateInfo substituted_info{};
     const XrSessionCreateInfo* forwarded_info = create_info;
     // The D3D11 bridge: see SessionState::d3d11_bridge. From here the
@@ -5206,7 +5235,7 @@ XrResult layer_create_session_impl(
                 auto afw = std::make_shared<xrfg::LukeAfwSynthesizer>();
                 const HRESULT afw_result = afw->initialize(
                     state->d3d12_device.Get(), state->d3d12_queue.Get(),
-                    current_layer_directory() / L"PDAFWPlugin.dll");
+                    luke_bootstrap_provider());
                 xrfg::bridge_flight_logger().event(
                     xrfg::BridgeFlightOperation::synthesis_initialize,
                     afw_result, 0xAF023245ULL,
@@ -5518,6 +5547,7 @@ XrResult layer_wait_frame_impl(
         return !state->application_wait_pending_begin;
     });
     observe_application_frame_thread(*state, false);
+    seal_outlaws_initialization(*state);
     initialize_late_luke_context(state);
     XrResult result = XR_SUCCESS;
     const bool use_continuous_presenter = continuous_presenter_active(state);
@@ -5859,6 +5889,7 @@ XrResult layer_begin_frame_impl(
         return XR_ERROR_HANDLE_INVALID;
     }
     std::unique_lock frame_call_lock(state->frame_call_mutex);
+    seal_outlaws_initialization(*state);
     initialize_late_luke_context(state);
     if (interface_call.started_ns()) {
         // One unbegun Wait ticket; frame-call admission prevents another Wait
@@ -5994,10 +6025,20 @@ XrResult layer_create_swapchain_impl(
     }
     auto swapchain_state = std::make_shared<SwapchainState>(state, *runtime_create_info);
     XrSwapchain created_swapchain = XR_NULL_HANDLE;
-    const XrResult result = state->dispatch->create_swapchain(
+    XrResult result = state->dispatch->create_swapchain(
         session,
         runtime_create_info,
         &created_swapchain);
+    if((result==XR_ERROR_LIMIT_REACHED||result==XR_ERROR_OUT_OF_MEMORY)&&
+        state->luke_outlaws_preframe&&!state->luke_outlaws_frame_started&&state->luke_outlaws_eager_budget) {
+        // Initial application creations have priority over our eager private
+        // rings. Retire only those owned rings, then retry the unchanged call.
+        state->generation_budget_exhausted.store(true,std::memory_order_release);
+        release_session_generation_budget(state);
+        state->luke_outlaws_eager_budget=false;
+        created_swapchain=XR_NULL_HANDLE;
+        result=state->dispatch->create_swapchain(session,runtime_create_info,&created_swapchain);
+    }
     if (XR_FAILED(result)) {
         // The application losing a swapchain of its own is the shape a layer
         // that overspends the runtime's budget takes from the outside, and
@@ -6285,7 +6326,7 @@ XrResult layer_enumerate_swapchain_images_impl(
     // and no presenter-owned composition may retain the resources while an
     // application replaces them during a resize/reconfigure transaction.
     PresenterResourceLifetimeGuard presenter_guard(state->session);
-    std::scoped_lock call_lock(state->call_mutex);
+    std::unique_lock call_lock(state->call_mutex);
     std::shared_ptr<xrfg::D3D11BridgeSwapchain> bridge;
     std::shared_ptr<xrfg::VulkanBridgeSwapchain> vulkan_bridge;
     {
@@ -6485,6 +6526,27 @@ XrResult layer_enumerate_swapchain_images_impl(
                 eligibility_detail,
                 (static_cast<std::uint64_t>(count) << 32) |
                     state->create_info.arraySize);
+            if(state->session->luke_outlaws_preframe&&!state->session->luke_outlaws_frame_started&&
+                state->session->luke_afw_enabled&&state->generation_eligible_pending&&
+                !state->session->generation_budget_exhausted.load(std::memory_order_acquire)) {
+                // The lifetime guard already owns frame_call_mutex. Only this
+                // call lock must be released: both existing setup helpers take
+                // their own swapchain locks. The original enum images/count and
+                // its result remain the application's, including on refusal.
+                call_lock.unlock();
+                initialize_late_luke_context(state->session);
+                if(!ensure_frame_generation(state)) {
+                    state->session->generation_budget_exhausted.store(true,std::memory_order_release);
+                    release_session_generation_budget(state->session);
+                    state->session->luke_outlaws_eager_budget=false;
+                } else {
+                    std::scoped_lock lock(state->mutex);
+                    state->session->luke_outlaws_eager_budget|=bool(state->frame_generation);
+                }
+                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                    (state->session->graphics_binding_capabilities&8ULL)?S_OK:HRESULT_FROM_WIN32(ERROR_NOT_READY),
+                    1001,handle_value(state->handle),state->session->luke_outlaws_eager_budget);
+            }
             return result;
         }
         if (state->session->d3d12_device.Get() == nullptr ||
@@ -12698,6 +12760,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
             !chain->generation_declined &&
             (admitted_shape_change || !state->generation_budget_exhausted.load(std::memory_order_acquire));
         if (!chain->frame_generation &&
+            !(state->luke_outlaws_preframe && state->luke_outlaws_frame_started) &&
             (!state->luke_afw_enabled || (state->graphics_binding_capabilities&8ULL)!=0) &&
             (control.desired.enabled || state->luke_afw_enabled) && eligible) {
             std::vector<ID3D11Texture2D*> sources;
@@ -13496,8 +13559,10 @@ XrResult layer_end_frame_impl(
     const auto bypass_generation =
         [&](GenerationPrepareReason reason, bool keep_generation_presenter = false) -> XrResult {
             using GS = xrfg::autonomous::GenerationState;
-            if (reason == GenerationPrepareReason::missing_capture || reason == GenerationPrepareReason::synthesis_busy)
+            if (reason == GenerationPrepareReason::synthesis_busy)
                 state->generation_status = GS::busy;
+            else if (reason == GenerationPrepareReason::missing_capture)
+                state->generation_status = GS::waiting;
             else if (reason == GenerationPrepareReason::manual_disarmed)
                 state->generation_status = GS::paused;
             else if (reason != GenerationPrepareReason::fsr_stereo_unavailable &&
@@ -13687,6 +13752,15 @@ XrResult layer_end_frame_impl(
     const std::span<const ProjectionResourceMapping> projection_mappings(
         resource_mappings.mappings.data(),
         resource_mappings.mappings.size());
+    if(state->luke_outlaws_preframe&&resource_mappings.ready()) {
+        // Eager histories no longer pass through lazy arming. Color identity
+        // still uses the actual submitted projection, never enum order/shape.
+        for(const auto& mapping:projection_mappings) {
+            const auto chain=find_swapchain(mapping.application_swapchain);
+            if(chain&&chain->create_info.arraySize==1)
+                xrfg::configure_luke_color_origin_extent(chain->create_info.width,chain->create_info.height);
+        }
+    }
     const bool generation_arming_pending =
         resource_mappings.ready() &&
         projection_frame_generation_pending(state, projection_mappings);

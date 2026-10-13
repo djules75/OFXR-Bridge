@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.500.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.511.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1236,15 +1236,41 @@ if(TARGET xrfg_three_slot_director_tests AND TARGET xrfg_sl_fixture_legacy)
         luke-ngx-actual-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
         "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
     set_tests_properties(xrfg_luke_ngx_actual_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+    add_test(NAME xrfg_kcd_logical_capture COMMAND xrfg_three_slot_director_tests
+        kcd-ngx-logical-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
+        "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
+    set_tests_properties(xrfg_kcd_logical_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+        PASS_REGULAR_EXPRESSION "KCD public source:")
+    add_test(NAME xrfg_kcd_scene_capture COMMAND xrfg_three_slot_director_tests
+        kcd-ngx-scene-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
+        "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
+    set_tests_properties(xrfg_kcd_scene_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+        PASS_REGULAR_EXPRESSION "KCD scene camera:")
+    add_test(NAME xrfg_luke_private_capture COMMAND xrfg_three_slot_director_tests
+        luke-ngx-private-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
+        "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
+    set_tests_properties(xrfg_luke_private_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+        PASS_REGULAR_EXPRESSION "Luke private ingress:")
+    add_test(NAME xrfg_outlaws_logical_capture COMMAND xrfg_three_slot_director_tests
+        outlaws-ngx-logical-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
+        "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
+    set_tests_properties(xrfg_outlaws_logical_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+        PASS_REGULAR_EXPRESSION "Outlaws public RR:")
 endif()
 
 if(XRFG_BUILD_TESTS AND TARGET xrfg_three_slot_director_tests)
     add_library(xrfg_luke_runtime_fixture SHARED tests/luke_runtime_fixture.cpp)
+    target_include_directories(xrfg_luke_runtime_fixture PRIVATE "${XRFG_VULKAN_INCLUDE_DIR}")
+    target_compile_definitions(xrfg_luke_runtime_fixture PRIVATE VK_NO_PROTOTYPES)
     set_target_properties(xrfg_luke_runtime_fixture PROPERTIES OUTPUT_NAME "luke-runtime-fixture")
     add_dependencies(xrfg_three_slot_director_tests xrfg_luke_runtime_fixture)
     file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/RealVR.ini" CONTENT "[Horizon]\nWorldScale=1.0\n")
     add_custom_command(TARGET xrfg_three_slot_director_tests POST_BUILD COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${XRFG_AFW_RUNTIME}" "$<TARGET_FILE_DIR:xrfg_three_slot_director_tests>/PDAFWPlugin.dll")
     add_test(NAME xrfg_luke_standalone_context COMMAND xrfg_three_slot_director_tests luke-standalone-context)
+    add_test(NAME xrfg_outlaws_startup COMMAND xrfg_three_slot_director_tests outlaws-startup
+        "$<TARGET_FILE:xrfg_luke_runtime_fixture>" "${XRFG_AFW_RUNTIME}")
+    set_tests_properties(xrfg_outlaws_startup PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE
+        PASS_REGULAR_EXPRESSION "Outlaws startup:")
     add_test(NAME xrfg_luke_missing_producer_bypass COMMAND xrfg_layer_manual_disarm_tests
         ${XRFG_TEST_LAYER_DLL} luke-no-guides "$<TARGET_FILE:xrfg_luke_runtime_fixture>")
     set_tests_properties(xrfg_luke_missing_producer_bypass PROPERTIES TIMEOUT 45)
@@ -1268,4 +1294,26 @@ if(WIN32 AND XRFG_BUILD_TESTS)
  target_link_libraries(xrfg_luke_provider_continuity_tests PRIVATE d3d12 dxgi)
  add_test(NAME xrfg_luke_provider_continuity COMMAND xrfg_luke_provider_continuity_tests "${XRFG_AFW_RUNTIME}")
  set_tests_properties(xrfg_luke_provider_continuity PROPERTIES TIMEOUT 30)
+ if(TARGET xrfg_d3d12_history)
+  add_executable(xrfg_luke_kcd_quality_tests tests/luke_kcd_quality_tests.cpp)
+  target_include_directories(xrfg_luke_kcd_quality_tests PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}/generated-shaders")
+  target_compile_features(xrfg_luke_kcd_quality_tests PRIVATE cxx_std_20)
+  target_compile_definitions(xrfg_luke_kcd_quality_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_link_libraries(xrfg_luke_kcd_quality_tests PRIVATE xrfg_d3d12_history d3d12 dxgi)
+  add_test(NAME xrfg_luke_kcd_quality_bundled COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/kcd-quality-bundled"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_kcd_quality_bundled PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+      PASS_REGULAR_EXPRESSION "KCD full quality:")
+  set(XRFG_KCD_GAME_AFW_PROVIDER "" CACHE FILEPATH "Optional read-only actual KCD PDAFW provider for quality comparison")
+  if(EXISTS "${XRFG_KCD_GAME_AFW_PROVIDER}")
+   add_test(NAME xrfg_luke_kcd_quality_game COMMAND "${CMAKE_COMMAND}"
+       "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_KCD_GAME_AFW_PROVIDER}"
+       "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/kcd-quality-game"
+       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+   set_tests_properties(xrfg_luke_kcd_quality_game PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+       PASS_REGULAR_EXPRESSION "KCD full quality:")
+  endif()
+ endif()
 endif()

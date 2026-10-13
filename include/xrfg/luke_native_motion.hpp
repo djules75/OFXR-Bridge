@@ -1,6 +1,7 @@
 #pragma once
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/luke_motion_format.hpp"
+#include "xrfg/luke_pose_camera.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -35,12 +36,12 @@ inline bool inverse(Matrix a,Matrix& out) noexcept {
     return true;
 }
 inline bool transform(const DlssNativeCameraHistory& current,
-    const DlssNativeCameraHistory& target,std::array<float,16>& output) noexcept {
+    const DlssNativeCameraHistory& target,std::array<float,16>& output,float up_sign=1.F) noexcept {
     Matrix source{},destination{},to_target{};source[3][3]=destination[3][3]=1;
     for(unsigned r=0;r<3;++r) {
-        source[r][0]=current.right[r];source[r][1]=current.up[r];
+        source[r][0]=current.right[r];source[r][1]=up_sign*current.up[r];
         source[r][2]=std::copysign(1.F,current.projection[11])*current.forward[r];
-        destination[r][0]=target.right[r];destination[r][1]=target.up[r];
+        destination[r][0]=target.right[r];destination[r][1]=up_sign*target.up[r];
         destination[r][2]=std::copysign(1.F,target.projection[11])*target.forward[r];
         // Subtract world origins in double before rotation; no 2km float cancellation.
         source[r][3]=double(current.position[r])-target.position[r];
@@ -78,7 +79,8 @@ inline std::array<float,16> guide_to_window_transform(
 }
 }
 inline bool luke_native_motion_constants(const DlssMotionVectorFrame& guide,
-    unsigned crop_x,unsigned crop_y,LukeNativeMotionConstants& out,unsigned& failure) noexcept {
+    unsigned crop_x,unsigned crop_y,LukeNativeMotionConstants& out,unsigned& failure,
+    LukeProducerCameraAxes axes=LukeProducerCameraAxes::view) noexcept {
     out={};failure=1;
     if(!guide.previous_opposite_guide || !guide.previous_same_native_camera)return false;
     const auto current=dlss_native_camera_history(guide);
@@ -129,7 +131,12 @@ inline bool luke_native_motion_constants(const DlssMotionVectorFrame& guide,
     out.source_base={guide.motion_x,guide.motion_y};out.crop={crop_x,crop_y};
     out.extent={float(guide.motion_width),float(guide.motion_height)};out.scale={guide.scale_x,guide.scale_y};
     out.jitter_difference={middle.jitter_x-older.jitter_x,middle.jitter_y-older.jitter_y};failure=9;
-    if(!native_motion_detail::transform(current,middle,out.opposite) || !native_motion_detail::transform(current,older,out.same))return false;
+    // DOOM's original pre-wrapper packet supplies DOWN, while its captured
+    // motion/depth raster and projection use view UP. Decode all three native
+    // cameras exactly as the scene camera does; never flip the motion field.
+    const float up_sign=axes==LukeProducerCameraAxes::right_down_forward?-1.F:1.F;
+    if(!native_motion_detail::transform(current,middle,out.opposite,up_sign) ||
+        !native_motion_detail::transform(current,older,out.same,up_sign))return false;
     failure=0;return true;
 }
 }

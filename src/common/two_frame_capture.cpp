@@ -26,7 +26,7 @@ namespace xrfg {
 namespace {
 
 using Microsoft::WRL::ComPtr;
-constexpr std::uint64_t kMaximumBytes = 1024ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t kMaximumBytes = 1280ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaximumImages = 48;
 
 struct Shot {
@@ -476,7 +476,7 @@ void write_session(const std::shared_ptr<Session>& session) {
         << "Trigger: F8; capture ends after two AFW evaluations or eight XR frames.\n"
         << "NGX source, AFW inputs, OpenXR eyes, camera matrices and xr-timeline.tsv.\n"
         << "Raw images include D3D12 row padding; see manifest.tsv.\n"
-        << "Max images=48, max total readback=1 GiB. Dropped images="
+        << "Max images=48, max total readback=1.25 GiB. Dropped images="
         << session->dropped_images << "\n";
     std::ofstream settings(session->directory / L"settings.txt", std::ios::binary);
     settings << session->settings;

@@ -47,6 +47,10 @@ int main() {
     check(xrfg::luke_game_camera_config_from_ini(ini).axes ==
         xrfg::LukeProducerCameraAxes::physical_forward,
         "Horizon restores owner-accepted V33018 physical-forward contract");
+    write("[KCD2]\nWorldScale=1.1\n");
+    check(xrfg::luke_world_scale_from_ini(ini) == 1.1F &&
+        xrfg::luke_game_camera_config_from_ini(ini).axes == xrfg::LukeProducerCameraAxes::physical_forward,
+        "KCD native physical-forward packet keeps accepted V33011 renderer handedness");
     write("[GENERAL]\nEnabled=1\n[UnknownLukeGame]\nWorldScale=0.8\n[RVR]\nQuality=2\n");
     check(xrfg::luke_world_scale_from_ini(ini) == 0.8F,
         "Any Luke game section is supported without a whitelist");

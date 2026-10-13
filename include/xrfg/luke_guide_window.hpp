@@ -18,7 +18,20 @@ enum class LukeGuideWindowFailure : std::uint32_t {
 
 struct LukeGuideWindow {
     std::uint32_t x{}, y{}, width{}, height{};
+    bool raster_x{}, raster_y{};
 };
+
+// Cropping preserves native pixel units. Integer ROI rounding must not change
+// the accepted full-output/guide gain; a genuinely resized axis keeps its
+// color/cropped-guide conversion. Callers already validate all extents.
+[[nodiscard]] inline float luke_guide_motion_gain(float raw_scale,
+    std::uint32_t output_extent, std::uint32_t guide_extent,
+    std::uint32_t color_extent, std::uint32_t cropped_extent,
+    bool raster_matched) noexcept {
+    return raster_matched
+        ? raw_scale * static_cast<float>(output_extent) / static_cast<float>(guide_extent)
+        : raw_scale * static_cast<float>(color_extent) / static_cast<float>(cropped_extent);
+}
 
 // Project the physical OpenXR FOV through the producer's full DLSS matrix.
 // The resulting ROI is in the guide's own pixel space, so it scales with any
@@ -59,14 +72,24 @@ struct LukeGuideWindow {
     // dimensions do not define a different FOV or a different native crop.
     if (x0 < -1.0 || y0 < -1.0 || x1 > output_width + 1.0 || y1 > output_height + 1.0)
         return reject(LukeGuideWindowFailure::outside_output);
-    const auto extent = [](std::uint32_t guide, double span,
-        std::uint32_t output) noexcept {
+    const bool raster_x = color_width <= output_width &&
+        std::abs((x1-x0)-double(color_width)) <= 1.0;
+    const bool raster_y = color_height <= output_height &&
+        std::abs((y1-y0)-double(color_height)) <= 1.0;
+    const auto extent = [](std::uint32_t guide, double span,std::uint32_t color,
+        std::uint32_t output, bool raster_matched) noexcept {
+        // Preserve the accepted raster contract when physical FOV and actual
+        // integer color differ by at most one output pixel. Floating-point
+        // ceil would otherwise add a guide texel to an already rounded span.
+        // A genuinely resized eye still uses its projected sampling footprint.
+        if(raster_matched)
+            return static_cast<std::uint32_t>((std::uint64_t(guide)*color+output-1)/output);
         return static_cast<std::uint32_t>(std::ceil(std::min(span,double(output))*guide/output));
     };
     const std::uint32_t width = extent(guide_width, x1-x0,
-        output_width);
+        color_width,output_width,raster_x);
     const std::uint32_t height = extent(guide_height, y1-y0,
-        output_height);
+        color_height,output_height,raster_y);
     if (!width || !height || width > guide_width || height > guide_height)
         return reject(LukeGuideWindowFailure::guide_extent);
     const auto rounded_x = std::llround(x0 * guide_width / output_width);
@@ -85,7 +108,7 @@ struct LukeGuideWindow {
             guide_width - width)),
         static_cast<std::uint32_t>(std::min<std::int64_t>(rounded_y,
             guide_height - height)),
-        width, height};
+        width, height, raster_x, raster_y};
     return result;
 }
 

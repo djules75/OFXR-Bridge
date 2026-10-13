@@ -45,12 +45,28 @@ class NgxCreationEvaluationScope {
     NgxCreationEvaluationScope* parent_{};
     NgxFeatureMetadata metadata_{};
     const void* native_list_identity_{};
+    const void* native_device_identity_{};
+    std::uint32_t public_production_identity_{};
     bool public_dispatch_{};
 public:
     NgxCreationEvaluationScope(const NgxFeatureMetadata& metadata,
-        const void* native_list_identity,bool public_dispatch) noexcept
+        const void* native_list_identity,bool public_dispatch,
+        const void* native_device_identity=nullptr) noexcept
         : parent_(current_),metadata_(metadata),
-          native_list_identity_(native_list_identity),public_dispatch_(public_dispatch) {
+          native_list_identity_(native_list_identity),native_device_identity_(native_device_identity),
+          public_dispatch_(public_dispatch) {
+        // Production ownership and creation geometry are separate receipts.
+        // A directly created intermediate dispatcher keeps its own geometry,
+        // but an exact enclosing public call still owns this production.
+        if(public_dispatch_&&native_list_identity_&&native_device_identity_) {
+            public_production_identity_=public_production(metadata_.type,
+                native_list_identity_,native_device_identity_);
+            if(!public_production_identity_&&metadata_.creation_observed&&metadata_.identity&&
+                metadata_.creation_source_identity==metadata_.identity&&
+                (metadata_.type==NVSDK_NGX_Feature_SuperSampling||
+                 metadata_.type==NVSDK_NGX_Feature_RayReconstruction))
+                public_production_identity_=metadata_.identity;
+        }
         // Forward a fresh outer receipt through an intermediate generic alias
         // whose contract was inherited earlier. A directly observed creation
         // owns its own contract even inside another evaluation on that list.
@@ -74,6 +90,17 @@ public:
         metadata=current_->metadata_;
         metadata.identity=0; // The typed handle keeps its own generation identity.
         return true;
+    }
+    // This associates a production with its actual public invocation. A
+    // directly created native feature keeps its own geometry; it can still be
+    // one physical-eye implementation of this same public SR/RR evaluation.
+    static std::uint32_t public_production(NVSDK_NGX_Feature type,
+        const void* native_list_identity,const void* native_device_identity) noexcept {
+        if(!native_device_identity||!current_||current_->native_device_identity_!=native_device_identity||
+            !native_list_identity||current_->native_list_identity_!=native_list_identity||
+            !current_->public_dispatch_||current_->metadata_.type!=type||
+            (type!=NVSDK_NGX_Feature_SuperSampling&&type!=NVSDK_NGX_Feature_RayReconstruction))return 0;
+        return current_->public_production_identity_;
     }
 };
 } // namespace xrfg

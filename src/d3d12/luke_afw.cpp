@@ -1237,7 +1237,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         // A failed native history must never borrow the producer/XR contract.
         const bool native_camera_contract = guide.camera_frame_token_valid;
         const bool have_native_motion = native_camera_contract &&
-            luke_native_motion_constants(guide,motion_crop_x,motion_crop_y,native_motion,native_failure);
+            luke_native_motion_constants(guide,motion_crop_x,motion_crop_y,native_motion,native_failure,impl_->camera_axes);
         bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,native_failure,950,guide.publication,
             guide.previous_same_native_camera?guide.previous_same_native_camera->publication:0);
         if(native_camera_contract && !have_native_motion) {
@@ -1716,10 +1716,12 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         FrameWarpEvaluateParams params{};
         params.command_list = command_list;
         params.input_eye_frame_buffer = &input;
-        params.motion_scale[0] = guide.scale_x *
-            static_cast<float>(color_desc.Width) / static_cast<float>(cropped_motion_width);
-        params.motion_scale[1] = guide.scale_y *
-            static_cast<float>(color_desc.Height) / static_cast<float>(cropped_motion_height);
+        params.motion_scale[0] = luke_guide_motion_gain(guide.scale_x,
+            guide.output_width, guide.motion_width, static_cast<UINT>(color_desc.Width),
+            cropped_motion_width, motion_window->raster_x);
+        params.motion_scale[1] = luke_guide_motion_gain(guide.scale_y,
+            guide.output_height, guide.motion_height, color_desc.Height,
+            cropped_motion_height, motion_window->raster_y);
         const int effective_mode = luke_afw_effective_mode(settings.mode,
             guide.publication, impl_->last_evaluated_publication,
             source_eye, impl_->last_evaluated_eye);

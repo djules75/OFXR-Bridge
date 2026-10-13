@@ -94,6 +94,29 @@ Camera select(uint32_t frame,bool has_viewport,uint32_t viewport,bool ambiguous=
     return selected;
 }
 struct Restore {Camera previous;~Restore(){production=previous;}};
+bool projection_fov(Camera& camera) noexcept {
+    const auto& p=camera.projection;const auto& inverse=camera.inverse;
+    if(!camera.observed||camera.ambiguous||camera.rejection!=64||!finite(p)||!finite(inverse))return false;
+    // Accepted OptiScaler derives vertical FOV from projection[1][1].
+    // Require a normalized perspective (both SDK matrix orientations), not
+    // an orthographic/identity matrix or an unrelated finite inverse.
+    constexpr float epsilon=1e-4F;
+    if(!(p[0]>0&&p[5]>0)||std::abs(p[15])>epsilon||
+        std::abs(p[1])>epsilon||std::abs(p[4])>epsilon||
+        std::abs(p[3])>epsilon||std::abs(p[7])>epsilon||
+        std::abs(p[12])>epsilon||std::abs(p[13])>epsilon||
+        !(std::abs(std::abs(p[11])-1)<epsilon||std::abs(std::abs(p[14])-1)<epsilon))return false;
+    for(unsigned r=0;r<4;++r)for(unsigned c=0;c<4;++c) {
+        double a{},b{};for(unsigned k=0;k<4;++k) {
+            a+=double(p[r*4+k])*inverse[k*4+c];b+=double(inverse[r*4+k])*p[k*4+c];
+        }
+        const double expected=r==c?1:0;
+        if(std::abs(a-expected)>.002||std::abs(b-expected)>.002)return false;
+    }
+    const float fov=2.F*std::atan(1.F/p[5]);
+    if(!(std::isfinite(fov)&&fov>0&&fov<3.1416F))return false;
+    camera.fov=fov;camera.rejection=0;camera.valid=true;return true;
+}
 bool evaluate1(sl1::CommandBuffer* list,sl1::Feature feature,uint32_t frame,uint32_t viewport) {
     Restore restore{production};production=select(frame,true,viewport);
     return hooks().eval1(list,feature,frame,viewport);
@@ -124,7 +147,9 @@ unsigned major_version(HMODULE module) {
     return HIWORD(info->dwFileVersionMS);
 }
 }
-Camera current() noexcept {return production;}
+Camera current(bool luke_projection_receipt) noexcept {
+    auto camera=production;if(luke_projection_receipt)static_cast<void>(projection_fov(camera));return camera;
+}
 bool hooked() noexcept {auto& s=hooks();std::scoped_lock lock(s.mutex);return bool(s.constants)&&bool(s.evaluate);}
 void poll() noexcept {
     try {

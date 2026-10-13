@@ -12,6 +12,7 @@
 #include "xrfg/luke_afw_startup.hpp"
 
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -288,6 +289,93 @@ int main() {
         3344, 3344, 1672, 1672, 3000, 2803);
     expect(resized_eye && resized_eye->x==left_window->x && resized_eye->width==left_window->width,
         "resized XR color preserves the native FOV sampling window");
+    // Actual historical KCD raster values, accepted by both V33011 and the
+    // V30098 endpoint contract: FOV spans2828.267 output pixels while color
+    // contains2828. At half-resolution the integer crop is1414, not1415.
+    const std::array<float,16> kcd_raster_projection{
+        .698464334F,0,0,0,0,.854080677F,0,0,
+        -.000132461719F,-.000359815429F,.0000062500385F,-1,
+        0,0,.0500003137F,0};
+    const float kcd_horizontal=std::atan(1.F/.932515085F);
+    const float kcd_vertical=std::atan(1.F/.854080677F);
+    const auto kcd_raster=xrfg::luke_guide_window(kcd_raster_projection,
+        -kcd_horizontal,kcd_horizontal,kcd_vertical,-kcd_vertical,
+        3776,3088,1888,1544,2828,3088);
+    expect(kcd_raster&&kcd_raster->width==1414&&kcd_raster->height==1544&&
+        1888.F*2828.F/float(kcd_raster->width)==3776.F,
+        "accepted KCD raster rounding preserves exact crop and native motion gain");
+    for(float focal:{std::nextafter(kcd_raster_projection[0],0.F),kcd_raster_projection[0],
+            std::nextafter(kcd_raster_projection[0],1.F)})
+        for(float jitter:{-.0005F,0.F,.0005F}) {
+            auto varied=kcd_raster_projection;varied[0]=focal;varied[8]=jitter;varied[9]=jitter;
+            const auto stable=xrfg::luke_guide_window(varied,
+                -kcd_horizontal,kcd_horizontal,kcd_vertical,-kcd_vertical,
+                3776,3088,1888,1544,2828,3088);
+            expect(stable&&stable->width==1414&&stable->height==1544&&
+                stable->x+stable->width<=1888&&stable->y+stable->height<=1544,
+                "ordinary camera float noise and jitter do not grow a raster-aligned guide");
+        }
+    auto raster_unit=kcd_raster_projection;raster_unit[0]=raster_unit[5]=1.F;
+    raster_unit[8]=raster_unit[9]=0;
+    for(unsigned guide:{1U,511U,1115U,1672U,2229U,3344U})
+        for(unsigned color:{256U,2594U,2803U,3344U})
+            for(float rounding:{-.25F,0.F,.25F}) {
+                const float angle=std::atan((float(color)+rounding)/3344.F);
+                const auto exact=xrfg::luke_guide_window(raster_unit,-angle,angle,angle,-angle,
+                    3344,3344,guide,guide,color,color);
+                const auto accepted=static_cast<unsigned>((std::uint64_t(guide)*color+3343)/3344);
+                expect(exact&&exact->width==accepted&&exact->height==accepted,
+                    "all accepted raster ratios retain the exact original integer extent");
+            }
+    // Measured V506 KCD steady-state geometry. The odd color width occupies
+    // 1346 guide texels, but that integer padding is not a motion resize.
+    auto odd_projection=kcd_raster_projection;
+    odd_projection[0]=.7265426F;odd_projection[5]=.8879965F;
+    const float odd_horizontal=std::atan((2691.25F/3344.F)/odd_projection[0]);
+    const float odd_vertical=std::atan((2254.25F/2736.F)/odd_projection[5]);
+    const auto odd_window=[&](unsigned color_width,unsigned color_height) {
+        return xrfg::luke_guide_window(odd_projection,-odd_horizontal,odd_horizontal,
+            odd_vertical,-odd_vertical,3344,2736,1672,1368,color_width,color_height);
+    };
+    const auto odd=odd_window(2691,2254);
+    expect(odd&&odd->width==1346&&odd->height==1127&&odd->raster_x&&odd->raster_y,
+        "measured odd KCD crop records independent raster matches on both axes");
+    if(odd) {
+        expect(xrfg::luke_guide_motion_gain(1672.F,3344,1672,2691,odd->width,odd->raster_x)==3344.F&&
+            xrfg::luke_guide_motion_gain(1368.F,2736,1368,2254,odd->height,odd->raster_y)==2736.F,
+            "raster padding preserves accepted native motion units rather than shrinking X to 3342.7578125");
+        expect(xrfg::luke_guide_motion_gain(-1672.F,3344,1672,2691,odd->width,odd->raster_x)==-3344.F,
+            "accepted raster gain preserves the caller's negative motion sign");
+        // These fixed IEEE-754 receipts distinguish V33011's two rounded
+        // operations from dividing the extents first, including the 2:1 case.
+        expect(std::bit_cast<std::uint32_t>(xrfg::luke_guide_motion_gain(
+            std::bit_cast<float>(0x3ca2d41eU),3344,1672,2691,odd->width,true))==0x3d22d41dU,
+            "raster gain preserves accepted float multiply-then-divide order");
+        expect(std::bit_cast<std::uint32_t>(xrfg::luke_guide_motion_gain(
+            -std::bit_cast<float>(0x3ca2d41eU),3344,1672,2691,odd->width,true))==0xbd22d41dU,
+            "negative raster gain preserves the same exact float operation order");
+        expect(std::bit_cast<std::uint32_t>(xrfg::luke_guide_motion_gain(
+            std::bit_cast<float>(0x3c60857dU),3344,1115,2691,898,true))==0x3d28573bU,
+            "nonintegral native resolution ratio preserves accepted float operation order");
+    }
+    const auto resized_x=odd_window(2600,2254),resized_y=odd_window(2691,2200);
+    expect(resized_x&&!resized_x->raster_x&&resized_x->raster_y&&
+        resized_y&&resized_y->raster_x&&!resized_y->raster_y,
+        "one genuinely resized axis cannot change the other axis's raster motion contract");
+    if(resized_x&&resized_y) {
+        expect(xrfg::luke_guide_motion_gain(-1672.F,3344,1672,2600,resized_x->width,false)==
+                -1672.F*2600.F/float(resized_x->width)&&
+            xrfg::luke_guide_motion_gain(1368.F,2736,1368,2254,resized_x->height,true)==2736.F&&
+            xrfg::luke_guide_motion_gain(1672.F,3344,1672,2691,resized_y->width,true)==3344.F&&
+            xrfg::luke_guide_motion_gain(-1368.F,2736,1368,2200,resized_y->height,false)==
+                -1368.F*2200.F/float(resized_y->height),
+            "genuine per-axis resizing retains the prior color-to-crop gain and raw signs");
+    }
+    const auto fractional_resize=xrfg::luke_guide_window(kcd_raster_projection,
+        -kcd_horizontal,kcd_horizontal,kcd_vertical,-kcd_vertical,
+        3776,3088,1888,1544,2800,3088);
+    expect(fractional_resize&&fractional_resize->width==1415&&fractional_resize->height==1544,
+        "a genuinely resized eye retains its fractional projected footprint");
     xrfg::LukeGuideWindowFailure rejection{};
     expect(xrfg::luke_guide_window(luke_projection,
         degrees(-54), degrees(40), degrees(44), degrees(-55),

@@ -18,7 +18,7 @@
     unsigned scenarios=0;
     for(bool left_handed:{false,true})
     for(auto format:{DXGI_FORMAT_R16G16_FLOAT,DXGI_FORMAT_R32G32_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R32G32B32A32_FLOAT})
-    for(unsigned scenario=0;scenario<11;++scenario) {
+    for(unsigned scenario=0;scenario<14;++scenario) {
         auto current=texture(10,8,format,D3D12_RESOURCE_FLAG_NONE,D3D12_RESOURCE_STATE_COPY_DEST);
         auto depth=texture(3,2,DXGI_FORMAT_R32_FLOAT,D3D12_RESOURCE_FLAG_NONE,D3D12_RESOURCE_STATE_COPY_DEST);
         auto output=texture(3,2,xrfg::kLukeAfwMotionFormat,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -37,12 +37,24 @@
         g.previous_serial=3;g.motion_x=g.motion_y=1;g.scale_x=g.scale_y=4;
         if(scenario==10){g.scale_x=8;g.scale_y=2;}
         middle->camera_position[0]=scenario==1?.05F:-.05F;
-        const float mid_yaw=(scenario==2 || scenario==3)?.015F:scenario==8?3.141592653589793F:0;
-        const float old_yaw=(scenario==2 || scenario==3)?.03F:0;
+        const float mid_yaw=(scenario==2 || scenario==3 || scenario==13)?.015F:scenario==8?3.141592653589793F:0;
+        const float old_yaw=(scenario==2 || scenario==3 || scenario==13)?.03F:0;
         auto yaw=[](xrfg::DlssMotionVectorFrame& f,float angle) {
             f.camera_right={std::cos(angle),0,-std::sin(angle)};
             f.camera_forward={-std::sin(angle),0,-std::cos(angle)};
         };yaw(*middle,mid_yaw);yaw(old,old_yaw);
+        const bool doom_pitch=scenario>=11;
+        const float mid_pitch=doom_pitch?(scenario==12?-.02F:.02F):0;
+        const float old_pitch=2*mid_pitch;
+        if(doom_pitch) {
+            // Independent right/down/physical-forward producer with real pitch.
+            const auto packet=[](xrfg::DlssMotionVectorFrame& f,float y,float p) {
+                f.camera_right={std::cos(y),0,-std::sin(y)};
+                f.camera_up={-std::sin(y)*std::sin(p),-std::cos(p),-std::cos(y)*std::sin(p)};
+                f.camera_forward={-std::sin(y)*std::cos(p),std::sin(p),-std::cos(y)*std::cos(p)};
+            };
+            packet(g,0,0);packet(*middle,mid_yaw,mid_pitch);packet(old,old_yaw,old_pitch);
+        }
         if(scenario==4) {
             middle->jitter_x=.25F;middle->jitter_y=.125F;old.jitter_x=-.25F;old.jitter_y=-.125F;
             for(auto* f:{middle.get(),&old}) {
@@ -56,7 +68,8 @@
         g.resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         g.previous_opposite_guide=middle;g.previous_same_native_camera=xrfg::dlss_native_camera_history(old);
         xrfg::LukeNativeMotionConstants constants{};unsigned failure{};
-        expect(xrfg::luke_native_motion_constants(g,2,2,constants,failure) && failure==0);
+        const auto axes=doom_pitch?xrfg::LukeProducerCameraAxes::right_down_forward:xrfg::LukeProducerCameraAxes::view;
+        expect(xrfg::luke_native_motion_constants(g,2,2,constants,failure,axes) && failure==0);
         const auto d=[&](unsigned x,unsigned y) {
             if(scenario==5)return 0.F;
             if(scenario==6 && x==2 && y==2)return NAN;
@@ -70,12 +83,15 @@
             const double py=ny-target.camera_position[1]*10*z;
             const double pz=-1-target.camera_position[2]*10*z;
             const double vx=std::cos(angle)*px-std::sin(angle)*pz;
-            const double vz=std::sin(angle)*px+std::cos(angle)*pz;
+            const double yaw_z=std::sin(angle)*px+std::cos(angle)*pz;
+            const float pitch=&target==middle.get()?mid_pitch:old_pitch;
+            const double vy=std::cos(pitch)*py+std::sin(pitch)*yaw_z;
+            const double vz=-std::sin(pitch)*py+std::cos(pitch)*yaw_z;
             const float projection_sign=left_handed?1.F:-1.F;
             return std::array<float,2>{float(((vx/-vz+projection_sign*target.camera_view_to_clip[8]-nx)*4-target.jitter_x)/g.scale_x),
-                float(((py/-vz+projection_sign*target.camera_view_to_clip[9]-ny)*-3-target.jitter_y)/g.scale_y)};
+                float(((vy/-vz+projection_sign*target.camera_view_to_clip[9]-ny)*-3-target.jitter_y)/g.scale_y)};
         };
-        const std::array<float,2> object=scenario==3?std::array<float,2>{.125F,-.0625F}:std::array<float,2>{};
+        const std::array<float,2> object=(scenario==3 || scenario==13)?std::array<float,2>{.125F,-.0625F}:std::array<float,2>{};
         const auto c=[&](unsigned x,unsigned y) {
             if(scenario==7 && x==2 && y==2)return std::array<float,2>{NAN,0};
             auto v=camera(*middle,mid_yaw,x,y,d(x,y));v[0]+=object[0];v[1]+=object[1];return v;
@@ -132,7 +148,7 @@
         }
         readback->Unmap(0,nullptr);++scenarios;
         // Guard failures never borrow newer cameras or fall back to uncorrected vectors.
-        auto admission=[&](unsigned wanted) {xrfg::LukeNativeMotionConstants ignored{};unsigned why{};const bool ok=xrfg::luke_native_motion_constants(g,2,2,ignored,why);expect(why==wanted && ok==(wanted==0));};
+        auto admission=[&](unsigned wanted) {xrfg::LukeNativeMotionConstants ignored{};unsigned why{};const bool ok=xrfg::luke_native_motion_constants(g,2,2,ignored,why,axes);expect(why==wanted && ok==(wanted==0));};
         const auto saved=g.previous_same_native_camera;g.previous_same_native_camera.reset();admission(1);g.previous_same_native_camera=saved;
         ++middle->epoch;admission(2);--middle->epoch;
         ++g.previous_serial;admission(2);--g.previous_serial;

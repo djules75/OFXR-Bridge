@@ -2,9 +2,11 @@
 #include "xrfg/luke_camera_units.hpp"
 #include "xrfg/luke_color_token.hpp"
 #include "xrfg/two_frame_capture.hpp"
+#include "xrfg/bridge_flight_logger.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <iterator>
 #include <mutex>
@@ -302,6 +304,104 @@ struct Candidate {
     std::shared_ptr<const DlssMotionVectorFrame> older;
 };
 
+// Diagnostic-only resolver receipts: at most 64 groups, once per second for
+// each refusal. No frame/thread wait or admission policy is changed here.
+// 1100 reason/token/sample; 1101 owner/epoch; 1102 retained token bounds;
+// 1103 current/previous tokens + history count; 1104 epochs; 1105 serials;
+// 1106 publications; 1107 unsubmitted lists; 1108 fence values; 1109 fences;
+// 1110 canonical consumer device/queue; 1111 motion owners; 1112 depth owners;
+// 1113 fence owners; 1114 producer queues; 1115 Wait HRESULT/failed publication.
+void report_luke_token_refusal(unsigned reason,std::uint32_t token,
+    const Registry& registry,const StreamState* owner,std::uint64_t stream_id,
+    const DlssMotionVectorFrame* current,const DlssMotionVectorFrame* previous,
+    ID3D12CommandQueue* queue,ID3D12Device* device,HRESULT wait=S_OK,
+    std::uint64_t failed_publication=0) noexcept {
+    try {
+        auto& logger=bridge_flight_logger();
+        if(!logger.enabled()&&!logger.ram_enabled())return;
+        static std::atomic_uint reports{};
+        static std::array<std::atomic_uint64_t,15> deadlines{};
+        if(reason>=deadlines.size()||reports.load(std::memory_order_relaxed)>=64)return;
+        const auto now=GetTickCount64();auto before=deadlines[reason].load(std::memory_order_relaxed);
+        if(now<before||!deadlines[reason].compare_exchange_strong(before,now+1000,std::memory_order_relaxed))return;
+        const auto sample=reports.fetch_add(1,std::memory_order_relaxed)+1;if(sample>64)return;
+        std::uint32_t oldest{},newest{};
+        const auto bounds=[&](const StreamState& candidate) {
+            for(const auto& origin:candidate.luke_origin_history) {
+                const auto value=origin->color_origin_token;
+                oldest=oldest?std::min(oldest,value):value;newest=std::max(newest,value);
+            }
+        };
+        if(owner)bounds(*owner);else for(const auto& [unused,candidate]:registry.streams)bounds(candidate);
+        const auto address=[](IUnknown* object){return reinterpret_cast<std::uint64_t>(object);};
+        const auto canonical=[&](IUnknown* object){return address(identity(object).Get());};
+        const auto event=[&](unsigned stage,std::uint64_t a,std::uint64_t b) {
+            logger.event(BridgeFlightOperation::luke_afw_stage,sample,stage,a,b);
+        };
+        logger.event(BridgeFlightOperation::luke_afw_stage,reason,1100,token,sample);
+        event(1101,stream_id,owner?owner->epoch:0);event(1102,oldest,newest);
+        event(1103,(std::uint64_t(current?current->color_origin_token:0)<<32)|
+            (previous?previous->color_origin_token:0),owner?owner->luke_origin_history.size():0);
+        event(1104,current?current->epoch:0,previous?previous->epoch:0);
+        event(1105,current?current->serial:0,previous?previous->serial:0);
+        event(1106,current?current->publication:0,previous?previous->publication:0);
+        event(1107,current?address(current->producer_command_list.Get()):0,previous?address(previous->producer_command_list.Get()):0);
+        event(1108,current?current->producer_fence_value:0,previous?previous->producer_fence_value:0);
+        event(1109,current?address(current->producer_fence.Get()):0,previous?address(previous->producer_fence.Get()):0);
+        event(1110,canonical(device),canonical(queue));
+        event(1111,current?canonical(current->motion_snapshot_device.Get()):0,previous?canonical(previous->motion_snapshot_device.Get()):0);
+        event(1112,current?canonical(current->depth_snapshot_device.Get()):0,previous?canonical(previous->depth_snapshot_device.Get()):0);
+        event(1113,current?canonical(current->producer_fence_device.Get()):0,previous?canonical(previous->producer_fence_device.Get()):0);
+        event(1114,current?canonical(current->producer_queue.Get()):0,previous?canonical(previous->producer_queue.Get()):0);
+        logger.event(BridgeFlightOperation::luke_afw_stage,wait,1115,sample,failed_publication);
+    }catch(...){}
+}
+
+// Bounded F9 receipts retain the actual admitted camera/guide contract without
+// requiring another image capture. This observes values only; no GPU work,
+// temporal policy or camera/motion conversion is performed here.
+void report_luke_ingress_contract(const DlssMotionVectorFrame& frame) noexcept {
+    try {
+        auto& logger=bridge_flight_logger();
+        if(!frame.color_origin_token||(!logger.enabled()&&!logger.ram_enabled()))return;
+        static std::atomic_uint reports{};
+        static std::atomic_uint64_t deadline{};
+        const auto now=GetTickCount64();auto before=deadline.load(std::memory_order_relaxed);
+        if(reports.load(std::memory_order_relaxed)>=64||now<before||
+            !deadline.compare_exchange_strong(before,now+5000,std::memory_order_relaxed))return;
+        const auto sample=reports.fetch_add(1,std::memory_order_relaxed)+1;
+        if(sample>64)return;
+        const auto pair=[](float a,float b) {
+            return (std::uint64_t(std::bit_cast<std::uint32_t>(a))<<32)|std::bit_cast<std::uint32_t>(b);
+        };
+        const auto extent=[](std::uint32_t a,std::uint32_t b){return (std::uint64_t(a)<<32)|b;};
+        const auto event=[&](unsigned stage,std::uint64_t a,std::uint64_t b) {
+            logger.event(BridgeFlightOperation::luke_afw_stage,sample,stage,a,b);
+        };
+        event(1160,frame.stream,frame.native_production_sequence);
+        event(1161,extent(frame.camera_frame_token,frame.color_origin_token),frame.publication);
+        event(1162,extent(frame.output_width,frame.output_height),extent(frame.motion_width,frame.motion_height));
+        event(1163,extent(frame.depth_width,frame.depth_height),pair(frame.scale_x,frame.scale_y));
+        event(1164,pair(frame.jitter_x,frame.jitter_y),pair(frame.frame_time_delta_ms,frame.camera_fov_vertical));
+        event(1165,pair(frame.camera_near,frame.camera_far),std::uint64_t(frame.reset)|
+            (std::uint64_t(frame.jittered)<<1)|(std::uint64_t(frame.depth_inverted)<<2)|
+            (std::uint64_t(frame.depth_infinite)<<3)|(std::uint64_t(frame.camera_data_valid)<<4)|
+            (std::uint64_t(frame.camera_matrices_valid)<<5)|
+            (std::uint64_t(static_cast<std::uint32_t>(frame.raw_camera_motion_included))<<8));
+        event(1166,pair(frame.camera_position[0],frame.camera_position[1]),pair(frame.camera_position[2],frame.calibrated_game_eye_baseline));
+        event(1167,pair(frame.camera_right[0],frame.camera_right[1]),pair(frame.camera_right[2],frame.camera_up[0]));
+        event(1168,pair(frame.camera_up[1],frame.camera_up[2]),pair(frame.camera_forward[0],frame.camera_forward[1]));
+        event(1169,pair(frame.camera_forward[2],0),extent(frame.source_motion_x,frame.source_depth_x));
+        for(unsigned i=0;i<4;++i) {
+            const auto base=i*4;
+            event(1170+i,pair(frame.camera_view_to_clip[base],frame.camera_view_to_clip[base+1]),
+                pair(frame.camera_view_to_clip[base+2],frame.camera_view_to_clip[base+3]));
+            event(1174+i,pair(frame.raw_clip_to_previous_clip[base],frame.raw_clip_to_previous_clip[base+1]),
+                pair(frame.raw_clip_to_previous_clip[base+2],frame.raw_clip_to_previous_clip[base+3]));
+        }
+    }catch(...){}
+}
+
 // Where an eye's DLSS inputs sit in their render targets. Both eyes often
 // share one double-wide target with the left eye on the left - UEVR's depth,
 // for one - so the eye further left is eye 0 whichever evaluates first.
@@ -502,6 +602,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
             // Exact N-2 scalar camera survives eviction of that GPU snapshot.
             frame->previous_same_native_camera=dlss_native_camera_history(*stream.previous);
         }
+        report_luke_ingress_contract(*frame);
         if (two_frame_capture_active()) {
             TwoFrameGuideContract contract{};
             contract.stage = "ngx_ingress";
@@ -1395,6 +1496,9 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
         const bool tracking = g_tracking_enabled.load(std::memory_order_acquire);
         if (!tracking || color_origin_token == 0 || consumer_queue == nullptr ||
             canonical_consumer_device == nullptr) {
+            auto& state=registry();std::scoped_lock lock(state.mutex);
+            report_luke_token_refusal(1,color_origin_token,state,nullptr,0,nullptr,nullptr,
+                consumer_queue,canonical_consumer_device);
             return {};
         }
         auto& state = registry();
@@ -1414,6 +1518,8 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
                 if (owner) {
                     ++state.statistics.invalid_rejections;
                     state.statistics.status = DlssMotionVectorStatus::invalid_input;
+                    report_luke_token_refusal(2,color_origin_token,state,owner,owner_stream,
+                        owner->luke_origin_history[origin_index].get(),nullptr,consumer_queue,canonical_consumer_device);
                     return {};
                 }
                 owner = &candidate;
@@ -1423,12 +1529,16 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
         }
         if (!owner) {
             ++state.statistics.resolve_missing_streams;
+            report_luke_token_refusal(3,color_origin_token,state,nullptr,0,nullptr,nullptr,
+                consumer_queue,canonical_consumer_device);
             return {};
         }
         const auto& stream = *owner;
         const auto origin = stream.luke_origin_history.begin() + origin_index;
         if (origin == stream.luke_origin_history.begin()) {
             ++state.statistics.resolve_stale_pairs;
+            report_luke_token_refusal(4,color_origin_token,state,owner,owner_stream,origin->get(),nullptr,
+                consumer_queue,canonical_consumer_device);
             return {};
         }
         const auto& current = *origin;
@@ -1439,6 +1549,11 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
             previous->serial + 1 != current->serial ||
             previous->publication + 1 != current->publication) {
             ++state.statistics.resolve_stale_pairs;
+            const unsigned reason=current->stream!=owner_stream||current->stream!=previous->stream?5:
+                current->epoch!=previous->epoch||current->epoch!=stream.epoch?6:
+                previous->serial+1!=current->serial?7:8;
+            report_luke_token_refusal(reason,color_origin_token,state,owner,owner_stream,current.get(),previous.get(),
+                consumer_queue,canonical_consumer_device);
             return {};
         }
         const auto compatible = [&](const auto& frame) {
@@ -1446,24 +1561,34 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
             // metadata for its color key, not a resource sampled by AFW.
             if (!same_identity(frame->motion_snapshot_device.Get(),
                     canonical_consumer_device)) {
+                report_luke_token_refusal(frame==current?9:10,color_origin_token,state,owner,owner_stream,
+                    current.get(),previous.get(),consumer_queue,canonical_consumer_device,S_OK,frame->publication);
                 return false;
             }
             if (frame->depth && !same_identity(frame->depth_snapshot_device.Get(),
                     canonical_consumer_device)) {
+                report_luke_token_refusal(11,color_origin_token,state,owner,owner_stream,current.get(),previous.get(),
+                    consumer_queue,canonical_consumer_device,S_OK,frame->publication);
                 return false;
             }
             if (same_identity(frame->producer_queue.Get(), consumer_queue))
                 return true;
             if (!frame->producer_fence || frame->producer_fence_value == 0) {
+                report_luke_token_refusal(12,color_origin_token,state,owner,owner_stream,current.get(),previous.get(),
+                    consumer_queue,canonical_consumer_device,S_OK,frame->publication);
                 return false;
             }
             if (!same_identity(frame->producer_fence_device.Get(),
                     canonical_consumer_device)) {
+                report_luke_token_refusal(13,color_origin_token,state,owner,owner_stream,current.get(),previous.get(),
+                    consumer_queue,canonical_consumer_device,S_OK,frame->publication);
                 return false;
             }
             const HRESULT wait = consumer_queue->Wait(frame->producer_fence.Get(),
                 frame->producer_fence_value);
             if (FAILED(wait)) {
+                report_luke_token_refusal(14,color_origin_token,state,owner,owner_stream,current.get(),previous.get(),
+                    consumer_queue,canonical_consumer_device,wait,frame->publication);
                 return false;
             }
             return true;

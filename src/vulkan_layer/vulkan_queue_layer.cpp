@@ -80,9 +80,10 @@ std::mutex g_tables_mutex;
 std::unordered_map<void*, InstanceTable> g_instances;
 std::unordered_map<void*, std::shared_ptr<DeviceTable>> g_devices;
 
-void start_luke_vulkan_ingress() noexcept {
-    if(!xrfg::native_vulkan::luke_vulkan_process())return;
+HMODULE start_luke_vulkan_ingress() noexcept {
+    if(!xrfg::native_vulkan::luke_vulkan_process())return nullptr;
     static std::once_flag once;
+    static HMODULE ingress_layer{};
     std::call_once(once, [] {
         HMODULE self{};wchar_t path[32768]{};
         if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -93,11 +94,24 @@ void start_luke_vulkan_ingress() noexcept {
         std::wcscpy(last+1,name);
         const auto layer=LoadLibraryExW(path,nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
         if(!layer)return;
+        ingress_layer=layer;
         using Start=void(*)() noexcept;
         if(const auto start=reinterpret_cast<Start>(GetProcAddress(layer,"OFXR_StartLukeVulkanIngressV1")))start();
         // Retain this registered runtime for the process; the OpenXR loader uses
         // the same absolute module later. No activation or separate proxy.
     });
+    return ingress_layer;
+}
+
+void observe_luke_device_dispatch(VkDevice device, PFN_vkGetDeviceProcAddr next_device_get) noexcept {
+    if(!device||!next_device_get)return;
+    const auto layer=start_luke_vulkan_ingress();
+    if(!layer)return;
+    using Observe=void(*)(VkDevice,PFN_vkGetDeviceProcAddr) noexcept;
+    const auto observe=reinterpret_cast<Observe>(GetProcAddress(layer,"OFXR_ObserveVulkanDeviceDispatchV1"));
+    // This is the exact successful loader-chain device and its saved next
+    // resolver, before the caller can cache private allocation entries.
+    if(observe)observe(device,next_device_get);
 }
 
 [[nodiscard]] InstanceTable instance_table(void* key) {
@@ -206,6 +220,7 @@ VKAPI_ATTR VkResult VKAPI_CALL layer_create_device(
     if (result != VK_SUCCESS) {
         return result;
     }
+    observe_luke_device_dispatch(*device,next_device_get);
     auto table = std::make_shared<DeviceTable>();
     table->get_device_proc_addr = next_device_get;
     table->destroy_device =

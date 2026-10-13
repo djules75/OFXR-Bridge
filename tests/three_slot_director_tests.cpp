@@ -9,6 +9,13 @@
 #include "xrfg/native_vulkan_transport_test.hpp"
 namespace xrfg {int run_luke_ngx_dispatch_test(const wchar_t*,bool);}
 namespace xrfg {int run_actual_ngx_capture_test(const wchar_t*,const wchar_t*);}
+namespace xrfg {int run_kcd_logical_capture_test(const wchar_t*,const wchar_t*);}
+namespace xrfg {int run_kcd_scene_capture_test(const wchar_t*,const wchar_t*,
+    HRESULT (*)(bool,ID3D12Device*,ID3D12CommandQueue*,Microsoft::WRL::ComPtr<ID3D12CommandQueue>&));}
+namespace xrfg {int run_luke_private_capture_test(const wchar_t*,const wchar_t*,
+    HRESULT (*)(bool,ID3D12Device*,ID3D12CommandQueue*,Microsoft::WRL::ComPtr<ID3D12CommandQueue>&));}
+namespace xrfg {int run_outlaws_logical_capture_test(const wchar_t*,const wchar_t*,
+    HRESULT (*)(bool,ID3D12Device*,ID3D12CommandQueue*,Microsoft::WRL::ComPtr<ID3D12CommandQueue>&));}
 
 namespace {
 #ifdef OFXR_TEST_DJULES_ROUTE
@@ -2028,11 +2035,19 @@ void refused_frame_recovery_test() {
 #include "djules_v474_layer_tests.inc"
 
 #include "v477_luke_context.inc"
+#include "../src/layer/outlaws_startup_test.inc"
 
 #include "luke_fresh_pacing_fixture.inc"
 #include "luke_clock_continuity_fixture.inc"
 int main(int argc, char** argv) {
     xrfg_fixture::ControlProfile autonomous_profile;
+    if(argc>3 && std::string_view(argv[1])=="outlaws-startup") {
+        const std::string marker=argv[2],provider=argv[3];
+        const std::wstring wide_marker(marker.begin(),marker.end());
+        const std::wstring wide_provider(provider.begin(),provider.end());
+        try {outlaws_startup_test(wide_marker.c_str(),wide_provider.c_str());return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
+    }
     if(argc>1 && std::string_view(argv[1])=="luke-startup-pacing") {
         try {luke_fresh_pacing_test(true);return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
@@ -2115,6 +2130,33 @@ int main(int argc, char** argv) {
         const std::wstring wide_realvr(realvr.begin(),realvr.end());
         const std::wstring wide_streamline(streamline.begin(),streamline.end());
         return xrfg::run_actual_ngx_capture_test(wide_realvr.c_str(),wide_streamline.c_str());
+    }
+    if(argc>3 && std::string_view(argv[1])=="kcd-ngx-logical-capture") {
+        const std::string realvr=argv[2],streamline=argv[3];
+        const std::wstring wide_realvr(realvr.begin(),realvr.end());
+        const std::wstring wide_streamline(streamline.begin(),streamline.end());
+        return xrfg::run_kcd_logical_capture_test(wide_realvr.c_str(),wide_streamline.c_str());
+    }
+    if(argc>3 && std::string_view(argv[1])=="kcd-ngx-scene-capture") {
+        const std::string realvr=argv[2],streamline=argv[3];
+        const std::wstring wide_realvr(realvr.begin(),realvr.end());
+        const std::wstring wide_streamline(streamline.begin(),streamline.end());
+        return xrfg::run_kcd_scene_capture_test(wide_realvr.c_str(),wide_streamline.c_str(),
+            &select_luke_execution_queue);
+    }
+    if(argc>3 && std::string_view(argv[1])=="luke-ngx-private-capture") {
+        const std::string realvr=argv[2],streamline=argv[3];
+        const std::wstring wide_realvr(realvr.begin(),realvr.end());
+        const std::wstring wide_streamline(streamline.begin(),streamline.end());
+        return xrfg::run_luke_private_capture_test(wide_realvr.c_str(),wide_streamline.c_str(),
+            &select_luke_execution_queue);
+    }
+    if(argc>3 && std::string_view(argv[1])=="outlaws-ngx-logical-capture") {
+        const std::string realvr=argv[2],streamline=argv[3];
+        const std::wstring wide_realvr(realvr.begin(),realvr.end());
+        const std::wstring wide_streamline(streamline.begin(),streamline.end());
+        return xrfg::run_outlaws_logical_capture_test(wide_realvr.c_str(),wide_streamline.c_str(),
+            &select_luke_execution_queue);
     }
     if (argc>2 && (std::string_view(argv[1])=="luke-ngx-dispatch" ||
                   std::string_view(argv[1])=="kcd-engine-dispatch")) {

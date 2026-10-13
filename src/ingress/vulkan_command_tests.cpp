@@ -139,6 +139,10 @@ int main() {
     VkCommandBufferBeginInfo begun{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begun.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     auto begin_hook=hooked<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer");begin_hook(command,&begun);
     check(can_split(command)&&recording_epoch(command)!=0,"exact recording preflight");auto epoch=recording_epoch(command);
+    const auto original_receipt=recording_receipt(command);
+    check(original_receipt&&original_receipt->epoch==epoch&&
+        original_receipt->disposition==RecordingDisposition::recording,
+        "original recording receipt exists before any split or raw copy");
     auto retained=std::shared_ptr<void>(new unsigned(1),[](void* value){delete static_cast<unsigned*>(value);
         ++released_recording_resources;probe_callback_locks();});
     std::weak_ptr<void> retained_identity=retained;
@@ -162,6 +166,8 @@ int main() {
     auto first=split(command,handoff(timeline,100,101,102,1),copyback,nullptr);
     check(first.result==VK_SUCCESS&&first.continuation&&first.recording_epoch==epoch,"first native split preserves epoch");
     check(native(command)==first.continuation,"native SR remaps to actual suffix");
+    check(recording_receipt(first.continuation)==original_receipt,
+        "owned continuation shares the exact original recording receipt");
     auto event_index=[&](const char* kind,VkCommandBuffer cmd,uint32_t value) {
         for(size_t i=0;i<events.size();++i)if(!strcmp(events[i].kind,kind)&&events[i].handle==cmd&&events[i].value==value)return i;
         return events.size();
@@ -201,6 +207,8 @@ int main() {
     check(submitted_fence==app_fence&&wait_value==8&&signal_value==9&&values.signalSemaphoreValueCount==1,"application fence and const metadata preserved");
     check(submitted_callbacks==2&&first.lifetime->disposition==RecordingDisposition::submitted&&
         second.lifetime->disposition==RecordingDisposition::submitted,"successful real submit activates each exact capture once");
+    check(original_receipt->disposition==RecordingDisposition::submitted,
+        "successful original Submit1 marks the pre-split recording receipt");
     check(!retained_identity.expired()&&released_recording_resources==0,
         "successful submission retains source-recording resources until application disposal");
     check(hooked<PFN_vkQueueSubmit>("vkQueueSubmit")(queue,1,&info,app_fence)==VK_ERROR_FEATURE_NOT_PRESENT,"one-time native split cannot silently resubmit stale timeline");
@@ -211,6 +219,10 @@ int main() {
     check(retained_identity.expired()&&released_recording_resources==1,
         "exact original reset releases resources after command mutex unlock");
     check(abandoned_callbacks==0,"reset of already submitted recording cannot cancel GPU ownership");
+    const auto second_receipt=recording_receipt(command);
+    check(original_receipt->disposition==RecordingDisposition::submitted&&second_receipt&&
+        second_receipt!=original_receipt&&second_receipt->epoch>original_receipt->epoch,
+        "reset preserves accepted submission and allocates a distinct recording epoch receipt");
     auto begin_render=hooked<PFN_vkCmdBeginRendering>("vkCmdBeginRendering");VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};begin_render(command,&rendering);
     const auto event_count=events.size();
     check(!can_split(command)&&split(command,{timeline,106,107,108}).result==VK_ERROR_FEATURE_NOT_PRESENT&&
@@ -225,6 +237,8 @@ int main() {
     check(third.result==VK_SUCCESS&&hooked<PFN_vkQueueSubmit2KHR>("vkQueueSubmit2KHR")(queue,1,&info2,app_fence)==VK_SUCCESS&&submitted.size()==2,"Submit2KHR preserves split schedule");
     check(submitted.front().wait_values==std::vector<uint64_t>{8}&&submitted.back().signal_values==std::vector<uint64_t>{9,108},"Submit2 metadata remains on prefix/final suffix");
     check(info2.commandBufferInfoCount==1&&submitted_command.commandBuffer==command&&signal.value==9,"Submit2 caller memory is immutable");
+    check(second_receipt->disposition==RecordingDisposition::submitted,
+        "successful original Submit2KHR marks the exact recording receipt");
     hooked<PFN_vkResetCommandBuffer>("vkResetCommandBuffer")(command,0);begin_hook(command,&begun);
     VkDescriptorBufferBindingInfoEXT unknown_binding{VK_STRUCTURE_TYPE_DESCRIPTOR_BUFFER_BINDING_INFO_EXT};
     hooked<PFN_vkCmdBindDescriptorBuffersEXT>("vkCmdBindDescriptorBuffersEXT")(command,1,&unknown_binding);
@@ -252,6 +266,48 @@ int main() {
     driver_submit_result=VK_SUCCESS;hooked<PFN_vkResetCommandBuffer>("vkResetCommandBuffer")(command,0);
     check(failed.lifetime->disposition==RecordingDisposition::abandoned&&abandoned_callbacks==2,
         "failed submission later reset still cancels exact recording");
+    {
+        // Early original-image copies can exist without a handoff segment.
+        // Their ownership rollback must follow the actual original submission,
+        // not a zero timeline, wrapper result or a later recording epoch.
+        VkCommandBuffer plain{};
+        check(hooked<PFN_vkAllocateCommandBuffers>("vkAllocateCommandBuffers")(device,&allocation,&plain)==VK_SUCCESS,
+            "unsplit original command allocation");
+        begin_hook(plain,&begun);const auto plain_first=recording_receipt(plain);
+        hooked<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(plain);
+        VkSubmitInfo plain_info{VK_STRUCTURE_TYPE_SUBMIT_INFO};plain_info.commandBufferCount=1;plain_info.pCommandBuffers=&plain;
+        const auto old_callbacks=submitted_callbacks;
+        check(hooked<PFN_vkQueueSubmit>("vkQueueSubmit")(queue,1,&plain_info,app_fence)==VK_SUCCESS&&
+            plain_first&&plain_first->disposition==RecordingDisposition::submitted&&submitted.size()==1&&
+            submitted.front().commands==std::vector<VkCommandBuffer>{plain}&&submitted_callbacks==old_callbacks,
+            "unsplit successful Submit1 records disposition without injecting a segment or callback");
+        hooked<PFN_vkResetCommandBuffer>("vkResetCommandBuffer")(plain,0);
+        check(plain_first->disposition==RecordingDisposition::submitted&&!recording_receipt(plain),
+            "disposed accepted unsplit recording cannot become abandoned or reappear");
+        begin_hook(plain,&begun);const auto plain_second=recording_receipt(plain);
+        hooked<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(plain);
+        VkCommandBufferSubmitInfo plain_command{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};plain_command.commandBuffer=plain;
+        VkSubmitInfo2 plain_info2{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};plain_info2.commandBufferInfoCount=1;plain_info2.pCommandBufferInfos=&plain_command;
+        driver_submit_result=VK_ERROR_DEVICE_LOST;
+        check(hooked<PFN_vkQueueSubmit2>("vkQueueSubmit2")(queue,1,&plain_info2,app_fence)==VK_ERROR_DEVICE_LOST&&
+            plain_second&&plain_second->disposition==RecordingDisposition::recording,
+            "failed unsplit Submit2 leaves original recording unsubmitted");
+        driver_submit_result=VK_SUCCESS;
+        check(hooked<PFN_vkQueueSubmit2>("vkQueueSubmit2")(queue,1,&plain_info2,app_fence)==VK_SUCCESS&&
+            plain_second->disposition==RecordingDisposition::submitted&&submitted.size()==1&&
+            submitted.front().commands==std::vector<VkCommandBuffer>{plain}&&submitted_callbacks==old_callbacks,
+            "successful unsplit Submit2 retry marks the same receipt without altering driver packet");
+        begin_hook(plain,&begun);const auto plain_third=recording_receipt(plain);
+        check(plain_second->disposition==RecordingDisposition::submitted&&plain_third&&
+            plain_third!=plain_second&&plain_third->epoch>plain_second->epoch,
+            "original rebegin preserves submitted receipt and creates a fresh epoch");
+        begin_hook(plain,&begun);const auto plain_fourth=recording_receipt(plain);
+        check(plain_third->disposition==RecordingDisposition::abandoned&&plain_fourth&&plain_fourth!=plain_third,
+            "unsubmitted original rebegin abandons exactly its previous epoch");
+        hooked<PFN_vkFreeCommandBuffers>("vkFreeCommandBuffers")(device,pool,1,&plain);
+        check(plain_fourth->disposition==RecordingDisposition::abandoned&&!recording_receipt(plain),
+            "unsubmitted original free abandons its receipt without any split callback");
+    }
     begin_hook(command,&begun);auto unknown_metadata=split(command,handoff(timeline,115,116,117,5));
     hooked<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(command);
     VkBaseInStructure unknown_node{};unknown_node.sType=static_cast<VkStructureType>(0x7ffffffd);

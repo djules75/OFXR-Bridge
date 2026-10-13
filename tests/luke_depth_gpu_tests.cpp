@@ -384,7 +384,7 @@ int main() { try {
     D3D12_COMPUTE_PIPELINE_STATE_DESC motion_pd{};motion_pd.pRootSignature=motion_root.Get();
     motion_pd.CS={g_xrfg_luke_compose_motion_shader,sizeof(g_xrfg_luke_compose_motion_shader)};
     ComPtr<ID3D12PipelineState> motion_pipeline;check(device->CreateComputePipelineState(&motion_pd,IID_PPV_ARGS(&motion_pipeline)));
-    for(auto format:{DXGI_FORMAT_R16G16_FLOAT,DXGI_FORMAT_R32G32_FLOAT,
+    for(auto format:{DXGI_FORMAT_R16G16_FLOAT,DXGI_FORMAT_R16G16_SNORM,DXGI_FORMAT_R32G32_FLOAT,
                     DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R32G32B32A32_FLOAT}) {
       expect(xrfg::luke_motion_srv_format(format)==format);
       for(float camera_step:{0.0F,0.25F}) {
@@ -406,6 +406,11 @@ int main() { try {
           for(UINT y=0;y<desc.Height;++y)for(UINT x=0;x<desc.Width;++x) {
             auto* row=static_cast<char*>(data)+fp.Offset+y*fp.Footprint.RowPitch;
             if(slot) { const float depth_value=0.5F;std::memcpy(row+x*4,&depth_value,4); }
+            else if(format==DXGI_FORMAT_R16G16_SNORM) {
+              const std::int16_t values[]{static_cast<std::int16_t>(std::lround(x*.125F*32767.F)),
+                  static_cast<std::int16_t>(std::lround(-static_cast<float>(y)*.25F*32767.F))};
+              std::memcpy(row+x*4,values,4);
+            }
             else if(format==DXGI_FORMAT_R32G32_FLOAT || format==DXGI_FORMAT_R32G32B32A32_FLOAT) {
               const float values[]{x*0.25F,-static_cast<float>(y)*0.5F,123.0F,-91.0F};
               const UINT pixel_bytes=format==DXGI_FORMAT_R32G32_FLOAT?8:16;
@@ -454,8 +459,9 @@ int main() { try {
         void* data{};check(readback->Map(0,nullptr,&data));
         for(UINT y=0;y<2;++y)for(UINT x=0;x<2;++x) {
           std::uint16_t values[2];std::memcpy(values,static_cast<char*>(data)+fp.Offset+y*fp.Footprint.RowPitch+x*4,4);
-          expect(std::abs(unhalf(values[0])-((x+3)*0.25F+camera_step-0.5F*stereo_step))<0.001F);
-          expect(std::abs(unhalf(values[1])+((y+1)*0.5F))<0.001F);
+          const bool snorm=format==DXGI_FORMAT_R16G16_SNORM;
+          expect(std::abs(unhalf(values[0])-((x+3)*(snorm?.125F:.25F)+camera_step-0.5F*stereo_step))<0.001F);
+          expect(std::abs(unhalf(values[1])+((y+1)*(snorm?.25F:.5F)))<0.001F);
         }
         readback->Unmap(0,nullptr);
        }

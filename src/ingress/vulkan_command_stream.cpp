@@ -14,6 +14,7 @@ struct CommandChain {
     VkCommandBufferLevel level{VK_COMMAND_BUFFER_LEVEL_PRIMARY};
     uint64_t epoch{};VkCommandBufferUsageFlags flags{};
     bool recording{},rendering{},unsupported_state{},submitted{};
+    std::shared_ptr<RecordingReceipt> receipt;
     std::vector<Segment> segments;
     std::vector<std::shared_ptr<void>> retained;
     std::vector<std::function<void(VkCommandBuffer)>> state_commands;
@@ -106,6 +107,11 @@ void register_command(const std::shared_ptr<DeviceState>& device,VkCommandBuffer
     auto& r=registry();std::scoped_lock lock(r.mutex);r.commands[original]=device;
 }
 void release_chain(DeviceState& device,CommandChain& chain,DisposedRecordings& abandoned) {
+    if(chain.receipt) {
+        auto expected=RecordingDisposition::recording;
+        (void)chain.receipt->disposition.compare_exchange_strong(expected,RecordingDisposition::abandoned);
+        chain.receipt.reset();
+    }
     auto free=load<PFN_vkFreeCommandBuffers>(device,"vkFreeCommandBuffers");
     for(auto& segment:chain.segments) {
         if(segment.lifetime) {
@@ -213,6 +219,13 @@ void mark_submitted(const std::vector<Segment>& segments) noexcept {
         (void)segment.lifetime->disposition.compare_exchange_strong(expected,RecordingDisposition::submitted);
     }
 }
+void mark_original_submitted(CommandChain& chain) noexcept {
+    chain.submitted=true;
+    if(chain.receipt) {
+        auto expected=RecordingDisposition::recording;
+        (void)chain.receipt->disposition.compare_exchange_strong(expected,RecordingDisposition::submitted);
+    }
+}
 void notify_submitted(VkQueue queue,const std::vector<Segment>& segments) noexcept {
     for(const auto& segment:segments)if(segment.lifetime&&
         segment.lifetime->disposition==RecordingDisposition::submitted&&
@@ -232,7 +245,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_vkQueueSubmit(VkQueue queue,uint32_t count,c
         }auto result=fn(queue,current_count,current,fence);
         if(result==VK_SUCCESS) {
             for(uint32_t i=0;i<count;++i)for(uint32_t j=0;j<submits[i].commandBufferCount;++j)
-                if(auto found=d->commands.find(submits[i].pCommandBuffers[j]);found!=d->commands.end())found->second.submitted=true;
+                if(auto found=d->commands.find(submits[i].pCommandBuffers[j]);found!=d->commands.end())mark_original_submitted(found->second);
             mark_submitted(segments);
         }
         // Evaluate may hold its transport-owner mutex while recording a split.
@@ -259,7 +272,7 @@ VkResult submit2(PFN_vkQueueSubmit2 fn,VkQueue queue,uint32_t count,const VkSubm
         }auto result=fn(queue,current_count,current,fence);
         if(result==VK_SUCCESS) {
             for(uint32_t i=0;i<count;++i)for(uint32_t j=0;j<submits[i].commandBufferInfoCount;++j)
-                if(auto found=d->commands.find(submits[i].pCommandBufferInfos[j].commandBuffer);found!=d->commands.end())found->second.submitted=true;
+                if(auto found=d->commands.find(submits[i].pCommandBufferInfos[j].commandBuffer);found!=d->commands.end())mark_original_submitted(found->second);
             mark_submitted(segments);
         }
         lock.unlock();if(result==VK_SUCCESS)notify_submitted(queue,segments);
@@ -374,6 +387,20 @@ bool retain_recording(VkCommandBuffer original,std::shared_ptr<void> resources) 
         if(found==d->commands.end()||!found->second.recording||found->second.submitted)return false;
         found->second.retained.push_back(std::move(resources));return true;
     }catch(...){return false;}
+}
+std::shared_ptr<RecordingReceipt> recording_receipt(VkCommandBuffer original) noexcept {
+    auto d=command_device(original);if(!d)return {};
+    try {
+        std::scoped_lock lock(d->mutex);original_locked(*d,original);
+        const auto found=d->commands.find(original);if(found==d->commands.end())return {};
+        auto& chain=found->second;
+        if(!chain.receipt) {
+            if(!chain.recording||chain.submitted||!chain.epoch)return {};
+            auto receipt=std::make_shared<RecordingReceipt>();receipt->epoch=chain.epoch;
+            chain.receipt=std::move(receipt);
+        }
+        return chain.receipt;
+    }catch(...){return {};}
 }
 CommandSplit split(VkCommandBuffer original,const CommandHandoff& handoff,
     RecordCopyback copyback,void* context) noexcept {
