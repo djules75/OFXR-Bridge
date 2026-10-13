@@ -360,9 +360,13 @@ const NVSDK_NGX_Handle* actual_outlaws_sr_handle{};
 void actual_kcd_native_parameter_observer(const NVSDK_NGX_Parameter* parameters) {
     const auto& c=*actual_ngx_capture_context;
     const auto& p=*c.parameters;
-    if(parameters!=c.parameters||p.motion!=(c.expect_capture?c.injector_motion:nullptr)||p.depth!=c.injector_depth||
-        p.output!=c.injector_output||p.input_color!=c.composited_color||p.reset!=0||
-        p.scale_x!=1.25F||p.scale_y!=.75F||p.jitter_x!=-.375F||p.jitter_y!=.25F||p.frame_time!=19.F)
+    // Outlaws deliberately poisons native scalars to prove its public snapshot;
+    // KCD uses its distinct typed-native contract. Keep both strict oracles.
+    const bool kcd=c.scene_camera;
+    if(parameters!=c.parameters||p.motion!=((!kcd||c.expect_capture)?c.injector_motion:nullptr)||p.depth!=c.injector_depth||
+        p.output!=c.injector_output||p.input_color!=c.composited_color||p.reset!=(kcd?0:1)||
+        p.scale_x!=(kcd?1.25F:91.F)||p.scale_y!=(kcd?.75F:92.F)||
+        p.jitter_x!=(kcd?-.375F:9.F)||p.jitter_y!=(kcd?.25F:-8.F)||p.frame_time!=(kcd?19.F:333.F))
         throw std::runtime_error("KCD public transaction changed the original injector's modified native parameters");
 }
 void actual_fixture_copy(ID3D12GraphicsCommandList* list,ID3D12Resource* destination,
