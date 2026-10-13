@@ -126,20 +126,34 @@ inline LukeColorOriginDecode decode_luke_origin_row(std::span<const float> row) 
 }
 inline unsigned luke_origin_pixel_bytes(DXGI_FORMAT format) noexcept {
     switch (format) {
-    case DXGI_FORMAT_R16G16B16A16_FLOAT: return 8;
+    case DXGI_FORMAT_R16G16B16A16_FLOAT: case DXGI_FORMAT_R16G16B16A16_UNORM: return 8;
     case DXGI_FORMAT_R32G32B32A32_FLOAT: return 16;
     case DXGI_FORMAT_R8G8B8A8_TYPELESS: case DXGI_FORMAT_R8G8B8A8_UNORM:
     case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: case DXGI_FORMAT_B8G8R8A8_TYPELESS:
     case DXGI_FORMAT_B8G8R8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
-    case DXGI_FORMAT_R10G10B10A2_UNORM: return 4;
+    case DXGI_FORMAT_R10G10B10A2_UNORM: case DXGI_FORMAT_R11G11B10_FLOAT: return 4;
     default: return 0;
     }
+}
+inline DXGI_FORMAT luke_origin_upload_format(DXGI_FORMAT resource, DXGI_FORMAT proven_view) noexcept {
+    if (proven_view == DXGI_FORMAT_UNKNOWN || proven_view == resource) return resource;
+    if ((resource == DXGI_FORMAT_R16G16B16A16_TYPELESS && proven_view == DXGI_FORMAT_R16G16B16A16_FLOAT) ||
+        (resource == DXGI_FORMAT_R32G32B32A32_TYPELESS && proven_view == DXGI_FORMAT_R32G32B32A32_FLOAT)) return proven_view;
+    return DXGI_FORMAT_UNKNOWN;
 }
 inline void luke_origin_pixel(std::byte* pixel, DXGI_FORMAT format, bool white) noexcept {
     if (format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
         const auto level = static_cast<std::uint16_t>(white ? 0x3c00 : 0);
         const std::uint16_t values[]{level, level, level, 0x3c00};
         std::memcpy(pixel, values, sizeof(values));
+    } else if (format == DXGI_FORMAT_R16G16B16A16_UNORM) {
+        const auto level = static_cast<std::uint16_t>(white ? 0xffff : 0);
+        const std::uint16_t values[]{level, level, level, 0xffff};
+        std::memcpy(pixel, values, sizeof(values));
+    } else if (format == DXGI_FORMAT_R11G11B10_FLOAT) {
+        // Unsigned 5-bit exponents, 6/6/5-bit mantissas. Exactly 1.0 RGB.
+        const std::uint32_t value = white ? (0x3c0U | (0x3c0U << 11) | (0x1e0U << 22)) : 0;
+        std::memcpy(pixel, &value, sizeof(value));
     } else if (format == DXGI_FORMAT_R32G32B32A32_FLOAT) {
         const float level = white ? 1.f : 0.f, values[]{level, level, level, 1.f};
         std::memcpy(pixel, values, sizeof(values));
@@ -170,6 +184,21 @@ inline float luke_origin_luma(const std::byte* pixel, DXGI_FORMAT format) noexce
     if (format == DXGI_FORMAT_R32G32B32A32_FLOAT) {
         float channels[4]{}; std::memcpy(channels, pixel, sizeof(channels));
         return luminance(channels[0], channels[1], channels[2]);
+    }
+    if (format == DXGI_FORMAT_R16G16B16A16_UNORM) {
+        std::uint16_t channels[4]{}; std::memcpy(channels, pixel, sizeof(channels));
+        return luminance(channels[0] / 65535.f, channels[1] / 65535.f, channels[2] / 65535.f);
+    }
+    if (format == DXGI_FORMAT_R11G11B10_FLOAT) {
+        std::uint32_t value{}; std::memcpy(&value, pixel, sizeof(value));
+        const auto channel = [](unsigned bits, unsigned mantissa_bits) {
+            const unsigned exponent = bits >> mantissa_bits;
+            const unsigned mantissa = bits & ((1U << mantissa_bits) - 1);
+            if (exponent == 31) return static_cast<float>(NAN);
+            return exponent ? std::ldexp(1.f + std::ldexp(static_cast<float>(mantissa), -int(mantissa_bits)), int(exponent) - 15)
+                : std::ldexp(static_cast<float>(mantissa), 1 - 15 - int(mantissa_bits));
+        };
+        return luminance(channel(value & 0x7ff, 6), channel((value >> 11) & 0x7ff, 6), channel(value >> 22, 5));
     }
     if (format == DXGI_FORMAT_R10G10B10A2_UNORM) {
         std::uint32_t value{}; std::memcpy(&value, pixel, sizeof(value));
@@ -241,7 +270,8 @@ void configure_luke_color_origin_extent(unsigned color_width, unsigned color_hei
 // upload allocation, CPU rewrite, producer-submission receipt or 64-frame cap.
 HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* color,
     std::uint32_t token, D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-    ID3D12Device* native_device = nullptr, LukeColorOriginRect rect = {}) noexcept;
+    ID3D12Device* native_device = nullptr, LukeColorOriginRect rect = {},
+    DXGI_FORMAT proven_color_view = DXGI_FORMAT_UNKNOWN) noexcept;
 // Reads only the compact corner ROI in one GPU submission/fence/map. Every
 // row is independently CRC-checked; distinct valid tokens reject the batch.
 // Missing/ambiguous/expired marker is an error; no selected-metadata fallback.

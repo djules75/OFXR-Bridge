@@ -177,6 +177,10 @@ int main() {
     check(event_index("dispatch",first.continuation,7)<events.size(),"cached vkCmd wrapper follows suffix");
     auto second=split(command,handoff(timeline,103,104,105,2),copyback,nullptr);
     check(second.result==VK_SUCCESS&&native(command)==second.continuation,"second SR split chains same timeline");
+    dispatch_hook(first.continuation,11,1,1);
+    check(event_index("dispatch",second.continuation,11)<events.size()&&device_for(first.continuation)==device&&
+        queue_family_for(first.continuation)==queue_family_for(command)&&recording_epoch(first.continuation)==epoch,
+        "outer wrapper received suffix follows exact inner continuation and owner");
     check(submitted_callbacks==0&&first.lifetime->disposition==RecordingDisposition::recording&&
         second.lifetime->epoch==epoch,"recording never schedules an unsignaled D3D12 prefix wait");
     hooked<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(command);
@@ -202,6 +206,8 @@ int main() {
     check(hooked<PFN_vkQueueSubmit>("vkQueueSubmit")(queue,1,&info,app_fence)==VK_ERROR_FEATURE_NOT_PRESENT,"one-time native split cannot silently resubmit stale timeline");
     hooked<PFN_vkResetCommandBuffer>("vkResetCommandBuffer")(command,0);begin_hook(command,&begun);
     check(recording_epoch(command)>epoch&&native(command)==command,"reset invalidates old suffix and advances epoch");
+    check(!device_for(first.continuation)&&native(first.continuation)==first.continuation,
+        "reset removes exact recording continuation aliases");
     check(retained_identity.expired()&&released_recording_resources==1,
         "exact original reset releases resources after command mutex unlock");
     check(abandoned_callbacks==0,"reset of already submitted recording cannot cancel GPU ownership");

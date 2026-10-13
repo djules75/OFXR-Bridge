@@ -102,7 +102,16 @@ inline bool luke_native_motion_constants(const DlssMotionVectorFrame& guide,
             for(float v:*values)if(!std::isfinite(v))return false;
     }
     auto next=[](std::uint32_t v){++v;return v?v:1;};
-    failure=4;if(next(older.token)!=middle.token || next(middle.token)!=current.token)return false;
+    failure=4;
+    if(current.native_production_sequence || middle.native_production_sequence || older.native_production_sequence) {
+        // KCD camera receipt IDs count probes rather than rendered frames.
+        // Require all three exact SR productions, including every failed
+        // capture; do not compact successful publications or mix identities.
+        if(!older.native_production_sequence || !middle.native_production_sequence || !current.native_production_sequence ||
+            older.native_production_sequence==UINT64_MAX || middle.native_production_sequence==UINT64_MAX ||
+            older.native_production_sequence+1!=middle.native_production_sequence ||
+            middle.native_production_sequence+1!=current.native_production_sequence)return false;
+    } else if(next(older.token)!=middle.token || next(middle.token)!=current.token)return false;
     failure=5;
     if(!current.motion_width || !current.motion_height || guide.motion_width!=guide.depth_width ||
         guide.motion_height!=guide.depth_height)return false;

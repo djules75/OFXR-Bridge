@@ -8,4 +8,8 @@ namespace xrfg::native_vulkan {
 void configure_owner(const VulkanSessionBinding&,ID3D12Device*,ID3D12CommandQueue*) noexcept {}
 void stop_owner(VkDevice) noexcept {}
 void poll_capture() noexcept {}
+VkDevice configure_luke_owner(ID3D12Device*,ID3D12CommandQueue*) noexcept {return {};}
+bool query_luke_context(ID3D12Device** device,ID3D12CommandQueue** queue) noexcept {
+    if(device)*device=nullptr;if(queue)*queue=nullptr;return false;
+}
 }

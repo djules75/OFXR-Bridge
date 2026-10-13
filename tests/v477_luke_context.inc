@@ -47,13 +47,19 @@ void luke_standalone_context_test() {
     check(!state->luke_afw && state->d3d12_queue==private_queue,"in-flight frame defers binding");
     state->application_frame_in_progress=false;initialize_late_luke_context(state);
     check(state->luke_afw && (state->graphics_binding_capabilities&8) &&
-        !(state->graphics_binding_capabilities&4) && state->d3d12_queue==original_queue,"late native AFW initialized");
+        !(state->graphics_binding_capabilities&4) && state->d3d12_queue &&
+        state->d3d12_queue!=original_queue && state->d3d12_queue!=private_queue &&
+        state->d3d12_device==d12,"late AFW uses separate queue on exact native device");
+    queried.Reset();q.Reset();
+    check(query_luke_ross_d3d12_context(&queried,&q)&&q==original_queue&&queried==d12,
+        "private execution queue replaced original SR/RR provenance");
+    auto execution_queue=state->d3d12_queue;
     auto initialized=state->luke_afw;initialize_late_luke_context(state);
-    check(state->luke_afw==initialized,"no repeat initialization");
+    check(state->luke_afw==initialized&&state->d3d12_queue==execution_queue,"no repeat initialization");
     xrfg::stop_ngx_guide_capture(original_queue.Get());
     queried.Reset();q.Reset();
     check(!query_luke_ross_d3d12_context(&queried,&q),"retired producer does not survive reset");
     check(!xrfg::native_ingress::query_luke_context(nullptr,&q) && !q,"invalid output rejected");
     FreeLibrary(marker);
-    std::cout<<"Luke standalone: original submitted queue, delayed bootstrap, real AFW provider, retirement\n";
+    std::cout<<"Luke standalone: exact submitted producer retained, separate execution queue, delayed bootstrap, real AFW provider, retirement\n";
 }

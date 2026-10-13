@@ -99,6 +99,7 @@ struct RuntimeStatus {
     bool logging_active{};
     bool vulkan_capture_suspended{};
     bool luke_detected{}, vulkan_detected{};
+    bool afw_running{}; // actual recent AFW output; IPC V487 rejects older reporters
     std::uint32_t provider_error{};
     InterfaceTelemetry telemetry{};
     int generation_mode{}, motion_source{};

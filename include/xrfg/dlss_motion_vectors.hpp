@@ -78,6 +78,10 @@ struct DlssMotionVectorPublication {
     bool direct_output_receipt{};
     std::uint32_t camera_frame_token{};
     bool camera_frame_token_valid{};
+    // KCD scene-camera tokens identify read attempts, including extra failed
+    // probes. Its temporal identity instead comes from the exact observed NGX
+    // SR/RR production; failed productions still consume this sequence.
+    std::uint64_t native_production_sequence{};
 };
 
 // Scalar native camera history: no retained older GPU resources or SL metadata.
@@ -88,6 +92,7 @@ struct DlssNativeCameraHistory {
     float jitter_x{},jitter_y{};
     std::array<float,3> position{},right{},up{},forward{};
     std::array<float,16> projection{},inverse_projection{};
+    std::uint64_t native_production_sequence{};
 };
 struct DlssMotionVectorFrame {
     std::uint64_t stream{};
@@ -170,6 +175,7 @@ struct DlssMotionVectorFrame {
     std::shared_ptr<DlssSnapshotRetention> depth_retention;
     std::uint32_t camera_frame_token{};
     bool camera_frame_token_valid{};
+    std::uint64_t native_production_sequence{};
     // Where the game's motion and depth rectangles started before the
     // snapshot cropped them: what tells eyes sharing one target apart.
     std::uint32_t source_motion_x{};
@@ -184,7 +190,8 @@ inline DlssNativeCameraHistory dlss_native_camera_history(const DlssMotionVector
         f.motion_width,f.motion_height,f.output_width,f.output_height,
         f.camera_frame_token_valid&&f.camera_data_valid&&f.camera_matrices_valid,
         f.reset,f.jittered,f.jitter_x,f.jitter_y,f.camera_position,f.camera_right,
-        f.camera_up,f.camera_forward,f.camera_view_to_clip,f.camera_clip_to_view};
+        f.camera_up,f.camera_forward,f.camera_view_to_clip,f.camera_clip_to_view,
+        f.native_production_sequence};
 }
 
 constexpr std::uint32_t kDlssMotionVectorEyeCount = 2;
@@ -238,6 +245,9 @@ void configure_dlss_motion_vector_tracking(bool enabled) noexcept;
 // completed. A live disable intentionally retains them until this safe point.
 void retire_disabled_dlss_motion_vector_resources() noexcept;
 void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept;
+// Failed native SR invalidates temporal joins immediately while preserving the
+// owned slot allocations and in-flight GPU snapshot lifetimes.
+void invalidate_dlss_motion_vector_stream_history(std::uint64_t stream) noexcept;
 void report_dlss_motion_vector_submission(
     ID3D12CommandQueue* queue,
     std::uint32_t command_list_count,

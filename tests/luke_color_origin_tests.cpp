@@ -1,8 +1,11 @@
 
 #include "xrfg/luke_color_origin.hpp"
+#include "xrfg/luke_afw_source.hpp"
 #include <dxgi1_6.h>
+#include <d3d12sdklayers.h>
 #include <wrl/client.h>
 #include <array>
+#include <chrono>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -139,12 +142,24 @@ void luma_tests() {
             "invalid half RGB component accepted");
     }
     for(auto format:{DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_B8G8R8A8_UNORM,
-        DXGI_FORMAT_R10G10B10A2_UNORM,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R32G32B32A32_FLOAT}) {
+        DXGI_FORMAT_R10G10B10A2_UNORM,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R32G32B32A32_FLOAT,
+        DXGI_FORMAT_R11G11B10_FLOAT,DXGI_FORMAT_R16G16B16A16_UNORM}) {
         std::array<std::byte,16> pixel{};
         for(bool white:{false,true}) {
             xrfg::luke_origin_pixel(pixel.data(),format,white);
             require(close(xrfg::luke_origin_luma(pixel.data(),format),white?1.F:0.F),"black/white stamp luminance changed");
         }
+    }
+    const std::uint32_t packed_hdr=0x3c0U|(0x380U<<11)|(0x1a0U<<22); // 1,.5,.25
+    require(close(xrfg::luke_origin_luma(reinterpret_cast<const std::byte*>(&packed_hdr),DXGI_FORMAT_R11G11B10_FLOAT),
+        red+.5F*green+.25F*blue),"packed HDR channels / exponent decode");
+    const std::uint32_t subnormal_hdr=1U|(1U<<11)|(1U<<22);
+    require(close(xrfg::luke_origin_luma(reinterpret_cast<const std::byte*>(&subnormal_hdr),DXGI_FORMAT_R11G11B10_FLOAT),
+        (red+green)*std::ldexp(1.F,-20)+blue*std::ldexp(1.F,-19),1.e-12F),"packed HDR subnormals");
+    for(unsigned shift:{0U,11U,22U}) {
+        const std::uint32_t invalid=(shift==22?0x3e0U:0x7c0U)<<shift;
+        require(!std::isfinite(xrfg::luke_origin_luma(reinterpret_cast<const std::byte*>(&invalid),DXGI_FORMAT_R11G11B10_FLOAT)),
+            "packed HDR infinite channel accepted");
     }
     // Dim chromatic overlay: B quantizes to the SAME103 in both Manchester
     // cells, while R/G retain only three R8 steps. First-byte BGRA cannot decode.
@@ -176,6 +191,9 @@ struct Gpu {
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> list;
     Gpu() {
+        ComPtr<ID3D12Debug> debug;
+        check(D3D12GetDebugInterface(IID_PPV_ARGS(debug.GetAddressOf())),"debug layer");
+        debug->EnableDebugLayer();
         ComPtr<IDXGIFactory6> factory; ComPtr<IDXGIAdapter> adapter;
         check(CreateDXGIFactory1(IID_PPV_ARGS(factory.GetAddressOf())),"DXGI");
         check(factory->EnumWarpAdapter(IID_PPV_ARGS(adapter.GetAddressOf())),"WARP");
@@ -185,12 +203,12 @@ struct Gpu {
         check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(allocator.GetAddressOf())),"allocator");
         check(device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),nullptr,IID_PPV_ARGS(list.GetAddressOf())),"list");
     }
-    ComPtr<ID3D12Resource> texture(unsigned width,unsigned height) {
+    ComPtr<ID3D12Resource> texture(unsigned width,unsigned height,DXGI_FORMAT format=DXGI_FORMAT_R8G8B8A8_UNORM) {
         D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
         heap.CreationNodeMask=heap.VisibleNodeMask=1;
         D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         desc.Width=width;desc.Height=height;desc.DepthOrArraySize=desc.MipLevels=desc.SampleDesc.Count=1;
-        desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        desc.Format=format;
         ComPtr<ID3D12Resource> result;
         check(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_COMMON,
             nullptr,IID_PPV_ARGS(result.GetAddressOf())),"texture");
@@ -276,6 +294,155 @@ void gpu_tests() {
         check(xrfg::read_luke_color_origin(gpu.queue.Get(),eye.Get(),&token,D3D12_RESOURCE_STATE_COMMON,5000),
             "KCD2 actual GPU endpoint/interior crop read");
         require(token==kcd_token,"KCD2 GPU crop changed publication identity");
+    }
+
+    // The shipping writer must carry the same full token through real HDR
+    // resources and compatible typeless storage, not just CPU stamp helpers.
+    for(const auto format:{DXGI_FORMAT_R11G11B10_FLOAT,DXGI_FORMAT_R16G16B16A16_UNORM,
+        DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R32G32B32A32_FLOAT,
+        DXGI_FORMAT_R16G16B16A16_TYPELESS,DXGI_FORMAT_R32G32B32A32_TYPELESS}) {
+        gpu.reset();
+        const auto typed=format==DXGI_FORMAT_R16G16B16A16_TYPELESS?DXGI_FORMAT_R16G16B16A16_FLOAT:
+            format==DXGI_FORMAT_R32G32B32A32_TYPELESS?DXGI_FORMAT_R32G32B32A32_FLOAT:format;
+        auto hdr_source=gpu.texture(1024,64,format),hdr_eye=gpu.texture(800,64,typed);
+        xrfg::configure_luke_color_origin_extent(800,64);
+        if(format!=typed) {
+            require(xrfg::mark_luke_color_origin(gpu.list.Get(),hdr_source.Get(),1,
+                D3D12_RESOURCE_STATE_COMMON,gpu.device.Get())==DXGI_ERROR_UNSUPPORTED,
+                "unproven typeless numeric view invented");
+            require(xrfg::mark_luke_color_origin(gpu.list.Get(),hdr_source.Get(),1,
+                D3D12_RESOURCE_STATE_COMMON,gpu.device.Get(),{},DXGI_FORMAT_R8G8B8A8_UNORM)==DXGI_ERROR_UNSUPPORTED,
+                "incompatible typed copy accepted");
+        }
+        constexpr std::uint32_t hdr_token=0xf83a7241U;
+        check(xrfg::mark_luke_color_origin(gpu.list.Get(),hdr_source.Get(),hdr_token,
+            D3D12_RESOURCE_STATE_COMMON,gpu.device.Get(),{},typed),"HDR/typeless original marker");
+        gpu.crop(hdr_source.Get(),hdr_eye.Get(),224,0,800,64);gpu.submit();
+        check(xrfg::read_luke_color_origin(gpu.queue.Get(),hdr_eye.Get(),&token,
+            D3D12_RESOURCE_STATE_COMMON,5000),"HDR/typeless cropped marker read");
+        require(token==hdr_token,"HDR copy changed token / CRC");
+    }
+    // Both eyes are released in a fixed order while actual AER production
+    // alternates. Retained right color must not hide the new left token.
+    // Exercise two render/output shapes across a simulated DLSS preset reset.
+    std::uint64_t last=0;
+    for(const unsigned width:{1024u,768u}) {
+        gpu.reset();
+        auto a=gpu.texture(width,64),b=gpu.texture(width,64);
+        xrfg::configure_luke_color_origin_extent(width,64);
+        const auto current=static_cast<std::uint32_t>(++last+100);
+        const auto prior=current-1;
+        check(xrfg::mark_luke_color_origin(gpu.list.Get(),a.Get(),current,D3D12_RESOURCE_STATE_COMMON,gpu.device.Get()),"new left color");
+        check(xrfg::mark_luke_color_origin(gpu.list.Get(),b.Get(),prior,D3D12_RESOURCE_STATE_COMMON,gpu.device.Get()),"retained right color");
+        gpu.submit();
+        std::array<std::uint64_t,2> publications{};
+        for(unsigned eye=0;eye<2;++eye) {
+            std::uint32_t decoded{};
+            check(xrfg::read_luke_color_origin(gpu.queue.Get(),eye?b.Get():a.Get(),&decoded,D3D12_RESOURCE_STATE_COMMON,5000),"stereo token read");
+            publications[eye]=decoded;
+        }
+        require(publications[0]==current&&publications[1]==prior,"stereo marker identity changed");
+        require(publications[1]<=prior,"last-release-right counterfactual not reproduced");
+        require(xrfg::select_luke_afw_color_source(publications,prior)==0,"last release hid current left source");
+        require(!xrfg::select_luke_afw_color_source(publications,current),"duplicate source reused");
+        require(xrfg::select_luke_afw_color_source({prior,current},prior)==1,"right source selection drift");
+        require(!xrfg::select_luke_afw_color_source({current,current},prior),"ambiguous two-eye token admitted");
+        require(!xrfg::select_luke_afw_color_source({0,0},prior),"missing tokens admitted");
+    }
+
+    // Outlaws' two probes are synchronous XR work. A second eye shares the
+    // queue's reader and must retire its first unfinished readback before
+    // reusing it; another probe therefore repeats the whole timeout. Freeze
+    // both original colors before parking later native work, then exercise
+    // the shipping reader on that queue and on an actual separate queue.
+    {
+        gpu.reset();
+        const std::array<std::uint32_t,2> frozen_tokens{0x3827a519U,0xc57418efU};
+        std::array<ComPtr<ID3D12Resource>,2> frozen{
+            gpu.texture(1024,64),gpu.texture(1024,64)};
+        xrfg::configure_luke_color_origin_extent(1024,64);
+        for(unsigned eye=0;eye<frozen.size();++eye)
+            check(xrfg::mark_luke_color_origin(gpu.list.Get(),frozen[eye].Get(),frozen_tokens[eye],
+                D3D12_RESOURCE_STATE_COMMON,gpu.device.Get()),"frozen original stereo marker");
+        gpu.submit();
+
+        ComPtr<ID3D12Fence> native_retirement,gate;
+        check(gpu.device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(native_retirement.GetAddressOf())),
+            "native reader retirement fence");
+        check(gpu.device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(gate.GetAddressOf())),
+            "later native-work gate");
+        const HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+        require(event!=nullptr,"native reader retirement event");
+        struct UnparkNative {
+            ComPtr<ID3D12CommandQueue> queue;
+            ComPtr<ID3D12Fence> gate,retirement;
+            HANDLE event;
+            ~UnparkNative() {
+                // Every exceptional path releases the CPU gate and retires
+                // the queued readback before local color resources disappear.
+                static_cast<void>(gate->Signal(1));
+                if(SUCCEEDED(queue->Signal(retirement.Get(),4))&&
+                    SUCCEEDED(retirement->SetEventOnCompletion(4,event)))
+                    static_cast<void>(WaitForSingleObject(event,5000));
+                CloseHandle(event);
+            }
+        } unpark{gpu.queue,gate,native_retirement,event};
+        check(gpu.queue->Signal(native_retirement.Get(),1),"freeze native colors");
+        check(native_retirement->SetEventOnCompletion(1,event),"freeze native completion event");
+        require(WaitForSingleObject(event,5000)==WAIT_OBJECT_0,"original stereo colors not completed");
+        check(gpu.queue->Wait(gate.Get(),1),"park later native work");
+        check(gpu.queue->Signal(native_retirement.Get(),2),"parked native marker");
+
+        const auto begin=std::chrono::steady_clock::now();
+        token=99;
+        const auto first=xrfg::read_luke_color_origin(gpu.queue.Get(),frozen[0].Get(),&token,
+            D3D12_RESOURCE_STATE_COMMON,5);
+        const auto first_done=std::chrono::steady_clock::now();
+        require(first==HRESULT_FROM_WIN32(WAIT_TIMEOUT)&&token==0,"parked first probe fabricated a token");
+        token=99;
+        const auto second=xrfg::read_luke_color_origin(gpu.queue.Get(),frozen[1].Get(),&token,
+            D3D12_RESOURCE_STATE_COMMON,5);
+        const auto second_done=std::chrono::steady_clock::now();
+        require(second==HRESULT_FROM_WIN32(WAIT_TIMEOUT)&&token==0,"pending reader reused for second eye");
+        require(first_done-begin>=std::chrono::milliseconds(4)&&
+            second_done-first_done>=std::chrono::milliseconds(4),"second probe did not reproduce repeated GPU wait");
+
+        D3D12_COMMAND_QUEUE_DESC execution_desc{};
+        execution_desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
+        execution_desc.Priority=D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+        execution_desc.NodeMask=gpu.queue->GetDesc().NodeMask;
+        ComPtr<ID3D12CommandQueue> execution;
+        check(gpu.device->CreateCommandQueue(&execution_desc,IID_PPV_ARGS(execution.GetAddressOf())),
+            "separate token execution queue");
+        ComPtr<ID3D12Device> execution_owner;
+        check(execution->GetDevice(IID_PPV_ARGS(execution_owner.GetAddressOf())),"execution queue owner");
+        require(execution.Get()!=gpu.queue.Get()&&execution_owner.Get()==gpu.device.Get()&&
+            execution->GetDesc().Type==D3D12_COMMAND_LIST_TYPE_DIRECT,"private reader changed native owner");
+        for(unsigned eye=0;eye<frozen.size();++eye) {
+            token=0;
+            check(xrfg::read_luke_color_origin(execution.Get(),frozen[eye].Get(),&token,
+                D3D12_RESOURCE_STATE_COMMON,5000),"private probe blocked behind later native work");
+            require(token==frozen_tokens[eye],"private probe changed exact token / CRC");
+            require(gate->GetCompletedValue()==0&&native_retirement->GetCompletedValue()==1,
+                "private probe secretly unparked the original producer");
+        }
+        check(gate->Signal(1),"release native reader gate");
+        check(gpu.queue->Signal(native_retirement.Get(),3),"retire original pending readback");
+        check(native_retirement->SetEventOnCompletion(3,event),"native readback retirement event");
+        require(WaitForSingleObject(event,5000)==WAIT_OBJECT_0,"old native reader did not retire after gate release");
+        check(xrfg::read_luke_color_origin(gpu.queue.Get(),frozen[0].Get(),&token,
+            D3D12_RESOURCE_STATE_COMMON,5000),"native reader recovery after unpark");
+        require(token==frozen_tokens[0],"unfinished native readback corrupted recovery");
+    }
+    ComPtr<ID3D12InfoQueue> info;
+    check(gpu.device.As(&info),"debug queue");
+    for(UINT64 i=0;i<info->GetNumStoredMessages();++i) {
+        SIZE_T bytes{};info->GetMessage(i,nullptr,&bytes);std::vector<std::byte> storage(bytes);
+        auto* message=reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+        check(info->GetMessage(i,message,&bytes),"debug message");
+        if(message->Severity<=D3D12_MESSAGE_SEVERITY_ERROR) {
+            std::cerr<<message->pDescription<<'\n';require(false,"GPU resource/copy validation failed");
+        }
     }
 
 }

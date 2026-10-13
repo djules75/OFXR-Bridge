@@ -1190,8 +1190,6 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         if (color_desc.Width > INT_MAX || color_desc.Height > INT_MAX) return reject_input(2);
         if (!guide.motion_width || !guide.motion_height || !guide.output_width || !guide.output_height)
             return reject_input(3);
-        if (color_desc.Width > guide.output_width || color_desc.Height > guide.output_height)
-            return reject_input(4);
         if (luke_motion_srv_format(motion_desc.Format) == DXGI_FORMAT_UNKNOWN) return reject_input(5);
         if (depth_desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
             motion_desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) return reject_input(6);
@@ -1255,6 +1253,9 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                     const std::uint64_t flags=(value.valid?1:0)|(value.reset?2:0)|(value.jittered?4:0)|
                         (static_cast<std::uint64_t>(value.token)<<32);
                     bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,i,953,w,flags);
+                    if(guide.native_production_sequence)
+                        bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,i,958,
+                            guide.publication,value.native_production_sequence);
                 }
             }
             return HRESULT_FROM_WIN32(ERROR_NOT_READY);
@@ -1716,11 +1717,9 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         params.command_list = command_list;
         params.input_eye_frame_buffer = &input;
         params.motion_scale[0] = guide.scale_x *
-            static_cast<float>(guide.output_width) /
-            static_cast<float>(guide.motion_width);
+            static_cast<float>(color_desc.Width) / static_cast<float>(cropped_motion_width);
         params.motion_scale[1] = guide.scale_y *
-            static_cast<float>(guide.output_height) /
-            static_cast<float>(guide.motion_height);
+            static_cast<float>(color_desc.Height) / static_cast<float>(cropped_motion_height);
         const int effective_mode = luke_afw_effective_mode(settings.mode,
             guide.publication, impl_->last_evaluated_publication,
             source_eye, impl_->last_evaluated_eye);

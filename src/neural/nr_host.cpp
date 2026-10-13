@@ -1,4 +1,5 @@
 #include "nr_host.hpp"
+#include "xrfg/ngx_feature_paths.hpp"
 
 namespace {
 struct NgxServices {
@@ -97,10 +98,8 @@ bool NrNgxCore::InitDx12(ID3D12Device* device) {
     auto init=reinterpret_cast<Init>(GetProcAddress(s.module,"NVSDK_NGX_D3D12_Init_Ext"));
     if(!init)return false;
     auto module_folder=Util::DllPath().parent_path().wstring();
-    auto exe_folder=Util::ExePath().parent_path().wstring();
-    const wchar_t* paths[]={module_folder.c_str(),exe_folder.c_str()};
-    NVSDK_NGX_FeatureCommonInfo info{};info.PathListInfo.Path=paths;info.PathListInfo.Length=2;
+    xrfg::NgxFeaturePaths search(nullptr,module_folder);
     s.initialized=init(0x24480451ULL,NrApplicationDataPath().c_str(),device,
-        NVSDK_NGX_Version_API,&info)==NVSDK_NGX_Result_Success;
+        NVSDK_NGX_Version_API,search.get())==NVSDK_NGX_Result_Success;
     return s.initialized;
 }

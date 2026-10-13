@@ -6786,6 +6786,16 @@ HRESULT D3D12FrameSynthesizer::ticket_available(const D3D12FrameSynthesisTicket&
     } catch(...) { return E_FAIL; }
 }
 
+Microsoft::WRL::ComPtr<ID3D12Fence> D3D12FrameSynthesizer::submission_fence(
+    const D3D12FrameSynthesisTicket& ticket) noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if(!impl_ || !impl_->fence || !ticket.fence_value ||
+            ticket.fence_value>impl_->last_submitted_fence_value) return {};
+        return impl_->fence;
+    } catch(...) { return {}; }
+}
+
 HRESULT D3D12FrameSynthesizer::previous_submission_available() noexcept {
     try {
         std::scoped_lock lock(mutex_);
@@ -6878,6 +6888,25 @@ HRESULT D3D12FrameSynthesizer::synchronize_consumer_queue(
     } catch (...) {
         return E_FAIL;
     }
+}
+
+void D3D12FrameSynthesizer::report_pending_submission() const noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if (!impl_) return;
+        auto& flight = bridge_flight_logger();
+        const auto snapshot = [&](int kind, ID3D12Fence* fence, std::uint64_t required) {
+            if (fence) flight.event(BridgeFlightOperation::gpu_fence_snapshot, kind,
+                reinterpret_cast<std::uintptr_t>(fence), required, fence->GetCompletedValue());
+        };
+        snapshot(49301, impl_->fence.Get(), impl_->last_submitted_fence_value);
+        snapshot(49302, impl_->nvidia_fence.Get(), impl_->last_nvidia_fence_value);
+        snapshot(49303, impl_->previous.producer_fence.Get(), impl_->previous.ticket.fence_value);
+        snapshot(49304, impl_->acquire_fence.Get(), impl_->next_acquire_fence_value - 1);
+        if (impl_->device) flight.event(BridgeFlightOperation::gpu_device_status,
+            impl_->device->GetDeviceRemovedReason(), reinterpret_cast<std::uintptr_t>(impl_->queue.Get()),
+            reinterpret_cast<std::uintptr_t>(impl_->device.Get()), 49300);
+    } catch (...) { }
 }
 
 bool D3D12FrameSynthesizer::initialized() const noexcept {

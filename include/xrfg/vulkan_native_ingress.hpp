@@ -7,4 +7,10 @@ namespace xrfg::native_vulkan {
 void configure_owner(const VulkanSessionBinding&,ID3D12Device*,ID3D12CommandQueue*) noexcept;
 void stop_owner(VkDevice device) noexcept;
 void poll_capture() noexcept;
+// DOOM / Indiana Jones native Vulkan producers are independent of D3D11 XR.
+// Select only a creation-observed native device with the exact adapter LUID.
+VkDevice configure_luke_owner(ID3D12Device*, ID3D12CommandQueue*) noexcept;
+// Published only after the original Vulkan prefix accepted an exact SR/RR
+// transport recording; neither device creation nor XR queue proves production.
+bool query_luke_context(ID3D12Device**, ID3D12CommandQueue**) noexcept;
 }

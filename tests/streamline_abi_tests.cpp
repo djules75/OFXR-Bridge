@@ -6,17 +6,22 @@
 #include <iostream>
 #include <string>
 #include <new>
+#include <limits>
 namespace camera=xrfg::native_ingress::streamline_camera;
 namespace xrfg::native_ingress {void poll_streamline() noexcept;}
 namespace {
 int failures{},calls{};bool supported{},nested{},inside{};uint32_t expected_frame=0x43ff,expected_viewport=5;
 const void* expected_constants{};bool expect_camera=true;void(*run_nested)();
+uint32_t expected_rejection{};
 void check(bool ok,const char* why){if(!ok){++failures;std::cerr<<"FAIL: "<<why<<'\n';}}
 void observe(void* list,uint32_t feature,uint32_t frame,uint32_t viewport,const void* values){
     ++calls;check(list==nullptr&&feature==0,"original evaluate arguments preserved");
     check(frame==expected_frame&&viewport==expected_viewport,"original frame and viewport preserved");
     check(values==expected_constants,"original Constants address preserved");
     auto c=camera::current();check(c.valid==(supported&&expect_camera),"exact camera admission");
+    if(supported&&expected_rejection)check(c.observed&&!c.valid&&c.frame==frame&&c.viewport==viewport&&
+        c.rejection==expected_rejection&&c.fov==std::numeric_limits<float>::max()&&c.near_z==.1f&&c.far_z==100,
+        "exact rejected camera preserves field mask and original scalar bits");
     if(c.valid){check(c.frame==frame&&c.viewport==viewport,"camera belongs to exact evaluate");
         check(c.position[0]==7&&c.projection[0]==1&&c.inverse[15]==1&&c.camera_motion==1&&c.inverted,"typed camera fields preserved");}
     if(nested&&!inside){inside=true;auto saved=c;run_nested();inside=false;
@@ -59,6 +64,9 @@ int main(int argc,char** argv){
         check(!eval1(nullptr,sl1::eFeatureDLSS,expected_frame,expected_viewport),"legacy evaluate failure preserved");
         outcome(1);expected_frame=0x43ff;expected_viewport=6;
         eval1(nullptr,sl1::eFeatureDLSS,expected_frame,expected_viewport);
+        expected_frame=0x4455;expected_viewport=5;expected_rejection=64;v->cameraFOV=std::numeric_limits<float>::max();
+        check(set1(*v,expected_frame,expected_viewport),"rejected legacy constants original result preserved");
+        check(eval1(nullptr,sl1::eFeatureDLSS,expected_frame,expected_viewport),"rejected legacy evaluate original result preserved");
     }else{
         auto* v=new(page+4096-sizeof(sl::Constants))sl::Constants;initialize(*v);expected_constants=v;
         set2=reinterpret_cast<PFun_slSetConstants*>(GetProcAddress(module,"slSetConstants"));eval2=reinterpret_cast<PFun_slEvaluateFeature*>(GetProcAddress(module,"slEvaluateFeature"));
@@ -73,7 +81,10 @@ int main(int argc,char** argv){
         outcome(1);expected_frame=0x43ff;get_token(token,&expected_frame);
         sl::ViewportHandle other(6);const sl::BaseStructure* conflict[]={&viewport,&other};
         eval2(sl::kFeatureDLSS,*token,conflict,2,nullptr);
+        expected_frame=0x4455;expected_rejection=64;get_token(token,&expected_frame);v->cameraFOV=std::numeric_limits<float>::max();
+        check(set2(*v,*token,viewport)==sl::Result::eOk,"rejected modern constants original result preserved");
+        check(eval2(sl::kFeatureDLSS,*token,inputs,1,nullptr)==sl::Result::eOk,"rejected modern evaluate original result preserved");
     }
-    check(calls==4,"all original evaluations reached");check(!camera::current().valid,"no camera leaks outside evaluate");
+    check(calls==5,"all original evaluations reached");check(!camera::current().valid,"no camera leaks outside evaluate");
     VirtualFree(page,0,MEM_RELEASE);std::cout<<"Streamline "<<(legacy?1:2)<<" supported="<<supported<<" original_calls="<<calls<<" failures="<<failures<<'\n';return failures?1:0;
 }

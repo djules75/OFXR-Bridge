@@ -220,12 +220,13 @@ static void report_origin_layout(bool writer, unsigned reason,
 
 HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* color,
     std::uint32_t token, D3D12_RESOURCE_STATES state, ID3D12Device* native_device,
-    LukeColorOriginRect rect) noexcept {
+    LukeColorOriginRect rect, DXGI_FORMAT proven_color_view) noexcept {
     try {
         if (!list || !color || !token) return E_INVALIDARG;
         const auto desc = color->GetDesc();
+        const auto format = luke_origin_upload_format(desc.Format, proven_color_view);
         if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.SampleDesc.Count != 1 ||
-            desc.DepthOrArraySize != 1 || desc.Width > 16384 || !luke_origin_pixel_bytes(desc.Format))
+            desc.DepthOrArraySize != 1 || desc.Width > 16384 || !luke_origin_pixel_bytes(format))
             return DXGI_ERROR_UNSUPPORTED;
         if (!rect.width) rect.width = static_cast<UINT>(desc.Width);
         if (!rect.height) rect.height = desc.Height;
@@ -251,7 +252,7 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             if (FAILED(result)) return result;
         }
         std::shared_ptr<Uploads> patterns;
-        HRESULT result = get_uploads(device.Get(), desc.Format, kLukeOriginHeight, patterns);
+        HRESULT result = get_uploads(device.Get(), format, kLukeOriginHeight, patterns);
         if (FAILED(result)) return result;
         D3D12_TEXTURE_COPY_LOCATION destination{};
         destination.pResource = color; destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -266,7 +267,7 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             D3D12_TEXTURE_COPY_LOCATION source{};
             source.pResource = patterns->colors[white ? 1 : 0].Get();
             source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-            source.PlacedFootprint.Footprint = {desc.Format, 2, kLukeOriginHeight, 1, 256};
+            source.PlacedFootprint.Footprint = {format, 2, kLukeOriginHeight, 1, 256};
                 list->CopyTextureRegion(&destination, x + cell * 2, y, 0, &source, nullptr);
             }
         }
@@ -361,7 +362,15 @@ HRESULT read_luke_color_origin(ID3D12CommandQueue* queue, ID3D12Resource* color,
         if (ram_reader_timing)
             bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
                 result, 124, reinterpret_cast<std::uint64_t>(reader.get()), value);
-        if (FAILED(result)) return report.finish(result);
+        if (FAILED(result)) {
+            bridge_flight_logger().event(BridgeFlightOperation::gpu_fence_snapshot,
+                49305, reinterpret_cast<std::uintptr_t>(reader->fence.Get()), value,
+                reader->fence->GetCompletedValue());
+            bridge_flight_logger().event(BridgeFlightOperation::gpu_device_status,
+                reader->device->GetDeviceRemovedReason(), reinterpret_cast<std::uintptr_t>(queue),
+                reinterpret_cast<std::uintptr_t>(reader->device.Get()), 49305);
+            return report.finish(result);
+        }
         std::vector<float> row(layout.scan.width);
         void* mapped{}; const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
         result = reader->readback->Map(0, &range, &mapped);

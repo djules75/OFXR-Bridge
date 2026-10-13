@@ -142,6 +142,24 @@
         const float w=g.camera_view_to_clip[11];g.camera_view_to_clip[11]=0;admission(3);g.camera_view_to_clip[11]=w;
         const float saved_jitter=middle->jitter_x;middle->jitter_x=NAN;admission(3);middle->jitter_x=saved_jitter;
         --middle->camera_frame_token;admission(4);++middle->camera_frame_token;
+        // KCD camera-read attempts can have gaps from extra failed probes.
+        // Exact observed native SR productions define temporal adjacency;
+        // arbitrary success compaction must never admit a missed SR frame.
+        const auto current_packet=g.camera_frame_token,middle_packet=middle->camera_frame_token;
+        const auto older_packet=g.previous_same_native_camera->token;
+        g.camera_frame_token=901;middle->camera_frame_token=407;g.previous_same_native_camera->token=103;
+        g.native_production_sequence=105;middle->native_production_sequence=104;
+        g.previous_same_native_camera->native_production_sequence=103;admission(0);
+        ++g.native_production_sequence;admission(4);--g.native_production_sequence;
+        --middle->native_production_sequence;admission(4);++middle->native_production_sequence;
+        g.previous_same_native_camera->native_production_sequence=0;admission(4);
+        g.previous_same_native_camera->native_production_sequence=103;
+        middle->camera_frame_token=0;admission(3);middle->camera_frame_token=407;
+        g.native_production_sequence=1;admission(4);g.native_production_sequence=105;
+        g.native_production_sequence=middle->native_production_sequence=0;
+        g.previous_same_native_camera->native_production_sequence=0;admission(4);
+        g.camera_frame_token=current_packet;middle->camera_frame_token=middle_packet;
+        g.previous_same_native_camera->token=older_packet;admission(0);
         ++middle->motion_width;admission(5);--middle->motion_width;
         const float scale=g.scale_x;g.scale_x=0;admission(6);g.scale_x=scale;
         const auto retention=g.depth_retention;g.depth_retention.reset();admission(7);g.depth_retention=retention;

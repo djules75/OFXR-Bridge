@@ -2,6 +2,8 @@
 #include "vulkan_command_internal.hpp"
 #include "vulkan_command_tracker.hpp"
 #include "vulkan_command_submit.hpp"
+#include "xrfg/native_export_address.hpp"
+#include <safetyhook.hpp>
 
 namespace xrfg::native_vulkan {
 namespace {
@@ -27,6 +29,10 @@ struct DeviceState {
     std::unordered_map<std::string,PFN_vkVoidFunction> functions;
     std::unordered_map<VkCommandPool,uint32_t> pools;
     std::unordered_map<VkCommandBuffer,CommandChain> commands;
+    // Only continuations allocated by split() in this exact recording. A
+    // wrapper may keep its received native prefix while an inner NGX call
+    // advances the chain; later observed commands must reach the live suffix.
+    std::unordered_map<VkCommandBuffer,VkCommandBuffer> continuation_owners;
     vk_state::CommandBufferStateTracker tracker;
     uint64_t next_epoch{};
 };
@@ -39,6 +45,7 @@ struct Registry {
     std::unordered_map<VkDevice,std::shared_ptr<DeviceState>> devices;
     std::unordered_map<void*,std::shared_ptr<DeviceState>> dispatch;
     std::unordered_map<VkCommandBuffer,std::weak_ptr<DeviceState>> commands;
+    std::unordered_map<void*,SafetyHookInline> entry_hooks;
 };
 Registry& registry(){static auto* value=new Registry;return *value;}
 void* dispatch_key(const void* object){return object?*static_cast<void* const*>(object):nullptr;}
@@ -58,11 +65,15 @@ std::shared_ptr<DeviceState> queue_device(VkQueue queue) {
 template<class T>T load(DeviceState& device,const char* name) {
     std::scoped_lock lock(device.mutex);
     auto found=device.functions.find(name);
-    if(found!=device.functions.end())return reinterpret_cast<T>(found->second);
+    if(found!=device.functions.end())return reinterpret_cast<T>(unhooked_command(found->second));
     auto function=device.gdpa?device.gdpa(device.device,name):nullptr;
-    device.functions.emplace(name,function);return reinterpret_cast<T>(function);
+    device.functions.emplace(name,function);return reinterpret_cast<T>(unhooked_command(function));
 }
-VkCommandBuffer native_locked(DeviceState& device,VkCommandBuffer original) {
+void original_locked(DeviceState& device,VkCommandBuffer& original) {
+    if(auto alias=device.continuation_owners.find(original);alias!=device.continuation_owners.end())original=alias->second;
+}
+VkCommandBuffer native_locked(DeviceState& device,VkCommandBuffer& original) {
+    original_locked(device,original);
     auto found=device.commands.find(original);
     return found!=device.commands.end()&&found->second.actual?found->second.actual:original;
 }
@@ -102,6 +113,7 @@ void release_chain(DeviceState& device,CommandChain& chain,DisposedRecordings& a
             if(segment.lifetime->disposition.compare_exchange_strong(expected,RecordingDisposition::abandoned)&&
                 segment.handoff.abandoned)abandoned.handoffs.push_back(segment.handoff);
         }
+        device.continuation_owners.erase(segment.suffix);
         if(free&&segment.suffix)free(device.device,chain.pool,1,&segment.suffix);
     }
     abandoned.retained.insert(abandoned.retained.end(),std::make_move_iterator(chain.retained.begin()),
@@ -264,6 +276,34 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_vkQueueSubmit2KHR(VkQueue queue,uint32_t cou
 #include "vulkan_command_dispatch.inc"
 }
 
+PFN_vkVoidFunction unhooked_command(PFN_vkVoidFunction function) noexcept {
+    auto& r=registry();std::scoped_lock lock(r.mutex);
+    const auto found=r.entry_hooks.find(reinterpret_cast<void*>(function));
+    return found==r.entry_hooks.end()?function:found->second.original<PFN_vkVoidFunction>();
+}
+unsigned install_command_entry_hooks(void* loader_module) noexcept {
+    try {
+        const char* names[]{"vkCreateCommandPool","vkAllocateCommandBuffers","vkBeginCommandBuffer",
+            "vkEndCommandBuffer","vkResetCommandBuffer","vkFreeCommandBuffers","vkResetCommandPool",
+            "vkDestroyCommandPool","vkQueueSubmit","vkQueueSubmit2","vkQueueSubmit2KHR",
+#include "vulkan_command_entry_names.inc"
+        };
+        auto& r=registry();
+        for(const auto* name:names) {
+            const auto address=native_export_address(static_cast<HMODULE>(loader_module),name);
+            if(!address)continue;
+            const auto replacement=resolve_command(VK_NULL_HANDLE,name,reinterpret_cast<PFN_vkVoidFunction>(address));
+            if(replacement==reinterpret_cast<PFN_vkVoidFunction>(address))continue;
+            std::scoped_lock lock(r.mutex);
+            auto* key=reinterpret_cast<void*>(address);if(r.entry_hooks.contains(key))continue;
+            auto hook=safetyhook::create_inline(key,reinterpret_cast<void*>(replacement),SafetyHookInline::StartDisabled);
+            if(hook)r.entry_hooks.emplace(key,std::move(hook));
+        }
+        std::scoped_lock lock(r.mutex);
+        for(auto& [address,hook]:r.entry_hooks)(void)hook.enable();
+        return static_cast<unsigned>(r.entry_hooks.size());
+    }catch(...){return 0;}
+}
 bool initialize_commands(VkInstance instance,VkPhysicalDevice physical,VkDevice device,
     PFN_vkGetInstanceProcAddr gipa,PFN_vkGetDeviceProcAddr gdpa) {
     if(!device||!gdpa)return false;auto d=std::make_shared<DeviceState>();
@@ -284,8 +324,14 @@ bool initialize_commands(VkInstance instance,VkPhysicalDevice physical,VkDevice 
     if(r.devices.contains(device))return true;r.devices[device]=d;r.dispatch[dispatch_key(device)]=d;return true;
 }
 PFN_vkVoidFunction resolve_command(VkDevice device,const char* name,PFN_vkVoidFunction original) noexcept {
-    if(!name||!original)return original;auto d=device_state(device);if(!d)return original;
-    {std::scoped_lock lock(d->mutex);d->functions[name]=original;}
+    if(!name||!original)return original;
+    // GIPA may resolve every device command before VkDevice exists. The
+    // wrapper routes each later call by its real device/command dispatch key;
+    // downstream functions remain device-specific, loaded only after creation.
+    if(device) {
+        auto d=device_state(device);if(!d)return original;
+        std::scoped_lock lock(d->mutex);d->functions[name]=original;
+    }
 #define VK_RESOLVE(name_literal) if(!strcmp(name,#name_literal))return reinterpret_cast<PFN_vkVoidFunction>(&hook_##name_literal)
     VK_RESOLVE(vkCreateCommandPool);VK_RESOLVE(vkAllocateCommandBuffers);VK_RESOLVE(vkBeginCommandBuffer);
     VK_RESOLVE(vkEndCommandBuffer);VK_RESOLVE(vkResetCommandBuffer);VK_RESOLVE(vkFreeCommandBuffers);
@@ -300,26 +346,31 @@ VkCommandBuffer native(VkCommandBuffer original) noexcept {
 }
 VkDevice device_for(VkCommandBuffer original) noexcept {
     auto d=command_device(original);if(!d)return {};
-    std::scoped_lock lock(d->mutex);return d->commands.contains(original)?d->device:VK_NULL_HANDLE;
+    std::scoped_lock lock(d->mutex);original_locked(*d,original);return d->commands.contains(original)?d->device:VK_NULL_HANDLE;
 }
 uint32_t queue_family_for(VkCommandBuffer original) noexcept {
     auto d=command_device(original);if(!d)return UINT32_MAX;
-    std::scoped_lock lock(d->mutex);auto command=d->commands.find(original);
+    std::scoped_lock lock(d->mutex);original_locked(*d,original);auto command=d->commands.find(original);
     if(command==d->commands.end())return UINT32_MAX;
     const auto pool=d->pools.find(command->second.pool);return pool==d->pools.end()?UINT32_MAX:pool->second;
 }
 bool can_split(VkCommandBuffer original) noexcept {
-    auto d=command_device(original);if(!d)return false;
-    std::scoped_lock lock(d->mutex);auto found=d->commands.find(original);
-    if(found==d->commands.end())return false;const auto& chain=found->second;
+    return split_refusal(original)==0;
+}
+unsigned split_refusal(VkCommandBuffer original) noexcept {
+    auto d=command_device(original);if(!d)return 1;
+    std::scoped_lock lock(d->mutex);original_locked(*d,original);auto found=d->commands.find(original);
+    if(found==d->commands.end())return 2;const auto& chain=found->second;
     vk_state::CommandBufferState snapshot;
-    return chain.recording&&chain.pool&&chain.level==VK_COMMAND_BUFFER_LEVEL_PRIMARY&&
-        !chain.rendering&&!chain.unsupported_state&&!chain.submitted&&d->tracker.Snapshot(original,snapshot);
+    return (!chain.recording?4U:0U)|(!chain.pool?8U:0U)|
+        (chain.level!=VK_COMMAND_BUFFER_LEVEL_PRIMARY?16U:0U)|
+        (chain.rendering?32U:0U)|(chain.unsupported_state?64U:0U)|
+        (chain.submitted?128U:0U)|(!d->tracker.Snapshot(original,snapshot)?256U:0U);
 }
 bool retain_recording(VkCommandBuffer original,std::shared_ptr<void> resources) noexcept {
     if(!resources)return false;auto d=command_device(original);if(!d)return false;
     try {
-        std::scoped_lock lock(d->mutex);auto found=d->commands.find(original);
+        std::scoped_lock lock(d->mutex);original_locked(*d,original);auto found=d->commands.find(original);
         if(found==d->commands.end()||!found->second.recording||found->second.submitted)return false;
         found->second.retained.push_back(std::move(resources));return true;
     }catch(...){return false;}
@@ -330,7 +381,7 @@ CommandSplit split(VkCommandBuffer original,const CommandHandoff& handoff,
         handoff.suffix_wait<=handoff.prefix_signal||
         (handoff.suffix_signal&&handoff.suffix_signal<=handoff.suffix_wait))return result;
     try {
-        std::scoped_lock lock(d->mutex);auto found=d->commands.find(original);if(found==d->commands.end())return result;
+        std::scoped_lock lock(d->mutex);original_locked(*d,original);auto found=d->commands.find(original);if(found==d->commands.end())return result;
         auto& chain=found->second;vk_state::CommandBufferState snapshot;
         if(!chain.recording||!chain.pool||chain.level!=VK_COMMAND_BUFFER_LEVEL_PRIMARY||chain.rendering||
             chain.unsupported_state||chain.submitted||!d->tracker.Snapshot(original,snapshot))return result;
@@ -355,7 +406,11 @@ CommandSplit split(VkCommandBuffer original,const CommandHandoff& handoff,
         replay.ReplayComputeToo=true;replay.ReplayVertexIndex=true;
         if(result.result==VK_SUCCESS&&!d->tracker.CaptureAndReplay(original,suffix,replay))result.result=VK_ERROR_FEATURE_NOT_PRESENT;
         if(result.result==VK_SUCCESS)for(const auto& state:chain.state_commands)state(suffix);
+        // Allocate alias ownership before ending the prefix. A failed driver
+        // end leaves no alias pointing at an uncommitted/freed continuation.
+        if(result.result==VK_SUCCESS)d->continuation_owners.emplace(suffix,original);
         if(result.result==VK_SUCCESS)result.result=end(chain.actual?chain.actual:original);
+        if(result.result!=VK_SUCCESS)d->continuation_owners.erase(suffix);
         if(result.result!=VK_SUCCESS)return result;
         chain.segments.push_back({chain.actual?chain.actual:original,suffix,handoff,lifetime});chain.actual=suffix;
         unused.value={};
@@ -364,7 +419,7 @@ CommandSplit split(VkCommandBuffer original,const CommandHandoff& handoff,
 }
 uint64_t recording_epoch(VkCommandBuffer original) noexcept {
     auto d=command_device(original);if(!d)return 0;std::scoped_lock lock(d->mutex);
-    auto found=d->commands.find(original);return found==d->commands.end()?0:found->second.epoch;
+    original_locked(*d,original);auto found=d->commands.find(original);return found==d->commands.end()?0:found->second.epoch;
 }
 void destroy_commands(VkDevice device) noexcept {
     auto d=device_state(device);if(!d)return;

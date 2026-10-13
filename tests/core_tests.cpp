@@ -283,21 +283,31 @@ int main() {
         double_resolution->y == 541 && double_resolution->width == 2594 &&
         double_resolution->height == 2803,
         "guide window scales with resolution instead of using pixel offsets");
-    expect(!xrfg::luke_guide_window(luke_projection,
+    const auto resized_eye=xrfg::luke_guide_window(luke_projection,
         degrees(-54), degrees(40), degrees(44), degrees(-55),
-        3344, 3344, 1672, 1672, 3000, 2803),
-        "mismatched colour extent rejects an unsafe unscaled guide");
+        3344, 3344, 1672, 1672, 3000, 2803);
+    expect(resized_eye && resized_eye->x==left_window->x && resized_eye->width==left_window->width,
+        "resized XR color preserves the native FOV sampling window");
     xrfg::LukeGuideWindowFailure rejection{};
-    expect(!xrfg::luke_guide_window(luke_projection,
+    expect(xrfg::luke_guide_window(luke_projection,
         degrees(-54), degrees(40), degrees(44), degrees(-55),
         3344, 3344, 1672, 1672, 3063, 3344, &rejection) &&
-        rejection == xrfg::LukeGuideWindowFailure::color_width_mismatch,
-        "Ghost-sized rejected crop identifies horizontal mismatch without admitting it");
-    expect(!xrfg::luke_guide_window(luke_projection,
+        rejection == xrfg::LukeGuideWindowFailure::none,
+        "color width is independent of native projection sampling");
+    expect(xrfg::luke_guide_window(luke_projection,
         degrees(-54), degrees(40), degrees(44), degrees(-55),
         3344, 3344, 1672, 1672, 2594, 3000, &rejection) &&
-        rejection == xrfg::LukeGuideWindowFailure::color_height_mismatch,
-        "vertical extent rejection is independently observable");
+        rejection == xrfg::LukeGuideWindowFailure::none,
+        "resized height does not invalidate physical camera FOV");
+    for(unsigned guide_width:{1U,511U,1115U,1672U,2229U,3344U})
+        for(unsigned eye_width:{256U,2594U,3056U,6688U})
+            for(unsigned eye_height:{128U,2803U,3337U,3344U,6688U}) {
+                const auto first=xrfg::luke_guide_window(luke_projection,
+                    degrees(-54),degrees(40),degrees(44),degrees(-55),
+                    3344,3344,guide_width,guide_width,eye_width,eye_height);
+                expect(first && first->x+first->width<=guide_width && first->y+first->height<=guide_width,
+                    "all guide ratios and independently resized XR eyes retain bounded physical sampling");
+            }
     expect(xrfg::luke_guide_window(luke_projection,
         degrees(-54), degrees(40), degrees(44), degrees(-55),
         3344, 3344, 1672, 1672, 2594, 2803, &rejection) &&

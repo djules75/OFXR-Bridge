@@ -1,6 +1,7 @@
 #include "xrfg/d3d12_history.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
+#include "xrfg/luke_color_origin.hpp"
 #include "xrfg/d3d12_native_binding.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/d3d12_guide_composer.hpp"
@@ -1666,13 +1667,19 @@ private:
 // differs. Same adapter is intentionally NOT proof of snapshot ownership.
 class ReportedDeviceAlias final : public ID3D12Device {
 public:
-    explicit ReportedDeviceAlias(ID3D12Device* native, bool exposes_native = false)
-        : native_(native), exposes_native_(exposes_native) {}
+    explicit ReportedDeviceAlias(ID3D12Device* native, bool exposes_native = false,
+        bool exposes_public_video=false,ID3D12Device* video_owner=nullptr)
+        : native_(native),video_owner_(video_owner?video_owner:native),
+          exposes_native_(exposes_native),exposes_public_video_(exposes_public_video) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
         if (!object) return E_POINTER;
         *object = nullptr;
         if (exposes_native_ && iid == xrfg::d3d_native::streamline_native_guid)
             return native_->QueryInterface(__uuidof(ID3D12Device), object);
+        if(exposes_public_video_ && iid==__uuidof(ID3D12VideoDevice2)) {
+            ++public_video_queries;
+            return video_owner_->QueryInterface(iid,object);
+        }
         if (iid != __uuidof(IUnknown) && iid != __uuidof(ID3D12Object) && iid != __uuidof(ID3D12Device))
             return E_NOINTERFACE;
         *object = static_cast<ID3D12Device*>(this); AddRef(); return S_OK;
@@ -1687,7 +1694,9 @@ public:
     HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID guid, const IUnknown* data) override { return native_->SetPrivateDataInterface(guid, data); }
     HRESULT STDMETHODCALLTYPE SetName(LPCWSTR name) override { return native_->SetName(name); }
     UINT STDMETHODCALLTYPE GetNodeCount() override { return native_->GetNodeCount(); }
-    HRESULT STDMETHODCALLTYPE CreateCommandQueue(const D3D12_COMMAND_QUEUE_DESC* d, REFIID i, void** p) override { return native_->CreateCommandQueue(d, i, p); }
+    unsigned intercepted_queues{};
+    unsigned public_video_queries{};
+    HRESULT STDMETHODCALLTYPE CreateCommandQueue(const D3D12_COMMAND_QUEUE_DESC* d, REFIID i, void** p) override { ++intercepted_queues;return native_->CreateCommandQueue(d, i, p); }
     HRESULT STDMETHODCALLTYPE CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE t, REFIID i, void** p) override { return native_->CreateCommandAllocator(t, i, p); }
     HRESULT STDMETHODCALLTYPE CreateGraphicsPipelineState(const D3D12_GRAPHICS_PIPELINE_STATE_DESC* d, REFIID i, void** p) override { return native_->CreateGraphicsPipelineState(d, i, p); }
     HRESULT STDMETHODCALLTYPE CreateComputePipelineState(const D3D12_COMPUTE_PIPELINE_STATE_DESC* d, REFIID i, void** p) override { return native_->CreateComputePipelineState(d, i, p); }
@@ -1725,7 +1734,9 @@ public:
     LUID STDMETHODCALLTYPE GetAdapterLuid() override { return native_->GetAdapterLuid(); }
 private:
     ComPtr<ID3D12Device> native_;
+    ComPtr<ID3D12Device> video_owner_;
     bool exposes_native_{};
+    bool exposes_public_video_{};
     volatile LONG references_{1};
 };
 
@@ -1779,6 +1790,52 @@ private:
     volatile LONG references_{1}, device_queries_{};
 };
 
+void test_public_video_allocation_owner(D3D12WarpFixture& fixture) {
+    ComPtr<ID3D12Device> hardware;
+    require_hresult(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&hardware)),"public video hardware device");
+    ComPtr<ID3D12VideoDevice2> video;
+    require_hresult(hardware.As(&video),"public native video interface available");
+    ComPtr<ReportedDeviceAlias> proxy;
+    proxy.Attach(new ReportedDeviceAlias(hardware.Get(),false,true));
+    IUnknown* legacy{};
+    require(xrfg::d3d_native::get_borrowed(proxy.Get(),&legacy)&&legacy==proxy.Get(),
+        "REAL VR unsupported-proxy counterfactual lost");
+    D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
+    ComPtr<ID3D12CommandQueue> old_queue;
+    require_hresult(proxy->CreateCommandQueue(&desc,IID_PPV_ARGS(&old_queue)),"legacy proxy queue creation");
+    require(proxy->intercepted_queues==1,"legacy queue did not enter proxy");
+    ComPtr<ID3D12Device> owner;
+    require_hresult(xrfg::d3d_native::allocation_owner(proxy.Get(),owner),"public video exact allocation owner");
+    require(owner.Get()==hardware.Get()&&d3d_owner::same(proxy.Get(),owner.Get()),"unverified backing admitted");
+    for(unsigned repeat=0;repeat<32;++repeat) {
+        ComPtr<ID3D12Device> retained;
+        require_hresult(xrfg::d3d_native::allocation_owner(proxy.Get(),retained),"cached verified owner");
+        require(retained.Get()==hardware.Get(),"cached allocation changed owner");
+    }
+    require(proxy->public_video_queries==1,"video interface queried repeatedly per frame");
+    ComPtr<ReportedDeviceAlias> wrong_backing;
+    wrong_backing.Attach(new ReportedDeviceAlias(fixture.device(),false,true,hardware.Get()));
+    ComPtr<ID3D12Device> rejected=hardware;
+    require(xrfg::d3d_native::allocation_owner(wrong_backing.Get(),rejected)==E_INVALIDARG&&!rejected,
+        "public video interface on a different backing device was accepted");
+    ComPtr<ID3D12CommandQueue> execution;
+    require_hresult(owner->CreateCommandQueue(&desc,IID_PPV_ARGS(&execution)),"unproxied private execution");
+    require(proxy->intercepted_queues==1,"private creation still entered wrapper");
+    ComPtr<ID3D12Device> execution_owner;
+    require_hresult(execution->GetDevice(IID_PPV_ARGS(&execution_owner)),"private queue device");
+    require(execution_owner.Get()==hardware.Get(),"private execution changed allocation owner");
+    ComPtr<ID3D12Fence> fence;
+    require_hresult(owner->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence)),"native owner fence");
+    require_hresult(execution->Signal(fence.Get(),1),"unproxied GPU work");
+    HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);require(event!=nullptr,"native owner event");
+    const auto signaled=fence->SetEventOnCompletion(1,event);
+    const auto waited=SUCCEEDED(signaled)?WaitForSingleObject(event,5000):WAIT_FAILED;CloseHandle(event);
+    require(SUCCEEDED(signaled)&&waited==WAIT_OBJECT_0,"unproxied execution did not complete");
+    require_hresult(xrfg::d3d_native::allocation_owner(owner.Get(),owner),"same-input owner normalization");
+    require(owner.Get()==hardware.Get(),"normalization changed known native identity");
+    std::cout<<"Public video device: old proxy intercepts queue, exact native owner bypasses it; real GPU fence completes PASS\n";
+}
+
 void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_disabled_dlss_motion_vector_resources();
@@ -1788,6 +1845,7 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
     auto depth = create_source_texture(fixture);
     std::vector<std::shared_ptr<const xrfg::DlssMotionVectorFrame>> held;
     std::shared_ptr<const xrfg::DlssMotionVectorFrame> published;
+    std::uint64_t production_sequence{};
     const auto publish = [&](unsigned n, bool reset = false) {
         upload_pattern(fixture, motion.Get(), make_pattern(static_cast<std::uint8_t>(n * 13)));
         upload_pattern(fixture, depth.Get(), make_pattern(static_cast<std::uint8_t>(n * 17)));
@@ -1801,6 +1859,7 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
             p.protect_snapshot_lifetime = true;
             p.reset = reset;
             p.camera_frame_token_valid = true; p.camera_frame_token = n * 7;
+            p.native_production_sequence = ++production_sequence;
             p.raw_camera_motion_included = n % 2;
             for (unsigned i=0;i<4;++i) p.raw_clip_to_previous_clip[i*5]=p.raw_previous_clip_to_clip[i*5]=1;
             p.raw_clip_to_previous_clip[12]=float(n)*.25F;
@@ -1818,7 +1877,8 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
             published->color_origin_token != 0 &&
             published->color_origin_token == frame->color_origin_token &&
             published->serial == n && frame->motion_retention && frame->depth_retention &&
-            frame->camera_frame_token_valid && frame->camera_frame_token == n * 7,
+            frame->camera_frame_token_valid && frame->camera_frame_token == n * 7 &&
+            frame->native_production_sequence == n,
             "protected guide lost provenance/lifetime");
         for (const auto& old : held) require(old->color_origin_token < frame->color_origin_token &&
             old->motion_vectors.Get() != frame->motion_vectors.Get() &&
@@ -1836,12 +1896,15 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
             selected->previous_opposite_guide &&
             selected->previous_opposite_guide->publication == held[2]->publication &&
             selected->camera_frame_token == 28 &&
-            selected->previous_opposite_guide->camera_frame_token == 21,
+            selected->previous_opposite_guide->camera_frame_token == 21 &&
+            selected->native_production_sequence == 4 &&
+            selected->previous_opposite_guide->native_production_sequence == 3,
             "color origin did not resolve its exact retained guide and N-1 camera");
         require(selected->previous_same_native_camera &&
             selected->previous_same_native_camera->publication == held[1]->publication &&
             selected->previous_same_native_camera->serial == 2 &&
             selected->previous_same_native_camera->token == 14 &&
+            selected->previous_same_native_camera->native_production_sequence == 2 &&
             selected->previous_same_native_camera->valid ==
                 xrfg::dlss_native_camera_history(*held[1]).valid,
             "color origin borrowed or synthesized the N-2 native camera");
@@ -1944,6 +2007,8 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
     const auto recycled = publish(17);
     require(published && recycled->publication == first_publication + 16 &&
         recycled->color_origin_token > last_origin_token + 1 &&
+        recycled->native_production_sequence == 18 &&
+        held.back()->native_production_sequence == 16 &&
         recycled->motion_vectors.Get() == first_motion.Get() &&
         recycled->depth.Get() == first_depth.Get(), "completed unowned snapshot not recycled");
     require_readback_matches(fixture, recycled->motion_vectors.Get(), make_pattern(221), "recycled MV", snapshot_state);
@@ -1960,6 +2025,18 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
         reset_join->previous_opposite_guide->publication == reset->publication &&
         !reset_join->previous_same_guide,
         "reset epoch did not join its exact consecutive origin");
+    xrfg::invalidate_dlss_motion_vector_stream_history(90028);
+    require(!xrfg::resolve_luke_guide_token(after_reset->color_origin_token,fixture.queue(),fixture.device()),
+        "failed native SR left its old temporal epoch resolvable");
+    require_readback_matches(fixture,reset_join->motion_vectors.Get(),make_pattern(143),
+        "native failure preserved retained in-flight MV",reset_join->resource_state);
+    require_readback_matches(fixture,reset_join->depth.Get(),make_pattern(187),
+        "native failure preserved retained in-flight depth",reset_join->depth_resource_state);
+    const auto after_native_failure=publish(12);
+    require(after_native_failure->epoch==after_reset->epoch+1 && after_native_failure->serial==1 &&
+        after_native_failure->native_production_sequence==production_sequence &&
+        !xrfg::resolve_luke_guide_token(after_native_failure->color_origin_token,fixture.queue(),fixture.device()),
+        "native SR failure did not restart exact temporal history");
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_disabled_dlss_motion_vector_resources();
     xrfg::configure_dlss_motion_vector_tracking(true);
@@ -2077,6 +2154,133 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
         xrfg::retire_disabled_dlss_motion_vector_resources();
     }
     std::cout << "Protected guides: bounded exact origins, immutable submission, reset rejection, CPU/GPU pins, unused-output independence\n";
+}
+
+void test_luke_multi_handle_origins(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    xrfg::configure_luke_color_origin_extent(512,32);
+    auto color=create_single_slice_texture(fixture,512,32);
+    auto motion=create_source_texture(fixture),depth=create_source_texture(fixture);
+    struct FrozenOrigin {
+        std::shared_ptr<const xrfg::DlssMotionVectorFrame> frame;
+        ComPtr<ID3D12Resource> color;
+    };
+    const auto publish=[&](std::uint64_t stream,unsigned n,unsigned seed,bool reset=false) {
+        upload_pattern(fixture,motion.Get(),make_pattern(static_cast<std::uint8_t>(seed+n)));
+        upload_pattern(fixture,depth.Get(),make_pattern(static_cast<std::uint8_t>(seed+n+50)));
+        FrozenOrigin recorded{};recorded.color=create_single_slice_texture(fixture,512,32);
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            xrfg::DlssMotionVectorPublication p;
+            p.stream=stream;p.output=color.Get();p.motion_vectors=motion.Get();p.depth=depth.Get();
+            p.producer_queue=fixture.queue();p.producer_command_list=list;
+            p.output_width=512;p.output_height=32;
+            p.motion_width=p.depth_width=kWidth;p.motion_height=p.depth_height=kHeight;
+            p.resource_state=p.depth_resource_state=D3D12_RESOURCE_STATE_RENDER_TARGET;
+            p.protect_snapshot_lifetime=true;p.reset=reset;
+            p.camera_frame_token_valid=p.camera_data_valid=p.camera_matrices_valid=true;
+            p.camera_frame_token=n*7;p.native_production_sequence=n;
+            recorded.frame=xrfg::publish_dlss_motion_vectors(p);
+            require(recorded.frame!=nullptr,"multi-handle owned native publication failed");
+            require_hresult(xrfg::mark_luke_color_origin(list,color.Get(),recorded.frame->color_origin_token,
+                D3D12_RESOURCE_STATE_RENDER_TARGET,fixture.device()),"multi-handle production color marker");
+            const D3D12_RESOURCE_BARRIER before[]{
+                transition_barrier(color.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE),
+                transition_barrier(recorded.color.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_DEST)};
+            list->ResourceBarrier(2,before);list->CopyResource(recorded.color.Get(),color.Get());
+            const D3D12_RESOURCE_BARRIER after[]{
+                transition_barrier(color.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET),
+                transition_barrier(recorded.color.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_RENDER_TARGET)};
+            list->ResourceBarrier(2,after);
+        });
+        return recorded;
+    };
+    const auto read=[&](const FrozenOrigin& source) {
+        std::uint32_t token{};
+        require_hresult(xrfg::read_luke_color_origin(fixture.queue(),source.color.Get(),&token,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,5000),"multi-handle frozen color CRC read");
+        require(token==source.frame->color_origin_token,"multi-handle frozen color lost its exact origin");
+        return token;
+    };
+    auto a1=publish(90499,1,10),a2=publish(90499,2,10),a3=publish(90499,3,10);
+    const auto a_token=read(a3);
+    require(xrfg::resolve_luke_guide_token(a_token,fixture.queue(),fixture.device())!=nullptr,
+        "single-handle baseline did not resolve exact color");
+    auto b1=publish(90500,1,90);
+    // A second legitimate native handle has no opposite history yet. It must
+    // neither borrow A's camera nor veto A's independently complete history.
+    require(!xrfg::resolve_luke_guide_token(read(b1),fixture.queue(),fixture.device()),
+        "new native handle borrowed another stream's opposite camera");
+    auto old_a=xrfg::resolve_luke_guide_token(a_token,fixture.queue(),fixture.device());
+    require(old_a && old_a->stream==90499 && old_a->publication==a3.frame->publication &&
+        old_a->previous_opposite_guide->publication==a2.frame->publication &&
+        old_a->previous_same_native_camera && old_a->previous_same_native_camera->publication==a1.frame->publication,
+        "unrelated native handle invalidated exact retained color owner");
+    auto b2=publish(90500,2,90),b3=publish(90500,3,90);
+    auto current_b=xrfg::resolve_luke_guide_token(read(b3),fixture.queue(),fixture.device());
+    require(current_b && current_b->stream==90500 && current_b->publication==b3.frame->publication &&
+        current_b->previous_opposite_guide->publication==b2.frame->publication &&
+        current_b->previous_same_native_camera && current_b->previous_same_native_camera->publication==b1.frame->publication,
+        "current color did not retain its own native handle's N-1/N-2 history");
+    old_a=xrfg::resolve_luke_guide_token(read(a3),fixture.queue(),fixture.device());
+    require(old_a && old_a->publication==a3.frame->publication &&
+        old_a->native_production_sequence==3 && current_b->native_production_sequence==3,
+        "older native color borrowed newer stream identity");
+    require_readback_matches(fixture,old_a->motion_vectors.Get(),make_pattern(13),"multi-handle old exact MV",old_a->resource_state);
+    require_readback_matches(fixture,old_a->depth.Get(),make_pattern(63),"multi-handle old exact depth",old_a->depth_resource_state);
+    require_readback_matches(fixture,current_b->motion_vectors.Get(),make_pattern(93),"multi-handle current exact MV",current_b->resource_state);
+    require_readback_matches(fixture,current_b->previous_opposite_guide->motion_vectors.Get(),make_pattern(92),
+        "multi-handle exact own N-1 MV",current_b->previous_opposite_guide->resource_state);
+
+    ComPtr<ReportedDeviceAlias> wrong_owner;wrong_owner.Attach(new ReportedDeviceAlias(fixture.device()));
+    require(!xrfg::resolve_luke_guide_token(a_token,fixture.queue(),wrong_owner.Get()),
+        "multi-handle token bypassed exact canonical device identity");
+    D3D12_COMMAND_QUEUE_DESC description{};description.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
+    ComPtr<ID3D12CommandQueue> consumer;require_hresult(fixture.device()->CreateCommandQueue(&description,
+        IID_PPV_ARGS(&consumer)),"multi-handle separate consumer queue");
+    require(!xrfg::resolve_luke_guide_token(a_token,consumer.Get(),fixture.device()),
+        "multi-handle token bypassed native submission receipt");
+    ID3D12CommandList* submitted[]{a2.frame->producer_command_list.Get(),a3.frame->producer_command_list.Get()};
+    xrfg::report_dlss_motion_vector_submission(fixture.queue(),2,submitted);
+    auto cross_queue=xrfg::resolve_luke_guide_token(a_token,consumer.Get(),fixture.device());
+    require(cross_queue && cross_queue->producer_fence_value && cross_queue->previous_opposite_guide->producer_fence_value &&
+        cross_queue->publication==a3.frame->publication,"multi-handle crossqueue did not preserve exact native fence ownership");
+    require(!xrfg::resolve_luke_guide_token(0,fixture.queue(),fixture.device()) &&
+        !xrfg::resolve_luke_guide_token(UINT32_MAX,fixture.queue(),fixture.device()),
+        "multi-handle unknown color fell back to an arbitrary stream head");
+    // Deliberately corrupt this fixture's registry claim: a process-unique
+    // token cannot have two native owners. Preserve the actual GPU colors and
+    // restore the fixture immediately after exercising the fail-closed guard.
+    auto forged_owner=std::const_pointer_cast<xrfg::DlssMotionVectorFrame>(b3.frame);
+    const auto b_token=forged_owner->color_origin_token;
+    forged_owner->color_origin_token=a_token;
+    require(!xrfg::resolve_luke_guide_token(read(a3),fixture.queue(),fixture.device()),
+        "duplicate color-origin owners were resolved by stream iteration order");
+    forged_owner->color_origin_token=b_token;forged_owner.reset();
+    require(xrfg::resolve_luke_guide_token(read(b3),fixture.queue(),fixture.device())!=nullptr,
+        "restored exact native origin could not resolve after ambiguity rejection");
+    auto a4=publish(90499,4,10);
+    require(!xrfg::resolve_luke_guide_token(read(a4),fixture.queue(),fixture.device()),
+        "multi-handle join crossed a nonconsecutive native publication interval");
+
+    // The barcode still decodes after its owner's epoch reset or retirement;
+    // its now-invalid immutable identity must never attach to another owner.
+    xrfg::invalidate_dlss_motion_vector_stream_history(90500);
+    require(!xrfg::resolve_luke_guide_token(read(b3),fixture.queue(),fixture.device()) &&
+        xrfg::resolve_luke_guide_token(read(a3),fixture.queue(),fixture.device())!=nullptr,
+        "native failure reset leaked ownership across independent streams");
+    xrfg::retire_dlss_motion_vector_stream(90500);
+    require(!xrfg::resolve_luke_guide_token(read(b3),fixture.queue(),fixture.device()),
+        "retired native handle's color remained resolvable");
+    old_a.reset();cross_queue.reset();a1.frame.reset();a2.frame.reset();a4.frame.reset();
+    for(unsigned n=5;n<=24;++n)static_cast<void>(publish(90499,n,10));
+    require(!xrfg::resolve_luke_guide_token(read(a3),fixture.queue(),fixture.device()),
+        "evicted native color fell back to a newer retained guide");
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    xrfg::configure_luke_color_origin_extent(0,0);
+    std::cout<<"Multi-handle native color: actual CRC transport, exact own N-1/N-2, old/current pixels, crossqueue/device/interval/reset/retirement/eviction guards PASS\n";
 }
 
 void test_luke_production_camera_units(D3D12WarpFixture& fixture) {
@@ -5154,7 +5358,9 @@ int main(int argc, char** argv) {
         }
         if (argc > 1 && std::string_view(argv[1]) == "protected-guides") {
             D3D12WarpFixture fixture;
+            test_public_video_allocation_owner(fixture);
             test_protected_guide_snapshots(fixture);
+            test_luke_multi_handle_origins(fixture);
             test_luke_production_camera_units(fixture);
             fixture.require_no_debug_errors();
             return 0;

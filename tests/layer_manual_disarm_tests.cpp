@@ -41,18 +41,21 @@ std::array<std::size_t, 2> marker_pixels(
 int main(int argc, char** argv) {
     if (argc != 3 && argc != 4) return 1;
     const std::string mode = argv[2];
+    const bool luke_no_guides=mode=="luke-no-guides";
+    g_luke_scratch_mode=luke_no_guides;
     const bool control_mode = argc == 4 && std::string_view(argv[3]) == "controls";
-    const std::string marker_mode = argc == 4 && !control_mode ? argv[3] : "";
+    const std::string marker_mode = argc == 4 && !control_mode && !luke_no_guides ? argv[3] : "";
     if (!marker_mode.empty() && (mode != "d3d11" ||
         (marker_mode != "on" && marker_mode != "off" && marker_mode != "hidden"))) return 1;
     g_flight_simulator_mode = mode == "flight";
     g_steamvr_runtime_mode = g_steamvr_presenter_mode = mode == "steamvr";
-    g_d3d11_interop_mode = mode == "d3d11";
+    g_d3d11_interop_mode = mode == "d3d11" || luke_no_guides;
     g_test_application_thread_id = GetCurrentThreadId();
     const auto root = std::filesystem::temp_directory_path() /
         (L"ofxr-disarm-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
     const auto manifest = root / L"XR_APILAYER_XRFrameBridge_manual-1-1.json";
     HMODULE module = nullptr;
+    HMODULE luke_fixture = nullptr;
     HANDLE signal = nullptr;
     XrInstance instance = XR_NULL_HANDLE;
     XrSession session = XR_NULL_HANDLE;
@@ -85,9 +88,17 @@ int main(int argc, char** argv) {
             ini << "[ofxr]\nbackend=fidelityfx\ncontrol_event=" << ascii_control
                 << "\n[diagnostics]\nlogging_enabled=" << (retain_failure || marker_mode == "on" || marker_mode == "hidden" ? 1 : 0)
                 << "\nsynthetic_marker_enabled=" << (marker_mode == "on" || marker_mode == "hidden" ? 1 : 0)
+                << "\nflush_each_event=" << (luke_no_guides ? 1 : 0)
                 << "\n[overlay]\nposition=" << (!marker_mode.empty() && marker_mode != "hidden" ? "upper_right" : "off") << '\n';
         }
         control_profile = std::make_unique<xrfg_fixture::ExternalControlProfile>(root / L"ofxr_bridge.ini");
+        if(luke_no_guides) {
+            require(argc==4,"Luke runtime fixture path");
+            luke_fixture=LoadLibraryA(argv[3]);require(luke_fixture!=nullptr,"load Luke marker");
+            auto desired=xrfg::autonomous::snapshot().desired;
+            desired.afw_mode=3;desired.motion_vectors=0;
+            require(xrfg::autonomous::request(desired),"request native-vector Luke route");
+        }
         require(g_d3d11_interop_mode ? initialize_d3d11() : initialize_d3d12(), "initialize GPU fixture");
         if (!marker_mode.empty()) {
             // Deterministic black images: no uninitialized texture can look like
@@ -224,6 +235,25 @@ int main(int argc, char** argv) {
             require(wait_for_queue_idle(), "warmup GPU retirement");
             if (g_flight_simulator_mode) current = next_frame;
             else require(XR_SUCCEEDED(wait(session, nullptr, &current)), "warmup wait");
+        }
+        if(luke_no_guides) {
+            require(g_synthetic_release_calls.load()==0, "missing native producer generated synthetic frames");
+            require(g_create_swapchain_calls.load()==1, "missing native producer allocated private swapchains");
+            require(g_application_release_calls.load()==9 && g_end_frame_calls.load()>=9,
+                "missing native producer interrupted original XR frames");
+            require(XR_SUCCEEDED(end_session(session)), "end missing-producer session");
+            require(XR_SUCCEEDED(destroy_swapchain(swapchain)), "destroy missing-producer swapchain");
+            swapchain=XR_NULL_HANDLE;
+            require(XR_SUCCEEDED(destroy_session(session)), "destroy missing-producer session");
+            session=XR_NULL_HANDLE;
+            require(XR_SUCCEEDED(destroy_instance(instance)), "destroy missing-producer instance");
+            instance=XR_NULL_HANDLE;
+            FreeLibrary(module);module=nullptr;
+            control_profile.reset();
+            if(signal)CloseHandle(signal);
+            std::error_code ignored;std::filesystem::remove_all(root,ignored);
+            std::cout<<"Missing native producer: real frames progress, no generation or private swapchains PASS\n";
+            return 0;
         }
         require(g_synthetic_release_calls.load() > 0, "generation active before Disarm");
         if (g_steamvr_presenter_mode || g_flight_simulator_mode)
@@ -364,6 +394,8 @@ int main(int argc, char** argv) {
     if (session && destroy_session) destroy_session(session);
     if (instance && destroy_instance) destroy_instance(instance);
     if (module) FreeLibrary(module);
+    // The production hook monitor outlives XR teardown. Keep the marker
+    // module loaded until process exit, just as the actual game injector is.
     control_profile.reset();
     if (signal) CloseHandle(signal);
     std::error_code ignored;

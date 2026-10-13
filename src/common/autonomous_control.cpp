@@ -66,7 +66,9 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465852;
-constexpr std::uint32_t kAbi = 47101;
+constexpr std::uint32_t kAbi = 48701;
+static_assert(offsetof(RuntimeStatus, provider_error)==72); // V471 IPC layout
+static_assert(offsetof(RuntimeStatus, afw_running)==69); // previously reserved padding
 struct Shared {
     std::uint32_t magic{};
     std::uint32_t abi{};
@@ -151,7 +153,7 @@ public:
             identity ^= static_cast<std::uint64_t>(std::towlower(character));
             identity *= 1099511628211ULL;
         }
-        const auto prefix = L"Local\\OFXRAutonomousV465-" + std::to_wstring(identity);
+        const auto prefix = L"Local\\OFXRAutonomousV487-" + std::to_wstring(identity);
         mutex = CreateMutexW(nullptr, FALSE, (prefix + L"-mutex").c_str());
         if (!mutex) return;
         const DWORD waited = WaitForSingleObject(mutex, 2000);
@@ -506,7 +508,18 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
     const bool active = r.telemetry.updated_ms && GetTickCount64() - r.telemetry.updated_ms < 2000 && r.telemetry.generating;
     if (active && (r.generation_mode == 0 || r.generation_mode == 3) && r.motion_source == 1 &&
         r.generation_state != GenerationState::ready) return "Fallback";
-    if (active) return "Generating";
+    if (active) {
+        const auto now=GetTickCount64();
+        const bool fresh=r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000;
+        const bool afw=fresh && r.afw_running && s.desired.afw_mode!=0;
+        const bool nr=fresh && r.nr_running && s.desired.nr_enabled;
+        if (r.generation_mode==1) return afw ? (nr ? "Generating FSR + AFW + Neural" : "Generating FSR + AFW")
+            : (nr ? "Generating FSR + Neural" : "Generating FSR");
+        if (r.generation_mode==2) return afw ? (nr ? "Generating DLSS-G + AFW + Neural" : "Generating DLSS-G + AFW")
+            : (nr ? "Generating DLSS-G + Neural" : "Generating DLSS-G");
+        return afw ? (nr ? "Generating OFXR + AFW + Neural" : "Generating OFXR + AFW")
+            : (nr ? "Generating OFXR + Neural" : "Generating OFXR");
+    }
     return r.ready ? "Real frames only" : "Waiting";
 }
 std::string interface_status_text(const Snapshot& s) {
@@ -546,6 +559,14 @@ std::string interface_status_text(const Snapshot& s) {
     if (r.vulkan_capture_suspended) add((r.generation_mode == 0 || r.generation_mode == 3)
         ? "Vulkan game-vector capture suspended: OFXR uses optical flow"
         : "Vulkan game-vector capture suspended: FSR / DLSS-G real-frame bypass");
-    return result.empty() ? "OK" : result;
+    const auto now=GetTickCount64();
+    const bool generating=r.telemetry.updated_ms && now>=r.telemetry.updated_ms &&
+        now-r.telemetry.updated_ms<2000 && r.telemetry.generating;
+    const bool runtime_fresh=r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000;
+    const auto generator=r.generation_mode==1 ? "FSR" : r.generation_mode==2 ? "DLSS-G" : "OFXR";
+    add(std::string(generator)+(s.desired.enabled ? (generating ? ": Active" : ": Waiting") : ": Off"));
+    add(s.desired.afw_mode==0 ? "AFW: Off" : runtime_fresh && r.afw_running ? "AFW: Active" : "AFW: Waiting");
+    add(!s.desired.nr_enabled ? "Neural Render: Off" : runtime_fresh && r.nr_running ? "Neural Render: Active" : "Neural Render: Waiting");
+    return result;
 }
 } // namespace xrfg::autonomous

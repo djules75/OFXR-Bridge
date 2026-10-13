@@ -7,6 +7,8 @@
 #include "ram_timing_fixture.hpp"
 #include "autonomous_layer_fixture.hpp"
 #include "xrfg/native_vulkan_transport_test.hpp"
+namespace xrfg {int run_luke_ngx_dispatch_test(const wchar_t*,bool);}
+namespace xrfg {int run_actual_ngx_capture_test(const wchar_t*,const wchar_t*);}
 
 namespace {
 #ifdef OFXR_TEST_DJULES_ROUTE
@@ -486,6 +488,194 @@ void publication_receipt_independence_test(const std::shared_ptr<SessionState>& 
     std::cout << "Publication receipt: producer queues while worker waits; worker completes before later producer GPU work\n";
 }
 
+void completed_publication_independence_test(const std::shared_ptr<SessionState>& state,
+    const std::shared_ptr<FrameGenerationSwapchainState>& generation,
+    const std::shared_ptr<xrfg::D3D12SwapchainHistory>& history, ID3D11Texture2D* source) {
+    const auto bridge=generation->d3d11_interop;
+    D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);
+    constexpr std::uint32_t pixel=0xff6c3b19;
+    std::vector<std::uint32_t> pixels(desc.Width*desc.Height,pixel);
+    for(UINT eye=0;eye<desc.ArraySize;++eye)
+        state->d3d11_context->UpdateSubresource(source,eye,nullptr,pixels.data(),desc.Width*4,0);
+    check(SUCCEEDED(bridge->prepare_capture(0)),"completed output capture");
+    xrfg::D3D12HistoryCaptureTicket capture;
+    check(SUCCEEDED(history->capture(0,&capture)),"completed output history");
+    check(SUCCEEDED(history->commit(capture)),"completed output history commit");
+    check(SUCCEEDED(bridge->finish_capture()),"completed output source retirement");
+    xrfg::D3D12ReprojectionView view{};
+    view.fov={-.7F,.7F,.7F,-.7F};view.image_rect={0,0,desc.Width,desc.Height};
+    std::vector<xrfg::D3D12ReprojectionView> views(desc.ArraySize,view);
+    for(unsigned eye=0;eye<views.size();++eye)views[eye].array_slice=eye;
+    xrfg::D3D12FrameSynthesisTicket ticket;
+    check(SUCCEEDED(bridge->prepare_synthesis()),"completed output destination access");
+    check(SUCCEEDED(generation->synthesizer->submit_copy(capture,views,0,&ticket)),"completed output copy");
+    const auto fence=generation->synthesizer->submission_fence(ticket);
+    check(fence && SUCCEEDED(wait_composition_fence(fence.Get(),ticket.fence_value)),"exact output completed");
+    Microsoft::WRL::ComPtr<ID3D12Fence> gate;
+    check(SUCCEEDED(state->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate))),"later native gate");
+    xrfg::D3D11PublicationReceipt invalid;
+    const auto before=bridge->publication_snapshot().copy_complete_value;
+    check(bridge->publish_completed(0,std::nullopt,gate.Get(),1,&invalid)==HRESULT_FROM_WIN32(ERROR_BUSY) &&
+        !invalid.fence && bridge->publication_snapshot().copy_complete_value==before,"unfinished producer cannot publish");
+    check(SUCCEEDED(state->d3d12_queue->Wait(gate.Get(),1)),"park later native work");
+    // Legacy publication appends its ready Signal behind this parked work,
+    // despite the worker pixels already being complete. Verify that condition
+    // first, then release it before testing the production completed route.
+    xrfg::D3D11PublicationReceipt legacy;
+    check(SUCCEEDED(bridge->publish(0,std::nullopt,&legacy)),"queue legacy dependency");
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    const bool legacy_blocked=legacy.fence->GetCompletedValue()<legacy.copy_complete_value;
+    static_cast<void>(gate->Signal(1));
+    check(SUCCEEDED(xrfg::wait_for_d3d11_publication(legacy)),"legacy cleanup");
+    check(SUCCEEDED(state->d3d12_queue->Wait(gate.Get(),2)),"park next native work");
+    PreparedProjectionFrame prepared;prepared.kind=PreparedGenerationKind::prime;
+    PreparedGeneration output;output.kind=PreparedGenerationKind::prime;
+    output.worker_generation=generation;output.synthesizer=generation->synthesizer;
+    output.worker_fence=fence;output.worker_fence_value=ticket.fence_value;
+    output.current_destination=0;output.current_slot=0;
+    prepared.resources.push_back({reinterpret_cast<XrSwapchain>(0x488),output});
+    std::atomic<bool> finished{false};bool successful=false;
+    std::thread worker([&]{successful=finish_worker_outputs(state,prepared,488);finished=true;});
+    for(unsigned i=0;i<250 && !finished.load();++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const bool independent=finished.load();
+    static_cast<void>(gate->Signal(2));worker.join();
+    check(legacy_blocked && independent && successful,"completed worker publication followed later native queue work");
+    auto image=bridge->published_current_image(0);
+    auto staging_desc=desc;staging_desc.Usage=D3D11_USAGE_STAGING;
+    staging_desc.BindFlags=staging_desc.MiscFlags=0;staging_desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+    check(SUCCEEDED(state->d3d11_device->CreateTexture2D(&staging_desc,nullptr,&staging)),"completed publication readback");
+    state->d3d11_context->CopyResource(staging.Get(),image.Get());
+    for(UINT eye=0;eye<desc.ArraySize;++eye) {
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        check(SUCCEEDED(state->d3d11_context->Map(staging.Get(),eye,D3D11_MAP_READ,0,&mapped)),"completed publication pixels");
+        bool identical=true;
+        for(UINT y=0;y<desc.Height;++y)for(UINT x=0;x<desc.Width;++x)
+            identical &= reinterpret_cast<const std::uint32_t*>(static_cast<const unsigned char*>(mapped.pData)+y*mapped.RowPitch)[x]==pixel;
+        state->d3d11_context->Unmap(staging.Get(),eye);
+        check(identical,"completed publication changed stereo pixels");
+    }
+    // A later native capture retirement may still be queued when already
+    // completed worker pixels are published. It must not rewind the D11
+    // publication receipt: that is a different producer timeline.
+    check(SUCCEEDED(state->d3d12_queue->Wait(gate.Get(),3)),"park native retirement");
+    check(SUCCEEDED(bridge->finish_capture()),"queue later native capture retirement");
+    Microsoft::WRL::ComPtr<ID3D12Fence> native_retired;
+    check(SUCCEEDED(state->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&native_retired))),"native retirement receipt");
+    check(SUCCEEDED(state->d3d12_queue->Signal(native_retired.Get(),1)),"exact native retirement marker");
+    xrfg::D3D11PublicationReceipt publication;
+    check(SUCCEEDED(bridge->publish_completed(0,std::nullopt,fence.Get(),ticket.fence_value,&publication)),"publish before later native retirement");
+    check(SUCCEEDED(xrfg::wait_for_d3d11_publication(publication)),"D11 copy completion before native retirement");
+    static_cast<void>(gate->Signal(3));
+    check(SUCCEEDED(wait_composition_fence(native_retired.Get(),1,1000)),"native retirement completed");
+    const bool monotonic=publication.fence->GetCompletedValue()>=publication.copy_complete_value;
+    // Advance an ordinary source handshake before checking the result, so
+    // the old single-timeline implementation can fail without stranding GPU
+    // queues during fixture destruction.
+    check(SUCCEEDED(bridge->prepare_capture(0)),"post-retirement capture");
+    xrfg::D3D12HistoryCaptureTicket later_capture;
+    check(SUCCEEDED(history->capture(0,&later_capture)) && SUCCEEDED(history->commit(later_capture)),"post-retirement history");
+    check(SUCCEEDED(bridge->finish_capture()),"post-retirement capture completion");
+    check(SUCCEEDED(bridge->wait_for_idle()),"completed publication cleanup");
+    // Reproduce the live single-eye backpressure with actual unfinished GPU
+    // work; the worker must retry without holding either producer lock.
+    check(SUCCEEDED(state->d3d12_queue->Wait(gate.Get(),4)),"park busy worker destination");
+    xrfg::D3D12FrameSynthesisTicket blocked_ticket,retried_ticket;
+    check(SUCCEEDED(generation->synthesizer->submit_copy(later_capture,views,0,&blocked_ticket)),"queue busy worker owner");
+    const auto legacy_result=submit_luke_worker_generation(state,generation,generation->synthesizer,false,[&] {
+        return generation->synthesizer->submit_copy(later_capture,views,0,&retried_ticket);});
+    check(legacy_result==HRESULT_FROM_WIN32(ERROR_BUSY),"legacy busy resource not reproduced");
+    const bool saved_luke=state->luke_afw_enabled;state->luke_afw_enabled=true;
+    std::mutex producer_call;std::atomic<unsigned> attempts{};std::atomic_bool retry_finished{};
+    HRESULT retry_result=E_PENDING;
+    std::thread retry([&] {
+        std::unique_lock call(producer_call);
+        retry_result=submit_luke_worker_generation(state,generation,generation->synthesizer,true,[&] {
+            ++attempts;return generation->synthesizer->submit_copy(later_capture,views,0,&retried_ticket);
+        },&call);retry_finished=true;
+    });
+    for(unsigned i=0;i<100&&!attempts.load();++i)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const bool gpu_free=state->gpu_mutex.try_lock();if(gpu_free)state->gpu_mutex.unlock();
+    const bool call_free=producer_call.try_lock();if(call_free)producer_call.unlock();
+    const bool waited=attempts.load()==1&&!retry_finished.load();
+    static_cast<void>(gate->Signal(4));retry.join();state->luke_afw_enabled=saved_luke;
+    check(gpu_free&&call_free&&waited&&SUCCEEDED(retry_result)&&attempts.load()==2,
+        "worker busy killed stereo transaction or retained producer locks");
+    check(SUCCEEDED(wait_composition_fence(generation->synthesizer->submission_fence(retried_ticket).Get(),retried_ticket.fence_value,1000)),"retried real copy completion");
+    // A completed native production must remain usable while later game work
+    // waits for CPU/XR progress. Exercise real NVIDIA OFA and D11 publication
+    // on the production-selected queue, with the native queue still parked.
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> execution, unchanged;
+    check(SUCCEEDED(select_luke_execution_queue(false,state->d3d12_device.Get(),
+        state->d3d12_queue.Get(),unchanged))&&unchanged==state->d3d12_queue,"non-Luke queue changed");
+    check(SUCCEEDED(select_luke_execution_queue(true,state->d3d12_device.Get(),
+        state->d3d12_queue.Get(),execution))&&execution!=state->d3d12_queue,"Luke execution queue not isolated");
+    auto independent_history=std::make_shared<xrfg::D3D12SwapchainHistory>();
+    check(SUCCEEDED(independent_history->initialize(state->d3d12_device.Get(),
+        state->d3d12_queue.Get(),bridge->source_images(),D3D12_RESOURCE_STATE_COMMON)),"isolated history");
+    xrfg::D3D12HistoryCaptureTicket first_native,second_native;
+    check(SUCCEEDED(bridge->prepare_capture(0)),"isolated native color ready");
+    check(SUCCEEDED(independent_history->capture(0,&first_native))&&
+        SUCCEEDED(independent_history->commit(first_native)),"first native production");
+    check(SUCCEEDED(independent_history->capture(0,&second_native))&&
+        SUCCEEDED(independent_history->commit(second_native))&&
+        SUCCEEDED(bridge->finish_capture())&&SUCCEEDED(bridge->wait_for_idle()),"second native production");
+    auto private_synth=std::make_shared<xrfg::D3D12FrameSynthesizer>();
+    check(SUCCEEDED(private_synth->initialize(state->d3d12_device.Get(),execution.Get(),
+        independent_history,bridge->current_destination_images(),bridge->synthetic_destination_images(),
+        desc.Format,D3D12_RESOURCE_STATE_COMMON,xrfg::D3D12OpticalFlowBackend::nvidia,
+        state->nvidia_options,false,xrfg::D3D12FrameGenerationMode::ofxr,true)),"isolated actual OFA provider");
+    xrfg::D3D12FrameSynthesisTicket isolated_prime,isolated_pair;
+    check(SUCCEEDED(private_synth->submit_prime(first_native,views,0,&isolated_prime))&&
+        SUCCEEDED(wait_composition_fence(private_synth->submission_fence(isolated_prime).Get(),
+            isolated_prime.fence_value,1000)),"isolated prime");
+    Microsoft::WRL::ComPtr<ID3D12Fence> legacy_progress;
+    check(SUCCEEDED(state->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,
+        IID_PPV_ARGS(&legacy_progress))),"legacy native progress fence");
+    struct Unpark { ID3D12Fence* fence; ~Unpark(){static_cast<void>(fence->Signal(6));} } unpark{gate.Get()};
+    check(SUCCEEDED(state->d3d12_queue->Wait(gate.Get(),5)),"park legacy scratch copy");
+    xrfg::D3D12FrameSynthesisTicket legacy_copy;
+    check(SUCCEEDED(generation->synthesizer->submit_copy(later_capture,views,0,&legacy_copy)),"legacy actual scratch copy");
+    auto legacy_fence=generation->synthesizer->submission_fence(legacy_copy);
+    const bool legacy_starved=FAILED(wait_composition_fence(legacy_fence.Get(),legacy_copy.fence_value,40));
+    static_cast<void>(gate->Signal(5));
+    check(SUCCEEDED(wait_composition_fence(legacy_fence.Get(),legacy_copy.fence_value,1000)),"legacy copy retirement");
+    check(SUCCEEDED(state->d3d12_queue->Wait(gate.Get(),6))&&
+        SUCCEEDED(state->d3d12_queue->Signal(legacy_progress.Get(),1)),"park future game rendering");
+    check(SUCCEEDED(private_synth->submit_pair(second_native,views,views,0,0,&isolated_pair)),"isolated OFA pair");
+    auto pair_fence=private_synth->submission_fence(isolated_pair);
+    check(SUCCEEDED(wait_composition_fence(pair_fence.Get(),isolated_pair.fence_value,1000)),"isolated OFA completion");
+    xrfg::D3D11PublicationReceipt isolated_publication;
+    check(SUCCEEDED(bridge->publish_completed(0,0,pair_fence.Get(),isolated_pair.fence_value,
+        &isolated_publication))&&SUCCEEDED(xrfg::wait_for_d3d11_publication(isolated_publication)),"isolated stereo publication");
+    const bool game_still_parked=legacy_progress->GetCompletedValue()==0;
+    static_cast<void>(gate->Signal(6));
+    check(legacy_starved&&game_still_parked&&SUCCEEDED(wait_composition_fence(legacy_progress.Get(),1,1000)),
+        "OFA inherited later native queue dependency");
+    check(SUCCEEDED(private_synth->retire_previous())&&SUCCEEDED(private_synth->wait_for_idle())&&
+        SUCCEEDED(independent_history->invalidate()),"isolated history retirement");
+    auto isolated_image=bridge->published_current_image(0);
+    state->d3d11_context->CopyResource(staging.Get(),isolated_image.Get());
+    for(UINT eye=0;eye<desc.ArraySize;++eye) {
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        check(SUCCEEDED(state->d3d11_context->Map(staging.Get(),eye,D3D11_MAP_READ,0,&mapped)),"isolated B readback");
+        bool identical=true;
+        for(UINT y=0;y<desc.Height;++y)for(UINT x=0;x<desc.Width;++x)
+            identical &= reinterpret_cast<const std::uint32_t*>(static_cast<const unsigned char*>(mapped.pData)+y*mapped.RowPitch)[x]==pixel;
+        state->d3d11_context->Unmap(staging.Get(),eye);
+        check(identical,"isolated current pixels changed");
+    }
+    std::cout<<"Actual NVIDIA OFA + D11 publication: legacy native queue starves, private queue completes while game stays parked PASS\n";
+    check(SUCCEEDED(history->invalidate()),"busy worker history cleanup");
+    std::cout<<"Actual GPU worker: legacy ERROR_BUSY, bounded retry succeeds with both producer locks released PASS\n";
+    check(monotonic,"later D12 capture retirement rewound a completed D11 publication fence");
+    std::cout<<"Publication timeline: later D12 retirement cannot rewind completed D11 copy receipt PASS\n";
+
+    std::cout<<"Completed worker: legacy blocks behind later native work; exact-fence publication finishes with identical stereo pixels\n";
+}
+
 template<class Predicate>
 void until(const std::shared_ptr<SessionState>& state, Predicate condition) {
     std::unique_lock lock(state->presenter_mutex);
@@ -766,7 +956,10 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
         };
         const auto history = initialize_generation(generation, images, 0x900);
         const auto interop = generation->d3d11_interop;
-        if (post_afw_packet) publication_receipt_independence_test(state, interop);
+        if (post_afw_packet) {
+            publication_receipt_independence_test(state, interop);
+            completed_publication_independence_test(state,generation,history,images[0].Get());
+        }
         std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, 6> right_images;
         auto right_generation = std::make_shared<FrameGenerationSwapchainState>();
         std::shared_ptr<xrfg::D3D12SwapchainHistory> right_history;
@@ -815,6 +1008,34 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
           g_swapchains[chain->handle] = chain; g_sessions[state->handle] = state;
           if (with_layers) g_swapchains[right_chain->handle] = right_chain;
           for (const auto& a : auxiliary) if (a) g_swapchains[a->handle] = a; }
+        if(post_afw_packet) {
+            // Model the actual one-second menu stall: game queue waits for
+            // CPU/XR progress while an OFXR scratch submission is pending.
+            check(SUCCEEDED(interop->prepare_capture(0)),"prediction gate capture");
+            xrfg::D3D12HistoryCaptureTicket capture;
+            check(SUCCEEDED(history->capture(0,&capture))&&SUCCEEDED(history->commit(capture))&&
+                SUCCEEDED(interop->finish_capture())&&SUCCEEDED(interop->wait_for_idle()),"prediction source ready");
+            Microsoft::WRL::ComPtr<ID3D12Fence> gate;
+            check(SUCCEEDED(state->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate))),"prediction gate");
+            check(SUCCEEDED(state->d3d12_queue->Wait(gate.Get(),1)),"park native work until prediction");
+            xrfg::D3D12ReprojectionView v{};v.fov={-.7F,.7F,.7F,-.7F};v.image_rect={0,0,desc.Width,desc.Height};
+            xrfg::D3D12FrameSynthesisTicket ticket;
+            check(SUCCEEDED(generation->synthesizer->submit_copy(capture,std::span(&v,1),0,&ticket)),"pending prediction scratch");
+            const bool old_luke=state->luke_afw_enabled;
+            const auto old_binding=state->graphics_binding;
+            state->luke_afw_enabled=true;state->graphics_binding=SessionGraphicsBinding::d3d11;
+            const auto legacy=wait_for_previous_session_synthesis(state);
+            const auto started=std::chrono::steady_clock::now();
+            const auto prediction=wait_for_previous_session_synthesis(state,true);
+            const auto elapsed=std::chrono::steady_clock::now()-started;
+            const bool still_pending=generation->synthesizer->ticket_available(ticket)==S_FALSE;
+            static_cast<void>(gate->Signal(1));
+            state->luke_afw_enabled=old_luke;state->graphics_binding=old_binding;
+            check(legacy==HRESULT_FROM_WIN32(ERROR_BUSY)&&SUCCEEDED(prediction)&&
+                elapsed<std::chrono::milliseconds(100)&&still_pending,"prediction waits for game work or fakes completion");
+            check(SUCCEEDED(generation->synthesizer->retire_previous())&&SUCCEEDED(history->invalidate()),"prediction reuse still retires GPU");
+            std::cout<<"Actual native GPU gate: legacy prediction blocks 1s; Luke prediction returns before work, reuse still retires PASS\n";
+        }
         state->synthesis_thread = std::thread(synthesis_worker_main, state);
         state->presenter_thread = std::thread(three_slot_director_main, state);
         presented.clear(); waits = begins = ends = 0;
@@ -1889,8 +2110,21 @@ int main(int argc, char** argv) {
         b.layers[0].views[1].pose.orientation={0,std::sin(.6F),0,std::cos(.6F)};
         check(!synthetic_camera_snapshot(a,b,.5F),"R19 recentre rejects entire stereo camera");
     }
+    if(argc>3 && std::string_view(argv[1])=="luke-ngx-actual-capture") {
+        const std::string realvr=argv[2],streamline=argv[3];
+        const std::wstring wide_realvr(realvr.begin(),realvr.end());
+        const std::wstring wide_streamline(streamline.begin(),streamline.end());
+        return xrfg::run_actual_ngx_capture_test(wide_realvr.c_str(),wide_streamline.c_str());
+    }
+    if (argc>2 && (std::string_view(argv[1])=="luke-ngx-dispatch" ||
+                  std::string_view(argv[1])=="kcd-engine-dispatch")) {
+        const std::string path=argv[2];const std::wstring wide(path.begin(),path.end());
+        return xrfg::run_luke_ngx_dispatch_test(wide.c_str(),std::string_view(argv[1])=="kcd-engine-dispatch");
+    }
     if (argc>1 && std::string_view(argv[1])=="native-vulkan-transport")
         return xrfg::native_vulkan::run_buffer_transport_test();
+    if (argc>1 && std::string_view(argv[1])=="native-vulkan-bootstrap")
+        return xrfg::native_vulkan::run_buffer_transport_test(true);
 #ifdef OFXR_TEST_DJULES_ROUTE
     {
         auto timing=std::make_shared<SessionState>(std::make_shared<Dispatch>());

@@ -333,7 +333,13 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         }
 
         auto& stream = state.streams[publication.stream];
-        if (publication.reset) {
+        const auto& last=stream.latest;
+        const bool resized=last && (last->output_width!=publication.output_width ||
+            last->output_height!=publication.output_height ||
+            last->motion_width!=publication.motion_width || last->motion_height!=publication.motion_height ||
+            last->depth_width!=publication.depth_width || last->depth_height!=publication.depth_height);
+        const bool reset=publication.reset || resized;
+        if (reset) {
             ++stream.epoch;
             stream.serial = 0;
             stream.previous.reset();
@@ -435,12 +441,13 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->previous_jitter_y = stream.jitter_y;
         frame->resource_state = kSnapshotReadState;
         frame->jittered = publication.jittered;
-        frame->reset = publication.reset;
+        frame->reset = reset;
         frame->depth = std::move(depth_snapshot);
         frame->motion_retention = std::move(motion_retention);
         frame->depth_retention = std::move(depth_retention);
         frame->camera_frame_token = publication.camera_frame_token;
         frame->camera_frame_token_valid = publication.camera_frame_token_valid;
+        frame->native_production_sequence = publication.native_production_sequence;
         frame->depth_x = publication.depth_x;
         frame->depth_y = publication.depth_y;
         frame->source_depth_x = publication.depth_x;
@@ -609,6 +616,26 @@ void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept {
         if (!retired.empty()) {
             state.retired_streams.push_back(std::move(retired.mapped()));
         }
+    } catch (...) {
+    }
+}
+
+void invalidate_dlss_motion_vector_stream_history(std::uint64_t stream_id) noexcept {
+    try {
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        const auto found = state.streams.find(stream_id);
+        if (found == state.streams.end()) return;
+        auto& stream = found->second;
+        ++stream.epoch;
+        stream.serial = 0;
+        stream.first_publication = 0;
+        stream.jitter_x = stream.jitter_y = 0;
+        stream.previous.reset();
+        stream.previous2.reset();
+        stream.latest.reset();
+        stream.luke_origin_history.clear();
+        state.statistics.status = DlssMotionVectorStatus::temporal_mismatch;
     } catch (...) {
     }
 }
@@ -1373,26 +1400,40 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
         ++state.statistics.resolve_calls;
-        if (state.streams.size() != 1) {
+        // The protected color token is process-unique, not local to a native
+        // feature handle. REAL VR can own several SR handles; an unrelated
+        // startup/multipass stream must not invalidate this exact color key.
+        // Resolve its one owner, then join only that owner's temporal history.
+        const StreamState* owner{};
+        std::uint64_t owner_stream{};
+        std::size_t origin_index{};
+        for (const auto& [stream_id, candidate] : state.streams) {
+            for (std::size_t index = 0; index < candidate.luke_origin_history.size(); ++index) {
+                if (candidate.luke_origin_history[index]->color_origin_token != color_origin_token)
+                    continue;
+                if (owner) {
+                    ++state.statistics.invalid_rejections;
+                    state.statistics.status = DlssMotionVectorStatus::invalid_input;
+                    return {};
+                }
+                owner = &candidate;
+                owner_stream = stream_id;
+                origin_index = index;
+            }
+        }
+        if (!owner) {
             ++state.statistics.resolve_missing_streams;
             return {};
         }
-        const auto& stream = state.streams.begin()->second;
-        const auto origin = std::find_if(stream.luke_origin_history.begin(),
-            stream.luke_origin_history.end(), [&](const auto& frame) {
-                return frame->color_origin_token == color_origin_token;
-            });
-        if (origin == stream.luke_origin_history.end()) {
-            ++state.statistics.resolve_missing_streams;
-            return {};
-        }
+        const auto& stream = *owner;
+        const auto origin = stream.luke_origin_history.begin() + origin_index;
         if (origin == stream.luke_origin_history.begin()) {
             ++state.statistics.resolve_stale_pairs;
             return {};
         }
         const auto& current = *origin;
         const auto& previous = *std::prev(origin);
-        if (current->stream != previous->stream ||
+        if (current->stream != owner_stream || current->stream != previous->stream ||
             current->epoch != previous->epoch ||
             current->epoch != stream.epoch ||
             previous->serial + 1 != current->serial ||

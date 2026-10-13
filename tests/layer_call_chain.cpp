@@ -58,6 +58,8 @@ XrSwapchain g_current_swapchain_b = fake_handle<XrSwapchain>(0x309);
 XrSwapchain g_current_swapchain_right_b = fake_handle<XrSwapchain>(0x30a);
 XrSwapchain g_synthetic_swapchain_b = fake_handle<XrSwapchain>(0x30b);
 XrSwapchain g_synthetic_swapchain_right_b = fake_handle<XrSwapchain>(0x30c);
+XrSwapchain g_current_swapchain_c = fake_handle<XrSwapchain>(0x30d);
+bool g_luke_scratch_mode = false;
 XrSpace g_space = fake_handle<XrSpace>(0x404);
 std::atomic<XrSpace> g_valid_composition_space{g_space};
 std::atomic<bool> g_delay_composition_validation{false};
@@ -171,6 +173,7 @@ ComPtr<ID3D11DeviceContext> g_d3d11_context;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_application_swapchain_images;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_current_swapchain_images;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_current_swapchain_b_images;
+std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_current_swapchain_c_images;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_synthetic_swapchain_images;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_synthetic_swapchain_b_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_application_swapchain_images;
@@ -193,6 +196,7 @@ std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_right_b_images;
     return swapchain == g_current_swapchain ||
            swapchain == g_current_swapchain_right ||
            swapchain == g_current_swapchain_b ||
+           (g_luke_scratch_mode && swapchain == g_current_swapchain_c) ||
            swapchain == g_current_swapchain_right_b;
 }
 
@@ -552,8 +556,13 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
     XrSession,
     const XrSwapchainCreateInfo* create_info,
     XrSwapchain* swapchain) {
-    const std::uint32_t call =
+    std::uint32_t call =
         g_create_swapchain_calls.fetch_add(1, std::memory_order_relaxed);
+    if (g_luke_scratch_mode && call == 3) {
+        *swapchain = g_current_swapchain_c;
+        return XR_SUCCESS;
+    }
+    if (g_luke_scratch_mode && call > 3) --call;
     if (g_split_eye_mode) {
         const bool private_info_valid =
             create_info != nullptr &&
@@ -764,6 +773,8 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_swapchain_images(
             selected_images = &g_d3d11_current_swapchain_images;
         } else if (swapchain == g_current_swapchain_b) {
             selected_images = &g_d3d11_current_swapchain_b_images;
+        } else if (swapchain == g_current_swapchain_c) {
+            selected_images = &g_d3d11_current_swapchain_c_images;
         } else if (swapchain == g_synthetic_swapchain) {
             selected_images = &g_d3d11_synthetic_swapchain_images;
         } else if (swapchain == g_synthetic_swapchain_b) {
@@ -1098,6 +1109,7 @@ template <typename Function>
     for (auto* images : {
              &g_d3d11_current_swapchain_images,
              &g_d3d11_current_swapchain_b_images,
+             &g_d3d11_current_swapchain_c_images,
              &g_d3d11_synthetic_swapchain_images,
              &g_d3d11_synthetic_swapchain_b_images}) {
         for (auto& image : *images) {

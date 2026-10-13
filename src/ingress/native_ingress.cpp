@@ -1,5 +1,6 @@
 #include "xrfg/native_ingress.hpp"
 #include "xrfg/d3d12_native_binding.hpp"
+#include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/neural_rendering.hpp"
 #include "xrfg/two_frame_capture.hpp"
 #include "xrfg/native_ingress/D3D_DeviceOwner.h"
@@ -70,9 +71,15 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue* queue,UINT count,ID3D12Comman
                     SUCCEEDED(actual->GetDevice(IID_PPV_ARGS(&reported))) &&
                     d3d_native::get_borrowed(reported.Get(),&native_device) &&
                     SUCCEEDED(native_device->QueryInterface(IID_PPV_ARGS(&canonical))) &&
+                    SUCCEEDED(d3d_native::allocation_owner(reported.Get(),canonical)) &&
                     d3d_owner::same(owner.Get(),canonical.Get())) {
                     // Accepted V30063 backing-owner challenge handles native
                     // device aliases; adapter equality alone never proves it.
+                    static std::atomic_uint owner_reports{};
+                    if(owner_reports.fetch_add(1,std::memory_order_relaxed)<16)
+                        bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                            S_OK,960,reinterpret_cast<std::uintptr_t>(reported.Get()),
+                            reinterpret_cast<std::uintptr_t>(canonical.Get()));
                     h.luke_device=std::move(canonical);h.luke_queue=actual;
                     has_luke_context.store(true,std::memory_order_release);
                 }

@@ -221,7 +221,10 @@ void report_afw_evaluation(std::uint64_t publication,
     auto& c = afw_control();
     std::scoped_lock lock(c.mutex);
     ++c.snapshot.evaluations;
-    if (result >= 0) ++c.snapshot.successful_evaluations;
+    if (result >= 0) {
+        ++c.snapshot.successful_evaluations;
+        c.snapshot.last_success_ms=GetTickCount64();
+    }
     c.snapshot.last_publication = publication;
     c.snapshot.last_source_eye = source_eye;
     c.snapshot.last_motion_width = motion_width;

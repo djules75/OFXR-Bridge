@@ -125,6 +125,14 @@ public:
         std::optional<std::uint32_t> synthetic_destination_index,
         D3D11PublicationReceipt* receipt = nullptr) noexcept;
 
+    // Output already completed on its retained synthesis fence. Reject an
+    // incomplete proof; never append a ready signal behind newer native work.
+    [[nodiscard]] HRESULT publish_completed(
+        std::uint32_t current_destination_index,
+        std::optional<std::uint32_t> synthetic_destination_index,
+        ID3D12Fence* producer_fence, std::uint64_t producer_value,
+        D3D11PublicationReceipt* receipt = nullptr) noexcept;
+
 
     [[nodiscard]] HRESULT wait_for_idle() noexcept;
     // Non-blocking observation only: never wait, flush or submit GPU work.

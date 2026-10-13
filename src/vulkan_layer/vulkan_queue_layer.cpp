@@ -27,6 +27,7 @@
 #include <vulkan/vk_layer.h>
 
 #include <windows.h>
+#include "xrfg/luke_vulkan_scope.hpp"
 
 #include <cstring>
 #include <memory>
@@ -79,6 +80,26 @@ std::mutex g_tables_mutex;
 std::unordered_map<void*, InstanceTable> g_instances;
 std::unordered_map<void*, std::shared_ptr<DeviceTable>> g_devices;
 
+void start_luke_vulkan_ingress() noexcept {
+    if(!xrfg::native_vulkan::luke_vulkan_process())return;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        HMODULE self{};wchar_t path[32768]{};
+        if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&start_luke_vulkan_ingress),&self)||!GetModuleFileNameW(self,path,32768))return;
+        auto* last=std::wcsrchr(path,L'\\');if(!last)return;
+        const wchar_t name[]=L"XR_APILAYER_XRFrameBridge_diagnostic.dll";
+        if(static_cast<size_t>(last-path)+1+std::size(name)>std::size(path))return;
+        std::wcscpy(last+1,name);
+        const auto layer=LoadLibraryExW(path,nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+        if(!layer)return;
+        using Start=void(*)() noexcept;
+        if(const auto start=reinterpret_cast<Start>(GetProcAddress(layer,"OFXR_StartLukeVulkanIngressV1")))start();
+        // Retain this registered runtime for the process; the OpenXR loader uses
+        // the same absolute module later. No activation or separate proxy.
+    });
+}
+
 [[nodiscard]] InstanceTable instance_table(void* key) {
     std::scoped_lock lock(g_tables_mutex);
     const auto found = g_instances.find(key);
@@ -101,6 +122,7 @@ VKAPI_ATTR VkResult VKAPI_CALL layer_create_instance(
     const VkInstanceCreateInfo* create_info,
     const VkAllocationCallbacks* allocator,
     VkInstance* instance) {
+    start_luke_vulkan_ingress();
     // Find this layer's link in the loader's chain and step past it.
     auto* chain = const_cast<VkLayerInstanceCreateInfo*>(
         static_cast<const VkLayerInstanceCreateInfo*>(create_info->pNext));

@@ -36,8 +36,7 @@ struct LukeGuideWindow {
         return std::nullopt;
     };
     if (!output_width || !output_height || !guide_width || !guide_height ||
-        !color_width || !color_height || color_width > output_width ||
-        color_height > output_height) return reject(LukeGuideWindowFailure::input_extent);
+        !color_width || !color_height) return reject(LukeGuideWindowFailure::input_extent);
     for (float value : projection)
         if (!std::isfinite(value)) return reject(LukeGuideWindowFailure::nonfinite_matrix);
     const double left = luke_projection_ray_ndc(std::tan(angle_left), projection[0],
@@ -55,22 +54,18 @@ struct LukeGuideWindow {
     const double x1 = (right + 1.0) * output_width * 0.5;
     const double y0 = (1.0 - top) * output_height * 0.5;
     const double y1 = (1.0 - bottom) * output_height * 0.5;
-    // A one-pixel difference is ordinary raster rounding; a materially
-    // different FOV/colour extent is not a safe unscaled AFW guide window.
+    // FOV defines the native sampling footprint. Luke's final eye may be
+    // resized or raster-aligned independently of the DLSS output; its texture
+    // dimensions do not define a different FOV or a different native crop.
     if (x0 < -1.0 || y0 < -1.0 || x1 > output_width + 1.0 || y1 > output_height + 1.0)
         return reject(LukeGuideWindowFailure::outside_output);
-    if (std::abs((x1 - x0) - color_width) > 1.0)
-        return reject(LukeGuideWindowFailure::color_width_mismatch);
-    if (std::abs((y1 - y0) - color_height) > 1.0)
-        return reject(LukeGuideWindowFailure::color_height_mismatch);
-    const auto extent = [](std::uint32_t guide, std::uint32_t color,
+    const auto extent = [](std::uint32_t guide, double span,
         std::uint32_t output) noexcept {
-        return static_cast<std::uint32_t>(
-            (static_cast<std::uint64_t>(guide) * color + output - 1) / output);
+        return static_cast<std::uint32_t>(std::ceil(std::min(span,double(output))*guide/output));
     };
-    const std::uint32_t width = extent(guide_width, color_width,
+    const std::uint32_t width = extent(guide_width, x1-x0,
         output_width);
-    const std::uint32_t height = extent(guide_height, color_height,
+    const std::uint32_t height = extent(guide_height, y1-y0,
         output_height);
     if (!width || !height || width > guide_width || height > guide_height)
         return reject(LukeGuideWindowFailure::guide_extent);

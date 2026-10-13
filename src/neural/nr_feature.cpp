@@ -234,6 +234,7 @@ struct NrRetirementToken
 {
     bool awaitingSubmission = true;
     bool abandoned = false;
+    bool evaluated = false;
     unsigned int handle{};
     void* list{};
     unsigned long long recording{};
@@ -261,6 +262,7 @@ struct NrQueueFence
 };
 
 std::mutex g_nrFlightMutex;
+std::atomic<unsigned long long> g_nrLastSubmittedMs{0};
 std::unordered_map<unsigned int, NrHandleFlight> g_nrFlights;
 DlssNr::NrSubmissionLedger g_nrSubmissionLedger;
 std::unordered_map<ID3D12CommandQueue*, NrQueueFence> g_nrQueueFences;
@@ -304,6 +306,15 @@ std::shared_ptr<NrRetirementToken> CurrentRetirement()
     std::scoped_lock lock(g_nrFlightMutex);
     const auto found = g_nrFlights.find(*g_retirementSource);
     return found == g_nrFlights.end() ? nullptr : found->second.retirement;
+}
+
+void MarkSuccessfulNrEvaluation()
+{
+    if (!g_retirementSource) return;
+    std::scoped_lock lock(g_nrFlightMutex);
+    const auto found=g_nrFlights.find(*g_retirementSource);
+    if(found!=g_nrFlights.end() && found->second.retirement)
+        found->second.retirement->evaluated=true;
 }
 
 bool TokenRetired(const std::shared_ptr<NrRetirementToken>& token)
@@ -1063,6 +1074,8 @@ void CompleteCommandListSubmission(ID3D12CommandQueue* queue,
         if(!token||!token->awaitingSubmission||token->recording!=receipt.recording||
             token->handle!=receipt.handle||token->list!=receipt.list)continue;
         token->awaitingSubmission=false;token->fence=queueFence.fence;token->fenceValue=fenceValue;
+        if(token->evaluated && !token->abandoned)
+            g_nrLastSubmittedMs.store(GetTickCount64(),std::memory_order_release);
         // A native handle may have been retired after recording but before the
         // game submits. Its detached receipt still retires the captured token.
         (void)g_nrSubmissionLedger.Complete(receipt);
@@ -1620,6 +1633,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
     if (result == NVSDK_NGX_Result_Success)
     {
         ++g_successfulEvaluations;
+        MarkSuccessfulNrEvaluation();
         // Resolve takes the difference between what the model returned and what it was shown, and adds
         // that back to the frame. At strength zero the result is what the upscaler produced, exactly, and
         // anything the model left alone is untouched rather than round-tripped through the curve.
@@ -2220,6 +2234,7 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
     if (result == NVSDK_NGX_Result_Success)
     {
         ++g_successfulEvaluations;
+        MarkSuccessfulNrEvaluation();
         // Resolve takes the difference between what the model returned and what it was shown, and adds
         // that back to the frame. At strength zero the result is what the upscaler produced, exactly, and
         // anything the model left alone is untouched rather than round-tripped through the curve.
@@ -2294,7 +2309,8 @@ bool IsRunning()
 {
     if (g_runtime.failed)
         return false;
-
+    const auto last=g_nrLastSubmittedMs.load(std::memory_order_acquire),now=GetTickCount64();
+    if(!last || now<last || now-last>=2000) return false;
     return std::any_of(g_nrByHandle.begin(), g_nrByHandle.end(),
                        [](const auto& entry) { return entry.second.feature != nullptr; });
 }
@@ -2500,7 +2516,7 @@ void retire_handle(unsigned int handle){DlssNr::ReleaseForHandle(handle);}
 void retry(){std::scoped_lock lock(DlssNr::g_nrMutex);DlssNr::RetryAfterFailure();}
 Status status() {
     std::scoped_lock lock(DlssNr::g_nrMutex);const auto& c=*NrConfiguration::Instance();
-    return {c.DlssNrEnabled.value_or_default(),DlssNr::IsRunning(),
+    return {c.DlssNrEnabled.value_or_default(),c.DlssNrEnabled.value_or_default() && DlssNr::IsRunning(),
         c.DlssNrRunBeforeSr.value_or_default(),DlssNr::FailureReason(),g_successfulEvaluations};
 }
 void shutdown(){DlssNr::Shutdown();}

@@ -22,6 +22,8 @@
 #include "xrfg/generation_backpressure.hpp"
 #include "xrfg/implicit_layer.hpp"
 #include "xrfg/luke_afw.hpp"
+#include "xrfg/luke_afw_source.hpp"
+#include "xrfg/native_ingress/D3D_DeviceOwner.h"
 #include "xrfg/luke_afw_startup.hpp"
 #include "xrfg/luke_color_origin.hpp"
 #include "xrfg/luke_world_scale.hpp"
@@ -894,6 +896,7 @@ struct SessionState {
     xrfg::D3D12PresentationTransform presentation_transform{};
     SessionGraphicsBinding graphics_binding{SessionGraphicsBinding::none};
     std::uint64_t graphics_binding_capabilities{};
+    VkDevice luke_vulkan_device{};
     ID3D12CommandQueue* luke_context_failed_queue{}; // original registry retains ownership; bounded failed initialization retry
     // Set once the runtime has refused a private swapchain. A runtime caps how
     // many swapchains one session may hold at all -- SteamVR hands out 16 --
@@ -1676,7 +1679,8 @@ struct CompositionCapture {
 };
 
 template<class Fence>
-[[nodiscard]] HRESULT wait_composition_fence(Fence* fence, std::uint64_t value) {
+[[nodiscard]] HRESULT wait_composition_fence(Fence* fence, std::uint64_t value,
+    DWORD timeout=INFINITE) {
     if (!fence || !value) return S_OK;
     const auto completed = fence->GetCompletedValue();
     if (completed == UINT64_MAX) return DXGI_ERROR_DEVICE_REMOVED;
@@ -1684,8 +1688,11 @@ template<class Fence>
     HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!event) return HRESULT_FROM_WIN32(GetLastError());
     HRESULT result = fence->SetEventOnCompletion(value, event);
-    if (SUCCEEDED(result) && WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0)
-        result = E_FAIL;
+    if (SUCCEEDED(result)) {
+        const auto waited=WaitForSingleObject(event, timeout);
+        if(waited!=WAIT_OBJECT_0)
+            result=waited==WAIT_TIMEOUT ? HRESULT_FROM_WIN32(ERROR_BUSY) : E_FAIL;
+    }
     CloseHandle(event);
     return result;
 }
@@ -1985,6 +1992,24 @@ struct SwapchainState {
 using QueryLukeRossD3D12Context = int (*)(
     ID3D12Device**, ID3D12CommandQueue**) noexcept;
 
+// A Luke D11 session consumes native D12 productions, but must not append
+// OFA/interop waits to the game's rendering queue. Its next native submission
+// can depend on the XR release currently waiting for this worker's output.
+HRESULT select_luke_execution_queue(bool native_luke, ID3D12Device* device,
+    ID3D12CommandQueue* producer, Microsoft::WRL::ComPtr<ID3D12CommandQueue>& execution) {
+    execution.Reset();
+    if (!device || !producer) return E_INVALIDARG;
+    if (!native_luke) { execution = producer; return S_OK; }
+    D3D12_COMMAND_QUEUE_DESC description{};
+    description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    description.NodeMask = producer->GetDesc().NodeMask;
+    const auto result = device->CreateCommandQueue(&description,
+        IID_PPV_ARGS(execution.ReleaseAndGetAddressOf()));
+    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+        result, 957, handle_value(producer), handle_value(execution.Get()));
+    return result;
+}
+
 [[nodiscard]] bool query_luke_ross_d3d12_context(
     ID3D12Device** device,
     ID3D12CommandQueue** queue) noexcept {
@@ -2001,8 +2026,8 @@ using QueryLukeRossD3D12Context = int (*)(
     }
     const auto query = reinterpret_cast<QueryLukeRossD3D12Context>(
         GetProcAddress(module, "OFXR_GetLukeRossD3D12ContextV1"));
-    return query != nullptr && query(device, queue) != 0 &&
-        *device != nullptr && *queue != nullptr;
+    if(query != nullptr && query(device, queue) != 0 && *device != nullptr && *queue != nullptr)return true;
+    return xrfg::native_vulkan::query_luke_context(device,queue);
 }
 
 void log_swapchain_eligibility(
@@ -2183,7 +2208,11 @@ XrResult XRAPI_CALL content_end_frame(XrSession session,const XrFrameEndInfo* in
 }
 
 [[nodiscard]] HRESULT wait_for_previous_session_synthesis(
-    const std::shared_ptr<SessionState>& session) noexcept {
+    const std::shared_ptr<SessionState>& session, bool application_wait=false) noexcept {
+    // REAL VR must receive its next prediction before submitting game work.
+    // Scratch/history ownership is still retired at its actual reuse points.
+    if(application_wait && session && session->luke_afw_enabled &&
+        session->graphics_binding==SessionGraphicsBinding::d3d11) return S_OK;
     try {
         HRESULT aggregate = S_OK;
         for (const auto& swapchain : find_swapchains(session)) {
@@ -3191,28 +3220,45 @@ void initialize_late_luke_context(const std::shared_ptr<SessionState>& session) 
     if(!session || !session->luke_afw_enabled || session->graphics_binding!=SessionGraphicsBinding::d3d11 ||
         (session->graphics_binding_capabilities&8ULL)!=0 || session->application_frame_in_progress)return;
     try {
+        if(!session->luke_vulkan_device)
+            session->luke_vulkan_device=xrfg::native_vulkan::configure_luke_owner(session->d3d12_device.Get(),session->d3d12_queue.Get());
         Microsoft::WRL::ComPtr<ID3D12Device> device;
         Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
         if(!query_luke_ross_d3d12_context(device.GetAddressOf(),queue.GetAddressOf()))return;
         if(session->luke_context_failed_queue==queue.Get())return;
-        auto afw=std::make_shared<xrfg::LukeAfwSynthesizer>();
-        const auto result=afw->initialize(device.Get(),queue.Get(),current_layer_directory()/L"PDAFWPlugin.dll");
-        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::synthesis_initialize,
-            result,0xAF023245ULL,session->luke_afw_odd_serial_is_left?1ULL:0ULL,1);
-        session->generation_initialization_result=result;
-        if(FAILED(result)){session->luke_context_failed_queue=queue.Get();return;}
-        // The waiting path never allocated private swapchains on the fallback
-        // device. Do not move active GPU histories across owners.
         auto chains=find_swapchains(session);
-        std::vector<std::unique_lock<std::mutex>> locks;
-        for(const auto& chain:chains)locks.emplace_back(chain->call_mutex);
+        bool active_history=false;
         for(const auto& chain:chains) {
             std::scoped_lock lock(chain->mutex);
-            if(chain->frame_generation || chain->d3d12_history)return;
+            active_history|=bool(chain->frame_generation)||bool(chain->d3d12_history);
         }
+        // Existing OFXR histories retain their owner. AFW can join that queue
+        // only on the exact same native device; its guide carries the producer
+        // fence. A different device cannot steal active OFXR resources.
+        if(active_history && !d3d_owner::same(device.Get(),session->d3d12_device.Get()))return;
+        auto execution_queue=session->d3d12_queue;
+        if (!active_history) {
+            Microsoft::WRL::ComPtr<ID3D12Device> native_device;
+            Microsoft::WRL::ComPtr<ID3D12CommandQueue> native_producer;
+            const bool native_luke=xrfg::native_ingress::query_luke_context(
+                native_device.GetAddressOf(),native_producer.GetAddressOf());
+            const auto queue_result=select_luke_execution_queue(native_luke,
+                device.Get(),queue.Get(),execution_queue);
+            if(FAILED(queue_result)){session->luke_context_failed_queue=queue.Get();return;}
+        }
+        auto afw=std::make_shared<xrfg::LukeAfwSynthesizer>();
+        const auto result=afw->initialize(device.Get(),execution_queue.Get(),current_layer_directory()/L"PDAFWPlugin.dll");
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::synthesis_initialize,
+            result,0xAF023245ULL,session->luke_afw_odd_serial_is_left?1ULL:0ULL,1);
+        if(FAILED(result)){session->luke_context_failed_queue=queue.Get();return;}
+        // Never move active GPU histories across owners or queues.
+        std::vector<std::unique_lock<std::mutex>> locks;
+        for(const auto& chain:chains)locks.emplace_back(chain->call_mutex);
         std::scoped_lock gpu_lock(session->gpu_mutex);
         auto previous_queue=session->d3d12_queue;
-        session->d3d12_device=std::move(device);session->d3d12_queue=std::move(queue);
+        if(!active_history) {
+            session->d3d12_device=std::move(device);session->d3d12_queue=std::move(execution_queue);
+        }
         session->luke_afw=std::move(afw);
         session->graphics_binding_capabilities=(session->graphics_binding_capabilities&~4ULL)|8ULL;
         if(previous_queue.Get()!=session->d3d12_queue.Get())xrfg::stop_ngx_guide_capture(previous_queue.Get());
@@ -5147,10 +5193,16 @@ XrResult layer_create_session_impl(
         if (query_luke_ross_d3d12_context(
                 luke_ross_device.GetAddressOf(),
                 luke_ross_queue.GetAddressOf())) {
+            Microsoft::WRL::ComPtr<ID3D12Device> native_device;
+            Microsoft::WRL::ComPtr<ID3D12CommandQueue> native_producer, execution;
+            const bool native_luke = xrfg::native_ingress::query_luke_context(
+                native_device.GetAddressOf(), native_producer.GetAddressOf());
+            const auto queue_result = select_luke_execution_queue(native_luke,
+                luke_ross_device.Get(), luke_ross_queue.Get(), execution);
             state->d3d12_device = std::move(luke_ross_device);
-            state->d3d12_queue = std::move(luke_ross_queue);
+            state->d3d12_queue = std::move(execution);
             state->graphics_binding_capabilities |= 8ULL;
-            if (state->luke_afw_enabled) {
+            if (state->luke_afw_enabled && SUCCEEDED(queue_result)) {
                 auto afw = std::make_shared<xrfg::LukeAfwSynthesizer>();
                 const HRESULT afw_result = afw->initialize(
                     state->d3d12_device.Get(), state->d3d12_queue.Get(),
@@ -5237,6 +5289,8 @@ XrResult layer_create_session_impl(
     }
     if (state->vulkan_bridge)
         xrfg::native_vulkan::configure_owner(state->vulkan_binding,state->d3d12_device.Get(),state->d3d12_queue.Get());
+    if(state->luke_afw_enabled && state->graphics_binding==SessionGraphicsBinding::d3d11)
+        state->luke_vulkan_device=xrfg::native_vulkan::configure_luke_owner(state->d3d12_device.Get(),state->d3d12_queue.Get());
     if (state->d3d12_device)
         state->native_dlss_generated_frames=xrfg::native_dlssg_max_generated_frames(state->d3d12_device.Get());
     configure_session_guide_capture(*state);
@@ -5266,6 +5320,7 @@ XrResult layer_destroy_session_impl(XrSession session) {
     }
 
     if (state->vulkan_bridge) xrfg::native_vulkan::stop_owner(state->vulkan_binding.device);
+    if(state->luke_vulkan_device)xrfg::native_vulkan::stop_owner(state->luke_vulkan_device);
     const XrResult result = state->dispatch->destroy_session(session);
     std::size_t remaining_sessions{};
     if (XR_SUCCEEDED(result)) {
@@ -5725,7 +5780,7 @@ XrResult layer_wait_frame_impl(
             !xrfg::embedded::snapshot().desired.enabled &&
             xrfg::embedded::afw_snapshot().desired.mode==0)) {
             if (!state->d3d12_synthesis_queue)
-                static_cast<void>(wait_for_previous_session_synthesis(state));
+                static_cast<void>(wait_for_previous_session_synthesis(state,true));
             else
                 static_cast<void>(flush_session_pending_copies(state));
         }
@@ -10242,6 +10297,8 @@ struct PreparedGeneration {
     bool anchor_is_current{};
     std::shared_ptr<FrameGenerationSwapchainState> worker_generation;
     xrfg::D3D11PublicationReceipt worker_publication;
+    Microsoft::WRL::ComPtr<ID3D12Fence> worker_fence;
+    std::uint64_t worker_fence_value{};
     std::uint32_t current_destination{};
     std::uint32_t synthetic_destination{};
     std::size_t current_slot{};
@@ -10378,6 +10435,30 @@ struct AfwSourceCapture {
     xrfg::D3D12HistoryCaptureTicket capture;
 };
 
+template<class Submit>
+HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& session,
+    const std::shared_ptr<FrameGenerationSwapchainState>& generation,
+    const std::shared_ptr<xrfg::D3D12FrameSynthesizer>& synthesizer,
+    bool worker,Submit&& submit,std::unique_lock<std::mutex>* call_lock=nullptr) {
+    HRESULT result;
+    {std::scoped_lock lock(session->gpu_mutex);result=submit();}
+    if(worker&&session->luke_afw_enabled&&!session->djules_route&&
+        generation->d3d11_interop&&session->frame_generation_mode==xrfg::D3D12FrameGenerationMode::ofxr&&
+        classify_synthesis_failure(result)==GenerationPrepareReason::synthesis_busy) {
+        // Backpressure on one eye is not a failed stereo transaction. Wait
+        // the synthesizer's existing completion before reusing its resources;
+        // keep the same capture, acquired destinations and camera packet.
+        // Neither the session GPU mutex nor a swapchain call lock is held.
+        if(call_lock)call_lock->unlock();
+        const auto ready=synthesizer->wait_for_previous_submission(
+            kFrameStartSynthesisWaitMilliseconds);
+        if(call_lock)call_lock->lock();
+        if(FAILED(ready))return ready;
+        std::scoped_lock lock(session->gpu_mutex);result=submit();
+    }
+    return result;
+}
+
 [[nodiscard]] PreparedGeneration prepare_frame_generation(
     XrSwapchain application_swapchain,
     bool request_pair,
@@ -10407,7 +10488,7 @@ struct AfwSourceCapture {
             return output;
         }
 
-        std::scoped_lock call_lock(state->call_mutex);
+        std::unique_lock call_lock(state->call_mutex);
         const auto presentation_transform = captured_transform ? *captured_transform
             : state->session->presentation_transform;
         if (!worker_submission && ((!state->presentation_transform_known && presentation_transform.active) ||
@@ -10600,8 +10681,7 @@ struct AfwSourceCapture {
                 std::to_string(state->d3d12_history->diagnostic_completed_value())+",\"gpu_wait_required_by_pipeline\":true}");
             } catch (...) {}
         }
-        {
-            std::scoped_lock gpu_lock(state->session->gpu_mutex);
+        submit_result=submit_luke_worker_generation(state->session,generation,synthesizer,worker_submission,[&] {
             log_completed_nvidia_gpu_timings(synthesizer);
             if (generation->d3d11_interop) {
                 submit_result =
@@ -10691,7 +10771,8 @@ struct AfwSourceCapture {
                     submit_result = publish_result;
                 }
             }
-        }
+            return submit_result;
+        },&call_lock);
         xrfg::bridge_flight_logger().end(
             synthesis_token,
             synthesis_operation,
@@ -10748,6 +10829,8 @@ struct AfwSourceCapture {
             // Submit both eyes before waiting. No unfinished synthesis fence
             // is placed on the application's D3D11 context here.
             output.worker_generation = generation;
+            output.worker_fence=synthesizer->submission_fence(ticket);
+            output.worker_fence_value=ticket.fence_value;
             output.current_destination = current_destination_index;
             output.synthetic_destination = synthetic_destination_index;
             output.current_slot = current_slot;
@@ -10963,14 +11046,24 @@ struct AfwSourceCapture {
         const auto completion_token = xrfg::bridge_flight_logger().begin(
             xrfg::BridgeFlightOperation::timing_synthesis_complete,
             source_sequence, handle_value(resource.application_swapchain));
-        const HRESULT ready = g.synthesizer->wait_for_previous_submission(
-            kFrameStartSynthesisWaitMilliseconds);
+        const HRESULT ready = g.worker_fence && g.worker_fence_value
+            ? wait_composition_fence(g.worker_fence.Get(),g.worker_fence_value,
+                kFrameStartSynthesisWaitMilliseconds) : E_INVALIDARG;
         xrfg::bridge_flight_logger().end(completion_token,
             xrfg::BridgeFlightOperation::timing_synthesis_complete, ready,
             source_sequence, handle_value(resource.application_swapchain));
         // On failure keep the images acquired; session teardown drains GPU
         // work before releasing them. Never return unfinished images to XR.
-        if (FAILED(ready)) return false;
+        if (FAILED(ready)) {
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::gpu_fence_snapshot,
+                49300, handle_value(g.worker_fence.Get()), g.worker_fence_value,
+                g.worker_fence ? g.worker_fence->GetCompletedValue() : 0);
+            if (g.worker_generation->synthesizer)
+                g.worker_generation->synthesizer->report_pending_submission();
+            if (g.worker_generation->afw_temporal_synthesizer)
+                g.worker_generation->afw_temporal_synthesizer->report_pending_submission();
+            return false;
+        }
     }
     for (auto& resource : prepared.resources) {
         auto& g = resource.generation;
@@ -10978,9 +11071,10 @@ struct AfwSourceCapture {
         if (success && g.worker_generation->d3d11_interop) {
             const auto token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::d3d11_publish, handle_value(resource.application_swapchain));
-            const HRESULT result = g.worker_generation->d3d11_interop->publish(
+            const HRESULT result = g.worker_generation->d3d11_interop->publish_completed(
                 g.current_destination, g.kind == PreparedGenerationKind::pair
                     ? std::optional<std::uint32_t>{g.synthetic_destination} : std::nullopt,
+                g.worker_fence.Get(),g.worker_fence_value,
                 &g.worker_publication);
             xrfg::bridge_flight_logger().end(token, xrfg::BridgeFlightOperation::d3d11_publish,
                 result, g.current_destination, g.synthetic_destination);
@@ -10993,7 +11087,7 @@ struct AfwSourceCapture {
         // Wait only for this publication, outside the interop mutex. A global
         // idle wait blocks AFW capture/publish on that same bridge and can
         // also inherit the next producer's completion cursor.
-        if (g.worker_generation->d3d11_interop) {
+        if (g.worker_generation->d3d11_interop && g.worker_publication.fence) {
             const auto publication_token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::timing_publication_complete,
                 source_sequence, handle_value(resource.application_swapchain),
@@ -11693,148 +11787,57 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
             release_deferred();
             return output;
         }
-        const std::size_t source_index =
-            entries[0].logical_eye == *released_eye ? 0U : 1U;
-        const std::size_t destination_index = 1U - source_index;
-
-        Entry& source = entries[source_index];
-        Entry& destination = entries[destination_index];
         std::optional<float> xr_eye_baseline;
-        {
-            std::scoped_lock lock(session->mutex);
-            xr_eye_baseline = session->luke_xr_eye_baseline;
-        }
-        if (!xr_eye_baseline) {
-            report_missing(7, 0); // never measure IPD from cross-time poses
-            output.reason = GenerationPrepareReason::missing_capture;
-            return output;
-        }
-        if (!source.source_capture) {
-            output.reason = GenerationPrepareReason::missing_capture;
-            return output;
-        }
-        // Prepare precisely this frozen color before resolving its original
-        // production. No latest-guide or eye-parity join survives here.
-        {
-            std::scoped_lock guide_lock(session->luke_guide_mutex);
-            session->luke_afw_last_pair.reset();
-        }
-
-        // The peer is an AFW output, not a second temporal-synthesis input.
-        // Retire any older use of its private colour, acquire it, and make the
-        // D3D12 queue wait for its last D3D11 publication.  Do not consume a
-        // peer history capture or submit a redundant FSR/NVIDIA prime that AFW
-        // would immediately overwrite.
-        {
-            std::scoped_lock call_lock(destination.swapchain->call_mutex);
-            {
-                std::scoped_lock gpu_lock(session->gpu_mutex);
-                const HRESULT retire_result =
-                    destination.generation->synthesizer->retire_previous();
-                if (FAILED(retire_result)) {
-                    output.reason = GenerationPrepareReason::retire_previous_failed;
-                    output.failed_swapchain =
-                        mappings[destination_index].application_swapchain;
-                    return output;
-                }
-            }
-            if (!acquire_and_wait_private_image(
-                    session.get(), session->dispatch, destination.generation->current[kAfwScratchSlot])) {
-                output.reason =
-                    GenerationPrepareReason::current_private_acquire_failed;
-                output.failed_swapchain =
-                    mappings[destination_index].application_swapchain;
-                return output;
-            }
-            HRESULT peer_result = E_UNEXPECTED;
-            {
-                std::scoped_lock gpu_lock(session->gpu_mutex);
-                peer_result =
-                    destination.generation->d3d11_interop->prepare_synthesis();
-            }
-            if (FAILED(peer_result)) {
-                static_cast<void>(release_private_image(
-                    session.get(), session->dispatch, destination.generation->current[kAfwScratchSlot]));
-                output.reason = GenerationPrepareReason::synthesis_failed;
-                output.failed_swapchain =
-                    mappings[destination_index].application_swapchain;
-                return output;
-            }
-            destination.prepared.kind = PreparedGenerationKind::prime;
-            destination.prepared.reason = GenerationPrepareReason::ready;
-            destination.prepared.current_handle =
-                destination.generation->current[kAfwScratchSlot].handle;
-            destination.prepared.publication_deferred = true;
-            destination.prepared.current_destination_index =
-                static_cast<std::uint32_t>(kAfwScratchSlot) *
-                    destination.generation->current_images_per_slot +
-                destination.generation->current[kAfwScratchSlot].acquired_index;
-        }
-
-        source.prepared = prepare_frame_generation(
-            mappings[source_index].application_swapchain, false,
-            std::span<const xrfg::D3D12ReprojectionView>(
-                source.views.data(), source.views.size()), 0.5f,
-            false, nullptr, true, nullptr, &*source.source_capture);
-        if (source.prepared.kind != PreparedGenerationKind::prime ||
-            !source.prepared.publication_deferred) {
-            output.reason = source.prepared.reason;
-            output.failed_swapchain =
-                mappings[source_index].application_swapchain;
-            release_deferred();
-            return output;
-        }
-        const auto source_images =
-            source.generation->d3d11_interop->current_destination_images();
-        const auto destination_images =
-            destination.generation->d3d11_interop->current_destination_images();
-        if (source.prepared.current_destination_index >= source_images.size() ||
-            destination.prepared.current_destination_index >=
-                destination_images.size()) {
-            output.reason = GenerationPrepareReason::invalid_private_swapchain;
-            release_deferred();
-            return output;
-        }
-
-        std::uint32_t origin_token{};
-        HRESULT origin_result = E_UNEXPECTED;
-        {
-            std::scoped_lock gpu_lock(session->gpu_mutex);
-            origin_result = xrfg::read_luke_color_origin(
-                session->d3d12_queue.Get(),
-                source_images[source.prepared.current_destination_index],
-                &origin_token);
-        }
-        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
-            origin_result, 89, frame_serial, origin_token);
-        if (FAILED(origin_result) || !origin_token) {
-            output.reason = GenerationPrepareReason::missing_capture;
-            release_deferred();
-            return output;
-        }
-        source.guide = xrfg::resolve_luke_guide_token(
-            origin_token, session->d3d12_queue.Get(), session->d3d12_device.Get());
-        std::uint32_t camera_rejection = !source.guide ? 1u : 0u;
-        if (source.guide) {
-            if (!source.guide->camera_data_valid) camera_rejection |= 2u;
-            if (!source.guide->previous_opposite_guide) camera_rejection |= 4u;
-            else if (!source.guide->previous_opposite_guide->camera_data_valid)
-                camera_rejection |= 8u;
-        }
-        if (camera_rejection != 0) {
-            xrfg::embedded::report_afw_guide_rejection(camera_rejection);
-            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
-                camera_rejection, 132, frame_serial, origin_token);
-            report_missing(8, origin_token);
-            output.reason = GenerationPrepareReason::missing_capture;
-            release_deferred();
-            return output;
-        }
+        {std::scoped_lock lock(session->mutex);xr_eye_baseline=session->luke_xr_eye_baseline;}
+        if(!xr_eye_baseline) {report_missing(7,0);output.reason=GenerationPrepareReason::missing_capture;return output;}
         std::uint64_t last_evaluated{};
-        {
-            std::scoped_lock guide_lock(session->luke_guide_mutex);
-            last_evaluated = session->luke_afw_last_evaluated_publication;
+        {std::scoped_lock lock(session->luke_guide_mutex);
+            last_evaluated=session->luke_afw_last_evaluated_publication;
+            session->luke_afw_last_pair.reset();}
+        std::array<std::uint64_t,2> publications{};
+        std::array<std::uint32_t,2> origin_tokens{};
+        // Each color is frozen by its own history ticket. Copy into disjoint
+        // AFW scratch, then resolve only the token actually present in it.
+        for(std::size_t index=0;index<entries.size();++index) {
+            auto& entry=entries[index];
+            if(!entry.source_capture) {output.reason=GenerationPrepareReason::missing_capture;release_deferred();return output;}
+            entry.prepared=prepare_frame_generation(mappings[index].application_swapchain,false,
+                std::span<const xrfg::D3D12ReprojectionView>(entry.views.data(),entry.views.size()),
+                0.5f,false,nullptr,true,nullptr,&*entry.source_capture);
+            if(entry.prepared.kind!=PreparedGenerationKind::prime||!entry.prepared.publication_deferred) {
+                output.reason=entry.prepared.reason;output.failed_swapchain=mappings[index].application_swapchain;
+                release_deferred();return output;
+            }
         }
+        for(std::size_t index=0;index<entries.size();++index) {
+            auto& entry=entries[index];const auto images=entry.generation->d3d11_interop->current_destination_images();
+            if(entry.prepared.current_destination_index>=images.size()) {
+                output.reason=GenerationPrepareReason::invalid_private_swapchain;release_deferred();return output;
+            }
+            HRESULT result;
+            {std::scoped_lock lock(session->gpu_mutex);
+                result=xrfg::read_luke_color_origin(session->d3d12_queue.Get(),
+                    images[entry.prepared.current_destination_index],&origin_tokens[index]);}
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                result,989+entry.logical_eye,frame_serial,origin_tokens[index]);
+            if(FAILED(result)||!origin_tokens[index])continue;
+            entry.guide=xrfg::resolve_luke_guide_token(origin_tokens[index],
+                session->d3d12_queue.Get(),session->d3d12_device.Get());
+            if(entry.guide&&entry.guide->camera_data_valid&&entry.guide->previous_opposite_guide&&
+                entry.guide->previous_opposite_guide->camera_data_valid)
+                publications[index]=entry.guide->publication;
+        }
+        const auto selected=xrfg::select_luke_afw_color_source(publications,last_evaluated);
+        if(!selected) {
+            output.reason=GenerationPrepareReason::missing_capture;release_deferred();return output;
+        }
+        const std::size_t source_index=*selected,destination_index=1-source_index;
+        Entry& source=entries[source_index];Entry& destination=entries[destination_index];
+        const auto origin_token=origin_tokens[source_index];
+        const auto source_images=source.generation->d3d11_interop->current_destination_images();
+        const auto destination_images=destination.generation->d3d11_interop->current_destination_images();
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+            source.logical_eye,991,source.guide->publication,last_evaluated);
         const auto ingress = [&](std::uint64_t stage, std::uint64_t value) {
             const auto flags = static_cast<std::int64_t>(source.logical_eye |
                 (session->menu_enabled ? 0x100 : 0) |
@@ -11870,10 +11873,10 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
         // Never evaluate one original color production twice for this eye.
         {
             std::scoped_lock guide_lock(session->luke_guide_mutex);
-            auto& last = session->luke_afw_last_guide_publication[*released_eye];
+            auto& last = session->luke_afw_last_guide_publication[source.logical_eye];
             if (source.guide->publication <= last) {
                 report_missing(5,
-                    (static_cast<std::uint64_t>(*released_eye) << 32) | last);
+                    (static_cast<std::uint64_t>(source.logical_eye) << 32) | last);
                 output.reason = GenerationPrepareReason::missing_capture;
                 release_deferred();
                 return output;

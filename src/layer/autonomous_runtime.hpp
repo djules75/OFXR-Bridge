@@ -11,6 +11,7 @@
 #include "xrfg/fsr_frame_generation.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/diagnostic_hotkeys.hpp"
+#include "xrfg/luke_vulkan_scope.hpp"
 
 namespace xrfg::autonomous {
 inline std::atomic_uint64_t applied_runtime_revision{};
@@ -75,14 +76,17 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     out.sessions=control.sessions; out.ready=control.ready;
     out.pending=control.pending; out.errors=control.errors;
     out.afw_projection_frames=afw.projection_frames; out.afw_ready_frames=afw.ready_frames;
+    const auto now=GetTickCount64();
+    out.afw_running=afw.desired.mode!=0 && afw.last_success_ms &&
+        now>=afw.last_success_ms && now-afw.last_success_ms<2000;
     out.nr_running=nr.running;
     out.logging_active=bridge_flight_logger().enabled();
-    out.vulkan_capture_suspended=vulkan_detected;
+    out.vulkan_capture_suspended=vulkan_detected && !native_vulkan::luke_vulkan_process();
     out.nr_evaluations=nr.evaluations;
     if (nr.enabled && !nr.reason.empty()) snprintf(out.message,sizeof(out.message),"%s",nr.reason.c_str());
     const auto ingress=native_ingress::statistics();
     out.luke_detected = ingress.luke != 0;
-    out.vulkan_detected = vulkan_detected;
+    out.vulkan_detected = vulkan_detected || (ingress.luke && native_vulkan::luke_vulkan_process());
     out.provider_error = control.desired.frame_generation == 2 ? provider_error : 0;
     if (ingress.luke && ingress.camera_rejected && !ingress.camera_accepted)
         snprintf(out.message,sizeof(out.message),"Luke: awaiting an exact native camera packet");

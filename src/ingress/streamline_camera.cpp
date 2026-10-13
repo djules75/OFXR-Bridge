@@ -35,7 +35,7 @@ bool basis(const Camera& c) {
         std::abs(dot(c.up,c.forward))<.05F&&std::abs(dot(c.forward,c.right))<.05F;
 }
 template<class Constants> Camera decode(const Constants& v,uint32_t frame,uint32_t viewport) {
-    Camera c{};c.frame=frame;c.viewport=viewport;
+    Camera c{};c.frame=frame;c.viewport=viewport;c.observed=true;
     std::copy_n(reinterpret_cast<const float*>(&v.cameraViewToClip),16,c.projection.begin());
     std::copy_n(reinterpret_cast<const float*>(&v.clipToCameraView),16,c.inverse.begin());
     std::copy_n(reinterpret_cast<const float*>(&v.clipToPrevClip),16,c.previous.begin());
@@ -48,9 +48,12 @@ template<class Constants> Camera decode(const Constants& v,uint32_t frame,uint32
     c.inverted=static_cast<int>(v.depthInverted)==1;
     c.camera_motion=static_cast<int>(v.cameraMotionIncluded)==1?1:
         static_cast<int>(v.cameraMotionIncluded)==0?0:-1;
-    c.valid=finite(c.projection)&&finite(c.inverse)&&finite(c.position)&&basis(c)&&
-        std::isfinite(c.near_z)&&c.near_z>0&&std::isfinite(c.far_z)&&
-        (c.far_z==0||c.far_z>c.near_z)&&std::isfinite(c.fov)&&c.fov>0&&c.fov<3.1416F;
+    c.rejection=(!finite(c.projection)?1U:0U)|(!finite(c.inverse)?2U:0U)|
+        (!finite(c.position)?4U:0U)|(!basis(c)?8U:0U)|
+        (!(std::isfinite(c.near_z)&&c.near_z>0)?16U:0U)|
+        (!(std::isfinite(c.far_z)&&(c.far_z==0||c.far_z>c.near_z))?32U:0U)|
+        (!(std::isfinite(c.fov)&&c.fov>0&&c.fov<3.1416F)?64U:0U);
+    c.valid=c.rejection==0;
     return c;
 }
 void remember(const Camera& c) {
@@ -74,13 +77,20 @@ bool set_constants1(const sl1::Constants& v,uint32_t frame,uint32_t viewport) {
     return result;
 }
 Camera select(uint32_t frame,bool has_viewport,uint32_t viewport,bool ambiguous=false) {
-    Camera selected{};selected.ambiguous=ambiguous;
+    Camera selected{};selected.frame=frame;selected.viewport=viewport;selected.rejection=512;selected.ambiguous=ambiguous;
     auto& s=hooks();std::scoped_lock lock(s.mutex);
     for(const auto& c:s.cameras)if(c.valid&&c.frame==frame&&(!has_viewport||c.viewport==viewport)) {
         if(selected.valid){selected.ambiguous=true;break;}
         const bool ambiguity=selected.ambiguous;selected=c;selected.ambiguous|=ambiguity;
     }
-    if(selected.ambiguous)selected.valid=false;
+    // Preserve the unique exact rejected packet only to report its original
+    // field bits. It remains invalid and cannot authorize capture or AFW.
+    if(!selected.valid&&!selected.ambiguous)for(const auto& c:s.cameras)
+        if(c.observed&&!c.valid&&c.frame==frame&&(!has_viewport||c.viewport==viewport)) {
+            if(selected.observed){selected.ambiguous=true;break;}
+            selected=c;
+        }
+    if(selected.ambiguous){selected.valid=false;selected.rejection|=1024;}
     return selected;
 }
 struct Restore {Camera previous;~Restore(){production=previous;}};

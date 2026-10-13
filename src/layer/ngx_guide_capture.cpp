@@ -12,6 +12,11 @@
 #include "xrfg/neural_rendering.hpp"
 #include "xrfg/d3d12_native_binding.hpp"
 #include "xrfg/vulkan_native_ingress.hpp"
+#include "xrfg/ngx_feature_metadata.hpp"
+#include "xrfg/native_export_address.hpp"
+#include "xrfg/luke_dispatch_module.hpp"
+#include "xrfg/ngx_feature_paths.hpp"
+#include "xrfg/ngx_evaluation_boundary.hpp"
 #include <windows.h>
 #include <wrl/client.h>
 #include <nvsdk_ngx_params.h>
@@ -25,10 +30,18 @@
 #include <cmath>
 #include <share.h>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#ifdef XRFG_NATIVE_INGRESS_TESTS
+#include <stdexcept>
+#include <iostream>
+#include <dxgi1_6.h>
+#include "xrfg/native_ingress/streamline1/sl1.h"
+#include "xrfg/native_ingress/streamline_camera.hpp"
+#endif
 
 namespace xrfg { namespace {
 using Microsoft::WRL::ComPtr;
@@ -37,20 +50,19 @@ using Create = NVSDK_NGX_Result(*)(ID3D12GraphicsCommandList*, NVSDK_NGX_Feature
 using Release = NVSDK_NGX_Result(*)(NVSDK_NGX_Handle*);
 using Evaluate = NVSDK_NGX_Result(*)(ID3D12GraphicsCommandList*, const NVSDK_NGX_Handle*,
     const NVSDK_NGX_Parameter*, void*);
-// Flags are accepted only from actual creation metadata. Typed implementation
-// module recovery requires all dimensions and flags, never guesses SR type.
-struct Feature { std::uint32_t identity{}; NVSDK_NGX_Feature type{NVSDK_NGX_Feature_SuperSampling}; int flags{}; UINT width{},height{},out_width{},out_height{}; bool flags_known{true}; };
+using Feature = NgxFeatureMetadata;
 struct Module {
-    SafetyHookInline create_hook, evaluate_hook, release_hook;
-    Create create{}; Evaluate evaluate{}; Release release{};
+    SafetyHookInline create_hook, evaluate_hook, evaluate_c_hook, release_hook;
+    Create create{}; Evaluate evaluate{}, evaluate_c{}; Release release{};
     HMODULE retained{};
     bool typed_implementation{};
 };
 struct Capture {
     std::mutex mutex, log_mutex;
     ComPtr<ID3D12CommandQueue> queue;
-    std::array<Module,3> modules;
+    std::array<Module,5> modules;
     std::unordered_map<const NVSDK_NGX_Handle*,Feature> features;
+    std::unordered_map<const NVSDK_NGX_Handle*,std::uint64_t> native_production_sequences;
     std::atomic_bool active{false}, started{false}, camera_ready{false};
     std::atomic_uint64_t calls{0};
     FILE* log{};
@@ -80,8 +92,23 @@ void log(const char* message, UINT64 a=0, UINT64 b=0, UINT64 c=0, UINT64 d=0) {
 }
 template<class T> T get(const NVSDK_NGX_Parameter* p,const char* name,T fallback={}) {
     T value=fallback;
-    if(NVSDK_NGX_FAILED(p->Get(name,&value)))return fallback;
+    if(!p||NVSDK_NGX_FAILED(p->Get(name,&value)))return fallback;
     return value;
+}
+#ifdef XRFG_NATIVE_INGRESS_TESTS
+bool test_kcd_production_identity{};
+#endif
+bool kingdom_come_process() {
+    static const bool selected=[] {
+        wchar_t process[MAX_PATH]{};GetModuleFileNameW(nullptr,process,MAX_PATH);
+        const auto* basename=wcsrchr(process,L'\\');basename=basename?basename+1:process;
+        return !_wcsicmp(basename,L"KingdomCome.exe");
+    }();
+#ifdef XRFG_NATIVE_INGRESS_TESTS
+    return selected || test_kcd_production_identity;
+#else
+    return selected;
+#endif
 }
 template<class T> ComPtr<T> native(T* object) {
     ComPtr<T> result; IUnknown* borrowed{};
@@ -124,7 +151,7 @@ void update_uevr_projection() {
     if(first)log("uevr_projection",UINT64(s.camera_near*1000000.F),api->version->minor);
 }
 std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* list,const NVSDK_NGX_Handle* handle,
-    const NVSDK_NGX_Parameter* p) {
+    const NVSDK_NGX_Parameter* p,std::uint64_t production_sequence) {
     auto& s=state(); if(!s.active.load())return {};
     const auto call=++s.calls;
     if(!list||!p)return {};
@@ -156,8 +183,28 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     auto cmd=native(list); auto nq=native(queue.Get());if(!cmd||!nq)return {};
     ComPtr<ID3D12Device> md,dd,cd,qd;
     if(FAILED(motion->GetDevice(IID_PPV_ARGS(&md)))||FAILED(depth->GetDevice(IID_PPV_ARGS(&dd)))||
-       FAILED(cmd->GetDevice(IID_PPV_ARGS(&cd)))||FAILED(nq->GetDevice(IID_PPV_ARGS(&qd)))||
-       !d3d_owner::same(md.Get(),dd.Get())||!d3d_owner::same(md.Get(),cd.Get())||!d3d_owner::same(md.Get(),qd.Get())) {
+       FAILED(cmd->GetDevice(IID_PPV_ARGS(&cd)))||FAILED(nq->GetDevice(IID_PPV_ARGS(&qd))))return {};
+    if(luke) {
+        // Keep the real game resources/list/queue intact. Only the proven
+        // allocation owner bypasses an injector's private-queue interception.
+        // WRL operator& converts through ComPtrRef and clears the owner before
+        // returning ComPtr*. Take the storage addresses without that overload.
+        std::array<ComPtr<ID3D12Device>*,4> owners{
+            std::addressof(md),std::addressof(dd),std::addressof(cd),std::addressof(qd)};
+        for(auto* owner:owners) {
+            ComPtr<ID3D12Device> canonical;
+            const auto result=d3d_native::allocation_owner(owner->Get(),canonical);
+            if(FAILED(result)) {
+                static std::atomic_uint failures{};
+                if(failures.fetch_add(1,std::memory_order_relaxed)<8)
+                    log("native_allocation_owner_failed",static_cast<UINT>(result),
+                        reinterpret_cast<UINT64>(owner->Get()));
+                return {};
+            }
+            *owner=std::move(canonical);
+        }
+    }
+    if(!d3d_owner::same(md.Get(),dd.Get())||!d3d_owner::same(md.Get(),cd.Get())||!d3d_owner::same(md.Get(),qd.Get())) {
         if(call<8)log("device_mismatch",call); return {};
     }
     const auto od=output->GetDesc(), mv=motion->GetDesc(), dz=depth->GetDesc();
@@ -167,8 +214,10 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     g.producer_queue=nq.Get(); g.producer_command_list=cmd.Get(); g.verified_producer_device=qd.Get();
     g.output_x=get<UINT>(p,NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X);
     g.output_y=get<UINT>(p,NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y);
-    g.output_width=feature.out_width?feature.out_width:get<UINT>(p,NVSDK_NGX_Parameter_OutWidth,UINT(od.Width));
-    g.output_height=feature.out_height?feature.out_height:get<UINT>(p,NVSDK_NGX_Parameter_OutHeight,od.Height);
+    g.output_width=ngx_display_dimension(feature.out_width,p,NVSDK_NGX_Parameter_OutWidth,
+        UINT(od.Width),feature.creation_observed);
+    g.output_height=ngx_display_dimension(feature.out_height,p,NVSDK_NGX_Parameter_OutHeight,
+        od.Height,feature.creation_observed);
     g.motion_x=get<UINT>(p,NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X);
     g.motion_y=get<UINT>(p,NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y);
     const auto rw=get<UINT>(p,NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width,feature.width);
@@ -250,8 +299,12 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     g.depth_infinite=infinite;
     // The exact camera is consumed BEFORE SR changes list bindings or any
     // provider mutates native motion. All snapshots are recorded now.
-    if(luke&&!feature.flags_known)return {};
+    if(luke&&!feature.flags_known) {
+        if(call<=8||call%300==0)log("waiting_creation_flags",call,g.stream);
+        return {};
+    }
     const bool exact_camera=native_ingress::apply_camera(g,cmd.Get());
+    g.native_production_sequence=production_sequence;
     if(exact_camera)g.depth=depth.Get();
     if(luke && !exact_camera) {
         if(embedded::afw_snapshot().desired.mode!=0)embedded::report_afw_ingress(false,false);
@@ -266,69 +319,176 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
         log("rects",(UINT64(g.output_x)<<32)|g.output_y,(UINT64(g.motion_x)<<32)|g.motion_y,
             (UINT64(g.motion_width)<<32)|g.motion_height,(UINT64(g.depth_width)<<32)|g.depth_height);
         log("formats",mv.Format,dz.Format,od.Width,od.Height);
+        log("output_format",od.Format,od.Dimension,od.DepthOrArraySize,od.SampleDesc.Count);
     }
     return frame;
 }
 template<UINT slot> NVSDK_NGX_Result create(ID3D12GraphicsCommandList* list,NVSDK_NGX_Feature id,
     NVSDK_NGX_Parameter* p,NVSDK_NGX_Handle** out) {
-    const auto result=state().modules[slot].create(list,id,p,out);
-    if(NVSDK_NGX_SUCCEED(result)&&out&&*out&&p) {
-        Feature f{native_ingress::allocate_handle_key(),id,get<int>(p,NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags),
+    // Preserve the caller's real creation contract before an injector or the
+    // native implementation mutates its parameter map. No opaque handle reads.
+    Feature f{0,id,get<int>(p,NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags),
             get<UINT>(p,NVSDK_NGX_Parameter_Width),get<UINT>(p,NVSDK_NGX_Parameter_Height),
             get<UINT>(p,NVSDK_NGX_Parameter_OutWidth),get<UINT>(p,NVSDK_NGX_Parameter_OutHeight)};
-        f.flags_known=NVSDK_NGX_SUCCEED(p->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,&f.flags));
-        {std::scoped_lock lock(state().mutex); state().features[*out]=f;}
+    f.flags_known=p&&NVSDK_NGX_SUCCEED(p->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,&f.flags));
+    f.creation_observed=true;
+    const auto result=state().modules[slot].create(list,id,p,out);
+    if(NVSDK_NGX_SUCCEED(result)&&out&&*out&&p) {
+        f.identity=native_ingress::allocate_handle_key();
+        f.creation_source_identity=f.identity;
+        bool replaced{};
+        {std::scoped_lock lock(state().mutex);
+            replaced=state().features.contains(*out);
+            state().features[*out]=f;
+            state().native_production_sequences.erase(*out);}
+        // A new feature may reuse an opaque handle address even if its old
+        // release was missed. It must never inherit that generation's history.
+        if(replaced&&kingdom_come_process())
+            invalidate_dlss_motion_vector_stream_history(reinterpret_cast<UINT64>(*out));
         log("feature",reinterpret_cast<UINT64>(*out),f.flags,(UINT64(f.width)<<32)|f.height,
             (UINT64(f.out_width)<<32)|f.out_height);
     }
     return result;
 }
-thread_local unsigned evaluation_depth{};
-thread_local bool nested_evaluation{};
-thread_local unsigned outer_module{};
 void complete_color(ID3D12GraphicsCommandList* list,const NVSDK_NGX_Parameter* p,
-    const std::shared_ptr<const DlssMotionVectorFrame>& frame) {
+    const std::shared_ptr<const DlssMotionVectorFrame>& frame,bool hdr) {
     if(!frame||!frame->color_origin_token||!native_ingress::luke_detected()||
-       embedded::afw_snapshot().desired.mode==0||nested_evaluation)return;
+       embedded::afw_snapshot().desired.mode==0)return;
     auto color=native(get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_Output));
     auto cmd=native(list);if(!color||!cmd||!same(color.Get(),frame->output.Get()))return;
     ComPtr<ID3D12Device> cd,ld;
     if(FAILED(color->GetDevice(IID_PPV_ARGS(&cd)))||FAILED(cmd->GetDevice(IID_PPV_ARGS(&ld)))||
        !d3d_owner::same(cd.Get(),frame->verified_producer_device.Get())||
        !d3d_owner::same(ld.Get(),frame->verified_producer_device.Get()))return;
+    const auto desc=color->GetDesc();
+    // NGX's actual HDR creation flag supplies the typed float view contract.
+    // Typeless HDR storage alone never selects a numeric interpretation.
+    const auto view=hdr&&desc.Format==DXGI_FORMAT_R16G16B16A16_TYPELESS?DXGI_FORMAT_R16G16B16A16_FLOAT:
+        hdr&&desc.Format==DXGI_FORMAT_R32G32B32A32_TYPELESS?DXGI_FORMAT_R32G32B32A32_FLOAT:DXGI_FORMAT_UNKNOWN;
     const auto result=mark_luke_color_origin(cmd.Get(),color.Get(),frame->color_origin_token,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,frame->verified_producer_device.Get(),
-        {frame->output_x,frame->output_y,frame->output_width,frame->output_height});
-    if(FAILED(result))log("origin_marker_failed",static_cast<UINT>(result),frame->publication,frame->camera_frame_token);
+        {frame->output_x,frame->output_y,frame->output_width,frame->output_height},view);
+    if(FAILED(result)) {
+        log("origin_marker_failed",static_cast<UINT>(result),frame->publication,frame->camera_frame_token);
+        static std::atomic_uint64_t last_failure{};
+        const auto now=GetTickCount64();auto previous=last_failure.load();
+        if(now-previous>=1000&&last_failure.compare_exchange_strong(previous,now))
+            log("origin_marker_resource",desc.Format,desc.Dimension,
+                (UINT64(desc.DepthOrArraySize)<<32)|desc.SampleDesc.Count,view);
+    }
 }
-template<UINT slot> NVSDK_NGX_Result evaluate(ID3D12GraphicsCommandList* list,
+template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12GraphicsCommandList* list,
     const NVSDK_NGX_Handle* h,const NVSDK_NGX_Parameter* p,void* callback) {
-    bool sr=false;unsigned identity{};ComPtr<ID3D12CommandQueue> queue;
+    const auto original = c_entry ? state().modules[slot].evaluate_c : state().modules[slot].evaluate;
+    if(kingdom_come_process()) {
+        static std::atomic_uint64_t last_entry{};
+        const auto now=GetTickCount64();auto previous=last_entry.load();
+        if(now-previous>=1000&&last_entry.compare_exchange_strong(previous,now)) {
+            int flags{};
+            const auto result=p?p->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,&flags):NVSDK_NGX_Result_Fail;
+            log("native_evaluate_entry",slot,state().modules[slot].typed_implementation,h!=nullptr,
+                static_cast<UINT>(result));
+        }
+    }
+    auto native_list=native(list);
+    ComPtr<IUnknown> native_list_identity;
+    if(native_list)static_cast<void>(native_list.As(&native_list_identity));
+    bool sr=false,hdr=false,native_available=false;unsigned identity{};ComPtr<ID3D12CommandQueue> queue;
+    bool replaced_native_generation{};
+    Feature evaluation_metadata{};
     {std::scoped_lock lock(state().mutex);queue=state().queue;
-     if constexpr(slot<2)if(state().modules[slot].typed_implementation&&h&&p&&!state().features.contains(h)) {
+     if constexpr(slot<2)if(state().modules[slot].typed_implementation&&h&&p) {
         // This trampoline belongs to the SR/RR implementation module, unlike
         // the generic core dispatcher. Its provenance identifies feature type;
-        // complete native creation metadata must still be present to recover it.
-        Feature recovered{};recovered.type=slot==0?NVSDK_NGX_Feature_SuperSampling:NVSDK_NGX_Feature_RayReconstruction;
-        recovered.flags_known=NVSDK_NGX_SUCCEED(p->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,&recovered.flags));
-        recovered.width=get<UINT>(p,NVSDK_NGX_Parameter_Width);recovered.height=get<UINT>(p,NVSDK_NGX_Parameter_Height);
-        recovered.out_width=get<UINT>(p,NVSDK_NGX_Parameter_OutWidth);recovered.out_height=get<UINT>(p,NVSDK_NGX_Parameter_OutHeight);
-        if(recovered.flags_known&&recovered.width&&recovered.height&&recovered.out_width&&recovered.out_height) {
-            recovered.identity=native_ingress::allocate_handle_key();state().features.emplace(h,recovered);
+        // creation dimensions may already be erased or inverted in the eval
+        // map. A known public ancestor supplies its immutable contract only
+        // within this exact evaluation on the same native command list.
+        auto existing=state().features.find(h);
+        Feature recovered{};
+        const auto type=slot==0?NVSDK_NGX_Feature_SuperSampling:NVSDK_NGX_Feature_RayReconstruction;
+        const bool direct_creation=existing!=state().features.end()&&existing->second.creation_observed&&
+            existing->second.creation_source_identity!=0&&
+            existing->second.creation_source_identity==existing->second.identity;
+        const bool inherited=!direct_creation&&NgxCreationEvaluationScope::inherit_native(type,
+            native_list_identity.Get(),recovered);
+        const bool inherited_unchanged=inherited&&existing!=state().features.end()&&
+            existing->second.creation_observed&&existing->second.type==recovered.type&&
+            existing->second.creation_source_identity==recovered.creation_source_identity&&
+            existing->second.flags_known&&recovered.flags_known&&existing->second.flags==recovered.flags&&
+            existing->second.width==recovered.width&&existing->second.height==recovered.height&&
+            existing->second.out_width==recovered.out_width&&existing->second.out_height==recovered.out_height;
+        if(!inherited_unchanged&&(inherited||existing==state().features.end()||
+            !existing->second.creation_observed||!existing->second.flags_known)) {
+            bool recovered_metadata=inherited;
+            if(inherited&&!recovered.flags_known) {
+                Feature flags;
+                if(recover_typed_ngx_metadata(true,type,p,flags)&&flags.flags_known) {
+                    recovered.flags=flags.flags;recovered.flags_known=true;
+                }
+            }
+            if(!inherited&&existing!=state().features.end()&&existing->second.creation_observed) {
+                recovered=existing->second;
+                Feature flags;
+                if(recover_typed_ngx_metadata(true,type,p,flags)&&flags.flags_known) {
+                    recovered.flags=flags.flags;recovered.flags_known=true;recovered_metadata=true;
+                }
+            } else if(!inherited&&(existing==state().features.end()||!existing->second.flags_known))
+                recovered_metadata=recover_typed_ngx_metadata(true,type,p,recovered);
+            if(recovered_metadata) {
+                if(existing==state().features.end()) {
+                    recovered.identity=native_ingress::allocate_handle_key();state().features.emplace(h,recovered);
+                    log("typed_feature_recovered",slot,recovered.flags_known,
+                        (UINT64(recovered.width)<<32)|recovered.height,(UINT64(recovered.out_width)<<32)|recovered.out_height);
+                } else if(recovered.flags_known||inherited) {
+                    replaced_native_generation=inherited&&
+                        existing->second.creation_source_identity!=recovered.creation_source_identity;
+                    recovered.identity=replaced_native_generation?native_ingress::allocate_handle_key():existing->second.identity;
+                    existing->second=recovered;
+                    if(replaced_native_generation)state().native_production_sequences.erase(h);
+                    log(inherited?"typed_creation_contract_inherited":"typed_feature_flags_recovered",
+                        slot,recovered.flags,(UINT64(recovered.width)<<32)|recovered.height,
+                        (UINT64(recovered.out_width)<<32)|recovered.out_height);
+                }
+            }
         }
      }
      auto it=state().features.find(h);sr=it!=state().features.end()&&
        (it->second.type==NVSDK_NGX_Feature_SuperSampling||it->second.type==NVSDK_NGX_Feature_RayReconstruction);
-     if(it!=state().features.end())identity=it->second.identity;}
+     if(it!=state().features.end()) {identity=it->second.identity;
+         evaluation_metadata=it->second;
+         if(sr)native_available=state().modules[it->second.type==NVSDK_NGX_Feature_SuperSampling?0:1].typed_implementation;
+         hdr=it->second.flags_known&&(it->second.flags&NVSDK_NGX_DLSS_Feature_Flags_IsHDR)!=0;}}
+    if(replaced_native_generation)
+        invalidate_dlss_motion_vector_stream_history(reinterpret_cast<UINT64>(h));
     // An untyped core dispatch may reach the typed SR module, where recovery
     // is exact. Generic core parameters never classify a feature as SR.
-    if(!sr)return state().modules[slot].evaluate(list,h,p,callback);
-    struct Scope{Scope(){++evaluation_depth;}~Scope(){--evaluation_depth;}} scope;
-    if(evaluation_depth!=1) {
-        if(slot==outer_module)nested_evaluation=true;
-        return state().modules[slot].evaluate(list,h,p,callback);
+    if(!sr) {
+        // Known non-SR dispatch blocks an enclosing SR creation receipt.
+        // Unknown generic forwarding keeps the caller's exact dynamic scope.
+        if(evaluation_metadata.creation_observed) {
+            NgxCreationEvaluationScope non_sr(evaluation_metadata,native_list_identity.Get(),false);
+            return original(list,h,p,callback);
+        }
+        return original(list,h,p,callback);
     }
-    outer_module=slot;nested_evaluation=false;
+    NgxCreationEvaluationScope creation_scope(evaluation_metadata,native_list_identity.Get(),
+        !state().modules[slot].typed_implementation);
+    NgxEvaluationBoundary scope(slot,state().modules[slot].typed_implementation,native_available);
+    static std::atomic_uint boundary_reports{};
+    if(boundary_reports.fetch_add(1,std::memory_order_relaxed)<16)
+        log("ngx_observation_boundary",slot,state().modules[slot].typed_implementation,
+            native_available,scope.observes());
+    if(!scope.observes())return original(list,h,p,callback);
+    const bool kcd_production=kingdom_come_process();
+    std::uint64_t production_sequence{};
+    if(kcd_production) {
+        // Allocate at the unique native SR/RR owner, before any camera/guide
+        // capture can fail. A generic-only known SR call owns the same logical
+        // production. Nested dispatch and unrelated features do not allocate.
+        std::scoped_lock lock(state().mutex);
+        auto& sequence=state().native_production_sequences[h];
+        if(sequence!=UINT64_MAX)production_sequence=++sequence;
+    }
     // Observe the original game list even during late XR bootstrap. The actual
     // Execute hook, not this recording call, establishes the producer queue.
     native_ingress::observe_luke_production(list);
@@ -337,31 +497,60 @@ template<UINT slot> NVSDK_NGX_Result evaluate(ID3D12GraphicsCommandList* list,
         get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_Depth) != nullptr);
     std::shared_ptr<const DlssMotionVectorFrame> frame;
     if(sr)try {
-        frame=capture(list,h,p);
+        if(!kcd_production || production_sequence)frame=capture(list,h,p,production_sequence);
         neural_rendering::before_sr(identity,list,p,queue.Get());
     }catch(...){log("native_pre_sr_exception");}
-    const auto result=state().modules[slot].evaluate(list,h,p,callback);
+    const auto result=original(list,h,p,callback);
     if(sr&&NVSDK_NGX_SUCCEED(result))try {
         neural_rendering::after_sr(identity,list,p,queue.Get());
-        complete_color(list,p,frame);
+        if(scope.can_complete())complete_color(list,p,frame,hdr);
     }catch(...){log("native_completion_exception");}
+    if(kcd_production) {
+        if(NVSDK_NGX_FAILED(result) || !scope.can_complete() || !production_sequence)
+            invalidate_dlss_motion_vector_stream_history(reinterpret_cast<UINT64>(h));
+        if(production_sequence<=8 || production_sequence%300==0 || NVSDK_NGX_FAILED(result))
+            log("kcd_production_identity",production_sequence,frame?frame->camera_frame_token:0,
+                bool(frame),static_cast<UINT>(result));
+    }
     return result;
 }
 template<UINT slot> NVSDK_NGX_Result release(NVSDK_NGX_Handle* handle) {
     unsigned id{};{std::scoped_lock lock(state().mutex);auto it=state().features.find(handle);if(it!=state().features.end())id=it->second.identity;}
     const auto result=state().modules[slot].release(handle);
     if(NVSDK_NGX_SUCCEED(result)&&handle) {
-        {std::scoped_lock lock(state().mutex);state().features.erase(handle);}
+        {std::scoped_lock lock(state().mutex);state().features.erase(handle);
+            state().native_production_sequences.erase(handle);}
         retire_dlss_motion_vector_stream(reinterpret_cast<UINT64>(handle));
         neural_rendering::retire_handle(id);
     }
     return result;
 }
-void install(UINT i,HMODULE mod,void* create_fn,void* eval_fn,void* release_fn) {
+void install(UINT i,HMODULE mod,void* create_fn,void* eval_fn,void* release_fn,void* eval_c_fn = nullptr) {
     auto& m=state().modules[i];if(m.retained||!mod)return;
     auto c=GetProcAddress(mod,"NVSDK_NGX_D3D12_CreateFeature");
     auto e=GetProcAddress(mod,"NVSDK_NGX_D3D12_EvaluateFeature");
     auto r=GetProcAddress(mod,"NVSDK_NGX_D3D12_ReleaseFeature");if(!c||!e||!r)return;
+    auto ec=GetProcAddress(mod,"NVSDK_NGX_D3D12_EvaluateFeature_C");
+    // KCD embeds its public NGX SDK dispatcher in WHGame.dll. Its exports
+    // and C-callback evaluation can bypass both the NVIDIA and REAL VR bodies.
+    // Resolve only declared executable exports from the matching module PE.
+    if(i==4) {
+        c=native_export_address(mod,"NVSDK_NGX_D3D12_CreateFeature");
+        e=native_export_address(mod,"NVSDK_NGX_D3D12_EvaluateFeature");
+        r=native_export_address(mod,"NVSDK_NGX_D3D12_ReleaseFeature");
+        ec=native_export_address(mod,"NVSDK_NGX_D3D12_EvaluateFeature_C");
+        if(!c||!e||!r)return;
+    }
+    // KCD's existing injector can redirect exports before the XR layer loads.
+    // Hook the actual typed implementation body used by cached original calls.
+    if(i<2&&native_ingress::luke_detected()&&kingdom_come_process()) {
+        const auto original_c=native_export_address(mod,"NVSDK_NGX_D3D12_CreateFeature");
+        const auto original_e=native_export_address(mod,"NVSDK_NGX_D3D12_EvaluateFeature");
+        const auto original_r=native_export_address(mod,"NVSDK_NGX_D3D12_ReleaseFeature");
+        log("native_export_resolution",i,original_c&&original_e&&original_r,
+            e!=original_e,(UINT64(reinterpret_cast<std::uintptr_t>(e)-reinterpret_cast<std::uintptr_t>(mod))));
+        if(original_c&&original_e&&original_r){c=original_c;e=original_e;r=original_r;}
+    }
     HMODULE implementation{};GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCWSTR>(e),&implementation);
     m.typed_implementation=i<2&&implementation==mod;
     HMODULE retained{};if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
@@ -369,16 +558,30 @@ void install(UINT i,HMODULE mod,void* create_fn,void* eval_fn,void* release_fn) 
     m.create_hook=safetyhook::create_inline(c,create_fn,SafetyHookInline::StartDisabled);
     m.evaluate_hook=safetyhook::create_inline(e,eval_fn,SafetyHookInline::StartDisabled);
     m.release_hook=safetyhook::create_inline(r,release_fn,SafetyHookInline::StartDisabled);
-    if(!m.create_hook||!m.evaluate_hook||!m.release_hook){
-        m.create_hook={};m.evaluate_hook={};m.release_hook={};FreeLibrary(retained);log("hook_failed",i);return;}
+    const bool separate_c = ec && ec!=e && eval_c_fn;
+    if(separate_c)m.evaluate_c_hook=safetyhook::create_inline(ec,eval_c_fn,SafetyHookInline::StartDisabled);
+    if(!m.create_hook||!m.evaluate_hook||!m.release_hook||(separate_c&&!m.evaluate_c_hook)){
+        m.create_hook={};m.evaluate_hook={};m.evaluate_c_hook={};m.release_hook={};FreeLibrary(retained);log("hook_failed",i);return;}
     m.create=m.create_hook.original<Create>();m.evaluate=m.evaluate_hook.original<Evaluate>();
+    m.evaluate_c=separate_c ? m.evaluate_c_hook.original<Evaluate>() : m.evaluate;
     m.release=m.release_hook.original<Release>();m.retained=retained;
     (void)m.create_hook.enable();(void)m.evaluate_hook.enable();(void)m.release_hook.enable();log("hook_installed",i);
+    if(separate_c){(void)m.evaluate_c_hook.enable();log("hook_c_installed",i);}
+}
+template<UINT slot> void install_dispatch(HMODULE module) {
+    install(slot,module,reinterpret_cast<void*>(&create<slot>),
+        reinterpret_cast<void*>(&evaluate<slot>),reinterpret_cast<void*>(&release<slot>),
+        reinterpret_cast<void*>(&evaluate<slot,true>));
 }
 void install_feature_hooks() {
-    install(0,GetModuleHandleW(L"nvngx_dlss.dll"),reinterpret_cast<void*>(&create<0>),reinterpret_cast<void*>(&evaluate<0>),reinterpret_cast<void*>(&release<0>));
-    install(1,GetModuleHandleW(L"nvngx_dlssd.dll"),reinterpret_cast<void*>(&create<1>),reinterpret_cast<void*>(&evaluate<1>),reinterpret_cast<void*>(&release<1>));
-    install(2,GetModuleHandleW(L"_nvngx.dll"),reinterpret_cast<void*>(&create<2>),reinterpret_cast<void*>(&evaluate<2>),reinterpret_cast<void*>(&release<2>));
+    install_dispatch<0>(GetModuleHandleW(L"nvngx_dlss.dll"));
+    install_dispatch<1>(GetModuleHandleW(L"nvngx_dlssd.dll"));
+    install_dispatch<2>(GetModuleHandleW(L"_nvngx.dll"));
+    if(kingdom_come_process()) {
+        const auto module=luke_dispatch_module();
+        install_dispatch<3>(module);
+        install_dispatch<4>(GetModuleHandleW(L"WHGame.dll"));
+    }
     native_ingress::poll_streamline();
     native_ingress::poll_d3d11_ngx();
     native_vulkan::poll_capture();
@@ -407,22 +610,11 @@ struct Discovery {
 };
 Discovery& discovery() { static auto* d=new Discovery; return *d; }
 struct DiscoveryInfo {
-    NVSDK_NGX_FeatureCommonInfo info{};
-    std::vector<const wchar_t*> paths;
+    std::unique_ptr<NgxFeaturePaths> paths;
     const NVSDK_NGX_FeatureCommonInfo* with_directory(const NVSDK_NGX_FeatureCommonInfo* given) {
-        const auto& directory=discovery().directory;
-        if(given)info=*given;
-        const UINT count=given&&given->PathListInfo.Path?given->PathListInfo.Length:0;
-        for(UINT i=0;i<count;++i) {
-            const wchar_t* path=given->PathListInfo.Path[i];
-            if(path&&_wcsicmp(path,directory.c_str())==0)return given;
-            paths.push_back(path);
-        }
-        paths.push_back(directory.c_str());
-        info.PathListInfo.Path=paths.data();
-        info.PathListInfo.Length=static_cast<unsigned int>(paths.size());
-        log("ngx_discovery_paths",paths.size());
-        return &info;
+        paths=std::make_unique<NgxFeaturePaths>(given,discovery().directory);
+        log("ngx_discovery_paths",paths->get()->PathListInfo.Length);
+        return paths->changed()?paths->get():given;
     }
 };
 NVSDK_NGX_Result init_ext(unsigned long long id,const wchar_t* data,ID3D12Device* device,
@@ -431,7 +623,10 @@ NVSDK_NGX_Result init_ext(unsigned long long id,const wchar_t* data,ID3D12Device
     try { info=extended.with_directory(given); } catch(...) {}
     native_ingress::install_device(device);
     install_feature_hooks();
-    return discovery().ext(id,data,device,version,info);
+    const auto result=discovery().ext(id,data,device,version,info);
+    log("ngx_init_ext_result",static_cast<UINT>(result),id,
+        info?info->PathListInfo.Length:0);
+    return result;
 }
 NVSDK_NGX_Result init_project(const char* project,NVSDK_NGX_EngineType engine,
     const char* engine_version,const wchar_t* data,ID3D12Device* device,
@@ -440,7 +635,10 @@ NVSDK_NGX_Result init_project(const char* project,NVSDK_NGX_EngineType engine,
     try { info=extended.with_directory(given); } catch(...) {}
     native_ingress::install_device(device);
     install_feature_hooks();
-    return discovery().project(project,engine,engine_version,data,device,version,info);
+    const auto result=discovery().project(project,engine,engine_version,data,device,version,info);
+    log("ngx_init_project_result",static_cast<UINT>(result),static_cast<UINT>(engine),
+        info?info->PathListInfo.Length:0);
+    return result;
 }
 // The driver's NGX core, as the SDK finds it when nothing ships next to the
 // game.
@@ -453,6 +651,9 @@ HMODULE load_ngx_core() {
     return LoadLibraryExW(path.c_str(),nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);
 }
 } // namespace
+#ifdef XRFG_NATIVE_INGRESS_TESTS
+#include "ngx_dispatch_test.inc"
+#endif
 void prepare_ngx_feature_discovery(const wchar_t* directory) noexcept {
     try {
         auto& d=discovery(); if(d.ext_hook||d.project_hook||!directory||!*directory)return;

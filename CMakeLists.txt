@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.483.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.500.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -440,12 +440,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     endif()
     target_include_directories(xrfg_d3d12_history PUBLIC "${XRFG_VULKAN_INCLUDE_DIR}")
     add_library(OFXR_vulkan_queue_layer SHARED src/vulkan_layer/vulkan_queue_layer.cpp)
-    target_include_directories(OFXR_vulkan_queue_layer PRIVATE "${XRFG_VULKAN_INCLUDE_DIR}")
+    target_include_directories(OFXR_vulkan_queue_layer PRIVATE include "${XRFG_VULKAN_INCLUDE_DIR}")
     target_compile_features(OFXR_vulkan_queue_layer PRIVATE cxx_std_20)
     target_compile_definitions(OFXR_vulkan_queue_layer PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN VK_NO_PROTOTYPES)
     if(XRFG_BUILD_TESTS)
         add_executable(xrfg_vulkan_queue_layer_tests tests/vulkan_queue_layer_tests.cpp)
-        target_include_directories(xrfg_vulkan_queue_layer_tests PRIVATE "${XRFG_VULKAN_INCLUDE_DIR}")
+        target_include_directories(xrfg_vulkan_queue_layer_tests PRIVATE include "${XRFG_VULKAN_INCLUDE_DIR}")
         target_compile_features(xrfg_vulkan_queue_layer_tests PRIVATE cxx_std_20)
         target_compile_definitions(xrfg_vulkan_queue_layer_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN VK_NO_PROTOTYPES)
         add_test(NAME xrfg_vulkan_queue_layer_tests COMMAND xrfg_vulkan_queue_layer_tests)
@@ -550,8 +550,30 @@ if(WIN32 AND XRFG_BUILD_LAYER)
 
     add_library(XR_APILAYER_XRFrameBridge_diagnostic ${XRFG_LAYER_KIND}
         ${XRFG_LAYER_SOURCE})
-    target_sources(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE src/layer/ngx_guide_capture.cpp src/layer/provider_api.cpp src/ingress/native_ingress.cpp src/ingress/streamline_camera.cpp src/ingress/d3d11_native_ingress.cpp src/ingress/vulkan_native_ingress_disabled.cpp)
+    target_sources(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE src/layer/ngx_guide_capture.cpp src/layer/provider_api.cpp src/ingress/native_ingress.cpp src/ingress/streamline_camera.cpp src/ingress/d3d11_native_ingress.cpp src/ingress/vulkan_native_ingress.cpp src/ingress/vulkan_command_stream.cpp)
     target_link_libraries(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE safetyhook version)
+    if(TARGET xrfg_vulkan_capture_suspended_tests)
+        add_dependencies(xrfg_vulkan_capture_suspended_tests XR_APILAYER_XRFrameBridge_diagnostic)
+        set_tests_properties(xrfg_vulkan_capture_suspended_tests PROPERTIES
+            PASS_REGULAR_EXPRESSION "Shipping Vulkan capture stays suspended")
+        add_test(NAME xrfg_shipping_vulkan_scope COMMAND xrfg_vulkan_capture_suspended_tests "$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>")
+        foreach(game DOOMTheDarkAges TheGreatCircle)
+            add_test(NAME xrfg_shipping_luke_bootstrap_${game} COMMAND "${CMAKE_COMMAND}"
+                "-DTEST_EXE=$<TARGET_FILE:xrfg_vulkan_capture_suspended_tests>"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DLUKE_FIXTURE=$<TARGET_FILE:xrfg_luke_runtime_fixture>" -DMODE=selected
+                "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/shipping-luke-${game}"
+                "-DGAME_EXE=${game}.exe"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_vulkan_shipping.cmake")
+            set_tests_properties(xrfg_shipping_luke_bootstrap_${game} PROPERTIES TIMEOUT 25)
+        endforeach()
+        add_test(NAME xrfg_shipping_flat_doom_scope COMMAND "${CMAKE_COMMAND}"
+            "-DTEST_EXE=$<TARGET_FILE:xrfg_vulkan_capture_suspended_tests>"
+            "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+            "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/shipping-flat-doom"
+            -DGAME_EXE=DOOMTheDarkAges.exe -DMODE=flat
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_vulkan_shipping.cmake")
+    endif()
     target_include_directories(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE "${XRFG_DLSS_SDK_ROOT}/include" "${XRFG_DEPENDENCY_ROOT}/Streamline")
     target_include_directories(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE
         include
@@ -741,6 +763,18 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_link_libraries(xrfg_luke_color_origin_tests PRIVATE d3d12 dxgi xrfg_bridge_flight_logger)
         add_test(NAME xrfg_luke_color_origin COMMAND xrfg_luke_color_origin_tests)
         set_tests_properties(xrfg_luke_color_origin PROPERTIES TIMEOUT 30)
+        add_executable(xrfg_ngx_feature_metadata_tests tests/ngx_feature_metadata_tests.cpp)
+        target_include_directories(xrfg_ngx_feature_metadata_tests PRIVATE include "${XRFG_DLSS_SDK_ROOT}/include")
+        target_compile_features(xrfg_ngx_feature_metadata_tests PRIVATE cxx_std_20)
+        target_compile_definitions(xrfg_ngx_feature_metadata_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        add_test(NAME xrfg_ngx_feature_metadata COMMAND xrfg_ngx_feature_metadata_tests)
+        add_library(xrfg_native_export_fixture SHARED tests/native_export_fixture.cpp)
+        add_executable(xrfg_native_export_address_tests tests/native_export_address_tests.cpp)
+        target_include_directories(xrfg_native_export_address_tests PRIVATE include)
+        target_compile_features(xrfg_native_export_address_tests PRIVATE cxx_std_20)
+        target_compile_definitions(xrfg_native_export_address_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        add_dependencies(xrfg_native_export_address_tests xrfg_native_export_fixture)
+        add_test(NAME xrfg_native_export_address COMMAND xrfg_native_export_address_tests "$<TARGET_FILE:xrfg_native_export_fixture>")
         target_link_libraries(xrfg_d3d11_color_identity_tests PRIVATE xrfg_d3d12_history)
         target_compile_features(xrfg_d3d11_color_identity_tests PRIVATE cxx_std_20)
         target_compile_definitions(xrfg_d3d11_color_identity_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -1196,6 +1230,13 @@ if(XRFG_BUILD_LAYER)
 endif()
 
 include(cmake/streamline_abi_tests.cmake)
+if(TARGET xrfg_three_slot_director_tests AND TARGET xrfg_sl_fixture_legacy)
+    add_dependencies(xrfg_three_slot_director_tests xrfg_sl_fixture_legacy)
+    add_test(NAME xrfg_luke_ngx_actual_capture COMMAND xrfg_three_slot_director_tests
+        luke-ngx-actual-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
+        "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
+    set_tests_properties(xrfg_luke_ngx_actual_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
 
 if(XRFG_BUILD_TESTS AND TARGET xrfg_three_slot_director_tests)
     add_library(xrfg_luke_runtime_fixture SHARED tests/luke_runtime_fixture.cpp)
@@ -1204,6 +1245,18 @@ if(XRFG_BUILD_TESTS AND TARGET xrfg_three_slot_director_tests)
     file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/RealVR.ini" CONTENT "[Horizon]\nWorldScale=1.0\n")
     add_custom_command(TARGET xrfg_three_slot_director_tests POST_BUILD COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${XRFG_AFW_RUNTIME}" "$<TARGET_FILE_DIR:xrfg_three_slot_director_tests>/PDAFWPlugin.dll")
     add_test(NAME xrfg_luke_standalone_context COMMAND xrfg_three_slot_director_tests luke-standalone-context)
+    add_test(NAME xrfg_luke_missing_producer_bypass COMMAND xrfg_layer_manual_disarm_tests
+        ${XRFG_TEST_LAYER_DLL} luke-no-guides "$<TARGET_FILE:xrfg_luke_runtime_fixture>")
+    set_tests_properties(xrfg_luke_missing_producer_bypass PROPERTIES TIMEOUT 45)
+    foreach(game DOOMTheDarkAges TheGreatCircle)
+        add_test(NAME xrfg_luke_vulkan_bootstrap_${game} COMMAND "${CMAKE_COMMAND}"
+            "-DTEST_EXE=$<TARGET_FILE:xrfg_three_slot_director_tests>"
+            "-DLUKE_FIXTURE=$<TARGET_FILE:xrfg_luke_runtime_fixture>"
+            "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/luke-vulkan-${game}"
+            "-DGAME_EXE=${game}.exe"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_vulkan_bootstrap.cmake")
+        set_tests_properties(xrfg_luke_vulkan_bootstrap_${game} PROPERTIES TIMEOUT 30)
+    endforeach()
     set_tests_properties(xrfg_luke_standalone_context PROPERTIES TIMEOUT 30)
 endif()
 

@@ -66,6 +66,7 @@ int main() {
         for (auto& bridge:transport) require(bridge.initialize(context.Get(),d12.Get(),queue.Get()),"per-stream shared transport");
         xrfg::configure_dlss_motion_vector_tracking(true);
         std::array<std::shared_ptr<const xrfg::DlssMotionVectorFrame>,2> held_first;
+        std::array<std::uint64_t,2> previous_epoch{};
         for (unsigned iteration=0;iteration<20;++iteration) {
             // Deliberately reverse submission order on alternating frames.
             for (unsigned order=0;order<2;++order) {
@@ -92,8 +93,16 @@ int main() {
                 publication.depth=bridge.resource(xrfg::D3D11GuideTransport::depth);publication.producer_queue=queue.Get();publication.producer_command_list=bridge.list();
                 publication.verified_producer_device=d12.Get();publication.direct_output_receipt=true;
                 publication.output_width=publication.output_height=publication.motion_width=publication.motion_height=publication.depth_width=publication.depth_height=8;
+                if(iteration>=6 && iteration<12)
+                    publication.motion_width=publication.motion_height=publication.depth_width=publication.depth_height=4;
                 publication.resource_state=publication.depth_resource_state=D3D12_RESOURCE_STATE_COMMON;publication.scale_x=-8;publication.scale_y=8;
                 auto frame=xrfg::publish_dlss_motion_vectors(publication);expect(bool(frame),"owned immutable guide snapshot");
+                if(frame) {
+                    if(iteration==6 || iteration==12)
+                        expect(frame->epoch==previous_epoch[eye]+1 && frame->serial==1 && frame->reset && !frame->previous_same_native_camera,
+                            "Quality/Performance transition resets native guide history without NGX Reset");
+                    previous_epoch[eye]=frame->epoch;
+                }
                 if (iteration==0) held_first[eye]=frame;
                 require(bridge.submit(),"actual submission and fence receipt");
                 if (!frame) continue;

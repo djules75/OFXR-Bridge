@@ -17,6 +17,7 @@
 #include <dxgi1_6.h>
 
 #ifdef XRFG_NATIVE_DLSSG
+#include "xrfg/ngx_feature_paths.hpp"
 #include "native_dlssg_pack_shader.hpp"
 #include "native_dlssg_pixel_shader.hpp"
 #include "native_dlssg_seed_shader.hpp"
@@ -353,9 +354,8 @@ HRESULT acquire_ngx(ID3D12Device *d) {
         }
     }
     const auto dir = module_directory();
-    const wchar_t *paths[]{dir.c_str()};
-    NVSDK_NGX_FeatureCommonInfo info{};
-    info.PathListInfo = {paths, 1};
+    NgxFeaturePaths search(nullptr,dir.wstring());
+    auto info=*search.get();
     if (environment(L"XRFG_TEST_NATIVE_DLSSG_VERBOSE")) {
         info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
         info.LoggingInfo.LoggingCallback = [](const char *message, NVSDK_NGX_Logging_Level,
@@ -444,15 +444,15 @@ UINT recover_direct(ID3D12Device* device, NVSDK_NGX_Parameter* private_caps) {
             SUCCEEDED(factory->EnumAdapterByLuid(device->GetAdapterLuid(), IID_PPV_ARGS(&adapter))) &&
             SUCCEEDED(adapter->GetDesc1(&desc)) && desc.VendorId == 0x10de &&
             !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
-            const auto dir = module_directory(); const wchar_t* paths[]{dir.c_str()};
-            NVSDK_NGX_FeatureCommonInfo common{}; common.PathListInfo = {paths, 1};
+            const auto dir = module_directory();
+            NgxFeaturePaths search(nullptr,dir.wstring());
             wchar_t local[32768]{}; GetEnvironmentVariableW(L"LOCALAPPDATA", local, 32768);
             const auto logs = *local ? std::filesystem::path(local) / L"OFXR Autonomous" / L"NGX" : dir / L"NGX";
             NVSDK_NGX_FeatureDiscoveryInfo info{};
             info.SDKVersion = NVSDK_NGX_Version_API; info.FeatureID = NVSDK_NGX_Feature_FrameGeneration;
             info.Identifier.IdentifierType = NVSDK_NGX_Application_Identifier_Type_Application_Id;
             info.Identifier.v.ApplicationId = 0x4f4658524155544full;
-            info.ApplicationDataPath = logs.c_str(); info.FeatureInfo = &common;
+            info.ApplicationDataPath = logs.c_str(); info.FeatureInfo = search.get();
             NVSDK_NGX_FeatureRequirement requirements{};
             auto result = direct_provider.requirements(adapter.Get(), &info, &requirements);
             diagnose("direct requirements result=0x%x support=0x%x", unsigned(result), unsigned(requirements.FeatureSupported));

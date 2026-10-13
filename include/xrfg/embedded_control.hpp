@@ -48,6 +48,7 @@ struct AfwSnapshot {
     std::uint64_t failed_frames{};
     std::uint64_t evaluations{};
     std::uint64_t successful_evaluations{};
+    std::uint64_t last_success_ms{};
     std::uint64_t ingress_frames{};
     std::uint64_t published_ingress_frames{};
     std::uint64_t missing_camera_ingress_frames{};

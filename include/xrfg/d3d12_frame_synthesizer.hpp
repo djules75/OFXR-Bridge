@@ -215,7 +215,7 @@ public:
 
     // Bit-exact transport of one immutable history capture. This does not
     // seed or dispatch any temporal/optical-flow backend. The history lease is
-    // retired against this copy's completion fence, without a rolling anchor.
+    // retired against this copy's completion fence, preserving the rolling anchor.
     [[nodiscard]] HRESULT submit_copy(
         const D3D12HistoryCaptureTicket& current,
         std::span<const D3D12ReprojectionView> current_source_views,
@@ -305,6 +305,9 @@ public:
     [[nodiscard]] HRESULT previous_submission_available() noexcept;
     // Poll this owned output ticket, never the newest pair or a deferred copy.
     [[nodiscard]] HRESULT ticket_available(const D3D12FrameSynthesisTicket& ticket) noexcept;
+    // Retain the immutable completion owner while this exact output is submitted.
+    [[nodiscard]] Microsoft::WRL::ComPtr<ID3D12Fence> submission_fence(
+        const D3D12FrameSynthesisTicket& ticket) noexcept;
 
 
     [[nodiscard]] HRESULT wait_for_idle() noexcept;
@@ -345,6 +348,9 @@ public:
         ID3D12CommandQueue* queue) noexcept;
 
     [[nodiscard]] bool initialized() const noexcept;
+
+    // Failure-only observations; never signal, wait, flush or release GPU work.
+    void report_pending_submission() const noexcept;
 
 private:
     struct Impl;

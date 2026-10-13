@@ -35,10 +35,16 @@ struct CommandSplit {
 };
 bool initialize_commands(VkInstance instance,VkPhysicalDevice physical_device,
     VkDevice device,PFN_vkGetInstanceProcAddr gipa,PFN_vkGetDeviceProcAddr gdpa);
-// Called by the autonomous loader/GDPA hook. Returns a hook only when an
+// Called by the autonomous GIPA/GDPA hooks. Null device denotes GIPA resolution
+// before device creation; actual calls route by their observed dispatch owner.
+// Returns a hook only when an
 // original exists; never invents unsupported commands or mutations of pNext.
 PFN_vkVoidFunction resolve_command(VkDevice device,const char* name,
     PFN_vkVoidFunction original) noexcept;
+// Early selected-game coverage of actual loader exports, including pointers
+// cached before GIPA/GDPA interception. Internal work uses their trampolines.
+unsigned install_command_entry_hooks(void* loader_module) noexcept;
+PFN_vkVoidFunction unhooked_command(PFN_vkVoidFunction function) noexcept;
 // The current actual prefix/continuation for native NGX and raw copy commands.
 VkCommandBuffer native(VkCommandBuffer original) noexcept;
 // Returns only the device associated with an observed native allocation.
@@ -48,6 +54,9 @@ VkDevice device_for(VkCommandBuffer original) noexcept;
 // UINT32_MAX means the application's allocation/pool was not observed.
 uint32_t queue_family_for(VkCommandBuffer original) noexcept;
 bool can_split(VkCommandBuffer original) noexcept;
+// 1 missing device, 2 missing allocation, 4 not recording, 8 missing pool,
+// 16 secondary, 32 rendering, 64 replay overflow, 128 submitted, 256 no state.
+unsigned split_refusal(VkCommandBuffer original) noexcept;
 // Own capture resources before the first raw copy, including recordings whose
 // later split fails. References survive submission and are released outside the
 // command mutex only when the application resets/frees that exact recording.
