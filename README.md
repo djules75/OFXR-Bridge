@@ -1,8 +1,12 @@
-## Current shared Autonomous endpoint: V519
+## Current shared Autonomous endpoint: V520
+
+V513 pre-HUD baseline + selected KCD V603 in V519 + accepted Indiana V701 in V520. Combined game validation pending; KCD distant-tree wobble remains reported. Private release: https://github.com/tig3rmast3r/ofxr-development/releases/tag/ofxr-autonomous-v520 . See V520_SELECTED_INDIANA_INTEGRATION.md and the shared branch provenance records. HUD experiments remain local and paused.
+
+## Historical shared Autonomous endpoint: V519
 
 Owner-selected KCD V603 merged onto pre-HUD V513. Combined runtime validation pending; distant-tree wobble remains reported. See autonomous/docs/V519_SELECTED_KCD_INTEGRATION.md and docs/ofxr-autonomous/KCD_SELECTED_DELTA.md. HUD experiments remain local.
 
-## Current shared Autonomous endpoint: V513
+## Historical shared Autonomous endpoint: V513
 
 Owner-selected export through V513. See [integration record](/docs/ofxr-autonomous/ACCEPTED_INTEGRATION.md) and the accepted-build provenance map. Earlier entries below describe historical checkpoints; V514-V518 HUD experiments remain local.
 
