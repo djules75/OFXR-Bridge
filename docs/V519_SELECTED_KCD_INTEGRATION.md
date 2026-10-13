@@ -18,3 +18,5 @@ A local fixture-only investigation is excluded from the exported branch.
 The real GPU director tests pass. Integration checks explicitly exclude only
 that existing invalid mock setup; no production renderer behavior is altered
 to accommodate it. This limitation remains documented for later test repair.
+
+Final validation: optimized Release builds. Ten affected checks pass in 10.94s with no skips: terminal D11 capture, native motion/depth GPU, KCD logical and scene capture, Outlaws logical capture/startup, both Vulkan title bootstraps, and bundled/actual-game KCD PDAFW quality. The preceding broad run passed 179/180 applicable cases; its one failure exposed a shared test observer expecting KCD scalars in the Outlaws fixture. The observer now keeps both strict per-title oracles, and affected checks pass. Existing CPU mock director limitation remains excluded. No game/headset verdict is inferred.
