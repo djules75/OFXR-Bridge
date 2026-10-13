@@ -193,7 +193,7 @@ struct ReadReport {
     std::uint32_t* token{};
     HRESULT result{E_UNEXPECTED};
     UINT width{}, height{};
-    ~ReadReport() { report_read(result, token ? *token : 0, width, height); }
+    ~ReadReport() { if (token) report_read(result, *token, width, height); }
     HRESULT finish(HRESULT value) noexcept { result = value; return value; }
 };
 } // namespace
@@ -291,131 +291,173 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
       catch (...) { return E_FAIL; }
 }
 
+namespace {
+HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
+    std::uint32_t* tokens, HRESULT* results, unsigned count,
+    D3D12_RESOURCE_STATES state, DWORD timeout_ms) noexcept {
+    struct Plan {
+        D3D12_RESOURCE_DESC original{};
+        LukeColorOriginLayout layout{};
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        bool valid{};
+    };
+    std::array<Plan, 2> plans{};
+    std::array<ReadReport, 2> reports{};
+    for (unsigned i=0; i<count; ++i) {
+        tokens[i]=0; results[i]=E_UNEXPECTED; reports[i].token=&tokens[i];
+    }
+    const auto finish = [&](HRESULT hr) {
+        for (unsigned i=0; i<count; ++i) {
+            if (results[i]==E_UNEXPECTED) results[i]=hr;
+            reports[i].finish(results[i]);
+        }
+        return hr;
+    };
+    try {
+        if (!queue) return finish(E_POINTER);
+        const auto output_extent=g_output_extent.load(std::memory_order_acquire);
+        unsigned valid_count{}, row_width{};
+        for (unsigned i=0; i<count; ++i) {
+            auto& plan=plans[i];
+            if (!colors[i]) { results[i]=E_POINTER; continue; }
+            plan.original=colors[i]->GetDesc();
+            const auto& original=plan.original;
+            if (original.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D || original.SampleDesc.Count!=1 ||
+                original.DepthOrArraySize!=1 || original.Width>16384 || original.Width<kLukeOriginWidth ||
+                !original.Height || !luke_origin_pixel_bytes(original.Format)) {
+                results[i]=DXGI_ERROR_UNSUPPORTED; continue;
+            }
+            configure_luke_color_origin_extent(static_cast<UINT>(original.Width),original.Height);
+            if (!output_extent) {
+                report_origin_layout(false,1,0,extent_bits(static_cast<UINT>(original.Width),original.Height));
+                results[i]=E_PENDING; continue;
+            }
+            if (!compact_luke_origin_layout(static_cast<UINT>(output_extent>>32),static_cast<UINT>(output_extent),
+                    static_cast<UINT>(original.Width),original.Height,plan.layout)) {
+                report_origin_layout(false,2,output_extent,extent_bits(static_cast<UINT>(original.Width),original.Height));
+                results[i]=E_PENDING; continue;
+            }
+            plan.valid=true; ++valid_count;
+            reports[i].width=plan.layout.scan.width; reports[i].height=plan.layout.scan.height;
+            row_width=std::max(row_width,plan.layout.scan.width);
+        }
+        if (!valid_count) return finish(results[0]);
+        std::shared_ptr<Reader> reader;
+        HRESULT result=get_reader(queue,reader);
+        if (FAILED(result)) return finish(result);
+        std::scoped_lock lock(reader->mutex);
+        const bool timing=bridge_flight_logger().ram_enabled() || bridge_flight_logger().enabled();
+        const auto phase=[&](unsigned stage,HRESULT hr) {
+            if (timing) bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                hr,stage,reinterpret_cast<std::uint64_t>(reader.get()),reader->last_fence);
+        };
+        phase(120,S_OK);
+        result=wait_reader(*reader,timeout_ms); phase(121,result);
+        if (FAILED(result)) return finish(result); // Retire before any allocator/readback reuse.
+        UINT64 bytes{};
+        for (auto& plan:plans) if (plan.valid) {
+            auto roi=plan.original; roi.Width=plan.layout.scan.width;
+            roi.Height=plan.layout.scan.height; roi.MipLevels=1;
+            const UINT64 offset=(bytes+D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT-1) &
+                ~(UINT64(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT)-1);
+            reader->device->GetCopyableFootprints(&roi,0,1,offset,&plan.footprint,nullptr,nullptr,nullptr);
+            bytes=plan.footprint.Offset+UINT64(plan.footprint.Footprint.RowPitch)*roi.Height;
+        }
+        if (!reader->readback || reader->bytes!=bytes) {
+            D3D12_HEAP_PROPERTIES heap{}; heap.Type=D3D12_HEAP_TYPE_READBACK;
+            heap.CreationNodeMask=heap.VisibleNodeMask=1;
+            D3D12_RESOURCE_DESC desc{}; desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
+            desc.Width=bytes; desc.Height=1; desc.DepthOrArraySize=desc.MipLevels=1;
+            desc.SampleDesc.Count=1; desc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            ComPtr<ID3D12Resource> buffer;
+            result=reader->device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,
+                D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(buffer.GetAddressOf()));
+            if (FAILED(result)) return finish(result);
+            reader->readback=std::move(buffer); reader->bytes=bytes;
+        }
+        // Allocate scratch before Map, so no throwing allocation can leave it mapped.
+        std::vector<float> row(row_width);
+        result=reader->allocator->Reset();
+        if (SUCCEEDED(result)) result=reader->list->Reset(reader->allocator.Get(),nullptr);
+        if (FAILED(result)) return finish(result);
+        for (unsigned i=0; i<count; ++i) if (plans[i].valid) {
+            const auto& plan=plans[i];
+            D3D12_TEXTURE_COPY_LOCATION source{};
+            source.pResource=colors[i]; source.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            D3D12_TEXTURE_COPY_LOCATION destination{};
+            destination.pResource=reader->readback.Get(); destination.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            destination.PlacedFootprint=plan.footprint;
+            if (state!=D3D12_RESOURCE_STATE_COPY_SOURCE) {
+                auto barrier=transition(colors[i],state,D3D12_RESOURCE_STATE_COPY_SOURCE);
+                reader->list->ResourceBarrier(1,&barrier);
+            }
+            const D3D12_BOX box{0,0,0,plan.layout.scan.width,plan.layout.scan.height,1};
+            reader->list->CopyTextureRegion(&destination,0,0,0,&source,&box);
+            if (state!=D3D12_RESOURCE_STATE_COPY_SOURCE) {
+                auto barrier=transition(colors[i],D3D12_RESOURCE_STATE_COPY_SOURCE,state);
+                reader->list->ResourceBarrier(1,&barrier);
+            }
+        }
+        result=reader->list->Close();
+        if (FAILED(result)) return finish(result);
+        ID3D12CommandList* lists[]{reader->list.Get()}; queue->ExecuteCommandLists(1,lists);
+        const auto value=reader->next_fence++;
+        result=queue->Signal(reader->fence.Get(),value);
+        if (FAILED(result)) { reader->poisoned=true; return finish(result); }
+        reader->last_fence=value;
+        phase(126,static_cast<HRESULT>(valid_count)); // Number of colors in this submission.
+        phase(123,result);
+        result=wait_reader(*reader,timeout_ms); phase(124,result);
+        if (FAILED(result)) {
+            bridge_flight_logger().event(BridgeFlightOperation::gpu_fence_snapshot,49305,
+                reinterpret_cast<std::uintptr_t>(reader->fence.Get()),value,reader->fence->GetCompletedValue());
+            bridge_flight_logger().event(BridgeFlightOperation::gpu_device_status,
+                reader->device->GetDeviceRemovedReason(),reinterpret_cast<std::uintptr_t>(queue),
+                reinterpret_cast<std::uintptr_t>(reader->device.Get()),49305);
+            return finish(result);
+        }
+        void* mapped{}; const D3D12_RANGE range{0,static_cast<SIZE_T>(bytes)};
+        result=reader->readback->Map(0,&range,&mapped);
+        if (FAILED(result)) return finish(result);
+        HRESULT decode_status=S_OK;
+        for (unsigned i=0; i<count; ++i) if (plans[i].valid) {
+            const auto& plan=plans[i];
+            const auto pixel_bytes=luke_origin_pixel_bytes(plan.original.Format);
+            std::uint32_t exact_token{}; bool ambiguous=false;
+            for (UINT y=0; y<plan.layout.scan.height; ++y) {
+                const auto* pixels=static_cast<const std::byte*>(mapped)+plan.footprint.Offset+
+                    UINT64(y)*plan.footprint.Footprint.RowPitch;
+                for (UINT x=0; x<plan.layout.scan.width; ++x)
+                    row[x]=luke_origin_luma(pixels+x*pixel_bytes,plan.original.Format);
+                const auto decoded=decode_luke_origin_row(std::span<const float>(row.data(),plan.layout.scan.width));
+                ambiguous|=decoded.ambiguous;
+                if (!decoded.token) continue;
+                if (exact_token && exact_token!=decoded.token) ambiguous=true;
+                exact_token=decoded.token;
+            }
+            results[i]=ambiguous ? HRESULT_FROM_WIN32(ERROR_INVALID_DATA) :
+                exact_token ? S_OK : HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+            if (SUCCEEDED(results[i])) tokens[i]=exact_token;
+            else decode_status=results[i];
+        }
+        const D3D12_RANGE no_write{0,0}; reader->readback->Unmap(0,&no_write);
+        phase(125,decode_status);
+        return finish(S_OK);
+    } catch (const std::bad_alloc&) { return finish(E_OUTOFMEMORY); }
+      catch (...) { return finish(E_FAIL); }
+}
+} // namespace
+
 HRESULT read_luke_color_origin(ID3D12CommandQueue* queue, ID3D12Resource* color,
     std::uint32_t* token, D3D12_RESOURCE_STATES state, DWORD timeout_ms) noexcept {
-    if (token) *token = 0;
-    ReadReport report{token};
-    try {
-        if (!queue || !color || !token) return report.finish(E_POINTER);
-        const auto original = color->GetDesc();
-        if (original.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || original.SampleDesc.Count != 1 ||
-            original.DepthOrArraySize != 1 || original.Width > 16384 || original.Width < kLukeOriginWidth ||
-            !original.Height || !luke_origin_pixel_bytes(original.Format))
-            return report.finish(DXGI_ERROR_UNSUPPORTED);
-        configure_luke_color_origin_extent(static_cast<UINT>(original.Width), original.Height);
-        const auto output_extent = g_output_extent.load(std::memory_order_acquire);
-        if (!output_extent) {
-            report_origin_layout(false,1,0,extent_bits(static_cast<UINT>(original.Width),original.Height));
-            return report.finish(E_PENDING);
-        }
-        LukeColorOriginLayout layout;
-        if (!compact_luke_origin_layout(static_cast<UINT>(output_extent >> 32),
-                static_cast<UINT>(output_extent), static_cast<UINT>(original.Width),
-                original.Height, layout)) {
-            report_origin_layout(false,2,output_extent,extent_bits(static_cast<UINT>(original.Width),original.Height));
-            return report.finish(E_PENDING);
-        }
-        report.width = layout.scan.width; report.height = layout.scan.height;
-        std::shared_ptr<Reader> reader;
-        HRESULT result = get_reader(queue, reader);
-        if (FAILED(result)) return report.finish(result);
-        std::scoped_lock lock(reader->mutex);
-        const bool reader_timing = bridge_flight_logger().ram_enabled() || bridge_flight_logger().enabled();
-        if (reader_timing)
-            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
-                S_OK, 120, reinterpret_cast<std::uint64_t>(reader.get()), reader->last_fence);
-        result = wait_reader(*reader, timeout_ms);
-        if (reader_timing)
-            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
-                result, 121, reinterpret_cast<std::uint64_t>(reader.get()), reader->last_fence);
-        if (FAILED(result)) return report.finish(result); // Retire before any allocator/readback reuse.
-        auto roi_desc = original; roi_desc.Width = layout.scan.width;
-        roi_desc.Height = layout.scan.height; roi_desc.MipLevels = 1;
-        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{}; UINT64 bytes{};
-        reader->device->GetCopyableFootprints(&roi_desc, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
-        if (!reader->readback || reader->bytes != bytes) {
-            D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_READBACK;
-            heap.CreationNodeMask = heap.VisibleNodeMask = 1;
-            D3D12_RESOURCE_DESC desc{}; desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-            desc.Width = bytes; desc.Height = 1; desc.DepthOrArraySize = desc.MipLevels = 1;
-            desc.SampleDesc.Count = 1; desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-            ComPtr<ID3D12Resource> buffer;
-            result = reader->device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(buffer.GetAddressOf()));
-            if (FAILED(result)) return report.finish(result);
-            reader->readback = std::move(buffer); reader->bytes = bytes;
-        }
-        result = reader->allocator->Reset();
-        if (SUCCEEDED(result)) result = reader->list->Reset(reader->allocator.Get(), nullptr);
-        if (FAILED(result)) return report.finish(result);
-        D3D12_TEXTURE_COPY_LOCATION source{};
-        source.pResource = color; source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        D3D12_TEXTURE_COPY_LOCATION destination{};
-        destination.pResource = reader->readback.Get(); destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        destination.PlacedFootprint = footprint;
-        if (state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
-            auto barrier = transition(color, state, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            reader->list->ResourceBarrier(1, &barrier);
-        }
-        const D3D12_BOX box{0, 0, 0, layout.scan.width, layout.scan.height, 1};
-        reader->list->CopyTextureRegion(&destination, 0, 0, 0, &source, &box);
-        if (state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
-            auto barrier = transition(color, D3D12_RESOURCE_STATE_COPY_SOURCE, state);
-            reader->list->ResourceBarrier(1, &barrier);
-        }
-        result = reader->list->Close();
-        if (FAILED(result)) return report.finish(result);
-        ID3D12CommandList* lists[]{reader->list.Get()}; queue->ExecuteCommandLists(1, lists);
-        const auto value = reader->next_fence++;
-        result = queue->Signal(reader->fence.Get(), value);
-        if (FAILED(result)) { reader->poisoned = true; return report.finish(result); }
-        reader->last_fence = value;
-        // F9/RAM: correlate each phase by (reader address, fence value).
-        // 123->124 is queued GPU readiness; 124->125 is Map/luma/CRC decode.
-        if (reader_timing)
-            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
-                result, 123, reinterpret_cast<std::uint64_t>(reader.get()), value);
-        result = wait_reader(*reader, timeout_ms);
-        if (reader_timing)
-            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
-                result, 124, reinterpret_cast<std::uint64_t>(reader.get()), value);
-        if (FAILED(result)) {
-            bridge_flight_logger().event(BridgeFlightOperation::gpu_fence_snapshot,
-                49305, reinterpret_cast<std::uintptr_t>(reader->fence.Get()), value,
-                reader->fence->GetCompletedValue());
-            bridge_flight_logger().event(BridgeFlightOperation::gpu_device_status,
-                reader->device->GetDeviceRemovedReason(), reinterpret_cast<std::uintptr_t>(queue),
-                reinterpret_cast<std::uintptr_t>(reader->device.Get()), 49305);
-            return report.finish(result);
-        }
-        std::vector<float> row(layout.scan.width);
-        void* mapped{}; const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
-        result = reader->readback->Map(0, &range, &mapped);
-        if (FAILED(result)) return report.finish(result);
-        const auto pixel_bytes = luke_origin_pixel_bytes(original.Format);
-        std::uint32_t exact_token{}; bool ambiguous = false;
-        for (UINT y = 0; y < layout.scan.height; ++y) {
-            const auto* pixels = static_cast<const std::byte*>(mapped) + footprint.Offset +
-                static_cast<UINT64>(y) * footprint.Footprint.RowPitch;
-            for (UINT x = 0; x < layout.scan.width; ++x)
-                row[x] = luke_origin_luma(pixels + x * pixel_bytes, original.Format);
-            const auto decoded = decode_luke_origin_row(row);
-            ambiguous |= decoded.ambiguous;
-            if (!decoded.token) continue;
-            if (exact_token && exact_token != decoded.token) ambiguous = true;
-            exact_token = decoded.token;
-        }
-        const D3D12_RANGE no_write{0, 0}; reader->readback->Unmap(0, &no_write);
-        const HRESULT decode_status = ambiguous ? HRESULT_FROM_WIN32(ERROR_INVALID_DATA)
-            : exact_token ? S_OK : HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
-        if (reader_timing)
-            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
-                decode_status, 125, reinterpret_cast<std::uint64_t>(reader.get()), value);
-        if (ambiguous) return report.finish(HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
-        if (!exact_token) return report.finish(HRESULT_FROM_WIN32(ERROR_NOT_FOUND));
-        *token = exact_token;
-        return report.finish(S_OK);
-    } catch (const std::bad_alloc&) { return report.finish(E_OUTOFMEMORY); }
-      catch (...) { return report.finish(E_FAIL); }
+    if (!token) return E_POINTER;
+    HRESULT result{};
+    read_origins(queue,&color,token,&result,1,state,timeout_ms);
+    return result;
+}
+HRESULT read_luke_color_origin_pair(ID3D12CommandQueue* queue,
+    const std::array<ID3D12Resource*,2>& colors, std::array<std::uint32_t,2>& tokens,
+    std::array<HRESULT,2>& results, D3D12_RESOURCE_STATES state, DWORD timeout_ms) noexcept {
+    return read_origins(queue,colors.data(),tokens.data(),results.data(),2,state,timeout_ms);
 }
 } // namespace xrfg

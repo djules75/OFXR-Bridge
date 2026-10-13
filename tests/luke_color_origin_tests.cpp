@@ -222,13 +222,14 @@ struct Gpu {
         D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         b.Transition={color,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,from,to};list->ResourceBarrier(1,&b);
     }
-    void crop(ID3D12Resource* source,ID3D12Resource* destination,unsigned x,unsigned y,unsigned width,unsigned height) {
+    void crop(ID3D12Resource* source,ID3D12Resource* destination,unsigned x,unsigned y,unsigned width,unsigned height,
+        unsigned destination_x=0,unsigned destination_y=0) {
         transition(source,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE);
         transition(destination,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);
         D3D12_TEXTURE_COPY_LOCATION s{},d{};s.pResource=source;s.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         d.pResource=destination;d.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         const D3D12_BOX box{x,y,0,x+width,y+height,1};
-        list->CopyTextureRegion(&d,0,0,0,&s,&box);
+        list->CopyTextureRegion(&d,destination_x,destination_y,0,&s,&box);
         transition(source,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON);
         transition(destination,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COMMON);
     }
@@ -268,6 +269,52 @@ void gpu_tests() {
     require(stalled==HRESULT_FROM_WIN32(WAIT_TIMEOUT) && !token,"stalled read fabricated token");
     check(xrfg::read_luke_color_origin(gpu.queue.Get(),left.Get(),&token,D3D12_RESOURCE_STATE_COMMON,5000),"read after timeout");
     require(token==UINT32_MAX,"readback/allocator prematurely reused");
+    // One transport, independent tokens/formats and no identity borrowing.
+    gpu.reset();
+    auto pair_a=gpu.texture(800,64),pair_b=gpu.texture(800,64,DXGI_FORMAT_R16G16B16A16_FLOAT);
+    xrfg::configure_luke_color_origin_extent(800,64);
+    constexpr std::uint32_t token_a=0xf1020304u,token_b=0x708090a0u;
+    check(xrfg::mark_luke_color_origin(gpu.list.Get(),pair_a.Get(),token_a,D3D12_RESOURCE_STATE_COMMON,
+        gpu.device.Get()),"pair first marker");
+    check(xrfg::mark_luke_color_origin(gpu.list.Get(),pair_b.Get(),token_b,D3D12_RESOURCE_STATE_COMMON,
+        gpu.device.Get()),"pair second HDR marker");
+    gpu.submit();
+    std::array<std::uint32_t,2> pair_tokens{};
+    std::array<HRESULT,2> pair_results{};
+    const auto read_pair=[&](std::array<ID3D12Resource*,2> colors,DWORD timeout=5000) {
+        return xrfg::read_luke_color_origin_pair(gpu.queue.Get(),colors,pair_tokens,pair_results,
+            D3D12_RESOURCE_STATE_COMMON,timeout);
+    };
+    check(read_pair({pair_a.Get(),pair_b.Get()}),"paired transport with different row pitches");
+    require(pair_results[0]==S_OK && pair_results[1]==S_OK &&
+        pair_tokens[0]==token_a && pair_tokens[1]==token_b,"paired eyes merged tokens/footprints");
+    check(read_pair({pair_b.Get(),pair_a.Get()}),"reversed paired transport");
+    require(pair_tokens[0]==token_b && pair_tokens[1]==token_a,"paired order inferred eye identity");
+    check(read_pair({nullptr,pair_b.Get()}),"valid peer survives unavailable color");
+    require(pair_results[0]==E_POINTER && !pair_tokens[0] && pair_results[1]==S_OK &&
+        pair_tokens[1]==token_b,"paired reader borrowed token from peer");
+    // Force invalid CRC in only one eye by overwriting the first half of one cell.
+    gpu.reset();
+    xrfg::LukeColorOriginLayout pair_layout{};
+    require(xrfg::compact_luke_origin_layout(800,64,800,64,pair_layout),"pair corruption layout");
+    const auto cell_x=pair_layout.bands[0].x+27*4;
+    // Adjacent Manchester halves always have opposite values; copy the second
+    // half over the first across all barcode rows, making this eye undecodable.
+    auto corrupt=gpu.texture(800,64);
+    gpu.crop(pair_a.Get(),corrupt.Get(),0,0,800,64);
+    gpu.crop(corrupt.Get(),pair_a.Get(),cell_x+2,pair_layout.bands[0].y,2,8,cell_x,pair_layout.bands[0].y);
+    gpu.submit();
+    check(read_pair({pair_a.Get(),pair_b.Get()}),"paired invalid-marker transport");
+    require(FAILED(pair_results[0]) && !pair_tokens[0] && pair_results[1]==S_OK &&
+        pair_tokens[1]==token_b,"invalid peer suppressed/contaminated valid eye");
+    check(gpu.queue->Wait(gate.Get(),2),"gate pair reader");
+    const auto pair_stalled=read_pair({pair_b.Get(),pair_b.Get()},5);
+    check(gate->Signal(2),"release pair reader gate");
+    require(pair_stalled==HRESULT_FROM_WIN32(WAIT_TIMEOUT) &&
+        pair_results[0]==pair_stalled && pair_results[1]==pair_stalled &&
+        !pair_tokens[0] && !pair_tokens[1],"stalled pair returned stale tokens");
+    check(read_pair({pair_b.Get(),pair_b.Get()}),"paired reuse after timeout");
+    require(pair_tokens[0]==token_b && pair_tokens[1]==token_b,"paired readback reused before retirement");
     // Final Output differs from the intermediate and has an explicit active rectangle.
     gpu.reset();
     auto final=gpu.texture(1024,64),active=gpu.texture(800,32);

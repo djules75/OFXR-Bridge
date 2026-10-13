@@ -1,3 +1,4 @@
+#include "xrfg/luke_vulkan_scope.hpp"
 #define XR_USE_GRAPHICS_API_VULKAN
 #include "xrfg/vulkan_session_bridge.hpp"
 #include "xrfg/d3d11_bridge.hpp"
@@ -11871,15 +11872,28 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 release_deferred();return output;
             }
         }
+        std::array<ID3D12Resource*,2> origin_colors{};
+        std::array<HRESULT,2> origin_results{};
         for(std::size_t index=0;index<entries.size();++index) {
             auto& entry=entries[index];const auto images=entry.generation->d3d11_interop->current_destination_images();
             if(entry.prepared.current_destination_index>=images.size()) {
                 output.reason=GenerationPrepareReason::invalid_private_swapchain;release_deferred();return output;
             }
-            HRESULT result;
-            {std::scoped_lock lock(session->gpu_mutex);
-                result=xrfg::read_luke_color_origin(session->d3d12_queue.Get(),
-                    images[entry.prepared.current_destination_index],&origin_tokens[index]);}
+            origin_colors[index]=images[entry.prepared.current_destination_index];
+        }
+        {
+            std::scoped_lock lock(session->gpu_mutex);
+            if(xrfg::native_vulkan::luke_vulkan_process()) {
+                xrfg::read_luke_color_origin_pair(session->d3d12_queue.Get(),
+                    origin_colors,origin_tokens,origin_results);
+            } else {
+                for(std::size_t index=0;index<entries.size();++index)
+                    origin_results[index]=xrfg::read_luke_color_origin(session->d3d12_queue.Get(),
+                        origin_colors[index],&origin_tokens[index]);
+            }
+        }
+        for(std::size_t index=0;index<entries.size();++index) {
+            auto& entry=entries[index];const HRESULT result=origin_results[index];
             xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
                 result,989+entry.logical_eye,frame_serial,origin_tokens[index]);
             if(FAILED(result)||!origin_tokens[index])continue;
