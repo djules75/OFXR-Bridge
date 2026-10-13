@@ -12,9 +12,6 @@
 namespace xrfg {
 
 struct DlssMotionVectorPublication {
-    // In-process producer receipt:1=current->N-1,2=current->same-eye N-2.
-    // KCD REALVR's replaced native input has already removed eye alternation.
-    std::uint32_t raw_motion_native_span{1};
     std::uint64_t stream{};
     ID3D12Resource* output{};
     ID3D12Resource* motion_vectors{};
@@ -85,6 +82,9 @@ struct DlssMotionVectorPublication {
     // probes. Its temporal identity instead comes from the exact observed NGX
     // SR/RR production; failed productions still consume this sequence.
     std::uint64_t native_production_sequence{};
+    // In-process receipt:1=current->N-1,2=current->same-eye N-2.
+    // Append fields so existing aggregate publishers retain their contract.
+    std::uint32_t raw_motion_native_span{1};
 };
 
 // Scalar native camera history: no retained older GPU resources or SL metadata.
@@ -99,7 +99,6 @@ struct DlssNativeCameraHistory {
     std::uint32_t raw_motion_native_span{1};
 };
 struct DlssMotionVectorFrame {
-    std::uint32_t raw_motion_native_span{1};
     std::uint64_t stream{};
     std::uint64_t epoch{};
     std::uint64_t serial{};
@@ -188,6 +187,7 @@ struct DlssMotionVectorFrame {
     // R22: preceding opposite-eye evaluation in a shared stream. Attached only
     // to resolved frames, never to stored producer frames or recursively.
     std::shared_ptr<const DlssMotionVectorFrame> bridge;
+    std::uint32_t raw_motion_native_span{1};
 };
 
 inline DlssNativeCameraHistory dlss_native_camera_history(const DlssMotionVectorFrame& f) noexcept {
