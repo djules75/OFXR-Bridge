@@ -3,7 +3,7 @@
   "base": "71233ef12ab8448a3655816ace2a4d305d1a48ea",
   "code_commit": "1958f7e8d811430e64a1b965083e035b6b171463",
   "observed_utc": "2026-10-14T19:19:17.392717+00:00",
-  "status": "automated-pass; named games not tested; owner-authorized private share",
+  "status": "owner-rejected; C1/C2/C3 reopened as TODO; historical automated results retained",
   "suites": [
     {
       "route": "new",
@@ -324,5 +324,8 @@
   "limitations": [
     "Existing invalid unregistered-session mock director and environment-blocked interactive foreground-input fixture are excluded; production-path GPU/menu/transport fixtures are selected.",
     "No motion-to-photon or FPS improvement claimed."
-  ]
+  ],
+  "historical_automated_status": "automated-pass; named games not tested; owner-authorized private share",
+  "owner_verdict": "rejected",
+  "rejection_reason": "Not specified by owner"
 }

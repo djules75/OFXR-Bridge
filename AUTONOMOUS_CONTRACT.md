@@ -1,3 +1,14 @@
+## Owner verdict: V531 rejected; compatibility fixes reopened (2026-10-14)
+
+The owner has discarded V531. C1/R19, C2/R26 and selected C3/R35 are **TODO again,
+not completed or accepted imports**. Historical automated passes and published
+commits do not override this verdict. No individual rejection cause was supplied.
+The V531 commits remain in Git history and were inherited by V532; this status
+correction does not revert runtime code or rewrite sealed tags/packages.
+Reimplement and validate the three fixes against the next selected baseline.
+See [the current Elliott audit](../docs/ofxr-autonomous/ELLIOTTTATE_AUDIT_CURRENT.md) for the current audit.
+Earlier V531 implementation/publication entries below are historical.
+
 ## V531 compatibility update on V530
 
 Selective Elliott R19 private D12 factory/serializer, R26 original deferred-D11

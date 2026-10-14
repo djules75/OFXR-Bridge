@@ -1,5 +1,7 @@
 # V531: selective Elliott compatibility changes on V530
 
+> **Owner verdict (2026-10-14): V531 rejected.** C1/R19, C2/R26 and selected C3/R35 return to TODO; none counts as a completed import. This report retains the rejected attempt and its historical evidence. See the [current audit](../../docs/ofxr-autonomous/ELLIOTTTATE_AUDIT_CURRENT.md) for the work to redo. No specific failure cause has been supplied.
+
 The owner requests these three compatibility changes on the published V530
 endpoint, production-path tests to decide the R26 import, and private online
 publication of the resulting build and updated English audit. Dedicated tests
