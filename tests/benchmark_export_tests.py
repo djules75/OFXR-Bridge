@@ -50,4 +50,10 @@ with tempfile.TemporaryDirectory() as directory:
     assert len(pimax)==3 and all(r['start_column']=='BI' and len(r['tsv'].split('\t'))==10 for r in pimax)
     assert sorted(r['dlssg_preset_request'] for r in pimax)==[0,1,3]
     assert sum(len(r['measurements']) for r in pimax)==38  # compact cells cannot discard portable A/B evidence
+    # Menu-transition outliers belong to neither measured end of an interval.
+    edge=dict(signature=(1,0,0),config=m.decode(1,0),start=0,last=25000,gaps=0,file='edges',version=530,
+              rates=[dict(ms=i*250,output=999 if i*250<3000 or i*250>22000 else 80,real=40,generated=40,hz=90,source=8) for i in range(101)],
+              cycles=[dict(ms=i*250,estimated=999 if i*250<3000 or i*250>22000 else 44,length=55,ofxr=7) for i in range(101)])
+    checked=m.summarize(edge,3,10,'estimated')
+    assert checked['value']=='80(44)' and checked['start_s']==3 and checked['end_s']==22
     print('38 exact spreadsheet measurements/40 cells, Djules3X B-only, A/C process profiles, Pimax rows, cycle selection, missing/short guards PASS')

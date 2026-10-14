@@ -88,7 +88,7 @@ def span_text(values):
     return str(low) if low == high else f'{low}-{high}'
 
 def summarize(segment, settle, minimum, metric):
-    lo, hi = segment['start'] + settle * 1000, segment['last'] - 1000
+    lo, hi = segment['start'] + settle * 1000, segment['last'] - 3000
     if hi - lo < minimum * 1000 or segment['gaps']:
         return None
     rates = [x for x in segment['rates'] if lo <= x['ms'] <= hi]
@@ -169,7 +169,7 @@ def main():
         raise SystemExit('No complete benchmark intervals. V529+ compact logs are required; no row fabricated.')
     a.out.mkdir(parents=True, exist_ok=True)
     report = dict(game=a.game, platform=a.platform, metric=a.metric, sync_mode=a.sync_mode, hags=a.hags,
-                  method='Output FPS and menu cycle field, min/max after 3s settle and 1s tail; >=10s useful window. Rounded to integers.',
+                  method='Output FPS and menu cycle field, min/max after excluding first 3s and last 3s of every configuration interval; >=10s useful window. Rounded to integers. Export starts at S for Meganex; R is the separate run without OFXR loaded.',
                   files=[dict(path=str(x), sha256=hashlib.sha256(x.read_bytes()).hexdigest()) for x in paths], rows=rows)
     (a.out / 'benchmark-results.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
     # Portable named measurements, independent of destination cell addresses.

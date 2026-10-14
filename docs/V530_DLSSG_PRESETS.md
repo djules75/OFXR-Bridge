@@ -34,6 +34,20 @@ No synthesis/guide/depth/pacing/queue math changed and no IPC Settings ABI chang
 
 ## Benchmark collection and export
 
+Owner methodology clarification: the Meganex paste row starts at **S**, the
+Disabled baseline with OFXR loaded. **R** is the separate baseline with OFXR
+not loaded; this log exporter cannot measure it and never writes that column.
+For **every configuration interval**, discard the first3seconds and the
+last3seconds from both FPS and cycle samples, including the final interval.
+Menu-opening/switching transitions must stay outside the retained measurement
+window. Keep at least10useful seconds after trimming; holding20-25seconds gives
+room for both exclusions. Short/gapped intervals remain `n.d.`. The JSON records
+the exact retained start/end and this methodology; it is not a whole-run average.
+
+Use the latest exporter/benchmark-tools-r2 companion supplied with the release
+for this clarification. The runtime ZIP remains immutable; Python-only updates
+do not require another renderer build.
+
 The owner added the Djules3X B-only column after the runtime ZIP was sealed.
 Use the current exporter from Git/the separate release asset or the benchmark
 tools companion ZIP, rather than the older script embedded in the immutable
