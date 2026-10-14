@@ -1224,6 +1224,21 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 synchronize(previous) && synchronize(current)) {
                 auto left = std::make_shared<DlssMotionVectorFrame>(*previous);
                 auto right = std::make_shared<DlssMotionVectorFrame>(*current);
+                // R35: retain raw cross-eye history before assigning same-eye
+                // serials or reordering eyes. Strict FSR keeps its old path.
+                if (!identity.strict) {
+                    const auto& older = candidates.front().older;
+                    if (older && older->stream == previous->stream &&
+                        older->epoch == previous->epoch && older->serial + 1 == previous->serial) {
+                        if (!synchronize(older)) {
+                            ++state.statistics.resolve_queue_mismatches;
+                            state.statistics.status = DlssMotionVectorStatus::queue_mismatch;
+                            return {};
+                        }
+                        left->bridge = older;
+                    }
+                    right->bridge = previous;
+                }
                 // The first of the pair is the left eye unless the inputs
                 // say otherwise.
                 if (input_offset(*right) < input_offset(*left)) std::swap(left, right);

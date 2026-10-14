@@ -4119,6 +4119,44 @@ void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
             alternating_cd->eyes[0]->previous_serial == 1 &&
             alternating_cd->eyes[1]->previous_serial == 2,
         "single alternating DLSS stream lost per-eye temporal continuity");
+    const auto array_cd=xrfg::resolve_dlss_motion_vectors(xr_output.Get(),fixture.queue());
+    require(array_cd && array_cd->eyes[0]->bridge && array_cd->eyes[1]->bridge &&
+        array_cd->eyes[0]->bridge->serial==2 && array_cd->eyes[1]->bridge->serial==3 &&
+        !array_cd->eyes[0]->bridge->bridge && !array_cd->eyes[1]->bridge->bridge,
+        "R35 ordinary array lost intervening raw guide history");
+    const auto strict_array=xrfg::resolve_dlss_motion_vectors(xr_output.Get(),fixture.queue(),-1,0,0,{true,0,0});
+    require(strict_array && !strict_array->eyes[0]->bridge && !strict_array->eyes[1]->bridge,
+        "R35 array change leaked extra bridge inputs into strict FSR");
+    const auto legacy_luke=xrfg::resolve_dlss_motion_vectors(std::uint32_t{2},fixture.queue());
+    require(legacy_luke && !legacy_luke->eyes[0]->bridge && !legacy_luke->eyes[1]->bridge,
+        "R35 ordinary array change altered Luke eye-count resolver");
+    // Resolve a right-first array stream: links must follow the raw source
+    // when the logical eye order swaps, not be assigned after that swap.
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    const auto offset_motion=create_texture(width,height,1);
+    const auto publish_offset=[&](UINT x,bool reset=false) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            xrfg::publish_dlss_motion_vectors({53135,left_output.Get(),offset_motion.Get(),fixture.queue(),
+                0,0,width,height,x,0,width/2,height/2,1,1,0,0,D3D12_RESOURCE_STATE_COMMON,false,reset,list});
+        });
+    };
+    publish_offset(4);publish_offset(0);publish_offset(4);publish_offset(0);
+    const auto swapped=xrfg::resolve_dlss_motion_vectors(xr_output.Get(),fixture.queue());
+    require(swapped && swapped->eyes[0]->serial==4 && swapped->eyes[1]->serial==3 &&
+        swapped->eyes[0]->bridge && swapped->eyes[0]->bridge->serial==3 &&
+        swapped->eyes[1]->bridge && swapped->eyes[1]->bridge->serial==2,
+        "R35 array reorder detached raw bridge from its source eye");
+    publish_offset(4,true);
+    require(!xrfg::resolve_dlss_motion_vectors(xr_output.Get(),fixture.queue()),
+        "R35 array reused a bridge from an old reset epoch");
+    publish_offset(0);
+    const auto reset_pair=xrfg::resolve_dlss_motion_vectors(xr_output.Get(),fixture.queue());
+    require(reset_pair && reset_pair->eyes[0]->bridge && !reset_pair->eyes[0]->bridge->bridge &&
+        reset_pair->eyes[0]->bridge->epoch==reset_pair->eyes[0]->epoch &&
+        !reset_pair->eyes[1]->bridge,
+        "R35 reset pair retained an older-epoch bridge");
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_disabled_dlss_motion_vector_resources();
     xrfg::retire_dlss_motion_vector_stream(101);
