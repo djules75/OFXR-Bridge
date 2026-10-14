@@ -28,8 +28,12 @@ Palette, rounded canvas, Scale2x bitmap text, controller flip/placement and pose
 
 ## V474 Djules lifecycle and bridge improvements
 
-V439–V443 improvements adapted from djules75/OFXR-Bridge 0.2.13.2, LGPL-3.0-or-later.
+V439⡂€“V443 improvements adapted from djules75/OFXR-Bridge 0.2.13.2, LGPL-3.0-or-later.
 Original author djules75 <1819336+djules75@users.noreply.github.com>. Exact original
 patches include their Co-Authored-By Claude Opus5.5 trailers; the provenance JSON
 records every commit and hash. Route isolation and Autonomous-specific regression
 fixtures are adaptations in this repository. See docs/imports/djules-v439-v443/.
+DLSS-G per-game NVIDIA profile selection is adapted from elliotttate/OFXR-Bridge
+release 36, b8048568c574f3a89847c18a4a0cd6d5aec22c39, under LGPL-3.0-or-later.
+Only public NVAPI DRS profile read/write controls are imported; no upstream
+pacing, shader, scheduler or model binary changes are included.

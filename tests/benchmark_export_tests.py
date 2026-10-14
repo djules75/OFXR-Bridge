@@ -16,6 +16,8 @@ with tempfile.TemporaryDirectory() as directory:
         bits = int(route!='Disabled') | backend<<1 | gen<<3 | int(flags[0])<<5 | int(flags[1])<<6 | 1<<15
         if route=='Hybrid': bits |= (1<<7)|(1<<8)
         if route=='Djules3X': bits |= 1<<10
+        if route=='DLSS-G-A': bits = (bits & ~(3<<3)) | (2<<3) | (1<<17)
+        if route=='DLSS-G-C': bits = (bits & ~(3<<3)) | (2<<3) | (3<<17)
         if key.endswith(':prefer'): bits |= 1<<9
         start=index*25000; revision=index+1
         rows.append(event('benchmark_configuration', start, revision, bits, 100<<16))
@@ -28,7 +30,8 @@ with tempfile.TemporaryDirectory() as directory:
     result=m.export([path], 'meganex', 'estimated')
     assert len(result)==1 and not result[0]['missing']
     values=result[0]['tsv'].split('\t')
-    assert len(values)==35 and values[0]=='40' and values[-2:]==['','529']
+    assert len(values)==39 and values[0]=='40' and values[-2:]==['','529']
+    assert len(result[0]['headers'])==39 and result[0]['headers'][-2:]==['Log','Tested Build']
     assert all(x=='80(44)' for x in values[1:-2])
     length=m.export([path], 'meganex', 'length')[0]
     assert length['cells']['FSR:10']['value']=='80(55)'
@@ -39,4 +42,10 @@ with tempfile.TemporaryDirectory() as directory:
     assert not m.export([partial], 'meganex', 'estimated')
     assert m.decode((3<<3)|1|(1<<7), 0)['route']=='Hybrid'
     assert m.decode((2<<3)|1|(1<<10), 0)['route']=='DLSS-G3X'
-    print('33 exact spreadsheet columns, separate PreferFPS/3X/A/B, cycle selection, missing/short guards PASS')
+    assert m.decode((2<<3)|1, 0)['cell']=='DLSS-G-unverified:00'
+    assert result[0]['cells']['DLSS-G-A:00']['config']['dlssg_preset_request']==1
+    assert result[0]['cells']['DLSS-G-C:00']['config']['dlssg_preset_request']==3
+    pimax=m.export([path], 'pimax', 'estimated')
+    assert len(pimax)==3 and all(r['start_column']=='BH' and len(r['tsv'].split('\t'))==10 for r in pimax)
+    assert sorted(r['dlssg_preset_request'] for r in pimax)==[0,1,3]
+    print('37 exact spreadsheet measurements/39 cells, A/C process profiles, Pimax rows, cycle selection, missing/short guards PASS')

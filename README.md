@@ -1,3 +1,16 @@
+## V530 DLSS-G preset test prerelease
+
+Owner requests and authorizes private publication for immediate testing.
+Desktop/F10 DLSS-G preset dropdown: A (slower), C (faster), Game default.
+Desktop chooses and remembers the actual game executable; F10 targets its host.
+Per-game NVIDIA DRS selection is verified and requires a game restart. C needs
+the updated NVIDIA model/driver; no universal performance gain is claimed.
+Benchmark logs preserve process-start preset requests, not active-model proof.
+Current exporter uses Meganex S:BE (39cells), A at AV:AY / C at AZ:BC,
+Quest G:N, Pimax BH:BQ (10cells, separate A/C rows). Cycle estimated selected.
+Details: autonomous/docs/V530_DLSSG_PRESETS.md. V529 test instructions remain
+applicable with this mapping/restart correction. HUD remains paused.
+
 ## V529 private collaborator test prerelease
 
 Start with the [human and AI test handoff](../docs/ofxr-autonomous/V529_COLLABORATOR_AI.md). The owner explicitly

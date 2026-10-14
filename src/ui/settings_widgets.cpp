@@ -1,6 +1,8 @@
 #include "xrfg/settings_widgets.hpp"
+#include "xrfg/dlssg_profile.hpp"
 #include "imgui.h"
 #include <windows.h>
+#include <commdlg.h>
 
 #include <algorithm>
 #include <iterator>
@@ -77,7 +79,63 @@ void status(const Snapshot& state) {
     ImGui::Separator();
 }
 
-bool generation(SettingsWidgetState& ui, const Snapshot& state) {
+std::string utf8(const std::wstring& value) {
+    if (value.empty()) return {};
+    const auto bytes = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    std::string result(bytes, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), result.data(), bytes, nullptr, nullptr);
+    return result;
+}
+void dlssg_preset(SettingsWidgetState& ui, bool compact) {
+    using namespace xrfg::standalone;
+    const auto selection_file = configuration_path().parent_path() / L"dlssg-profile-selection.ini";
+    const auto refresh = [&] {
+        DlssgProfile profile; std::wstring error;
+        const bool read = !ui.dlssg_executable.empty() && read_dlssg_profile(ui.dlssg_executable, profile, error);
+        ui.dlssg_model = read && profile.enabled && profile.custom_override ?
+            (profile.preset == 3 ? 2 : profile.preset == 1 ? 1 : 0) : 0;
+        ui.dlssg_profile_status = read ? "Game profile read. Changes apply after restarting the game." :
+            ui.dlssg_executable.empty() ? "Choose the actual game executable before selecting a preset." : utf8(error);
+        ui.dlssg_profile_loaded = true;
+    };
+    if (!ui.dlssg_profile_loaded) {
+        if (compact) ui.dlssg_executable = process_executable();
+        else {
+            wchar_t path[32768]{};
+            GetPrivateProfileStringW(L"dlssg", L"executable", L"", path, 32768, selection_file.c_str());
+            ui.dlssg_executable = path;
+        }
+        refresh();
+    }
+    if (!compact && ImGui::Button("Choose game executable")) {
+        wchar_t path[32768]{};
+        OPENFILENAMEW dialog{}; dialog.lStructSize = sizeof(dialog); dialog.hwndOwner = GetActiveWindow();
+        dialog.lpstrFile = path; dialog.nMaxFile = 32768;
+        dialog.lpstrFilter = L"Game executable (*.exe)\0*.exe\0\0";
+        dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        if (GetOpenFileNameW(&dialog)) {
+            ui.dlssg_executable = path; refresh();
+            std::filesystem::create_directories(selection_file.parent_path());
+            if (!WritePrivateProfileStringW(L"dlssg", L"executable", path, selection_file.c_str()))
+                ui.dlssg_profile_status = "Executable selected for this tray; could not save selection.";
+        }
+    }
+    if (!ui.dlssg_executable.empty()) ImGui::TextWrapped("Game: %s", utf8(ui.dlssg_executable.filename().wstring()).c_str());
+    ImGui::BeginDisabled(ui.dlssg_executable.empty());
+    int selected = ui.dlssg_model;
+    if (ImGui::Combo("DLSS-G preset (restart game)", &selected, "Game default\0Preset A (slower)\0Preset C (faster)\0")) {
+        const auto preset = selected == 1 ? DlssgPreset::a : selected == 2 ? DlssgPreset::c : DlssgPreset::game_default;
+        std::wstring error;
+        if (write_dlssg_profile(ui.dlssg_executable, preset, error)) {
+            refresh(); ui.dlssg_profile_status = "Saved and verified. Restart the game to load the selected model.";
+        } else ui.dlssg_profile_status = utf8(error);
+    }
+    ImGui::EndDisabled();
+    if (ImGui::Button("Refresh preset profile")) refresh();
+    ImGui::TextWrapped("%s", ui.dlssg_profile_status.c_str());
+    ImGui::TextWrapped("Preset C requires NVIDIA's updated FG model and a compatible driver. A/C performance depends on the system; global NVIDIA overrides may still apply.");
+}
+bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     auto& draft = ui.draft;
     bool changed = ImGui::Checkbox("Enable frame generation", &draft.enabled);
     int selected_generation = generation_ui_index(draft.frame_generation);
@@ -126,6 +184,7 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state) {
         if (draft.triple_frame_gen) ImGui::TextDisabled("Prefer FPS is enabled with 3X");
     }
     if (dlssg) {
+        dlssg_preset(ui, compact);
         changed |= ImGui::SliderInt("Generated resolution", &draft.native_scale, 25, 100, "%d%%");
         ui.scale_editing |= ImGui::IsItemActive();
         ImGui::TextWrapped("Requires compatible NVIDIA DLSS-G hardware and runtime");
@@ -302,7 +361,7 @@ bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& state,
         if (ImGui::BeginTabItem("Frame generation")) {
             ImGui::BeginChild("Generation", ImVec2(0, 0));
             ImGui::PushItemWidth(std::clamp(ImGui::GetContentRegionAvail().x * .56F, 180.F, 580.F));
-            changed |= generation(ui, state);
+            changed |= generation(ui, state, options.compact);
             ImGui::PopItemWidth();
             ImGui::EndChild();
             ImGui::EndTabItem();

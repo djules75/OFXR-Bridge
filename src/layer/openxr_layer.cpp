@@ -19,6 +19,7 @@
 #include "xrfg/d3d11_color_identity.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/benchmark_log.hpp"
+#include "xrfg/dlssg_profile.hpp"
 #include "xrfg/fsr_cadence_probe.hpp"
 #include "xrfg/luke_render_identity.hpp"
 #include "xrfg/generation_backpressure.hpp"
@@ -1615,7 +1616,8 @@ void log_benchmark_configuration(SessionState& state) noexcept {
         (state.nvidia_options.hybrid ? 1ULL << 8 : 0ULL) | (s.prefer_fps ? 1ULL << 9 : 0ULL) |
         (s.triple_frame_gen ? 1ULL << 10 : 0ULL) | (s.motion_vectors ? 1ULL << 11 : 0ULL) |
         (std::uint64_t(s.afw_mode) << 12) | (s.nr_enabled ? 1ULL << 14 : 0ULL) |
-        (state.binding_queue ? 1ULL << 15 : 0ULL) | (state.luke_afw_enabled ? 1ULL << 16 : 0ULL);
+        (state.binding_queue ? 1ULL << 15 : 0ULL) | (state.luke_afw_enabled ? 1ULL << 16 : 0ULL) |
+        (std::uint64_t(xrfg::standalone::process_dlssg_preset()) << 17);
     logger.event(xrfg::BridgeFlightOperation::benchmark_configuration, 0, control.revision, bits,
         std::uint64_t(s.preset) | (std::uint64_t(s.scale) << 8) | (std::uint64_t(s.native_scale) << 16));
 }
@@ -15490,6 +15492,7 @@ extern "C" __declspec(dllexport) XRAPI_ATTR XrResult XRAPI_CALL xrNegotiateLoade
     const char* layer_name,
     XrNegotiateApiLayerRequest* layer_request) {
 
+    static_cast<void>(xrfg::standalone::process_dlssg_preset());
     xrfg::initialize_bridge_flight_logger();
     const auto token = xrfg::bridge_flight_logger().begin(
         xrfg::BridgeFlightOperation::negotiation,
