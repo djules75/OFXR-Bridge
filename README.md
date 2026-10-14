@@ -1,3 +1,15 @@
+## V531 compatibility update on V530
+
+Selective Elliott R19 private D12 factory/serializer, R26 original deferred-D11
+guide identity, and R35 ordinary array history for the existing composer.
+R26 is justified by an actual V530 wrong-publication negative. Release checks:
+new88/88, Djules25/25; shader/provider/queue/pacing contracts retained. This
+system cannot exercise recovered-factory GPU work; healthy GPU and safe
+unavailability are tested. Named-game recovery is not claimed.
+See [V531 scope and evidence](docs/V531_COMPATIBILITY.md). The owner authorizes
+private sharing and the updated English audit without dedicated named-game tests.
+V530 A/C controls and final benchmark exporter remain included.
+
 ## V530 DLSS-G preset test prerelease
 
 Owner requests and authorizes private publication for immediate testing.
