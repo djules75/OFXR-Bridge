@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.530.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.531.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -739,6 +739,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_executable(xrfg_three_slot_director_tests
             tests/three_slot_director_tests.cpp
             src/common/embedded_control.cpp)
+        foreach(kind invalid_redist healthy_redist)
+            add_executable(xrfg_d3d12_${kind}_tests tests/d3d12_invalid_redist_tests.cpp)
+            target_link_libraries(xrfg_d3d12_${kind}_tests PRIVATE xrfg_d3d12_history)
+            target_compile_definitions(xrfg_d3d12_${kind}_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+            add_test(NAME xrfg_d3d12_${kind}_tests COMMAND xrfg_d3d12_${kind}_tests)
+            set_tests_properties(xrfg_d3d12_${kind}_tests PROPERTIES TIMEOUT 30)
+        endforeach()
+        target_compile_definitions(xrfg_d3d12_invalid_redist_tests PRIVATE XRFG_BROKEN_AGILITY)
         add_executable(xrfg_d3d11_bridge_tests tests/d3d11_bridge_tests.cpp)
         target_link_libraries(xrfg_d3d11_bridge_tests PRIVATE xrfg_d3d12_history)
         target_compile_definitions(xrfg_d3d11_bridge_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

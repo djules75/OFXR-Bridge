@@ -1,3 +1,4 @@
+#include "xrfg/d3d12_compat.hpp"
 #include "xrfg/d3d11_d3d12_interop.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/two_frame_capture.hpp"
@@ -209,10 +210,7 @@ HRESULT create_d3d12_device_for_d3d11(
         }
 
         ComPtr<ID3D12Device> device;
-        result = D3D12CreateDevice(
-            adapter.Get(),
-            D3D_FEATURE_LEVEL_11_0,
-            IID_PPV_ARGS(device.GetAddressOf()));
+        result = xrfg::create_d3d12_device_on_adapter(adapter.Get(), device.GetAddressOf());
         if (FAILED(result)) {
             return result;
         }

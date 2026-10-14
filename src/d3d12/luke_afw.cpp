@@ -1,3 +1,4 @@
+#include "xrfg/d3d12_compat.hpp"
 #include "xrfg/luke_afw.hpp"
 #include "xrfg/luke_depth_format.hpp"
 #include "xrfg/luke_motion_format.hpp"
@@ -535,8 +536,7 @@ struct LukeAfwSynthesizer::Impl {
         root_description.pParameters = parameters.data();
         Microsoft::WRL::ComPtr<ID3DBlob> serialized;
         Microsoft::WRL::ComPtr<ID3DBlob> errors;
-        result = D3D12SerializeRootSignature(&root_description,
-            D3D_ROOT_SIGNATURE_VERSION_1, serialized.GetAddressOf(),
+        result = xrfg::serialize_root_signature(device.Get(), root_description, serialized.GetAddressOf(),
             errors.GetAddressOf());
         if (FAILED(result)) return result;
         Microsoft::WRL::ComPtr<ID3D12RootSignature> root_signature;
@@ -938,8 +938,7 @@ struct LukeAfwSynthesizer::Impl {
         root_description.pParameters = parameters.data();
         Microsoft::WRL::ComPtr<ID3DBlob> serialized;
         Microsoft::WRL::ComPtr<ID3DBlob> errors;
-        result = D3D12SerializeRootSignature(&root_description,
-            D3D_ROOT_SIGNATURE_VERSION_1, serialized.GetAddressOf(),
+        result = xrfg::serialize_root_signature(device.Get(), root_description, serialized.GetAddressOf(),
             errors.GetAddressOf());
         if (FAILED(result)) return result;
         Microsoft::WRL::ComPtr<ID3D12RootSignature> root;
