@@ -1,3 +1,14 @@
+## V532 benchmark-label diagnostic follow-up
+
+Owner requests fixing lost labels before repeating AC Valhalla. The logger
+now validates UI and embedded renderer revisions independently, including
+applied PreferFPS/3X. Pending pipeline/renderer settings stay excluded.
+Untried routes are n.a.; attempted short/invalid trials remain n.d.
+Current exporter included in the ZIP: Meganex startsS (RwithoutOFXR separate),
+first3/last3seconds excluded, Cycle estimated, portable headers retained.
+Based on selected V531 compatibility source; no renderer/pacing/AFW changes.
+See autonomous/docs/V532_BENCHMARK_LABELS.md. Owner repeat-run validation pending.
+
 ## V531 compatibility update on V530
 
 Selective Elliott R19 private D12 factory/serializer, R26 original deferred-D11

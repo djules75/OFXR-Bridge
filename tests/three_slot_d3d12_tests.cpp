@@ -371,6 +371,55 @@ int main(int argc,char** argv) {
         s->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::nvidia;
         s->nvidia_new_route = true; s->djules_route=kTestDjules;
         const std::string_view mode = argc>1 ? argv[1] : "";
+        if(mode=="benchmark-revisions") {
+            const auto directory=xrfg::autonomous::configuration_path().parent_path();
+            {std::ofstream ini(directory/L"ofxr_bridge.ini");ini<<"[diagnostics]\nlogging_enabled=1\n";}
+            auto& logger=xrfg::bridge_flight_logger();logger.initialize(directory);
+            auto desired=xrfg::autonomous::snapshot().desired;
+            xrfg::autonomous::select_generation(desired,0,3);
+            desired.prefer_fps=false;desired.triple_frame_gen=false;
+            desired.separate_synthesis=0;desired.lower_vram=0;
+            require(xrfg::autonomous::request(desired),"initial benchmark preferences");
+            xrfg::autonomous::apply_runtime_settings();
+            s->djules_route=true;s->control_revision=xrfg::embedded::snapshot().revision;
+            const auto renderer_revision=s->control_revision;
+            desired.prefer_fps=true;
+            require(xrfg::autonomous::request(desired),"pipeline-only UI preference");
+            xrfg::autonomous::apply_runtime_settings();
+            const auto ui_revision=xrfg::autonomous::snapshot().revision;
+            require(ui_revision!=renderer_revision && xrfg::embedded::snapshot().revision==renderer_revision,
+                "independent UI/renderer revision mismatch was not reproduced");
+            s->djules_deep_pipeline=true;
+            log_benchmark_configuration(*s);logger.flush();
+            auto contents=[&] {std::ifstream file(xrfg::benchmark_log_path(logger.log_path()));
+                return std::string(std::istreambuf_iterator<char>(file),{});};
+            auto text=contents();
+            require(text.find("op=benchmark_configuration result=0 dur_us=0 a="+std::to_string(ui_revision)+" ")!=std::string::npos,
+                "PreferFPS erased the applied configuration label");
+            desired.triple_frame_gen=true;
+            require(xrfg::autonomous::request(desired),"3X UI preference");
+            xrfg::autonomous::apply_runtime_settings();
+            const auto triple_revision=xrfg::autonomous::snapshot().revision;
+            log_benchmark_configuration(*s);logger.flush();text=contents();
+            const auto marker="op=benchmark_configuration result=0 dur_us=0 a="+std::to_string(triple_revision)+" ";
+            require(text.find(marker)==std::string::npos,"unapplied 3X was labelled active");
+            s->djules_triple_requested=true;
+            log_benchmark_configuration(*s);logger.flush();text=contents();
+            require(text.find(marker)!=std::string::npos,"applied 3X lost its configuration label");
+            desired.separate_synthesis=1;
+            require(xrfg::autonomous::request(desired),"transport UI preference");
+            xrfg::autonomous::apply_runtime_settings();
+            const auto transport_revision=xrfg::autonomous::snapshot().revision;
+            const auto transport_marker="op=benchmark_configuration result=0 dur_us=0 a="+std::to_string(transport_revision)+" ";
+            log_benchmark_configuration(*s);logger.flush();text=contents();
+            require(text.find(transport_marker)==std::string::npos,"pending renderer transport was labelled active");
+            s->control_revision=xrfg::embedded::snapshot().revision;
+            log_benchmark_configuration(*s);logger.flush();text=contents();
+            require(text.find(transport_marker)!=std::string::npos,"later transport change lost its label");
+            logger.shutdown();session_state.reset();
+            std::cout<<"Actual benchmark logger preserves independent revisions and rejects pending pipeline/transport PASS\n";
+            return 0;
+        }
         if(mode=="steamvr-djules-restart" && argc>2) {
             std::filesystem::path log_root=argv[2];std::filesystem::create_directories(log_root);
             {std::ofstream ini(log_root/L"ofxr_bridge.ini");ini<<"[diagnostics]\nlogging_enabled=1\n";}

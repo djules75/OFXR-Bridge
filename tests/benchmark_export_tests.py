@@ -56,4 +56,13 @@ with tempfile.TemporaryDirectory() as directory:
               cycles=[dict(ms=i*250,estimated=999 if i*250<3000 or i*250>22000 else 44,length=55,ofxr=7) for i in range(101)])
     checked=m.summarize(edge,3,10,'estimated')
     assert checked['value']=='80(44)' and checked['start_s']==3 and checked['end_s']==22
+    single=Path(directory)/'single.benchmark.log'
+    single.write_text(''.join(rows[:164]))  # complete Disabled, all other routes untried
+    one=m.export([single],'meganex','estimated')[0]
+    assert one['tsv'].split('\t')[1]=='n.a.' and 'Reference:00' in one['untried']
+    short=[event('benchmark_configuration',25000,2,1|(1<<1)|(1<<15),0)]
+    short += [event('benchmark_rates',25000+i*250,(80000<<32)|40000,(40000<<32)|90000,2,2049) for i in range(41)]
+    single.write_text(''.join(rows[:164]+short))
+    attempted=m.export([single],'meganex','estimated')[0]
+    assert attempted['tsv'].split('\t')[5]=='n.d.' and 'Reference:00' not in attempted['untried']
     print('38 exact spreadsheet measurements/40 cells, Djules3X B-only, A/C process profiles, Pimax rows, cycle selection, missing/short guards PASS')

@@ -114,8 +114,14 @@ def summarize(segment, settle, minimum, metric):
 def export(paths, platform, metric, settle=3, minimum=10):
     groups = {}
     measurements = {}
+    attempted = {}
     for path in paths:
         for segment in read_segments(path):
+            cfg = segment['config']
+            group = (cfg['nr'], cfg['separate_queue'], cfg['luke'], cfg['afw_mode'] if cfg['luke'] else 0,
+                     0 if platform == 'meganex' else cfg['dlssg_preset_request'])
+            key = cfg['cell'] if platform == 'meganex' else cfg['route']
+            attempted.setdefault(group, set()).add(key)
             result = summarize(segment, settle, minimum, metric)
             if result is None:
                 continue
@@ -130,7 +136,7 @@ def export(paths, platform, metric, settle=3, minimum=10):
     results = []
     for key, cells in sorted(groups.items()):
         slots = MEGANEX if platform == 'meganex' else QUEST
-        row = [cells[x]['value'] if x in cells else 'n.d.' for x in slots]
+        row = [cells[x]['value'] if x in cells else 'n.d.' if x in attempted[key] else 'n.a.' for x in slots]
         versions = sorted(set(x['version'] for x in cells.values()))
         if len(versions) != 1:
             raise ValueError('Multiple builds in one row; export each build separately.')
@@ -141,6 +147,7 @@ def export(paths, platform, metric, settle=3, minimum=10):
                             dlssg_preset_request=key[4],
                             start_column='S' if platform == 'meganex' else 'BI' if platform == 'pimax' else 'G',
                             missing=[x for x in slots if x not in cells], cells=cells,
+                            untried=[x for x in slots if x not in attempted[key]],
                             measurements=measurements[key], tsv='\t'.join(row)))
     return results
 

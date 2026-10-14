@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.531.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.532.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -831,6 +831,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_unified_route_policy COMMAND xrfg_three_slot_director_tests unified-routes)
         add_test(NAME xrfg_unified_route_shapes_gpu COMMAND xrfg_three_slot_d3d12_tests route-shapes)
         add_test(NAME xrfg_steamvr_queue_choice_gpu COMMAND xrfg_three_slot_d3d12_tests runtime-queue-policy)
+        add_test(NAME xrfg_benchmark_configuration_revisions COMMAND xrfg_three_slot_d3d12_tests benchmark-revisions)
         set_tests_properties(xrfg_steamvr_queue_choice_gpu PROPERTIES TIMEOUT 30)
         add_test(NAME xrfg_steamvr_budget_recovery_gpu COMMAND xrfg_three_slot_d3d12_tests steamvr-budget-recovery)
         set_tests_properties(xrfg_steamvr_budget_recovery_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)

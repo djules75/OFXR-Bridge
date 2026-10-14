@@ -1608,8 +1608,14 @@ void log_benchmark_configuration(SessionState& state) noexcept {
     auto& logger = xrfg::bridge_flight_logger();
     if (!logger.enabled()) return;
     const auto control = xrfg::autonomous::snapshot();
-    if (control.revision != state.control_revision) return;
+    // UI/AFW/pipeline revisions and embedded renderer revisions are independent.
+    // PreferFPS/3X must not erase all subsequent benchmark labels.
+    if (control.revision != xrfg::autonomous::applied_runtime_revision.load(std::memory_order_acquire) ||
+        xrfg::embedded::snapshot().revision != state.control_revision) return;
     const auto& s = control.desired;
+    if (djules_native_scheduler(state) &&
+        (state.djules_triple_requested != s.triple_frame_gen ||
+         state.djules_deep_pipeline != (s.prefer_fps || s.triple_frame_gen))) return;
     const std::uint64_t bits = (s.enabled ? 1ULL : 0ULL) | (std::uint64_t(s.backend) << 1) |
         (std::uint64_t(s.frame_generation) << 3) | (s.separate_synthesis ? 1ULL << 5 : 0ULL) |
         (s.lower_vram ? 1ULL << 6 : 0ULL) | (s.frame_generation == 3 ? 1ULL << 7 : 0ULL) |
