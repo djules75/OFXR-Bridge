@@ -49,6 +49,8 @@ void clear_d3d11_guide_receipt(ID3D11Resource*) noexcept;
 // Only a complete, same-size, single-slice copy carries ownership.
 bool propagate_d3d11_guide_receipt(ID3D11Resource* destination, ID3D11Resource* source) noexcept;
 std::shared_ptr<const DlssMotionVectorSet> resolve_d3d11_dlss_guides(ID3D11Resource*, ID3D12CommandQueue*) noexcept;
+// Deferred release uses its original immutable receipt; owner/stream must still be live.
+std::shared_ptr<const DlssMotionVectorSet> resolve_d3d11_dlss_guides(ID3D11Resource*, ID3D12CommandQueue*, const D3D11GuideReceipt&) noexcept;
 // Exact receipt lookup; never select another stream or a later publication.
 std::shared_ptr<const DlssMotionVectorFrame> resolve_dlss_guide_publication(
     std::uint64_t stream, std::uint64_t publication, ID3D12CommandQueue*) noexcept;

@@ -2057,6 +2057,7 @@ void refused_frame_recovery_test() {
 #include "elliott_controller_layer_tests.inc"
 #include "blackbar_timing_layer_tests.inc"
 #include "djules_v474_layer_tests.inc"
+#include "elliott_compat_layer_tests.inc"
 
 #include "v477_luke_context.inc"
 #include "../src/layer/outlaws_startup_test.inc"
@@ -2094,6 +2095,10 @@ int main(int argc, char** argv) {
     }
     if(argc>1 && std::string_view(argv[1])=="v474-policy") {
         try {djules_v474_policy_lifecycle_test();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
+    }
+    if(argc>1 && std::string_view(argv[1])=="elliott-r26") {
+        try {elliott_r26_release_test(true);elliott_r26_release_test(false);elliott_r26_release_test(true,true);return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
     }
     if(argc>1 && std::string_view(argv[1])=="v474-bridge") {

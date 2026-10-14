@@ -2024,6 +2024,12 @@ void log_swapchain_eligibility(
     std::uint64_t detail = 0,
     std::uint64_t auxiliary = 0) noexcept;
 
+struct DeferredBridgeGuideIdentity {
+    std::uint64_t publication{};
+    bool d11_claimed{};
+    xrfg::D3D11GuideReceipt d11_receipt{};
+};
+
 struct SwapchainState {
     std::shared_ptr<xrfg::VulkanBridgeSwapchain> vulkan_bridge;
     // On a bridged D3D11 session (SessionState::d3d11_bridge): the shared
@@ -2090,6 +2096,7 @@ struct SwapchainState {
     // Ordinary D11 bridge only; call_mutex. No borrowed extension pointers.
     std::optional<std::uint32_t> pending_bridge_release;
     std::chrono::steady_clock::time_point pending_bridge_release_at{};
+    DeferredBridgeGuideIdentity pending_bridge_guides{};
     std::uint32_t enumerated_image_count{};
     // An attempt that failed for its own reasons -- synthesis, interop -- is
     // not retried every frame. Provider initialization refusals can be retired
@@ -7001,7 +7008,8 @@ XrResult layer_wait_swapchain_image_impl(
 XrResult release_swapchain_image_locked(
     const std::shared_ptr<SwapchainState>& state,
     const XrSwapchainImageReleaseInfo* release_info,
-    std::optional<xrfg::LukeRenderIdentity> luke_identity) {
+    std::optional<xrfg::LukeRenderIdentity> luke_identity,
+    const DeferredBridgeGuideIdentity* released_guides = nullptr) {
     const auto swapchain=state->handle;
     std::optional<std::uint32_t> candidate_index;
     std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
@@ -7082,7 +7090,7 @@ XrResult release_swapchain_image_locked(
 
     const bool release_bound_guides = release_bound_projection_guides(*state->session);
     const auto release_publication = release_bound_guides && candidate_index
-        ? xrfg::dlss_motion_vector_publications() : 0;
+        ? (released_guides ? released_guides->publication : xrfg::dlss_motion_vector_publications()) : 0;
     const HRESULT composition_result = candidate_index && !idle_luke
         ? capture_composition_image(state, *candidate_index) : S_FALSE;
 
@@ -7104,24 +7112,26 @@ XrResult release_swapchain_image_locked(
             std::scoped_lock lock(state->mutex);
             auto* application_d3d11_device = state->session->d3d11_bridge
                 ? state->session->d3d11_bridge->device.Get() : state->session->d3d11_device.Get();
-            if ((d3d11_interop || bridge) && xrfg::d3d11_guides_claimed(application_d3d11_device)) {
+            if ((d3d11_interop || bridge) && (released_guides
+                    ? released_guides->d11_claimed : xrfg::d3d11_guides_claimed(application_d3d11_device))) {
                 // Resolve this actual eye texture. The returned one-eye set is
                 // already selected, including right-eye logical index 1.
                 if (bridge && *candidate_index < bridge->d3d11_images().size())
-                    pending_motion_vectors = xrfg::resolve_d3d11_dlss_guides(
-                        bridge->d3d11_images()[*candidate_index],
-                        state->session->d3d12_queue.Get());
+                    pending_motion_vectors = released_guides ? xrfg::resolve_d3d11_dlss_guides(
+                        bridge->d3d11_images()[*candidate_index], state->session->d3d12_queue.Get(), released_guides->d11_receipt)
+                        : xrfg::resolve_d3d11_dlss_guides(bridge->d3d11_images()[*candidate_index], state->session->d3d12_queue.Get());
                 else if (!bridge && *candidate_index < state->enumerated_d3d11_images.size())
-                    pending_motion_vectors = xrfg::resolve_d3d11_dlss_guides(
-                        state->enumerated_d3d11_images[*candidate_index].Get(),
-                        state->session->d3d12_queue.Get());
+                    pending_motion_vectors = released_guides ? xrfg::resolve_d3d11_dlss_guides(
+                        state->enumerated_d3d11_images[*candidate_index].Get(), state->session->d3d12_queue.Get(), released_guides->d11_receipt)
+                        : xrfg::resolve_d3d11_dlss_guides(state->enumerated_d3d11_images[*candidate_index].Get(), state->session->d3d12_queue.Get());
                 static std::atomic<unsigned> diagnostic_samples{0};
                 if (diagnostic_samples.fetch_add(1,std::memory_order_relaxed)<32) {
                     const auto frame=pending_motion_vectors ? pending_motion_vectors->eyes[0] : nullptr;
                     xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::d3d11_bridge,
                         frame?S_OK:S_FALSE,811,handle_value(state->handle),frame?frame->publication:0);
                 }
-            } else if (*candidate_index < state->enumerated_d3d12_images.size()) {
+            } else if ((!released_guides || release_publication != 0) &&
+                       *candidate_index < state->enumerated_d3d12_images.size()) {
                 const int eye = state->session->luke_afw_enabled ? -1 :
                     state->projection_eye.load(std::memory_order_relaxed);
                 pending_motion_vectors = xrfg::resolve_dlss_motion_vectors(
@@ -7505,6 +7515,17 @@ XrResult release_swapchain_with_identity(
             state->waited_count>0 && !state->acquired_indices.empty()) {
             state->pending_bridge_release=state->acquired_indices.front();
             state->pending_bridge_release_at=std::chrono::steady_clock::now();
+            auto& guides=state->pending_bridge_guides;
+            guides={};
+            if(state->session->dlss_motion_vectors) {
+                guides.publication=xrfg::dlss_motion_vector_publications();
+                auto* device=state->session->d3d11_bridge
+                    ? state->session->d3d11_bridge->device.Get() : state->session->d3d11_device.Get();
+                guides.d11_claimed=xrfg::d3d11_guides_claimed(device);
+                if(guides.d11_claimed && *state->pending_bridge_release < state->bridge->d3d11_images().size())
+                    guides.d11_receipt=xrfg::get_d3d11_guide_receipt(
+                        state->bridge->d3d11_images()[*state->pending_bridge_release]);
+            }
             return XR_SUCCESS;
         }
     }
@@ -7516,10 +7537,12 @@ void release_pending_bridge_image_locked(const std::shared_ptr<SwapchainState>& 
         if (!state->pending_bridge_release) return;
         const auto index=*state->pending_bridge_release;
         state->pending_bridge_release.reset();
+        const auto guides=state->pending_bridge_guides;
+        state->pending_bridge_guides={};
         const auto elapsed=std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now()-state->pending_bridge_release_at).count();
         const XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        const auto result=release_swapchain_image_locked(state,&release,std::nullopt);
+        const auto result=release_swapchain_image_locked(state,&release,std::nullopt,&guides);
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::d3d11_bridge,
             XR_SUCCEEDED(result)?4:static_cast<std::int64_t>(result),handle_value(state->handle),
             XR_SUCCEEDED(result)?index:4,XR_SUCCEEDED(result)?static_cast<std::uint64_t>(std::max<std::int64_t>(0,elapsed)):index);
