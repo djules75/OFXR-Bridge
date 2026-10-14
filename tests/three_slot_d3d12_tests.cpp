@@ -34,6 +34,8 @@ bool fsr_stereo_guard{};
 std::mutex guard_journal_mutex;
 bool guard_runtime_waited{}, guard_runtime_begun{};
 bool legacy_queue{};
+bool transport_test{}, transport_inline{};
+std::unordered_map<unsigned,unsigned> triple_synthetic_ordinals;
 bool legacy_early_current{};
 bool midpoint_cadence{};
 bool deep_readiness{};
@@ -43,6 +45,9 @@ bool triple_switch{};
 bool deep_switch{};
 bool lower_vram_test{}, direct_output_test{};
 bool capture_busy_test{};
+unsigned private_budget_limit{}, private_budget_refusals{};
+bool reference_stall_test{};
+std::chrono::steady_clock::time_point reference_synthetic_returned{};
 bool guide_bypass_switch{};
 XrSwapchain last_synthetic_handle{};
 unsigned last_synthetic_frame{};
@@ -50,6 +55,9 @@ bool fsr_queue_gpu_pending{};
 ComPtr<ID3D12Fence> fsr_gpu_gate;
 std::jthread fsr_gpu_watchdog;
 std::atomic<bool> fsr_wait_before_gpu_complete{};
+bool reference_readiness_test{};
+bool reference_capture_overlap_test{};
+std::atomic<bool> reference_wait_before_gpu_complete{};
 std::vector<std::chrono::steady_clock::time_point> output_times;
 std::vector<XrTime> output_display_times;
 std::vector<std::string> fsr_receipt_trace;
@@ -128,16 +136,23 @@ unsigned pixel(ID3D12Resource* r, unsigned slice,
         D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource=readback.Get(); dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint=layout;
         list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
         barrier(list,r,D3D12_RESOURCE_STATE_COPY_SOURCE,submitted_state);
-#ifdef OFXR_TEST_DJULES_ROUTE
     },(deep_readiness||triple_core)?runtime_queue(*session_state):nullptr);
-#else
-    });
-#endif
     void* mapped=nullptr; hr(readback->Map(0,nullptr,&mapped),"readback");
     const unsigned value=*reinterpret_cast<unsigned*>(static_cast<unsigned char*>(mapped)+layout.Offset+64*layout.Footprint.RowPitch+sample_x*4);
     readback->Unmap(0,nullptr); return value;
 }
 XrResult XRAPI_CALL fake_create(XrSession,const XrSwapchainCreateInfo* info,XrSwapchain* h) {
+    {
+        std::scoped_lock lock(resources_mutex);
+        // The transport matrix bounds projection outputs independently of
+        // its additional poisoned-quad ownership oracle.
+        const bool budgeted=!transport_test || info->arraySize==1;
+        const auto allocation_count=transport_test ? std::count_if(images.begin(),images.end(),
+            [](const auto& entry){return entry.second->GetDesc().DepthOrArraySize==1;}) : images.size();
+        if(budgeted && private_budget_limit && allocation_count>=private_budget_limit) {
+            ++private_budget_refusals;return XR_ERROR_LIMIT_REACHED;
+        }
+    }
     auto r=resource(info->arraySize);
     *h=reinterpret_cast<XrSwapchain>(std::uintptr_t(0x1000+ ++created));
     std::scoped_lock lock(resources_mutex); images[*h]=r; return XR_SUCCESS;
@@ -156,6 +171,8 @@ XrResult XRAPI_CALL fake_wait(XrSession,const XrFrameWaitInfo*,XrFrameState* s) 
         require(!guard_runtime_waited && !guard_runtime_begun,"guard double physical Wait");
         guard_runtime_waited=true;
     }
+    if(reference_readiness_test && fsr_gpu_gate && fsr_gpu_gate->GetCompletedValue()==0)
+        reference_wait_before_gpu_complete=true;
     if(fsr_queue_gpu_pending && fsr_gpu_gate && fsr_gpu_gate->GetCompletedValue()==0) {
         fsr_wait_before_gpu_complete=true;
         hr(fsr_gpu_gate->Signal(1), "release pending application GPU work at XR Wait");
@@ -188,7 +205,7 @@ bool is_private_image(XrSwapchain handle) {
     std::scoped_lock lock(resources_mutex);
     return images.contains(handle);
 }
-XrResult XRAPI_CALL fake_end(XrSession,const XrFrameEndInfo* end) {
+XrResult XRAPI_CALL fake_end_impl(XrSession,const XrFrameEndInfo* end) {
     if(fsr_stereo_guard) {
         std::scoped_lock lock(guard_journal_mutex);
         require(guard_runtime_begun && !guard_runtime_waited,"guard unmatched physical End");
@@ -205,12 +222,19 @@ XrResult XRAPI_CALL fake_end(XrSession,const XrFrameEndInfo* end) {
     if (!end->layerCount) { ++empty_submissions; return XR_SUCCESS; }
     const auto* projection=reinterpret_cast<const XrCompositionLayerProjection*>(end->layers[0]);
     bool synthetic=synthetic_handles.contains(projection->views[0].subImage.swapchain);
+    if(transport_test && triple_core && synthetic && !session_state->separate_synthesis)
+        std::this_thread::sleep_for(std::chrono::milliseconds(8)); // allow the next producer to attempt reuse
     if(guide_bypass_switch && !synthetic) for(const auto& chain:find_swapchains(session_state)) {
         std::scoped_lock lock(chain->mutex);
         if(chain->frame_generation) for(const auto& image:chain->frame_generation->synthetic)
             synthetic |= image.handle==projection->views[0].subImage.swapchain;
     }
     const unsigned frame_id=static_cast<unsigned>(projection->views[0].pose.position.y);
+    if(reference_stall_test && !synthetic && frame_id==4 && reference_synthetic_returned.time_since_epoch().count())
+        if(std::chrono::steady_clock::now()-reference_synthetic_returned<std::chrono::milliseconds(6)) {
+            std::cerr<<"Reference real endpoint overwrote a stalled synthetic before one display exposure\n";
+            require(false,"Reference stalled synthetic exposure");
+        }
     if (direct_output_test && (triple_core || triple_inline) && synthetic) {
         if(last_synthetic_frame==frame_id)
             require(last_synthetic_handle!=projection->views[0].subImage.swapchain,"3X synthetic outputs alias one direct handle");
@@ -235,6 +259,8 @@ XrResult XRAPI_CALL fake_end(XrSession,const XrFrameEndInfo* end) {
         }
     }
     unsigned real_id=0;
+    const auto synthetic_ordinal=transport_test && (triple_core||triple_inline) && synthetic
+        ? ++triple_synthetic_ordinals[frame_id] : 0;
     for(unsigned eye=0;eye<projection->viewCount;++eye) {
         auto sub=projection->views[eye].subImage;
         ComPtr<ID3D12Resource> image=submitted_image(sub.swapchain);
@@ -246,6 +272,8 @@ XrResult XRAPI_CALL fake_end(XrSession,const XrFrameEndInfo* end) {
         if(((p>>8)&255)!=(eye?160u:80u))
             std::cerr<<"eye mismatch frame="<<frame_id<<" synthetic="<<synthetic<<" eye="<<eye<<" pixel="<<std::hex<<p<<std::dec<<'\n';
         correct &= ((p>>8)&255)==(eye?160u:80u);
+        if(synthetic_ordinal) require((p&255)==(synthetic_ordinal==1?frame_id-1:frame_id),
+            "3X synthetic image belongs to another pair or interpolation slot");
         if(!synthetic) {
             if(eye==0) real_id=p&255;
             const unsigned expected=alternating_eyes && frame_id>1 && frame_id%2!=eye ? frame_id-1:frame_id;
@@ -286,7 +314,15 @@ XrResult XRAPI_CALL fake_end(XrSession,const XrFrameEndInfo* end) {
             promotion_gate->Signal(1);
         });
     }
+    if(reference_stall_test && synthetic && frame_id==4) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        reference_synthetic_returned=std::chrono::steady_clock::now();
+    }
     return XR_SUCCESS;
+}
+XrResult XRAPI_CALL fake_end(XrSession session,const XrFrameEndInfo* end) {
+    try{return fake_end_impl(session,end);}
+    catch(const std::exception& error){std::cerr<<"runtime fixture: "<<error.what()<<'\n';throw;}
 }
 std::shared_ptr<SwapchainState> source(unsigned id,unsigned slices,bool projection,bool static_image=false) {
     auto c=std::make_shared<SwapchainState>(session_state, XrSwapchainCreateInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO});
@@ -335,28 +371,44 @@ int main(int argc,char** argv) {
         s->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::nvidia;
         s->nvidia_new_route = true; s->djules_route=kTestDjules;
         const std::string_view mode = argc>1 ? argv[1] : "";
+        if(mode=="steamvr-djules-restart" && argc>2) {
+            std::filesystem::path log_root=argv[2];std::filesystem::create_directories(log_root);
+            {std::ofstream ini(log_root/L"ofxr_bridge.ini");ini<<"[diagnostics]\nlogging_enabled=1\n";}
+            xrfg::bridge_flight_logger().initialize(log_root);
+        }
+        if(mode=="steamvr-djules-outputs" || mode=="steamvr-djules-restart") {
+            dispatch->steamvr_runtime=true;s->djules_route=true;s->separate_synthesis=1;s->lower_vram=1;
+            if(mode=="steamvr-djules-restart") {
+                s->presenter_active=true;
+                stop_continuous_presenter(s);
+                require(!s->presenter_active && s->presenter_stop_requested,"restart stop state not reproduced");
+            }
+        }
+        if(mode=="steamvr-output-retire")dispatch->steamvr_runtime=true;
+        reference_stall_test=mode=="legacy-queue-stall-exposure";
+        reference_readiness_test=mode=="legacy-queue-readiness";
+        reference_capture_overlap_test=mode=="legacy-queue-capture-overlap";
         capture_busy_test=mode=="capture-busy";
         guide_bypass_switch=mode=="guide-bypass-switch";
         lower_vram_test=mode.ends_with("lower-vram"); direct_output_test=mode.ends_with("direct-output");
-        if(lower_vram_test) s->lower_vram=1;
+        if(lower_vram_test) { s->separate_synthesis=1; s->lower_vram=1; }
         if(direct_output_test) s->lower_vram=0;
         if(mode=="legacy-queue-lower-vram" || mode=="legacy-queue-direct-output") s->nvidia_new_route=false;
         if(mode=="fidelityfx-lower-vram") { s->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::fidelity_fx; s->nvidia_new_route=false; s->djules_route=false; }
-#ifdef OFXR_TEST_DJULES_ROUTE
         deep_readiness=mode.starts_with("deep-readiness");
         deep_switch=mode.starts_with("deep-switch");
         deep_readiness=deep_readiness || deep_switch;
         // Owned-repeat readiness belongs to deferred staged outputs. Preserve
         // that regression explicitly with Lower VRAM on and exercise the new
         // direct-output default in separate fixtures with the same GPU gate.
-        if(deep_readiness && !direct_output_test) s->lower_vram=1;
+        if(deep_readiness && !direct_output_test) { s->separate_synthesis=1; s->lower_vram=1; }
         s->djules_deep_pipeline=deep_readiness;
-        triple_switch=argc>1 && std::string_view(argv[1])=="triple-switch";
+        triple_switch=mode.starts_with("triple-switch");
         triple_core=triple_switch || (argc>1 && std::string_view(argv[1]).starts_with("triple-core"));
         triple_inline=argc>1 && std::string_view(argv[1]).starts_with("triple-inline");
+        if(deep_readiness || triple_core || triple_inline) s->djules_route=true;
         s->djules_triple_requested=triple_core||triple_inline;
         if(triple_inline) { dispatch->virtual_desktop_runtime=false; dispatch->inline_unless_pipelined=true; }
-#endif
         fsr_test=argc>1 && std::string_view(argv[1]).starts_with("fsr-");
         legacy_queue=argc>1 && std::string_view(argv[1]).starts_with("legacy-queue");
         legacy_early_current=argc>1 && std::string_view(argv[1])=="legacy-queue-early-b";
@@ -378,6 +430,26 @@ int main(int argc,char** argv) {
             s->frame_generation_mode={};
             dispatch->steamvr_runtime=std::string_view(argv[1]) != "legacy-queue-vdxr";
         }
+        transport_test=mode.starts_with("transport-") || mode.starts_with("transport3-");
+        if(transport_test) {
+            const bool reference=mode.find("-ref-")!=std::string_view::npos;
+            s->nvidia_new_route=!reference;
+            s->djules_route=mode.find("-djules-")!=std::string_view::npos;
+            s->separate_synthesis=mode[mode.size()-2]=='1';
+            s->lower_vram=mode.back()=='1';
+            dispatch->steamvr_runtime=mode.find("-steam-")!=std::string_view::npos;
+            dispatch->virtual_desktop_runtime=!dispatch->steamvr_runtime;
+            dispatch->inline_unless_pipelined=dispatch->virtual_desktop_runtime;
+            transport_inline=s->djules_route && dispatch->virtual_desktop_runtime;
+            // VDXR's split-thread shape retains its existing synchronous owner.
+            if(transport_inline) {s->application_wait_thread_id=1;s->application_end_thread_id=2;s->split_frame_loop=true;}
+            if(mode.starts_with("transport3-")) {
+                s->djules_triple_requested=true;
+                triple_core=!transport_inline;triple_inline=transport_inline;
+            }
+            if(dispatch->steamvr_runtime) private_budget_limit=8; // actual log ceiling: eight outputs fit, twelve refuse
+            legacy_queue=reference || (s->lower_vram && !s->separate_synthesis && !transport_inline);
+        }
         fsr_queue=argc>1 && std::string_view(argv[1]).starts_with("fsr-queue");
         fsr_queue_slow=argc>1 && std::string_view(argv[1]) == "fsr-queue-slow";
         fsr_queue_slow=fsr_queue_slow || (argc>1 && std::string_view(argv[1]) == "legacy-queue-slow");
@@ -394,14 +466,61 @@ int main(int argc,char** argv) {
         D3D12_COMMAND_QUEUE_DESC q{};q.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
         hr(s->d3d12_device->CreateCommandQueue(&q,IID_PPV_ARGS(&s->d3d12_queue)),"application queue");
         hr(s->d3d12_device->CreateCommandQueue(&q,IID_PPV_ARGS(&s->d3d12_synthesis_queue)),"synthesis queue");
-#ifdef OFXR_TEST_DJULES_ROUTE
+        if (mode == "runtime-queue-policy") {
+            dispatch->steamvr_runtime = true;
+            for (bool separate : {false, true}) for (int backend : {0, 1, 2, 3})
+                for (int generator : {0, 1, 2}) for (bool hybrid : {false, true}) for (bool enabled : {false, true}) {
+                    s->steamvr_separate_queue = separate;
+                    s->menu_enabled = enabled;
+                    s->nvidia_new_route = backend >= 2;
+                    s->djules_route = backend == 3;
+                    s->optical_flow_backend = backend == 0 ? xrfg::D3D12OpticalFlowBackend::fidelity_fx : xrfg::D3D12OpticalFlowBackend::nvidia;
+                    s->frame_generation_mode = static_cast<xrfg::D3D12FrameGenerationMode>(generator);
+                    s->hybrid_requested = hybrid; s->nvidia_options.hybrid = hybrid;
+                    require(runtime_binding_queue_requested(*s) == separate, "initial generator changed explicit queue choice");
+                }
+            s->nvidia_new_route = false; s->djules_route = false;
+            s->optical_flow_backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
+            s->frame_generation_mode = xrfg::D3D12FrameGenerationMode::fsr3;
+            s->hybrid_requested = false; s->nvidia_options.hybrid = false;
+            for (bool separate : {false, true}) {
+                s->steamvr_separate_queue = separate;
+                require(initialize_runtime_binding_queue(*s) == (separate ? S_OK : S_FALSE), "actual queue initialization disagrees with choice");
+                require((runtime_queue(*s) != s->d3d12_queue.Get()) == separate, "actual runtime queue identity incorrect");
+                ComPtr<ID3D12Fence> gate, runtime_done, application_done;
+                hr(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate)), "queue gate");
+                hr(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&runtime_done)), "runtime marker");
+                hr(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&application_done)), "application marker");
+                hr(runtime_queue(*s)->Wait(gate.Get(), 1), "hold runtime work");
+                hr(runtime_queue(*s)->Signal(runtime_done.Get(), 1), "runtime progress");
+                hr(s->d3d12_queue->Signal(application_done.Get(), 1), "application progress");
+                const HRESULT progress = wait_composition_fence(application_done.Get(), 1, 30);
+                // Always release the GPU gate before an assertion can unwind.
+                hr(gate->Signal(1), "release runtime gate");
+                hr(wait_composition_fence(runtime_done.Get(), 1), "runtime drain");
+                hr(wait_composition_fence(application_done.Get(), 1), "application drain");
+                require(separate ? SUCCEEDED(progress) : progress == HRESULT_FROM_WIN32(ERROR_BUSY), "runtime dependency isolation differs from selected mode");
+            }
+            dispatch->steamvr_runtime = false; dispatch->virtual_desktop_runtime = true;
+            require(!runtime_binding_queue_requested(*s), "VDXR gained a SteamVR override");
+            dispatch->virtual_desktop_runtime = false; dispatch->steamvr_runtime = true;
+            s->luke_afw_enabled = true; s->steamvr_separate_queue = false; s->nvidia_new_route = true;
+            require(runtime_binding_queue_requested(*s), "Luke established queue contract changed");
+            std::cout << "Explicit native SteamVR queue policy independent of generator; real GPU shared/separate dependency checks PASS\n";
+            session_state.reset(); // Retire the GPU device before process-static layer globals.
+            return 0;
+        }
+        if(reference_capture_overlap_test) {
+            hr(s->d3d12_device->CreateCommandQueue(&q,IID_PPV_ARGS(&s->binding_queue)),"Reference XR binding queue");
+            hr(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&s->app_release_fence)),"Reference release fence");
+            hr(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&s->reacquire_fence)),"Reference reacquire fence");
+        }
         if(deep_readiness||triple_core) {
             dispatch->steamvr_runtime=true;
             hr(s->d3d12_device->CreateCommandQueue(&q,IID_PPV_ARGS(&s->binding_queue)),"DJ runtime binding queue");
             hr(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&s->app_release_fence)),"DJ app release fence");
             hr(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&s->reacquire_fence)),"DJ reacquire fence");
         }
-#endif
         dispatch->create_swapchain=fake_create;dispatch->enumerate_swapchain_images=fake_enumerate;dispatch->destroy_swapchain=fake_destroy;
         dispatch->acquire_swapchain_image=[](XrSwapchain,const XrSwapchainImageAcquireInfo*,uint32_t* index)->XrResult{*index=0;return XR_SUCCESS;};
         dispatch->wait_swapchain_image=[](XrSwapchain,const XrSwapchainImageWaitInfo*)->XrResult{return XR_SUCCESS;};
@@ -417,6 +536,171 @@ int main(int argc,char** argv) {
         auto right=array?left:source(0x202,1,true);if(!array)chains.push_back(right);
         auto dynamic=source(0x203,2,false);auto fixed=source(0x204,2,false,true);
         chains.push_back(dynamic);chains.push_back(fixed);
+        if(transport_test) {
+            const unsigned current=s->lower_vram?1:2;
+            const unsigned synthetic=s->lower_vram?1:2;
+            require(images.size()==2*(current+synthetic),"transport flags did not select exact XR budget");
+            for(const auto& chain:{left,right}) {
+                const auto g=chain->frame_generation;
+                require(g && g->staged_outputs==bool(s->separate_synthesis),"separation still coupled to reduction");
+                require(g->current_runtime_rings==current && g->synthetic_runtime_rings==synthetic,"incorrect transport ring counts");
+                if(g->staged_outputs) require(std::count_if(g->current_staging.begin(),g->current_staging.end(),[](const auto& image){return bool(image);})==2 &&
+                    std::count_if(g->synthetic_staging.begin(),g->synthetic_staging.end(),[](const auto& image){return bool(image);})==(s->djules_triple_requested?4:2),"2X reserved unused 3X synthesis textures");
+            }
+        }
+        if(mode=="steamvr-djules-outputs")
+            require(left->frame_generation->staged_outputs && right->frame_generation->staged_outputs &&
+                images.size()==4,"Djules reduced transport did not halve four XR rings to two per eye");
+        if(mode=="steamvr-new-bounded") {
+            dispatch->steamvr_runtime=true;
+            s->djules_route=false;
+            for(const auto& chain:{left,right}) {
+                fill(chain->enumerated_d3d12_images[0].Get(),1,chain==left?80:160);
+                release(chain);
+                drain_swapchain_gpu(chain);destroy_frame_generation_swapchains(chain);
+                chain->generation_eligible_pending=true;
+            }
+            const auto capture=right->last_released_capture->serial;
+            private_budget_limit=6;
+            std::array<ProjectionResourceMapping,2> mapped{};
+            mapped[0].application_swapchain=left->handle;mapped[1].application_swapchain=right->handle;
+            require(!ensure_projection_frame_generation(s,mapped),"full allocation silently reduced its XR budget");
+            require(private_budget_refusals==1 && right->last_released_capture->serial==capture,
+                "full allocation refusal changed capture or retried unboundedly");
+            restore_route.previous=xrfg::embedded::snapshot().desired;
+            auto desired=*restore_route.previous;
+            desired.enabled=true;desired.backend=2;desired.frame_generation=0;
+            desired.separate_synthesis=1;desired.lower_vram=1;
+            require(xrfg_fixture::request_control(desired),"explicit bounded output request");
+            hr(apply_embedded_control(s),"explicit bounded output control");
+            require(ensure_projection_frame_generation(s,mapped),"explicit reduced budget did not recover");
+            require(left->frame_generation && right->frame_generation && images.size()==4 &&
+                left->frame_generation->staged_outputs && right->frame_generation->staged_outputs,
+                "explicit reduction lost owned output capacity");
+            require(right->last_released_capture->serial==capture,"explicit reduction changed capture");
+            private_budget_limit=0; // auxiliary ownership oracle is independent of the budget
+            for(const auto& chain:{left,right})for(const auto& image:chain->frame_generation->synthetic)
+                if(image.handle)synthetic_handles.insert(image.handle);
+        }
+        if(mode=="steamvr-budget-recovery") {
+            restore_route.previous=xrfg::embedded::snapshot().desired;
+            dispatch->steamvr_runtime=true;
+            std::array<ProjectionResourceMapping,2> projected{};
+            projected[0].application_swapchain=left->handle;
+            projected[1].application_swapchain=right->handle;
+            // REAL VR can enumerate extra eye targets that are absent from the
+            // current submitted projection. Their histories do not admit outputs.
+            for(unsigned id:{0x205u,0x206u}) {
+                auto unused=source(id,1,true);chains.push_back(unused);
+                destroy_frame_generation_swapchains(unused);
+                unused->generation_eligible_pending=true;
+            }
+            fill(left->enumerated_d3d12_images[0].Get(),1,80);release(left);
+            fill(right->enumerated_d3d12_images[0].Get(),1,160);release(right);
+            const auto history=left->d3d12_history;
+            const auto serial=left->last_released_capture->serial;
+            auto desired=*restore_route.previous;
+            desired.enabled=true;desired.backend=1;desired.frame_generation=0;desired.separate_synthesis=0;desired.lower_vram=0;
+            require(xrfg_fixture::request_control(desired),"budget reference request");
+            // The owner run admits the eight New/Reference private outputs,
+            // but rejects the twelve direct Djules outputs, even in 2X.
+            private_budget_limit=8;
+            hr(apply_embedded_control(s),"budget reference control");
+            s->presenter_display_period=22'222'222;
+            require(adopt_reference_display_period(*s,std::chrono::nanoseconds(11'111'111)) &&
+                s->presenter_display_period==11'111'111,"reference used throttled app clock as display clock");
+            require(!adopt_reference_display_period(*s,std::nullopt) &&
+                !adopt_reference_display_period(*s,std::chrono::nanoseconds(1)),"invalid display clock admitted");
+            require(!chains[4]->frame_generation && !chains[5]->frame_generation,
+                "control allocated outputs for unsubmitted eye targets");
+            for(unsigned route:{3u,1u,2u}) {
+                desired.backend=route;desired.separate_synthesis=route==3;desired.lower_vram=route==3;
+                require(xrfg_fixture::request_control(desired),"budget route request");
+                hr(apply_embedded_control(s),"budget route control");
+                require(ensure_projection_frame_generation(s,projected),"bounded projected output creation");
+                require(left->frame_generation && right->frame_generation,"budget lost one eye");
+                require(private_budget_refusals==0,"route replacement exceeded final output budget");
+                require(left->frame_generation->staged_outputs==(route==3) &&
+                    right->frame_generation->staged_outputs==(route==3),"SteamVR staged output scope changed");
+                require(!adopt_reference_display_period(*s,std::chrono::nanoseconds(8'333'333)) || route==1,
+                    "reference display clock changed New/Djules");
+                require(left->d3d12_history==history && left->last_released_capture->serial==serial,
+                    "output replacement changed source history/capture");
+            }
+            // The supplied log has a per-eye synthetic-ring refusal without
+            // the session-wide gate: reproduce that exact local latched state.
+            drain_swapchain_gpu(left);destroy_frame_generation_swapchains(left);
+            private_budget_limit=7;
+            SwapchainEligibilityReason local_reason{};std::uint64_t local_detail{};
+            auto refused=create_d3d12_frame_generation_swapchains(left,&local_reason,&local_detail);
+            require(!refused && local_reason==SwapchainEligibilityReason::synthetic_private_swapchain_failed &&
+                local_detail==static_cast<std::uint64_t>(static_cast<std::int64_t>(XR_ERROR_LIMIT_REACHED)),
+                "logged local synthetic-ring refusal not reproduced");
+            left->generation_declined=true;left->generation_eligible_pending=false;
+            left->generation_refusal=local_reason;left->generation_refusal_detail=local_detail;
+            require(!s->generation_budget_exhausted,"local refusal unexpectedly became session-wide");
+            hr(apply_embedded_control(s),"unchanged local refused revision");
+            require(left->generation_declined,"local refusal retried without a new revision");
+            private_budget_limit=8;desired.backend=3;desired.separate_synthesis=1;desired.lower_vram=1;
+            require(xrfg_fixture::request_control(desired),"logged local refusal route change");
+            hr(apply_embedded_control(s),"logged local refusal recovery");
+            require(ensure_projection_frame_generation(s,projected) && left->frame_generation && right->frame_generation,
+                "logged local refusal stayed latched after route change");
+            // Genuine refusal still stops generation and retires every owned
+            // output. Neither another EndFrame nor the same revision retries it.
+            for(const auto& chain:{left,right}) {
+                drain_swapchain_gpu(chain);destroy_frame_generation_swapchains(chain);
+                chain->generation_eligible_pending=true;
+            }
+            private_budget_limit=3;
+            require(!ensure_projection_frame_generation(s,projected) && s->generation_budget_exhausted,
+                "runtime budget refusal was hidden");
+            release_session_generation_budget(s);
+            const unsigned refusals=private_budget_refusals, allocations=created;
+            hr(apply_embedded_control(s),"same refused revision");
+            require(ensure_projection_frame_generation(s,projected) && s->generation_budget_exhausted &&
+                private_budget_refusals==refusals && created==allocations,"refused budget retried each frame");
+            // Explicit new route is a bounded new transaction, after retirement.
+            private_budget_limit=8;desired.backend=1;desired.separate_synthesis=0;desired.lower_vram=0;
+            require(xrfg_fixture::request_control(desired),"refused budget new route");
+            hr(apply_embedded_control(s),"refused budget control recovery");
+            require(!s->generation_budget_exhausted,"new route permanently retained exhausted budget");
+            require(ensure_projection_frame_generation(s,projected) && left->frame_generation && right->frame_generation,
+                "explicit route failed to recover both projected eyes");
+            require(!fixed->generation_eligible_pending && fixed->generation_declined,
+                "budget retry reopened protected/static eligibility");
+            require(!chains[4]->frame_generation && !chains[5]->frame_generation,
+                "budget recovery allocated unused eye targets");
+            // Exercise enable recovery too, without changing the provider tuple.
+            for(const auto& chain:{left,right}) {
+                drain_swapchain_gpu(chain);destroy_frame_generation_swapchains(chain);
+                chain->generation_eligible_pending=true;
+            }
+            private_budget_limit=3;
+            require(!ensure_projection_frame_generation(s,projected),"enable refusal setup");
+            release_session_generation_budget(s);
+            desired.enabled=false;require(xrfg_fixture::request_control(desired),"budget disable request");
+            hr(apply_embedded_control(s),"budget disable");
+            require(s->generation_budget_exhausted,"disable unexpectedly rearmed output budget");
+            private_budget_limit=8;desired.enabled=true;
+            require(xrfg_fixture::request_control(desired),"budget enable request");
+            hr(apply_embedded_control(s),"budget explicit enable recovery");
+            require(!s->generation_budget_exhausted && ensure_projection_frame_generation(s,projected) &&
+                left->frame_generation && right->frame_generation,"enable did not recover both eyes");
+            // Return to new for the unchanged eight-real/seven-generated GPU
+            // pixel/ownership oracle below. No fresh captures are invented.
+            desired.backend=2;require(xrfg_fixture::request_control(desired),"budget final new route");
+            hr(apply_embedded_control(s),"budget final route");
+            require(ensure_projection_frame_generation(s,projected),"budget final outputs");
+            require(images.size()==8,"final New output budget changed");
+            // The bounded phase above isolates projection-output capacity.
+            // The existing oracle below allocates additional retained quad
+            // outputs; those are a different budget consumer, not eye rings.
+            private_budget_limit=0;
+            for(const auto& chain:{left,right})for(const auto& image:chain->frame_generation->synthetic)
+                synthetic_handles.insert(image.handle);
+            std::cout<<"SteamVR budget: only projected eyes, old shapes retired before new, strict limit refusal, no per-frame retry, explicit route/enable recovery PASS\n";
+        }
         if(mode=="guide-bypass-switch") {
             restore_route.previous=xrfg::embedded::snapshot().desired;
             for(unsigned n=1;n<=11;++n) {
@@ -602,9 +886,9 @@ int main(int argc,char** argv) {
             const auto history=left->d3d12_history;
             const auto capture=left->last_released_capture;
             require(capture.has_value(),"owned capture before route change");
-            for(const int lower:{0,1}) for(const int route:{1,3,2,1,3,2}) {
+            for(const int lower:{0,1}) for(const int separate:{0,1}) for(const int route:{1,3,2,1,3,2}) {
                 auto desired=*restore_route.previous;
-                desired.enabled=true;desired.backend=route;desired.frame_generation=0;desired.lower_vram=lower;
+                desired.enabled=true;desired.backend=route;desired.frame_generation=0;desired.separate_synthesis=separate;desired.lower_vram=lower;
                 if(mode=="paused-route-shapes") {
                     auto paused=xrfg::embedded::snapshot().desired;
                     paused.enabled=false;
@@ -626,12 +910,20 @@ int main(int argc,char** argv) {
                 require(left->d3d12_history==history && left->last_released_capture.has_value(),"route replaced source ownership");
                 for(const auto& chain:{left,right}) {
                     const auto generation=chain->frame_generation;
-                    require(generation && generation->staged_outputs==(lower!=0),"stale private output shape");
-                    require(generation->direct_extra_outputs==(!generation->staged_outputs && route==3),"stale direct 3X capacity");
-                    require(generation->staging_stride==(generation->staged_outputs && route==3 ? 2U : 1U),"stale staged 3X capacity");
+                    require(generation && generation->staged_outputs==(separate!=0),"stale private output shape");
+                    require(!generation->direct_extra_outputs,"stale direct 3X capacity");
+                    require(generation->current_runtime_rings==(lower?1U:2U) &&
+                        generation->synthetic_runtime_rings==(lower?1U:2U),"stale independent runtime ring allocation");
+                    require(generation->staging_stride==1U,"stale staged 3X capacity");
                     for(const auto& image:generation->synthetic)synthetic_handles.insert(image.handle);
                 }
             }
+            auto final=*restore_route.previous;final.enabled=true;final.backend=2;final.frame_generation=0;
+            final.separate_synthesis=0;final.lower_vram=0;
+            require(xrfg_fixture::request_control(final),"restore full direct output after matrix switches");
+            hr(apply_embedded_control(s),"restore full direct output after matrix switches");
+            for(const auto& chain:{left,right}) for(const auto& image:chain->frame_generation->synthetic)
+                if(image.handle) synthetic_handles.insert(image.handle);
             // The frame path below must deliver eight real and seven generated
             // frames after the last resume, with pixel and XR-cycle accounting.
             // It must not inherit a stale temporal anchor from these switches.
@@ -661,7 +953,7 @@ int main(int argc,char** argv) {
         s->last_inline_frame_state.predictedDisplayTime=runtime_time;s->last_inline_frame_state.shouldRender=XR_TRUE;s->last_inline_frame_state_valid=true;
         if(fsr_test) require(!three_slot_generation_session(s),
             "FSR was admitted to the three-slot director");
-        if(!promotion_test && !fsr_test && !legacy_queue && !triple_inline && s->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::nvidia) {
+        if(mode!="steamvr-djules-restart" && !promotion_test && !fsr_test && !legacy_queue && !triple_inline && !transport_inline && s->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::nvidia) {
             require(start_continuous_presenter(s,nullptr,false),"promotion");
             if(s->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::nvidia)
                 require(s->three_slot_director && s->synthesis_thread.joinable(),"native did not enter three lanes");
@@ -675,16 +967,21 @@ int main(int argc,char** argv) {
             require(start_continuous_presenter(s,nullptr,true),"guard initial virtual owner");
         }
         for(unsigned n=1;n<=real_count;++n) {
-#ifdef OFXR_TEST_DJULES_ROUTE
-            if(triple_switch && (n==5 || n==7))
+            if(triple_switch && (n==5 || n==7)) {
                 require(XR_SUCCEEDED(switch_djules_pipeline(s,n==7,false)),"live GPU multiplier switch");
+                for(const auto& chain:{left,right}) {
+                    const auto g=chain->frame_generation;
+                    require(g && g->synthetic_runtime_rings==(s->lower_vram?1U:2U),"live 3X change reserved extra XR handles");
+                    if(g->staged_outputs) require(g->staging_stride==(n==7?2U:1U),"live 2X did not free extra owned textures");
+                    for(const auto& image:g->synthetic) if(image.handle) synthetic_handles.insert(image.handle);
+                }
+            }
             if(deep_switch && (n==5 || n==7)) {
                 if(n==5) require(policy_gate->GetCompletedValue()==0,"policy fixture did not retain pending GPU work");
                 require(XR_SUCCEEDED(switch_djules_pipeline(s,false,n==7)),"live GPU deep preference switch");
                 require(s->djules_deep_pipeline==(n==7),"live preference not applied");
                 if(n==5) require(policy_gate->GetCompletedValue()==1,"policy crossed unfinished GPU work");
             }
-#endif
             require(XR_SUCCEEDED(wait_for_synthesis_handoff(s)),"worker rendezvous");
             const bool busy_frame=capture_busy_test && (n==4 || n==6);
             xrfg::D3D12HistoryConsumerLease left_lease{}, right_lease{};
@@ -707,6 +1004,12 @@ int main(int argc,char** argv) {
             }
             if(!alternating_eyes || n==1 || n%2==0){fill(left->enumerated_d3d12_images[0].Get(),n,80,array);release(left,!busy_frame);}
             if(!array && (!alternating_eyes || n==1 || n%2==1)){fill(right->enumerated_d3d12_images[0].Get(),n,160);release(right,!busy_frame);}
+            if(reference_capture_overlap_test && n==4) {
+                require(fsr_gpu_gate->GetCompletedValue()==0,"next Reference capture globally waited for preceding pair");
+                require(left->last_released_capture && right->last_released_capture,
+                    "overlapping Reference capture missing");
+                hr(fsr_gpu_gate->Signal(1),"release preceding pair after next capture");
+            }
             if(capture_busy_test && n<=3) {
                 held_left[n]=*left->last_released_capture; held_right[n]=*right->last_released_capture;
             }
@@ -743,8 +1046,8 @@ int main(int argc,char** argv) {
             // Inline submissions borrow the application's released auxiliary
             // image until synchronous End; only asynchronous consumers require
             // an independently retained release capture.
-            fill(dynamic->enumerated_d3d12_images[0].Get(),n,60);release(dynamic,!busy_frame && s->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::nvidia && !triple_inline && (!legacy_queue || n>1));
-            if(n==1){fill(fixed->enumerated_d3d12_images[0].Get(),55,120);release(fixed,s->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::nvidia && !triple_inline && !legacy_queue);}
+            fill(dynamic->enumerated_d3d12_images[0].Get(),n,60);release(dynamic,mode!="steamvr-djules-restart" && !busy_frame && s->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::nvidia && !triple_inline && !transport_inline && (!legacy_queue || n>1));
+            if(n==1){fill(fixed->enumerated_d3d12_images[0].Get(),55,120);release(fixed,mode!="steamvr-djules-restart" && s->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::nvidia && !triple_inline && !transport_inline && !legacy_queue);}
             if(busy_frame) fill(fixed->enumerated_d3d12_images[0].Get(),55,120);
             XrFrameState prediction{XR_TYPE_FRAME_STATE};
             if(guard_next) {prediction=*guard_next;guard_next.reset();}
@@ -752,6 +1055,15 @@ int main(int argc,char** argv) {
             if(!fsr_stereo_guard)
                 require(prediction.predictedDisplayPeriod==(triple_switch && (n==5 || n==6)?8333333 : (triple_core||triple_inline)?24999999 : legacy_queue && n>1 ? 16666666 : 8333333),"advertised period");
             require(XR_SUCCEEDED(layer_begin_frame_impl(s->handle,nullptr)),"producer begin");
+            if((reference_readiness_test || reference_capture_overlap_test) && n==3) {
+                require(XR_SUCCEEDED(wait_for_presenter_idle(s)),"Reference readiness drain");
+                hr(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fsr_gpu_gate)),"Reference GPU gate");
+                hr(s->d3d12_synthesis_queue->Wait(fsr_gpu_gate.Get(),1),"hold Reference synthesis output");
+                fsr_gpu_watchdog=std::jthread([] {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    fsr_gpu_gate->Signal(1);
+                });
+            }
             if(fsr_queue_gpu_pending && n==3) {
                 require(XR_SUCCEEDED(wait_for_presenter_idle(s)), "pending GPU test drain");
                 hr(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fsr_gpu_gate)), "FSR pending GPU gate");
@@ -821,7 +1133,7 @@ int main(int argc,char** argv) {
                     "guard admitted mono projection");
                 left->last_released_motion_vectors=original;
             }
-            const unsigned independence_frame=(fsr_test || legacy_queue || triple_inline || s->optical_flow_backend!=xrfg::D3D12OpticalFlowBackend::nvidia) ? 0 : promotion_test ? 5 : 2;
+            const unsigned independence_frame=(mode=="steamvr-djules-restart" || fsr_test || legacy_queue || triple_inline || transport_inline || s->optical_flow_backend!=xrfg::D3D12OpticalFlowBackend::nvidia) ? 0 : promotion_test ? 5 : 2;
             if(deep_switch && n==4) {
                 hr(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&policy_gate)),"policy GPU gate");
                 hr(s->d3d12_synthesis_queue->Wait(policy_gate.Get(),1),"hold policy GPU work");
@@ -838,7 +1150,21 @@ int main(int argc,char** argv) {
                 guard_next=next;
             }
             const auto fsr_used_before=xrfg::fsr_frame_generation_statistics().used;
-            require(XR_SUCCEEDED(layer_end_frame_impl(s->handle,&end)),"actual EndFrame");
+            const auto ended=layer_end_frame_impl(s->handle,&end);
+            if(XR_FAILED(ended))std::cerr<<"actual EndFrame result="<<ended<<" frame="<<n<<'\n';
+            require(XR_SUCCEEDED(ended),"actual EndFrame");
+            if(reference_capture_overlap_test && n==3)
+                require(fsr_gpu_gate->GetCompletedValue()==0,"overlap Reference producer blocked on output");
+            if(reference_readiness_test && n==3) {
+                require(fsr_gpu_gate->GetCompletedValue()==0,"Reference GPU wait blocked producer End");
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                require(!reference_wait_before_gpu_complete,"Reference opened XR cycle before exact GPU output was ready");
+                hr(fsr_gpu_gate->Signal(1),"release Reference output after producer returned");
+            }
+            if(mode=="steamvr-djules-restart" && n==1)
+                require(s->generation_status==xrfg::autonomous::GenerationState::recovering &&
+                    submissions.size()==1 && submissions[0]==std::pair<unsigned,bool>{1,false},
+                    "stopped SteamVR presenter prevented staged bootstrap prime");
             if (fsr_test && !fsr_queue) fsr_receipt_trace.push_back(
                 "frame=" + std::to_string(n) + " capture=" + std::to_string(left->last_released_capture.has_value()) +
                 " generation=" + std::to_string(static_cast<unsigned>(s->generation_status.load())) +
@@ -951,7 +1277,7 @@ int main(int argc,char** argv) {
             require(submissions.size()==fresh.size()+repeats,"deep physical output accounting");
             submissions=std::move(fresh);
         }
-        const unsigned expected_count=capture_busy_test?11:fsr_stereo_guard?16:deep_switch?13:triple_switch?17:(triple_core||triple_inline)?22:fsr_queue_switch ? 16 : fsr_missing ? 8 : gap_test ? 12 : promotion_test ? 14 : 15;
+        const unsigned expected_count=capture_busy_test?11:fsr_stereo_guard?16:deep_switch?13:triple_switch?17:(triple_core||triple_inline)?22:fsr_queue_switch ? 16 : fsr_missing ? 8 : gap_test ? 12 : (promotion_test || mode=="steamvr-djules-restart") ? 14 : 15;
         const unsigned expected_cycles = expected_count + repeats + empty_submissions;
         if (submissions.size()!=expected_count || waits!=expected_cycles || begins!=expected_cycles || ends!=expected_cycles) {
             const auto fsr=xrfg::fsr_frame_generation_statistics();
@@ -987,7 +1313,7 @@ int main(int argc,char** argv) {
                 expected.emplace_back(n,false);
             }
             require(submissions==expected,"gap must skip only synthetic, keep every real, resume pairing");
-        } else if(promotion_test) {
+        } else if(promotion_test || mode=="steamvr-djules-restart") {
             const std::array<unsigned,8> real_positions={0,2,4,5,7,9,11,13};
             unsigned next_real=0;
             for(unsigned i=0;i<submissions.size();++i) {
@@ -1054,6 +1380,32 @@ int main(int argc,char** argv) {
         }
         if(fsr_test) {const auto stats=xrfg::fsr_frame_generation_statistics();
             require(fsr_missing ? stats.attempts==0 : stats.used==(fsr_stereo_guard?3:7) && stats.failures==0,"FSR dispatch count/failed");}
+        if(reference_readiness_test)
+            require(!reference_wait_before_gpu_complete,"Reference opened XR cycle before exact GPU output was ready");
+        if(mode=="steamvr-output-retire") {
+            require(dynamic->composition_capture && fixed->composition_capture,"quad budget fixture missing");
+            const auto live_handles=images.size();
+            auto held=dynamic->composition_capture->outputs[0];
+            require(held && held->image.handle,"quad lease fixture missing");
+            const auto held_handle=held->image.handle;
+            XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+            const auto* only=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+            XrFrameEndInfo current{XR_TYPE_FRAME_END_INFO};current.layerCount=1;current.layers=&only;
+            retire_unused_composition_outputs(s,&current);
+            require(images.size()<live_handles && images.contains(held_handle),"leased quad retired or idle quad budget retained");
+            held.reset();retire_unused_composition_outputs(s,&current);
+            for(const auto& chain:{dynamic,fixed}) {
+                require(chain->composition_capture->valid,"quad source capture lost after output retirement");
+                for(const auto& slot:chain->composition_capture->outputs)require(!slot,"idle quad XR output retained");
+            }
+            GeneratedFrameEndInfo returned;
+            returned.composition_layers.push_back(XrCompositionLayerQuad{XR_TYPE_COMPOSITION_LAYER_QUAD});
+            auto& quad=std::get<XrCompositionLayerQuad>(returned.composition_layers[0]);
+            quad.subImage.swapchain=dynamic->handle;
+            require(XR_SUCCEEDED(own_composition_images(s,returned)) && !returned.composition_images.empty(),
+                "returning quad could not use its preserved source capture");
+            returned={};retire_unused_composition_outputs(s,&current);
+        }
         for(auto& c:chains){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
         require(created==destroyed,"private XR swapchain leak");
         ComPtr<ID3D12InfoQueue> info;

@@ -227,6 +227,35 @@ void integrity_scope_policy() {
             current == RegistryScope::local_machine,
         "current process scope must be valid");
 }
+
+void queue_preference() {
+    Fixture test;
+    test.state.settings_path = test.state.local_directory / L"tray.ini";
+    const auto revision = xrfg::autonomous::snapshot().revision;
+    std::wstring error;
+    require(set_steamvr_queue_preference(test.state, false, &error), "unarmed queue selection saved");
+    AppState restarted;
+    restarted.settings_path = test.state.settings_path;
+    load_settings(restarted);
+    require(!restarted.settings.steamvr_separate_queue, "shared queue survives tray restart");
+    const auto runtime = runtime_directory(test.state.local_directory);
+    std::filesystem::create_directories(runtime);
+    const auto ini = runtime / L"ofxr_bridge.ini";
+    std::ofstream(ini) << "[ofxr]\nenabled=0\nseparate_synthesis=1\nsingle_swapchain_rings=0\n[experimental]\nkeep_me=42\n";
+    test.state.armed = true; // No registration: exercise the production preference transaction only.
+    require(set_steamvr_queue_preference(test.state, true, &error), "armed separate choice saved");
+    require(GetPrivateProfileIntW(L"ofxr", L"steamvr_separate_queue", -1, ini.c_str()) == 1, "new session reads separate");
+    require(set_steamvr_queue_preference(test.state, false, &error), "armed shared choice saved");
+    require(GetPrivateProfileIntW(L"ofxr", L"steamvr_separate_queue", -1, ini.c_str()) == 0, "new session reads shared");
+    require(GetPrivateProfileIntW(L"ofxr", L"enabled", -1, ini.c_str()) == 0 &&
+        GetPrivateProfileIntW(L"ofxr", L"separate_synthesis", -1, ini.c_str()) == 1 &&
+        GetPrivateProfileIntW(L"experimental", L"keep_me", -1, ini.c_str()) == 42, "startup choice preserves live renderer values");
+    require(xrfg::autonomous::snapshot().revision == revision, "queue choice does not request a live renderer reconfiguration");
+    test.state.armed = false;
+    test.state.settings_path = test.state.local_directory; // A directory cannot be replaced by the settings file.
+    require(!set_steamvr_queue_preference(test.state, true, &error) && !test.state.settings.steamvr_separate_queue,
+        "failed persistence rolls back the selection");
+}
 } // namespace
 
 int main() {
@@ -237,6 +266,7 @@ int main() {
         blocked_manifest();
         runtime_stop_and_watchdog();
         integrity_scope_policy();
+        queue_preference();
         std::cout << "V074 dual-hive registry recovery and production tray lifecycle checks passed\n";
         return 0;
     } catch (const std::exception& error) {

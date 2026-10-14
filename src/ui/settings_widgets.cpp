@@ -46,10 +46,10 @@ void status(const Snapshot& state) {
         ImGui::TableNextRow();
         value("Output FPS", m.output_fps, current && m.rates_valid, true,
             m.output_source == InterfaceSource::steamvr_delivery ?
-            "SteamVR cached delivery rate; capped by confirmed native content for DLSS-G. Repeats/native copies cannot inflate confirmed generated content." :
+            "Presented SteamVR compositor frames per second. Late presentation is included; repeated scanouts counted once. Source scene identity is not measured. Native DLSS-G is capped by confirmed interpolation." :
             "Accepted distinct real and generated submissions per second, not measured scanout. Repeats/native copies excluded.");
         value("Game FPS", m.game_fps, current && m.rates_valid, true, "Distinct real frames successfully submitted per second.");
-        value("Generated FPS", m.generated_fps, current && m.rates_valid, true, "Fresh generated frames per second. Native DLSS-G requires confirmed GPU interpolation.");
+        value("Generated FPS", m.generated_fps, current && m.rates_valid, true, "Fresh generated frames successfully submitted per second. This is not measured display delivery. Native DLSS-G requires confirmed GPU interpolation.");
         value("Display Hz", m.display_hz, current && m.display_hz > 0, true,
             m.display_source == InterfaceSource::steamvr_display ? "SteamVR physical display frequency." : "OpenXR shortest observed predicted display period; may reflect runtime throttling.");
         ImGui::TableNextRow();
@@ -112,10 +112,12 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state) {
     const bool dlssg = draft.frame_generation == 2;
     if (djules || dlssg) {
         int multiplier = draft.triple_frame_gen ? 1 : 0;
+        ImGui::BeginDisabled(draft.lower_vram && !draft.separate_synthesis);
         if (ImGui::Combo("Multiplier", &multiplier, "2X\0" "3X\0")) {
             draft.triple_frame_gen = multiplier == 1;
             changed = true;
         }
+        ImGui::EndDisabled();
     }
     if (djules) {
         ImGui::BeginDisabled(draft.triple_frame_gen);
@@ -128,12 +130,18 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state) {
         ui.scale_editing |= ImGui::IsItemActive();
         ImGui::TextWrapped("Requires compatible NVIDIA DLSS-G hardware and runtime");
     }
-    bool lower_vram = draft.lower_vram != 0;
-    if (ImGui::Checkbox("Lower VRAM", &lower_vram)) {
-        draft.lower_vram = lower_vram ? 1 : 0;
-        changed = true;
+    bool separate = draft.separate_synthesis != 0;
+    if(ImGui::Checkbox("Separate synthesis", &separate)) {
+        draft.separate_synthesis = separate ? 1 : 0; changed = true;
     }
-    ImGui::TextWrapped("May affect smoothness or break generation");
+    bool lower_vram = draft.lower_vram != 0;
+    if(ImGui::Checkbox("Reduce XR swapchains", &lower_vram)) {
+        draft.lower_vram = lower_vram ? 1 : 0; changed = true;
+    }
+    if(lower_vram && !separate && draft.triple_frame_gen) {
+        draft.triple_frame_gen=false; changed=true;
+    }
+    ImGui::TextWrapped("Independent D3D12 transport controls. Direct reduced output uses 2X and may wait for image reuse. AFW interop retains its own transport.");
     changed |= ImGui::Checkbox("Reduce black bars during headset rotation###R19 synthetic camera (experimental)", &draft.r19_camera);
     ImGui::Separator();
     if (!ImGui::CollapsingHeader("Details")) return changed;

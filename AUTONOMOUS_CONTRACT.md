@@ -1,3 +1,13 @@
+## V529 private collaborator test prerelease
+
+Start with the [human and AI test handoff](../docs/ofxr-autonomous/V529_COLLABORATOR_AI.md). The owner explicitly
+authorizes this endpoint for private Pimax testing. Headset acceptance remains
+pending. Download the unchanged sealed V529 ZIP and the current exporter from
+the [private release](https://github.com/tig3rmast3r/ofxr-development/releases/tag/ofxr-autonomous-v529-shared).
+F9 records compact benchmark logs; hold each combination20-25s, keep the scene
+and runtime settings fixed, then export Output FPS with Cycle estimated.
+Earlier version sections below are historical development evidence.
+
 ## Current shared Autonomous endpoint: V520
 
 V513 pre-HUD baseline + selected KCD V603 in V519 + accepted Indiana V701 in V520. Combined game validation pending; original KCD V603 is owner-accepted and matches OptiScaler (confirmed 2026-10-14). Private release: https://github.com/tig3rmast3r/ofxr-development/releases/tag/ofxr-autonomous-v520 . See V520_SELECTED_INDIANA_INTEGRATION.md and the shared branch provenance records. HUD experiments remain local and paused.

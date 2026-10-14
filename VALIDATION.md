@@ -1,3 +1,73 @@
+## V529 private collaborator test prerelease
+
+Start with the [human and AI test handoff](../docs/ofxr-autonomous/V529_COLLABORATOR_AI.md). The owner explicitly
+authorizes this endpoint for private Pimax testing. Headset acceptance remains
+pending. Download the unchanged sealed V529 ZIP and the current exporter from
+the [private release](https://github.com/tig3rmast3r/ofxr-development/releases/tag/ofxr-autonomous-v529-shared).
+F9 records compact benchmark logs; hold each combination20-25s, keep the scene
+and runtime settings fixed, then export Output FPS with Cycle estimated.
+Earlier version sections below are historical development evidence.
+
+## V527 demand output allocation
+
+63/63 focused optimized Release checks passed in55.47s, including24 flag/engine/
+runtime2X cases, six3X cases, and four multiplier/deep readiness GPU checks.
+The packaged loader, binary hashes and matching PDB are verified on delivery.
+
+ExactV526 source fails both no-flag2X/3X fixtures under the bounded projection
+budget. Candidate checks all24 flag/engine/runtime2X combinations, six3X
+Steam/VDXR cases, live direct/staged3X->2X->3X retirement, and staged2X deep
+readiness/repeats. Actual GPU constant-color readback verifies both3X
+interpolation slots while direct submissions are delayed and the producer
+attempts reuse. Exact counts/rawlogs are in package evidence/APPLICABLE_CHECKS.json.
+MockXR tests do not establish headset success/FPS/latency. PreferFPS unchanged;
+ownerSteamVR test pending. The unchanged interactive foreground-input fixture
+is outside this focused selection; actual D11/D12 menuGPU checks included.
+
+## V526 independent output transport
+
+53/53 focused Release checks passed in48.97s, including24/24 GPU matrix cases.
+Restoring the former coupling in a temporary mutation makes the separation-only
+GPU case fail; restoring the candidate passes. Raw initial UI-label fixture
+failure is retained alongside the corrected final run. No production change
+was made to satisfy an unrelated input/foreground fixture.
+
+The focused optimized Release suite covers all24 nativeD12 GPU combinations
+of three NVIDIA engines, SteamVR/VDXR policy and independent flags. Eight-real/
+seven-synthetic stereo pixel readbacks, auxiliary ownership, exact XR budget,
+cycle/order accounting, debug errors and teardown remain checked. Live output
+shape/profile replacement and migration/restart checks are included. Runtime
+policies use a mocked XR dispatch; this does not measure vendor compositor
+latency. Raw logs and final counts are in package evidence/APPLICABLE_CHECKS.json.
+The unchanged interactive foreground-input fixture blocked on V525 is outside
+this focused selection; actual menuGPUchecks are included. No input-hook change.
+Owner Ghostwire/VDXR performance and visual acceptance remain pending.
+
+## V525 Reference capture overlap
+
+32 applicable checks pass. One unchanged interactive menu-input fixture fails
+to acquire Windows foreground, also on retry; retained as environment-blocked.
+Actual D11/D12 menu GPU checks pass. See V525 evidence/APPLICABLE_CHECKS.json.
+
+V524 fails actual next-image Release while its preceding pair is GPU-blocked.
+V525 passes eight-real/seven-synthetic stereo and poisoned auxiliary ownership,
+without blocking the producer or adding output slots. Route policy verifies
+VirtualDesktop/New/Djules/AFW/FSR/staged exclusions. Focused Release checks and
+packaged loader are bundled.44ms cycle is an owner target, not a measured gain.
+
+## V524 targeted SteamVR validation
+
+V523 production fails independent six-handle New recovery and exact Reference
+GPU readiness fixtures. Fixed fixtures retain stereo pixels and auxiliary
+ownership, and the producer returns before the GPU gate releases. Presentation
+accounting covers76/90 cadence, repeated45FPS scanouts, actual omissions and
+pending tails. Focused final Release suite and packaged loader evidence are
+bundled. In-game gain and smoothness remain unverified.
+
+## V521 local candidate — SteamVR OFXR recovery
+
+Based on V520. Prepare a fresh game launch with the V521 tray. In Valhalla keep the same REAL VR resolution/stereo settings, OFXR on and AFW/Neural off; enable F9 before switching Reference 0.2.1 to Djules 0.2.13. Check whether generation starts and recovers after returning to Reference or toggling OFXR off/on. Game validation pending. Details: docs/V521_STEAMVR_PROJECTED_BUDGET.md. Earlier entries below describe historical published versions.
+
 ## Current shared Autonomous endpoint: V520
 
 V513 pre-HUD baseline + selected KCD V603 in V519 + accepted Indiana V701 in V520. Combined game validation pending; original KCD V603 is owner-accepted and matches OptiScaler (confirmed 2026-10-14). Private release: https://github.com/tig3rmast3r/ofxr-development/releases/tag/ofxr-autonomous-v520 . See V520_SELECTED_INDIANA_INTEGRATION.md and the shared branch provenance records. HUD experiments remain local and paused.

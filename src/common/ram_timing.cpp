@@ -140,6 +140,7 @@ const char* name(unsigned value) noexcept {
     ENTRY(luke_temporal_pair); ENTRY(luke_temporal_pose);
     ENTRY(generation_prepare);
     ENTRY(composition_layer); ENTRY(composition_publish);
+    ENTRY(menu_status);
 #undef ENTRY
     default: return "unknown";
     }

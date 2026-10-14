@@ -10,6 +10,7 @@ inline bool request_control(const xrfg::embedded::Settings& desired) {
     auto s=xrfg::autonomous::snapshot().desired;
     s.enabled=desired.enabled; s.backend=desired.backend; s.preset=desired.preset;
     s.scale=desired.scale; s.backward=desired.backward; s.lower_vram=desired.lower_vram;
+    s.separate_synthesis=desired.separate_synthesis;
     s.motion_vectors=desired.motion_vectors; s.frame_generation=desired.frame_generation;
     s.native_scale=static_cast<int>(desired.native_scale);
     const auto pipeline=xrfg::embedded::djules_pipeline_snapshot();

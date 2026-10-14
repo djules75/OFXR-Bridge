@@ -44,6 +44,8 @@ struct Control {
         settings.backward = options.bidirectional;
         settings.lower_vram = std::clamp(static_cast<int>(GetPrivateProfileIntW(
             L"ofxr", L"single_swapchain_rings", 0, ini().c_str())), 0, 1);
+        settings.separate_synthesis = std::clamp(static_cast<int>(GetPrivateProfileIntW(
+            L"ofxr", L"separate_synthesis", settings.lower_vram, ini().c_str())), 0, 1);
         settings.enabled = GetPrivateProfileIntW(L"ofxr", L"enabled", 1, ini().c_str()) != 0;
         wchar_t motion[16]{};
         GetPrivateProfileStringW(L"ofxr", L"motion_vectors", L"off", motion, 16, ini().c_str());
@@ -113,7 +115,7 @@ bool request(Settings s) {
         s.scale < 0 || s.scale > 2 || s.motion_vectors < 0 || s.motion_vectors > 1 ||
         s.frame_generation < 0 || s.frame_generation > 2 ||
         s.native_scale < 25 || s.native_scale > 100 ||
-        s.lower_vram < 0 || s.lower_vram > 1) return false;
+        s.separate_synthesis < 0 || s.separate_synthesis > 1 || s.lower_vram < 0 || s.lower_vram > 1) return false;
     auto& c = control(); std::scoped_lock lock(c.mutex);
     const auto old = c.settings;
     bool ok = true;
@@ -125,6 +127,7 @@ bool request(Settings s) {
     const wchar_t* scales[]{L"100", L"75", L"50"};
     if (old.preset != s.preset) ok &= write(L"ofxr", L"nvidia_preset", presets[s.preset]);
     if (old.scale != s.scale) ok &= write(L"ofxr", L"nvidia_input_scale", scales[s.scale]);
+    if(old.separate_synthesis != s.separate_synthesis) ok &= write(L"ofxr", L"separate_synthesis", s.separate_synthesis ? L"1" : L"0");
     if (old.lower_vram != s.lower_vram) ok &= write(L"ofxr", L"single_swapchain_rings",
         s.lower_vram ? L"1" : L"0");
     if (old.backward != s.backward) ok &= write(L"ofxr", L"nvidia_bidirectional", s.backward ? L"1" : L"0");

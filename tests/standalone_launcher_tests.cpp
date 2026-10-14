@@ -21,6 +21,18 @@ int main() {
     using namespace xrfg::standalone;
 
     const LauncherSettings release_defaults;
+    if (!release_defaults.steamvr_separate_queue) return 1;
+    for (bool separate : {false, true}) {
+        auto queue_settings = release_defaults;
+        queue_settings.steamvr_separate_queue = separate;
+        if (parse_settings(serialize_settings(queue_settings)).steamvr_separate_queue != separate ||
+            !contains(build_runtime_ini(queue_settings), separate ? "steamvr_separate_queue=1" : "steamvr_separate_queue=0")) return 1;
+        for (int generator : {0, 1, 2}) for (int backend : {0, 1, 2, 3}) {
+            xrfg::autonomous::Settings controls;
+            controls.backend = backend; controls.frame_generation = generator;
+            if (!contains(build_runtime_ini(queue_settings, controls), separate ? "steamvr_separate_queue=1" : "steamvr_separate_queue=0")) return 1;
+        }
+    }
     xrfg::autonomous::Settings autonomous;
     autonomous.backend = 3;
     autonomous.frame_generation = 1;
@@ -39,6 +51,15 @@ int main() {
     autonomous.lower_vram = 1;
     if (!contains(build_runtime_ini(release_defaults, autonomous), "single_swapchain_rings=1")) return 1;
     autonomous.lower_vram = 0;
+    for (int separate : {0,1}) for (int reduce : {0,1}) {
+        autonomous.separate_synthesis = separate; autonomous.lower_vram = reduce;
+        const auto ini = build_runtime_ini(release_defaults, autonomous);
+        if (!contains(ini, separate ? "separate_synthesis=1" : "separate_synthesis=0") ||
+            !contains(ini, reduce ? "single_swapchain_rings=1" : "single_swapchain_rings=0")) return 1;
+    }
+    autonomous.separate_synthesis = 0; autonomous.lower_vram = 0;
+    if (!parse_settings("[tray]\nsingle_swapchain_rings=1\n").separate_synthesis ||
+        parse_settings("[tray]\nsingle_swapchain_rings=1\nseparate_synthesis=0\n").separate_synthesis) return 1;
 
     const std::string default_runtime_ini = build_runtime_ini(release_defaults);
     if (release_defaults.frame_generation != FrameGeneration::ofxr ||

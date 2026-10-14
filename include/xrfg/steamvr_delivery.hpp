@@ -80,8 +80,9 @@ public:
     // that it never spans an instance boundary, not that it opens once.
     static void release_process_connection() noexcept;
 
-    // Distinct images the headset received per second, over a rolling window of
-    // about a second. Empty until the first window closes. Attaches lazily on
+    // Presented compositor frames per second, over a rolling 64-record window.
+    // Repeated scanouts count once; mispresentation is not deducted as loss.
+    // This does not identify the source scene image. Attaches lazily on
     // the first call of any accessor after mark_established(), once.
     [[nodiscard]] std::optional<float> delivered_fps(std::int64_t now_ns) noexcept;
 
@@ -100,8 +101,8 @@ public:
     [[nodiscard]] std::optional<VsyncAnchor> vsync_anchor() noexcept;
 
     // Whether the compositor's most recent frame went out on the vsync it was
-    // predicted for. mispresented > 0 is "it landed somewhere else", which is
-    // per-frame attribution for a loss that submission counts cannot see.
+    // predicted for. mispresented > 0 means it landed on another vsync;
+    // presents > 0 still means it was shown, not lost.
     struct FramePresentation {
         std::uint32_t frame_index{};
         std::uint32_t mispresented{};

@@ -1,3 +1,80 @@
+## V529 private collaborator test prerelease
+
+Start with the [human and AI test handoff](../docs/ofxr-autonomous/V529_COLLABORATOR_AI.md). The owner explicitly
+authorizes this endpoint for private Pimax testing. Headset acceptance remains
+pending. Download the unchanged sealed V529 ZIP and the current exporter from
+the [private release](https://github.com/tig3rmast3r/ofxr-development/releases/tag/ofxr-autonomous-v529-shared).
+F9 records compact benchmark logs; hold each combination20-25s, keep the scene
+and runtime settings fixed, then export Output FPS with Cycle estimated.
+Earlier version sections below are historical development evidence.
+
+## V527 demand output allocation
+
+Djules2X/3X no longer reserves six XR handles per source: full allocation is
+four, reduction is two. Owned extra synthetic textures exist only in3X and
+are freed on returning to2X. No hidden transport flags. Separate synthesis
+chooses private compute textures; Reduce XR swapchains halves XR handles.
+Direct3X protects both independent synthetic descriptors through submission;
+direct/reduced retains the2X restriction. PreferFPS remains for ownerSteam tests.
+Close oldtray/game and startV527. SameGhostwire UEVR scene/settings/Hz,
+AFW/Neuraloff: Djules2X then3X with both flagsOFF; then separationON/reductionOFF
+and ON/ON. Compare correctness, CycleLength/Estimated and OutputFPS. No dump.
+Headset and latency result pending. See docs/V527_DEMAND_OUTPUT_CAPACITY.md.
+Earlier entries below describe historical candidates.
+
+## V526 independent output transport experiment
+
+Separate synthesis and Reduce XR swapchains are independent per-engine flags
+for applicable native D3D12 routes on SteamVR and VDXR. Test On/Off, then On/On
+first; Off/Off and Off/On are additional controls. Old Lower VRAM profiles
+migrate both on; explicit separation off remains off. Start a fresh V526 tray
+and game because the shared control ABI changes. Same UEVR scene/settings/Hz,
+AFW/Neural off,2X: record Cycle length, Cycle estimated and Output FPS. No dump.
+Direct reduced output is bounded 2X. AFW/D11/Vulkan transport is unchanged.
+Latency gains remain unmeasured. See docs/V526_INDEPENDENT_OUTPUT_TRANSPORT.md.
+Earlier sections below describe historical candidates.
+
+## V525 Reference latency candidate
+
+0.2.1 is latency priority:44ms cycle target, not a claimed result. Native
+D3D12 SteamVR Reference captures the next frame without globally waiting for
+the preceding pair when runtime/application queues are separate. No added
+output buffering. Virtual Desktop and New/Djules keep their policies.
+Fresh V525 Ghostwire UEVR, same scene/settings, Neural/AFWoff, F9 before
+Reference. Compare Cycle length/Cycle estimated and OutputFPS with V524.
+Shortest correct cycle matters before FPS. No dump. Headset validation pending.
+See docs/V525_REFERENCE_LATENCY.md. Earlier entries are historical.
+
+## V524 local SteamVR candidate
+
+Output FPS counts presented compositor frames without subtracting late vsyncs.
+New recovers a bounded second-eye output refusal; Reference waits for its exact
+GPU output before starting the runtime cycle, on the consumer only.
+Fresh V524 tray/game, same Valhalla settings, AFW/Neuraloff; compare New,
+Reference and Djules in one location, F9 before the comparison. Check fluidity
+and Game/Generated/Output together. No image capture. Headset result pending.
+See docs/V524_STEAMVR_PRESENTATION.md. Earlier entries are historical.
+
+## V523 local candidate: SteamVR output lifecycle
+
+V522 rejected by owner. Fresh V523 tray/game, same Valhalla settings, F9 before
+loading; reopen F10 in the level, then New -> Djules -> Reference -> New.
+Staged restart, Reference stalled-output exposure and unused auxiliary-output
+retirement. Headset result pending; no dump needed. See docs/V523_STEAMVR_LIFECYCLE.md.
+Earlier candidate entries are historical.
+
+## V522 local candidate: Valhalla / Meganex / SteamVR
+
+Fresh V522 tray/game, same REAL VR settings, OFXR on and AFW/Neural off.
+Enable F9 before New -> Reference -> Djules -> New, and reopen F10 after each
+route. Existing staged Djules output and Reference physical display-clock fixes;
+menu refusal recovery and diagnostics. Owner headset result pending.
+See docs/V522_STEAMVR_ROUTES.md. Earlier candidate entries are historical.
+
+## V521 local candidate — SteamVR OFXR recovery
+
+Based on V520. Prepare a fresh game launch with the V521 tray. In Valhalla keep the same REAL VR resolution/stereo settings, OFXR on and AFW/Neural off; enable F9 before switching Reference 0.2.1 to Djules 0.2.13. Check whether generation starts and recovers after returning to Reference or toggling OFXR off/on. Game validation pending. Details: docs/V521_STEAMVR_PROJECTED_BUDGET.md. Earlier entries below describe historical published versions.
+
 ## Current shared Autonomous endpoint: V520
 
 V513 pre-HUD baseline + selected KCD V603 in V519 + accepted Indiana V701 in V520. Combined game validation pending; original KCD V603 is owner-accepted and matches OptiScaler (confirmed 2026-10-14). Private release: https://github.com/tig3rmast3r/ofxr-development/releases/tag/ofxr-autonomous-v520 . See V520_SELECTED_INDIANA_INTEGRATION.md and the shared branch provenance records. HUD experiments remain local and paused.

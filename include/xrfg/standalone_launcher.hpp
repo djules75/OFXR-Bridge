@@ -56,7 +56,11 @@ struct LauncherSettings {
     // single_swapchain_rings): "Lower VRAM" checkbox. Off by default.
     // Enabling private output staging reduces XR surface allocations and
     // adds a hand-over copy, which can affect smoothness.
+    bool separate_synthesis{};
     bool single_swapchain_rings{};
+    // Tray-only session choice; independent of the active generator and A/B.
+    // Native D3D12 SteamVR only. Changing it requires restarting the game.
+    bool steamvr_separate_queue{true};
     // The Vulkan bridge (see the layer's vulkan_session_bridge): a Vulkan
     // game's session is handed to the runtime as D3D12. On by default; no
     // menu entry.

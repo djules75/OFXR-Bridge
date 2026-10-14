@@ -48,6 +48,8 @@ enum MenuCommand : UINT {
     toggle_arm = 90,
     toggle_pause = 91,
     change_pause_key = 92,
+    steamvr_queue_separate = 93,
+    steamvr_queue_shared = 94,
     show_settings = 100,
     open_logs = 130,
     donate_creator = 138,
@@ -855,6 +857,14 @@ void show_context_menu(AppState& state) {
         toggle_pause, state.paused ? L"Resume frame generation" : L"Pause frame generation");
     std::wstring binding = L"Pause key: " + pause_key_display(state.settings.pause_hotkey);
     AppendMenuW(menu, MF_STRING, change_pause_key, binding.c_str());
+    HMENU queue_menu = CreatePopupMenu();
+    if (queue_menu) {
+        AppendMenuW(queue_menu, MF_STRING | (state.settings.steamvr_separate_queue ? MF_CHECKED : MF_UNCHECKED),
+            steamvr_queue_separate, L"Separate from game");
+        AppendMenuW(queue_menu, MF_STRING | (state.settings.steamvr_separate_queue ? MF_UNCHECKED : MF_CHECKED),
+            steamvr_queue_shared, L"Shared with game");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(queue_menu), L"SteamVR queue (restart game)");
+    }
     HBITMAP pause_bitmap = state.paused ? create_pause_bitmap() : nullptr;
     if (pause_bitmap) {
         MENUITEMINFOW item{sizeof(item)};
@@ -873,6 +883,27 @@ void show_context_menu(AppState& state) {
     PostMessageW(state.window, WM_NULL, 0, 0);
     DestroyMenu(menu);
     if (pause_bitmap) DeleteObject(pause_bitmap);
+}
+
+[[nodiscard]] bool set_steamvr_queue_preference(AppState& state, bool separate, std::wstring* error) {
+    const bool previous = state.settings.steamvr_separate_queue;
+    state.settings.steamvr_separate_queue = separate;
+    if (!write_text_atomic(state.settings_path, xrfg::standalone::serialize_settings(state.settings), error)) {
+        state.settings.steamvr_separate_queue = previous;
+        return false;
+    }
+    if (state.armed) {
+        const auto ini = runtime_directory(state.local_directory) / L"ofxr_bridge.ini";
+        // Update this startup-only key; retain every current renderer/debug value.
+        if (!WritePrivateProfileStringW(L"ofxr", L"steamvr_separate_queue", separate ? L"1" : L"0", ini.c_str())) {
+            if (error) *error = last_error_message(L"Saving the SteamVR queue choice");
+            state.settings.steamvr_separate_queue = previous;
+            save_settings(state);
+            return false;
+        }
+    }
+    log_lifecycle(state.local_directory, separate ? L"steamvr-queue-separate-next-session" : L"steamvr-queue-shared-next-session");
+    return true;
 }
 
 void handle_command(AppState& state, UINT command) {
@@ -916,6 +947,13 @@ void handle_command(AppState& state, UINT command) {
     case change_pause_key:
         change_pause_hotkey(state);
         break;
+    case steamvr_queue_separate:
+    case steamvr_queue_shared: {
+        std::wstring error;
+        if (!set_steamvr_queue_preference(state, command == steamvr_queue_separate, &error))
+            show_error(state.window, error);
+        break;
+    }
     case show_settings:
         if (!xrfg::autonomous::show_settings_window(state.window))
             show_error(state.window, L"Could not open the settings window.");

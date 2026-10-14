@@ -12,6 +12,7 @@ struct Settings {
     int preset{1}; // 0 slow, 1 medium, 2 fast
     int scale{2}; // 0 full, 1 three-quarter, 2 half
     bool backward{};
+    int separate_synthesis{}; // private output textures, independent of XR ring count
     int lower_vram{}; // checkbox: 0 off (default), 1 on
     int motion_vectors{}; // 0 optical flow, 1 DLSS ingress
     int frame_generation{}; // 0 OFXR synthesis, 1 FSR 3, 2 native DLSS-G

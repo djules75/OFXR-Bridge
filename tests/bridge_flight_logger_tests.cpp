@@ -65,6 +65,11 @@ void concurrent_records(const fs::path& directory, bool wrap, bool flush) {
     require(logger.enabled(), "concurrent logger did not initialize");
     const auto path = logger.log_path();
     logger.event(xrfg::BridgeFlightOperation::runtime_identity, 999, 42, 7, 3);
+    if (wrap) {
+        logger.event(xrfg::BridgeFlightOperation::benchmark_configuration, 0, 42, 33, 100);
+        logger.event(xrfg::BridgeFlightOperation::benchmark_rates, 1, 42, 43, 42);
+        logger.flush();
+    }
     constexpr unsigned threads = 8;
     const unsigned iterations = wrap ? 12000 : flush ? 32 : 1500;
     std::atomic<unsigned> ready{};
@@ -133,6 +138,11 @@ void concurrent_records(const fs::path& directory, bool wrap, bool flush) {
         require(contents.find("phase=M op=runtime_identity result=999") != std::string::npos &&
             contents.find("phase=M op=logger result=") != std::string::npos,
             "rotation lost startup identity or implementation metadata");
+        const auto compact = xrfg::benchmark_log_path(path);
+        const auto benchmark = read(compact);
+        require(benchmark.find("op=benchmark_configuration result=0 dur_us=0 a=42 b=33 c=100") != std::string::npos &&
+            benchmark.find("op=benchmark_rates result=1 dur_us=0 a=42 b=43 c=42") != std::string::npos,
+            "compact benchmark lost first measurements during verbose rotation");
     }
 }
 
@@ -145,6 +155,7 @@ void live_switch_records(const fs::path& directory) {
     xrfg::BridgeFlightLogger logger;
     logger.initialize(directory);
     logger.event(xrfg::BridgeFlightOperation::runtime_identity, 777, 1, 2, 3);
+    logger.event(xrfg::BridgeFlightOperation::steamvr_queue_configuration, S_OK, 23, 3, 131073);
     logger.event(xrfg::BridgeFlightOperation::swapchain_eligibility, 13, 99, 0x887A0004, 1);
     require(!logger.enabled(), "live fixture started with logging active");
     std::atomic<bool> stop{};
@@ -176,6 +187,8 @@ void live_switch_records(const fs::path& directory) {
         logger.flush();
         require(read(first).find("phase=M op=runtime_identity result=777") != std::string::npos,
             "late logging lost startup metadata from disabled mode");
+        require(read(first).find("phase=M op=steamvr_queue_configuration result=0 dur_us=0 a=23 b=3 c=131073") != std::string::npos,
+            "late logging lost the requested/actual queue and initial selection");
         require(read(first).find("phase=M op=swapchain_eligibility result=13") != std::string::npos,
             "late logging lost the provider refusal preceding activation");
         const auto stale = logger.begin(xrfg::BridgeFlightOperation::application_wait_frame);

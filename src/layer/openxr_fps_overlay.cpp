@@ -1,4 +1,6 @@
 #include "xrfg/openxr_fps_overlay.hpp"
+#include "xrfg/bridge_flight_logger.hpp"
+#include "xrfg/benchmark_log.hpp"
 #include "xrfg/elliott_meter.hpp"
 #include "xrfg/steamvr_delivery.hpp"
 #include "xrfg/overlay_menu_renderer.hpp"
@@ -154,6 +156,7 @@ struct OpenXrFpsOverlay::Impl {
 
     void close_menu(bool release_input = true) noexcept {
         const bool was_open = menu_open || menu_valid || pending_menu_input.open;
+        if (was_open) menu_event(0, 0);
         if (was_open) autonomous::set_interface_visible(autonomous::InterfaceSurface::headset, false);
         if (release_input && menu_input) menu_input->close();
         menu_open = menu_valid = false;
@@ -163,6 +166,14 @@ struct OpenXrFpsOverlay::Impl {
             menu_renderer.reset_input();
         }
         reset_menu_drag(menu_interaction);
+    }
+
+    void menu_event(unsigned stage, std::int64_t result) noexcept {
+        bridge_flight_logger().event(BridgeFlightOperation::menu_status, result, stage,
+            reinterpret_cast<std::uintptr_t>(menu_swapchain), menu_index);
+    }
+    bool menu_failure(unsigned stage, std::int64_t result) noexcept {
+        menu_event(stage, result); close_menu(); return false;
     }
 
     static void draw_menu(void* user) {
@@ -195,7 +206,15 @@ struct OpenXrFpsOverlay::Impl {
         info.format = format;
         info.sampleCount = info.faceCount = info.arraySize = info.mipCount = 1;
         info.width = menu_width; info.height = menu_height;
-        if (XR_FAILED(create_swapchain(session, &info, &menu_swapchain))) return false;
+        const auto created = create_swapchain(session, &info, &menu_swapchain);
+        menu_event(1, created);
+        if (XR_FAILED(created)) {
+            // A temporary runtime budget refusal must not permanently latch
+            // F10 off. Closing releases input; the next explicit opening can
+            // retry once after a route change has freed output handles.
+            if (created == XR_ERROR_LIMIT_REACHED) menu_attempted = false;
+            return false;
+        }
         std::uint32_t count{};
         if (XR_FAILED(enumerate_images(menu_swapchain, 0, &count, nullptr)) || !count || count > 64) return false;
         menu_images.resize(count);
@@ -236,7 +255,8 @@ struct OpenXrFpsOverlay::Impl {
         if (menu_unfenced_submission) { close_menu(); return false; }
         if (!menu_acquired) {
             XrSwapchainImageAcquireInfo info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-            if (XR_FAILED(acquire(menu_swapchain, &info, &menu_index))) { close_menu(); return false; }
+            const auto result = acquire(menu_swapchain, &info, &menu_index);
+            if (XR_FAILED(result)) return menu_failure(2, result);
             menu_acquired = true; menu_waited = false;
         }
         if (menu_index >= menu_images.size()) { close_menu(); return false; }
@@ -244,12 +264,12 @@ struct OpenXrFpsOverlay::Impl {
             XrSwapchainImageWaitInfo info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO}; info.timeout = 0;
             const auto result = wait(menu_swapchain, &info);
             if (result == XR_TIMEOUT_EXPIRED) return false;
-            if (result != XR_SUCCESS) { close_menu(); return false; }
+            if (result != XR_SUCCESS) return menu_failure(3, result);
             menu_waited = true;
         }
         auto& image = menu_images[menu_index];
         const auto completed = fence12 ? fence12->GetCompletedValue() : fence11->GetCompletedValue();
-        if (completed == UINT64_MAX) { close_menu(); return false; }
+        if (completed == UINT64_MAX) return menu_failure(4, DXGI_ERROR_DEVICE_REMOVED);
         if (completed < image.fence_value) return false;
         const auto value = next_fence++;
         HRESULT result{};
@@ -292,12 +312,13 @@ struct OpenXrFpsOverlay::Impl {
             }
         }
         if (result == S_FALSE || result == E_PENDING) return false;
-        if (FAILED(result)) { close_menu(); return false; }
+        if (FAILED(result)) return menu_failure(6, result);
         last_fence = image.fence_value = value;
         pending_menu_input.events.clear();
         pending_menu_input.wheel_x = pending_menu_input.wheel_y = 0;
         XrSwapchainImageReleaseInfo info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        if (XR_FAILED(release(menu_swapchain, &info))) { close_menu(); return false; }
+        const auto released = release(menu_swapchain, &info);
+        if (XR_FAILED(released)) return menu_failure(7, released);
         menu_acquired = menu_waited = false;
         menu_valid = true;
         return true;
@@ -721,7 +742,7 @@ struct OpenXrFpsOverlay::Impl {
     }
 
     void refresh_telemetry() {
-        if (!autonomous::interface_telemetry_requested()) return;
+        if (!interface_measurement_requested()) return;
         const auto clock = interface_clock_ns();
         if (clock < next_telemetry) return;
         next_telemetry = clock + 250'000'000;
@@ -748,6 +769,7 @@ struct OpenXrFpsOverlay::Impl {
         }
         out.display_hz = period > 0 ? 1.0e9F / float(period) : 0;
         timings.snapshot(clock, out);
+        log_benchmark_telemetry(out);
         autonomous::report_interface_telemetry(out);
     }
 
@@ -998,7 +1020,7 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
             layers[composed.layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&impl_->menu_quad);
         submitted = &composed;
     }
-    const bool measure = autonomous::interface_telemetry_requested() && new_content && stamp.entered_ns;
+    const bool measure = interface_measurement_requested() && new_content && stamp.entered_ns;
     std::int64_t display{};
     if (measure && !synthetic && nonempty && impl_->converter)
         if (!impl_->converter(impl_->converter_user, info->displayTime, display)) display = 0;
@@ -1007,7 +1029,10 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
     const auto accepted_clock = measure ? interface_clock_ns() : 0;
     if (measure && !synthetic) impl_->timings.submitted(stamp, submit_clock, result == XR_SUCCESS,
         nonempty, synthetic, new_content, display, accepted_clock);
-    if (result != XR_SUCCESS) impl_->close_menu();
+    if (result != XR_SUCCESS) {
+        if (impl_->menu_open) impl_->menu_event(8, result);
+        impl_->close_menu();
+    }
     if (result == XR_SUCCESS && nonempty) {
         const auto now=now_ns();
         impl_->poll_native_counts(now);

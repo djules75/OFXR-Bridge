@@ -16,6 +16,7 @@ struct GenerationPreferences {
     int preset{1};
     int scale{2};
     bool backward{};
+    int separate_synthesis{}; // private output textures, independent of XR ring count
     int lower_vram{};
     bool prefer_fps{true};
     bool triple_frame_gen{};
@@ -35,6 +36,7 @@ struct Settings {
     int preset{1}; // 0 slow, 1 medium, 2 fast
     int scale{2}; // 0 full, 1 three-quarter, 2 half
     bool backward{};
+    int separate_synthesis{}; // private output textures, independent of XR ring count
     int lower_vram{}; // checkbox: 0 off (default), 1 on
     bool prefer_fps{true};
     bool triple_frame_gen{};

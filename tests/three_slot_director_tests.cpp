@@ -320,6 +320,30 @@ void own_time_pairing_recovery_test() {
 }
 
 void unified_route_policy_test() {
+    {
+        auto reference = std::make_shared<SessionState>(std::make_shared<Dispatch>());
+        reference->graphics_binding = SessionGraphicsBinding::d3d12;
+        reference->optical_flow_backend = xrfg::D3D12OpticalFlowBackend::nvidia;
+        reference->frame_generation_mode = xrfg::D3D12FrameGenerationMode::ofxr;
+        reference->nvidia_new_route = false;
+        reference->dispatch->steamvr_runtime = true;
+        check(steamvr_reference_capture_overlap(*reference), "native SteamVR Reference transport not selected");
+        reference->dispatch->steamvr_runtime = false;
+        reference->dispatch->virtual_desktop_runtime = true;
+        check(!steamvr_reference_capture_overlap(*reference), "Reference overlap leaked into Virtual Desktop");
+        reference->dispatch->steamvr_runtime = true;
+        reference->nvidia_new_route = true;
+        check(!steamvr_reference_capture_overlap(*reference), "Reference overlap changed New/Djules");
+        reference->nvidia_new_route = false;
+        reference->luke_afw_enabled = true;
+        check(!steamvr_reference_capture_overlap(*reference), "Reference overlap changed Luke AFW");
+        reference->luke_afw_enabled = false;
+        reference->frame_generation_mode = xrfg::D3D12FrameGenerationMode::fsr3;
+        check(!steamvr_reference_capture_overlap(*reference), "Reference overlap changed FSR");
+        reference->frame_generation_mode = xrfg::D3D12FrameGenerationMode::ofxr;
+        reference->lower_vram = 1;
+        check(steamvr_reference_capture_overlap(*reference), "allocation flag changed Reference capture overlap");
+    }
     const auto ini = current_layer_directory() / L"ofxr_bridge.ini";
     wchar_t old_deep[64]{}, old_triple[64]{};
     GetPrivateProfileStringW(L"ofxr", L"deep_pipeline", L"absent", old_deep, 64, ini.c_str());

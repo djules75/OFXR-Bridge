@@ -66,7 +66,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465852;
-constexpr std::uint32_t kAbi = 48701;
+constexpr std::uint32_t kAbi = 52601;
 static_assert(offsetof(RuntimeStatus, provider_error)==72); // V471 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==69); // previously reserved padding
 struct Shared {
@@ -96,13 +96,13 @@ std::size_t selected_profile(const Settings& s) noexcept {
         static_cast<std::size_t>(std::clamp(s.frame_generation, 1, 2) + 3);
 }
 GenerationPreferences active_preferences(const Settings& s) noexcept {
-    return {s.motion_vectors, s.preset, s.scale, s.backward, s.lower_vram,
+    return {s.motion_vectors, s.preset, s.scale, s.backward, s.separate_synthesis, s.lower_vram,
         s.prefer_fps, s.triple_frame_gen, s.native_scale};
 }
 void restore_preferences(Settings& s) noexcept {
     const auto& p = s.generation_profiles[selected_profile(s)];
     s.motion_vectors = p.motion_vectors; s.preset = p.preset; s.scale = p.scale;
-    s.backward = p.backward; s.lower_vram = p.lower_vram; s.prefer_fps = p.prefer_fps;
+    s.backward = p.backward; s.separate_synthesis = p.separate_synthesis; s.lower_vram = p.lower_vram; s.prefer_fps = p.prefer_fps;
     s.triple_frame_gen = p.triple_frame_gen; s.native_scale = p.native_scale;
 }
 Settings load() {
@@ -213,6 +213,7 @@ Settings sanitize(Settings value) noexcept {
     value.frame_generation = std::clamp(value.frame_generation, 0, 3);
     value.preset = std::clamp(value.preset, 0, 2);
     value.scale = std::clamp(value.scale, 0, 2);
+    value.separate_synthesis = std::clamp(value.separate_synthesis, 0, 1);
     value.lower_vram = std::clamp(value.lower_vram, 0, 1);
     value.native_scale = std::clamp(value.native_scale, 25, 100);
     value.afw_mode = std::clamp(value.afw_mode, 0, 3);
@@ -249,6 +250,7 @@ Settings sanitize(Settings value) noexcept {
         auto& p = value.generation_profiles[i];
         p.motion_vectors = i >= 4 ? 1 : std::clamp(p.motion_vectors, 0, 1);
         p.preset = std::clamp(p.preset, 0, 2); p.scale = std::clamp(p.scale, 0, 2);
+        p.separate_synthesis = std::clamp(p.separate_synthesis, 0, 1);
         p.lower_vram = std::clamp(p.lower_vram, 0, 1);
         p.native_scale = std::clamp(p.native_scale, 25, 100);
     }
@@ -266,7 +268,8 @@ void select_generation(Settings& value, int generation, int ofxr_engine) noexcep
 Settings parse_settings(std::string_view text) {
     Settings value;
     int section = -2; // -1 autonomous, 0..5 generation profile, -2 ignored
-    std::array<bool, kGenerationProfileCount> profile_seen{};
+    std::array<bool, kGenerationProfileCount> profile_seen{}, separation_seen{};
+    bool flat_separation_seen{};
     std::istringstream input{std::string(text)};
     std::string line;
     while (std::getline(input, line)) {
@@ -291,17 +294,19 @@ Settings parse_settings(std::string_view text) {
         if (number < -1000000.F || number > 1000000.F) continue;
         if (section >= 0) {
             auto& profile = value.generation_profiles[static_cast<std::size_t>(section)];
+            if(key=="separate_synthesis") separation_seen[static_cast<std::size_t>(section)]=true;
 #define READ_PROFILE(name) if (key == #name) profile.name = static_cast<decltype(profile.name)>(number);
             READ_PROFILE(motion_vectors) READ_PROFILE(preset) READ_PROFILE(scale)
-            READ_PROFILE(backward) READ_PROFILE(lower_vram) READ_PROFILE(prefer_fps)
+            READ_PROFILE(backward) READ_PROFILE(separate_synthesis) READ_PROFILE(lower_vram) READ_PROFILE(prefer_fps)
             READ_PROFILE(triple_frame_gen) READ_PROFILE(native_scale)
 #undef READ_PROFILE
             continue;
         }
+        if(key=="separate_synthesis") flat_separation_seen=true;
 #define READ_FIELD(name) if (key == #name) value.name = static_cast<decltype(value.name)>(number);
         READ_FIELD(enabled) READ_FIELD(backend) READ_FIELD(motion_vectors)
         READ_FIELD(frame_generation) READ_FIELD(hybrid_backend) READ_FIELD(preset) READ_FIELD(scale)
-        READ_FIELD(backward) READ_FIELD(lower_vram) READ_FIELD(prefer_fps)
+        READ_FIELD(backward) READ_FIELD(separate_synthesis) READ_FIELD(lower_vram) READ_FIELD(prefer_fps)
         READ_FIELD(triple_frame_gen) READ_FIELD(native_scale) READ_FIELD(r19_camera)
         READ_FIELD(afw_mode) READ_FIELD(afw_debug) READ_FIELD(afw_clear_before_warping)
         READ_FIELD(afw_ignore_motion_threshold) READ_FIELD(afw_depth_dilate_mode)
@@ -316,6 +321,9 @@ Settings parse_settings(std::string_view text) {
         READ_FIELD(menu_scale) READ_FIELD(menu_offset_x) READ_FIELD(menu_offset_y)
 #undef READ_FIELD
     }
+    if(!flat_separation_seen) value.separate_synthesis=value.lower_vram;
+    for(std::size_t i=0;i<profile_seen.size();++i)
+        if(!separation_seen[i]) value.generation_profiles[i].separate_synthesis=value.generation_profiles[i].lower_vram;
     if (std::any_of(profile_seen.begin(), profile_seen.end(), [](bool seen) { return seen; })) {
         value.profiles_initialized = true;
         if (profile_seen[selected_profile(value)]) restore_preferences(value);
@@ -330,7 +338,7 @@ std::string serialize_settings(const Settings& settings) {
 #define WRITE_FIELD(name) output << #name << '=' << value.name << '\n';
     WRITE_FIELD(enabled) WRITE_FIELD(backend) WRITE_FIELD(motion_vectors)
     WRITE_FIELD(frame_generation) WRITE_FIELD(hybrid_backend) WRITE_FIELD(preset) WRITE_FIELD(scale)
-    WRITE_FIELD(backward) WRITE_FIELD(lower_vram) WRITE_FIELD(prefer_fps)
+    WRITE_FIELD(backward) WRITE_FIELD(separate_synthesis) WRITE_FIELD(lower_vram) WRITE_FIELD(prefer_fps)
     WRITE_FIELD(triple_frame_gen) WRITE_FIELD(native_scale) WRITE_FIELD(r19_camera)
     WRITE_FIELD(afw_mode) WRITE_FIELD(afw_debug) WRITE_FIELD(afw_clear_before_warping)
     WRITE_FIELD(afw_ignore_motion_threshold) WRITE_FIELD(afw_depth_dilate_mode)
@@ -349,7 +357,7 @@ std::string serialize_settings(const Settings& settings) {
         const auto& p = value.generation_profiles[i];
 #define WRITE_PROFILE(name) output << #name << '=' << p.name << '\n';
         WRITE_PROFILE(motion_vectors) WRITE_PROFILE(preset) WRITE_PROFILE(scale)
-        WRITE_PROFILE(backward) WRITE_PROFILE(lower_vram) WRITE_PROFILE(prefer_fps)
+        WRITE_PROFILE(backward) WRITE_PROFILE(separate_synthesis) WRITE_PROFILE(lower_vram) WRITE_PROFILE(prefer_fps)
         WRITE_PROFILE(triple_frame_gen) WRITE_PROFILE(native_scale)
 #undef WRITE_PROFILE
     }
@@ -418,7 +426,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
         const auto& d = desired.generation_profiles[i];
 #define MERGE_PROFILE(name) if (b.name != d.name) p.name = d.name;
         MERGE_PROFILE(motion_vectors) MERGE_PROFILE(preset) MERGE_PROFILE(scale)
-        MERGE_PROFILE(backward) MERGE_PROFILE(lower_vram) MERGE_PROFILE(prefer_fps)
+        MERGE_PROFILE(backward) MERGE_PROFILE(separate_synthesis) MERGE_PROFILE(lower_vram) MERGE_PROFILE(prefer_fps)
         MERGE_PROFILE(triple_frame_gen) MERGE_PROFILE(native_scale)
 #undef MERGE_PROFILE
     }

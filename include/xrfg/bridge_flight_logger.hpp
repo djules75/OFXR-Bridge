@@ -10,6 +10,11 @@
 
 namespace xrfg {
 class RamTimingCapture;
+inline std::filesystem::path benchmark_log_path(const std::filesystem::path& flight) {
+    constexpr std::wstring_view prefix = L"ofxr-bridge-flight-";
+    const auto stem = flight.stem().wstring();
+    return flight.parent_path() / (L"ofxr-benchmark-" + stem.substr(prefix.size()) + L".benchmark.log");
+}
 
 enum class BridgeFlightOperation : std::uint32_t {
     logger,
@@ -136,6 +141,9 @@ enum class BridgeFlightOperation : std::uint32_t {
     luke_release,
     luke_filter,
     luke_cycle_wait,
+    // Startup-only: a=session, b=requested separate bit0/actual bit1,
+    // c=initial backend low8, generator next8, Hybrid bit16, enabled bit17.
+    steamvr_queue_configuration,
     // Embedded-only diagnostics appended to preserve V223 operation IDs.
     fsr_eye_binding,
     fsr_eye_resources,
@@ -202,6 +210,10 @@ enum class BridgeFlightOperation : std::uint32_t {
     native_dlssg_evaluate, // result=NGX result, a=reset, b=output index, c=direct
     native_dlssg_decision, // result=generated mask, a=publication, b=eyes/outputs, c=disable bits
     history_capture_wait, // V441: result HRESULT, a swapchain, b waited us, c budget/index
+    menu_status, // result XR/HRESULT; a boundary (0 close,1 create,2 acquire,3 wait,4 fence,5 list,6 draw,7 release,8 end), b XR handle, c image
+    benchmark_configuration, // a=revision,b=selected/effective route bits,c=quality options
+    benchmark_rates, // a=output/game milliFPS,b=generated milliFPS/display milliHz,c=revision
+    benchmark_cycles, // a=OFXR/cycle microseconds,b=estimated microseconds,c=revision; result validity bits
 };
 
 struct BridgeFlightToken {

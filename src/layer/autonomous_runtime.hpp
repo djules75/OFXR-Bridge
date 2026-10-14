@@ -32,7 +32,7 @@ inline void apply_runtime_settings() {
     const auto& s=incoming.desired;
     embedded::Settings e{};
     e.enabled=s.enabled; e.backend=s.backend; e.preset=s.preset; e.scale=s.scale;
-    e.backward=s.backward; e.lower_vram=s.lower_vram;
+    e.backward=s.backward; e.separate_synthesis=s.separate_synthesis; e.lower_vram=s.lower_vram;
     e.motion_vectors=s.motion_vectors; e.frame_generation=s.frame_generation==3 ? 0 : s.frame_generation;
     e.hybrid=s.frame_generation==3;
     if(e.hybrid) e.backend=0; // Fixed FidelityFX fallback, independent of OFXR profile.

@@ -231,14 +231,24 @@ void actual_widgets() {
     require(headset.widgets.draft.enabled == enabled.desired.enabled,
         "headset reflects hot tray checkbox edit");
     require(enabled.desired.lower_vram == 0, "opening settings preserves Lower VRAM off");
-    tray.activate("/Generation_", "Lower VRAM");
+    tray.activate("/Generation_", "Separate synthesis");
+    tray.draw(); tray.draw();
+    require(snapshot().desired.separate_synthesis == 1 && snapshot().desired.lower_vram == 0,
+        "separation alone keeps full XR allocation");
+    tray.activate("/Generation_", "Reduce XR swapchains");
     tray.draw();
-    require(snapshot().desired.lower_vram == 1, "tray Lower VRAM checkbox enables staging");
+    require(snapshot().desired.lower_vram == 1 && snapshot().desired.separate_synthesis == 1,
+        "tray independently enables reduced allocation");
     headset.draw();
     require(headset.widgets.draft.lower_vram == 1, "headset reflects Lower VRAM on");
-    headset.activate("/Generation_", "Lower VRAM");
+    headset.activate("/Generation_", "Separate synthesis");
+    headset.draw(); headset.draw();
+    require(snapshot().desired.separate_synthesis == 0 && snapshot().desired.lower_vram == 1,
+        "headset reduction alone preserves explicit separation off");
+    headset.activate("/Generation_", "Reduce XR swapchains");
     headset.draw();
-    require(snapshot().desired.lower_vram == 0, "headset Lower VRAM checkbox disables staging");
+    require(snapshot().desired.lower_vram == 0 && snapshot().desired.separate_synthesis == 0,
+        "headset returns to full direct output");
     tray.draw();
     require(tray.widgets.draft.lower_vram == 0, "tray reflects Lower VRAM off");
     headset.select_tab("Neural Rendering");

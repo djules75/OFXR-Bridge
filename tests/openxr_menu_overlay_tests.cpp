@@ -20,6 +20,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 unsigned checks{}, made{}, destroyed{}, max_layers{3}, count_seen{}, menu_seen{}, fps_seen{};
 bool d11{};
+bool refuse_menu_create{};
 void check(bool pass,const char* message) { ++checks; if (!pass) throw std::runtime_error(message); }
 template<class T> T handle(std::uintptr_t v) { return reinterpret_cast<T>(v); }
 ComPtr<ID3D12Device> device; ComPtr<ID3D12CommandQueue> queue; ComPtr<ID3D11Device> device11;
@@ -46,6 +47,9 @@ XrResult XRAPI_CALL formats(XrSession,std::uint32_t capacity,std::uint32_t* coun
     *count=1;if(capacity)out[0]=DXGI_FORMAT_R8G8B8A8_UNORM;return XR_SUCCESS;
 }
 XrResult XRAPI_CALL create_chain(XrSession,const XrSwapchainCreateInfo* i,XrSwapchain* out) {
+    if(i->width==1024 && refuse_menu_create) {
+        refuse_menu_create=false;*out=XR_NULL_HANDLE;return XR_ERROR_LIMIT_REACHED;
+    }
     *out=handle<XrSwapchain>(++made+10); auto& c=chains[*out]; c.width=i->width;c.height=i->height;
     check(i->arraySize==1&&i->sampleCount==1,"single image/single sample");
     if(d11) {
@@ -181,6 +185,11 @@ int main(int argc,char** argv) {
                 device.Get(),queue.Get(),device11.Get(),ini,true,poll);
             overlay.application_frame(&frame);check(made==0,"closed menu + FPS off creates no texture");
             input.open=input.focused=input.mouse_valid=true;input.mouse_x=300;input.mouse_y=240;
+            refuse_menu_create=true;
+            overlay.application_frame(&frame);overlay.end_frame(&frame,false);
+            check(made==1&&menu_seen==0,"refused menu must release capture and preserve application frame");
+            // A second explicit F10 request after budget recovery retries the
+            // creation; refusal must not latch menu_attempted for this session.
             overlay.application_frame(&frame);overlay.end_frame(&frame,false);
             check(made==2&&menu_seen==0,"positive wait timeout cannot publish menu");
             overlay.application_frame(&frame);overlay.end_frame(&frame,false);

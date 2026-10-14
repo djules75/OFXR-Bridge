@@ -165,6 +165,7 @@ std::string nvidia_input_scale_ini_value(NvidiaInputScale scale) {
 
 LauncherSettings parse_settings(std::string_view text) {
     LauncherSettings settings;
+    bool separation_seen = false;
     std::string section;
     std::size_t offset = 0;
     while (offset <= text.size()) {
@@ -218,9 +219,14 @@ LauncherSettings parse_settings(std::string_view text) {
                         lower_ascii(value) == "true";
                 } else if (key == "excluded_processes") {
                     settings.excluded_processes = value;
+                } else if (key == "separate_synthesis") {
+                    separation_seen = true;
+                    settings.separate_synthesis = value == "1" || lower_ascii(value) == "true";
                 } else if (key == "single_swapchain_rings") {
                     settings.single_swapchain_rings = value == "1" ||
                         lower_ascii(value) == "true";
+                } else if (key == "steamvr_separate_queue") {
+                    settings.steamvr_separate_queue = value != "0" && lower_ascii(value) != "false";
                 } else if (key == "vulkan_session_bridge") {
                     settings.vulkan_session_bridge = value == "1" ||
                         lower_ascii(value) == "true";
@@ -253,6 +259,7 @@ LauncherSettings parse_settings(std::string_view text) {
         }
         offset = newline + 1;
     }
+    if (!separation_seen) settings.separate_synthesis = settings.single_swapchain_rings;
     return settings;
 }
 
@@ -269,7 +276,9 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
            "\r\ntriple_frame_gen=" + (settings.triple_frame_gen ? "1" : "0") +
            "\r\nexcluded_processes=" + settings.excluded_processes +
+           "\r\nseparate_synthesis=" + (settings.separate_synthesis ? "1" : "0") +
            "\r\nsingle_swapchain_rings=" + (settings.single_swapchain_rings ? "1" : "0") +
+           "\r\nsteamvr_separate_queue=" + (settings.steamvr_separate_queue ? "1" : "0") +
            "\r\nvulkan_session_bridge=" + (settings.vulkan_session_bridge ? "1" : "0") +
            "\r\nvulkan_bridge=" + (settings.vulkan_support ? "1" : "0") +
            "\r\nd3d11_bridge=" + (settings.d3d11_bridge ? "1" : "0") +
@@ -508,7 +517,9 @@ std::string build_runtime_ini(
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
            "\r\ntriple_frame_gen=" + (settings.triple_frame_gen ? "1" : "0") +
            "\r\nexcluded_processes=" + settings.excluded_processes +
+           "\r\nseparate_synthesis=" + (settings.separate_synthesis ? "1" : "0") +
            "\r\nsingle_swapchain_rings=" + (settings.single_swapchain_rings ? "1" : "0") +
+           "\r\nsteamvr_separate_queue=" + (settings.steamvr_separate_queue ? "1" : "0") +
            "\r\nvulkan_session_bridge=" + (settings.vulkan_session_bridge ? "1" : "0") +
            "\r\nvulkan_bridge=" + (settings.vulkan_support ? "1" : "0") +
            "\r\nd3d11_bridge=" + (settings.d3d11_bridge ? "1" : "0") +
@@ -537,6 +548,7 @@ std::string build_runtime_ini(
     settings.nvidia_bidirectional = desired.backward;
     settings.deep_pipeline = desired.prefer_fps;
     settings.triple_frame_gen = desired.triple_frame_gen;
+    settings.separate_synthesis = desired.separate_synthesis > 0;
     settings.single_swapchain_rings = desired.lower_vram > 0;
     settings.diagnostics = desired.diagnostics;
     settings.overlay_position = static_cast<FpsOverlayPosition>(desired.overlay_position);

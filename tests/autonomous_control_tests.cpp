@@ -43,7 +43,21 @@ void codec() {
     const auto old_memory = xrfg::autonomous::parse_settings("[autonomous]\nlower_vram=-1\n");
     require(old_memory.lower_vram == 0, "legacy route default migrates to Lower VRAM off");
     const auto explicit_memory = xrfg::autonomous::parse_settings("[autonomous]\nlower_vram=1\n");
-    require(explicit_memory.lower_vram == 1, "explicit Lower VRAM on survives migration");
+    require(explicit_memory.lower_vram == 1 && explicit_memory.separate_synthesis == 1,
+        "old Lower VRAM migrates both controls on");
+    for (int separate : {0,1}) for (int reduce : {0,1}) {
+        auto independent = desired;
+        independent.separate_synthesis = separate; independent.lower_vram = reduce;
+        auto restored = xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(independent));
+        require(restored.separate_synthesis == separate && restored.lower_vram == reduce,
+            "independent transport flags survive restart");
+    }
+    const auto migrated_profiles = xrfg::autonomous::parse_settings(
+        "[autonomous]\nbackend=1\n[route.ofxr_reference]\nlower_vram=1\n"
+        "[route.ofxr_new]\nlower_vram=1\nseparate_synthesis=0\n");
+    require(migrated_profiles.generation_profiles[1].separate_synthesis == 1 &&
+        migrated_profiles.generation_profiles[2].separate_synthesis == 0,
+        "old inactive profiles migrate without replacing explicit separation off");
     desired.backend = 3;
     desired.triple_frame_gen = true;
     desired.afw_mode = 2;
@@ -103,6 +117,7 @@ void route_profiles() {
         saved.motion_vectors = i % 2;
         saved.triple_frame_gen = i == 3;
         saved.lower_vram = i == 2;
+        saved.separate_synthesis = i % 2;
         saved.preset = i % 3;
         saved.scale = (i + 1) % 3;
         saved.native_scale = 30 + i * 10;
@@ -117,6 +132,7 @@ void route_profiles() {
         select_generation(restored, i < 4 ? 0 : i - 3, i < 4 ? i : 3);
         require(restored.motion_vectors == (i < 4 ? i % 2 : 1) &&
             restored.triple_frame_gen == (i == 3) && restored.lower_vram == (i == 2) &&
+            restored.separate_synthesis == i % 2 &&
             restored.preset == i % 3 && restored.scale == (i + 1) % 3 &&
             restored.native_scale == 30 + i * 10 && restored.backward == bool(i % 2) &&
             restored.prefer_fps == !bool(i % 2), "each route restores its own complete preferences");

@@ -161,10 +161,15 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::gpu_fence_snapshot: return "gpu_fence_snapshot";
     case BridgeFlightOperation::gpu_device_status: return "gpu_device_status";
     case BridgeFlightOperation::history_capture_wait: return "history_capture_wait";
+    case BridgeFlightOperation::menu_status: return "menu_status";
     }
     if (operation == BridgeFlightOperation::luke_release) return "luke_release";
     if (operation == BridgeFlightOperation::luke_filter) return "luke_filter";
     if (operation == BridgeFlightOperation::luke_cycle_wait) return "luke_cycle_wait";
+    if (operation == BridgeFlightOperation::steamvr_queue_configuration) return "steamvr_queue_configuration";
+    if (operation == BridgeFlightOperation::benchmark_configuration) return "benchmark_configuration";
+    if (operation == BridgeFlightOperation::benchmark_rates) return "benchmark_rates";
+    if (operation == BridgeFlightOperation::benchmark_cycles) return "benchmark_cycles";
     return "unknown";
 }
 
@@ -172,6 +177,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     return (operation == BridgeFlightOperation::logger && result > 0) ||
         operation == BridgeFlightOperation::runtime_identity ||
         operation == BridgeFlightOperation::session_binding ||
+        operation == BridgeFlightOperation::steamvr_queue_configuration ||
+        operation == BridgeFlightOperation::benchmark_configuration ||
         operation == BridgeFlightOperation::presenter_clock_capability ||
         operation == BridgeFlightOperation::view_configuration ||
         operation == BridgeFlightOperation::instance_create ||
@@ -286,6 +293,7 @@ struct BridgeFlightLogger::Impl {
     static constexpr std::uint64_t capacity = 262144;
     std::uint64_t epoch{};
     HANDLE file{INVALID_HANDLE_VALUE};
+    HANDLE benchmark_file{INVALID_HANDLE_VALUE};
     LARGE_INTEGER frequency{}, origin{};
     std::atomic<std::uint64_t> next_sequence{1};
     std::filesystem::path path;
@@ -371,6 +379,19 @@ struct BridgeFlightLogger::Impl {
             static_cast<unsigned long long>(record.duration), static_cast<unsigned long long>(record.a),
             static_cast<unsigned long long>(record.b), static_cast<unsigned long long>(record.c));
         if (length <= 0 || static_cast<std::size_t>(length) >= line.size()) return;
+        // The same asynchronous writer keeps a compact benchmark sidecar.
+        // It does not wrap when verbose flight records reach their size limit.
+        const bool benchmark = record.operation == BridgeFlightOperation::benchmark_configuration ||
+            record.operation == BridgeFlightOperation::benchmark_rates || record.operation == BridgeFlightOperation::benchmark_cycles ||
+            record.operation == BridgeFlightOperation::logger || record.operation == BridgeFlightOperation::session_binding ||
+            record.operation == BridgeFlightOperation::steamvr_queue_configuration || record.operation == BridgeFlightOperation::view_configuration ||
+            record.operation == BridgeFlightOperation::runtime_identity;
+        if (!replayed && benchmark && benchmark_file != INVALID_HANDLE_VALUE) {
+            DWORD written{};
+            if (!WriteFile(benchmark_file, line.data(), static_cast<DWORD>(length), &written, nullptr) || written != length) {
+                CloseHandle(benchmark_file); benchmark_file = INVALID_HANDLE_VALUE;
+            }
+        }
         if (file_position + length > maximum_bytes) {
             if (!write_batch()) return;
             LARGE_INTEGER beginning{};
@@ -420,6 +441,7 @@ struct BridgeFlightLogger::Impl {
             if (!found) std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         static_cast<void>(FlushFileBuffers(file));
+        if (benchmark_file != INVALID_HANDLE_VALUE) static_cast<void>(FlushFileBuffers(benchmark_file));
     }
     void flush() {
         std::unique_lock lock(flush_mutex);
@@ -435,6 +457,7 @@ struct BridgeFlightLogger::Impl {
     ~Impl() {
         finish();
         if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+        if (benchmark_file != INVALID_HANDLE_VALUE) CloseHandle(benchmark_file);
     }
 };
 
@@ -469,6 +492,9 @@ void BridgeFlightLogger::start_disk_locked() {
     if (implementation->file == INVALID_HANDLE_VALUE)
         implementation->file = create_log_file(fallback_log_directory(), &implementation->path);
     if (implementation->file == INVALID_HANDLE_VALUE || base_frequency_ <= 0) return;
+    const auto benchmark_path = benchmark_log_path(implementation->path);
+    implementation->benchmark_file = CreateFileW(benchmark_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+        nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     implementation->frequency.QuadPart = base_frequency_;
     implementation->origin.QuadPart = base_origin_;
     implementation->epoch = ++disk_epoch_;
