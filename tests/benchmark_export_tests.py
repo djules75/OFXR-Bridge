@@ -30,8 +30,9 @@ with tempfile.TemporaryDirectory() as directory:
     result=m.export([path], 'meganex', 'estimated')
     assert len(result)==1 and not result[0]['missing']
     values=result[0]['tsv'].split('\t')
-    assert len(values)==39 and values[0]=='40' and values[-2:]==['','529']
-    assert len(result[0]['headers'])==39 and result[0]['headers'][-2:]==['Log','Tested Build']
+    assert len(values)==40 and values[0]=='40' and values[-2:]==['','529']
+    assert len(result[0]['headers'])==40 and result[0]['headers'][-2:]==['Log','Tested Build']
+    assert result[0]['headers'][16]=='Djules3X:01'
     assert all(x=='80(44)' for x in values[1:-2])
     length=m.export([path], 'meganex', 'length')[0]
     assert length['cells']['FSR:10']['value']=='80(55)'
@@ -46,6 +47,7 @@ with tempfile.TemporaryDirectory() as directory:
     assert result[0]['cells']['DLSS-G-A:00']['config']['dlssg_preset_request']==1
     assert result[0]['cells']['DLSS-G-C:00']['config']['dlssg_preset_request']==3
     pimax=m.export([path], 'pimax', 'estimated')
-    assert len(pimax)==3 and all(r['start_column']=='BH' and len(r['tsv'].split('\t'))==10 for r in pimax)
+    assert len(pimax)==3 and all(r['start_column']=='BI' and len(r['tsv'].split('\t'))==10 for r in pimax)
     assert sorted(r['dlssg_preset_request'] for r in pimax)==[0,1,3]
-    print('37 exact spreadsheet measurements/39 cells, A/C process profiles, Pimax rows, cycle selection, missing/short guards PASS')
+    assert sum(len(r['measurements']) for r in pimax)==38  # compact cells cannot discard portable A/B evidence
+    print('38 exact spreadsheet measurements/40 cells, Djules3X B-only, A/C process profiles, Pimax rows, cycle selection, missing/short guards PASS')

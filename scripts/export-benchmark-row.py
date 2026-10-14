@@ -13,7 +13,7 @@ FIELDS = re.compile(r'(\w+)=([^\s]+)')
 MEGANEX = ['Disabled', 'Fidelity:00', 'Fidelity:10', 'Fidelity:01', 'Fidelity:11',
            'Reference:00', 'Reference:10', 'Reference:01', 'Reference:11',
            'Djules:00', 'Djules:00:prefer', 'Djules:10', 'Djules:01', 'Djules:11',
-           'Djules3X:00', 'Djules3X:10', 'Djules3X:11',
+           'Djules3X:00', 'Djules3X:10', 'Djules3X:01', 'Djules3X:11',
            'New:00', 'New:10', 'New:01', 'New:11',
            'Hybrid:00', 'Hybrid:10', 'Hybrid:01', 'Hybrid:11',
            'FSR:00', 'FSR:10', 'FSR:01', 'FSR:11',
@@ -113,6 +113,7 @@ def summarize(segment, settle, minimum, metric):
 
 def export(paths, platform, metric, settle=3, minimum=10):
     groups = {}
+    measurements = {}
     for path in paths:
         for segment in read_segments(path):
             result = summarize(segment, settle, minimum, metric)
@@ -123,6 +124,7 @@ def export(paths, platform, metric, settle=3, minimum=10):
             group = (cfg['nr'], cfg['separate_queue'], cfg['luke'], cfg['afw_mode'] if cfg['luke'] else 0,
                      0 if platform == 'meganex' else cfg['dlssg_preset_request'])
             cells = groups.setdefault(group, {})
+            measurements.setdefault(group, []).append(result)
             key = cfg['cell'] if platform == 'meganex' else cfg['route']
             cells[key] = result  # Last complete repeat wins; evidence preserves exact file/window.
     results = []
@@ -133,12 +135,13 @@ def export(paths, platform, metric, settle=3, minimum=10):
         if len(versions) != 1:
             raise ValueError('Multiple builds in one row; export each build separately.')
         if platform in ('meganex', 'pimax'):
-            row += ['', str(versions[0])]  # Meganex BD/BE, Pimax BP/BQ.
+            row += ['', str(versions[0])]  # Meganex BE/BF, Pimax BQ/BR.
         headers = list(slots) + (['Log', 'Tested Build'] if platform in ('meganex', 'pimax') else [])
         results.append(dict(nr=key[0], separate_queue=key[1], luke=key[2], afw_mode=key[3], headers=headers,
                             dlssg_preset_request=key[4],
-                            start_column='S' if platform == 'meganex' else 'BH' if platform == 'pimax' else 'G',
-                            missing=[x for x in slots if x not in cells], cells=cells, tsv='\t'.join(row)))
+                            start_column='S' if platform == 'meganex' else 'BI' if platform == 'pimax' else 'G',
+                            missing=[x for x in slots if x not in cells], cells=cells,
+                            measurements=measurements[key], tsv='\t'.join(row)))
     return results
 
 def main():
@@ -176,7 +179,7 @@ def main():
                          'Reduce XR B', 'Prefer FPS', 'Multiplier', 'Neural', 'Separate queue',
                          'Luke AFW', 'Output FPS range', 'Cycle metric', 'Cycle range ms', 'Warning'])
         for row in rows:
-            for result in row['cells'].values():
+            for result in row['measurements']:
                 cfg = result['config']
                 writer.writerow([a.game, result['version'], cfg['route'],
                                  {1:'A',3:'C'}.get(cfg['dlssg_preset_request'], 'unverified'),
