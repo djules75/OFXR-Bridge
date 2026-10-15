@@ -5496,10 +5496,24 @@ XrResult layer_wait_frame_impl(
             state->presenter_stop_requested) {
             return XR_ERROR_SESSION_NOT_RUNNING;
         }
+        // The period the presenter paces on, not the one the runtime reported
+        // for this frame. SteamVR reports two periods on the wait after a
+        // missed vsync, and handed on that becomes a 66.7 ms period at 3X:
+        // MSFS 2024 submits the previous wait's time plus its period, so the
+        // next frame overshoots by a period and the one after goes backwards,
+        // which clears continuity. The prime that follows misses the next
+        // slot, SteamVR reports two periods again, and the loop held at a
+        // reset every fourth frame - 30 real and 45 synthetic per second at
+        // 90 Hz, for as long as the race that breaks it took to come up
+        // (issue 33). A constant period cannot go backwards: the time below
+        // is strictly increasing.
+        const XrDuration runtime_period = state->presenter_display_period > 0
+            ? state->presenter_display_period
+            : state->presenter_frame_state.predictedDisplayPeriod;
         const XrDuration virtual_period = (state->manual_control.stop_requested() || !state->menu_enabled)
-            ? state->presenter_frame_state.predictedDisplayPeriod
+            ? runtime_period
             : virtual_display_period(
-                state->presenter_frame_state.predictedDisplayPeriod,
+                runtime_period,
                 state->frames_per_application_frame);
         // The application's timeline is anchored to the runtime's own
         // prediction, one virtual period ahead of the frame the presenter is
