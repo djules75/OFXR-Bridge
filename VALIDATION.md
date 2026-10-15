@@ -1,3 +1,15 @@
+## V536 accepted for main (2026-10-15)
+
+The owner confirms that V536 is OK and explicitly requests main alignment.
+[V536 acceptance](docs/V536_ACCEPTANCE.json) records the exact sealed source/tag and
+ZIP hash. Preserve those artifacts unchanged; the earlier runtime-pending
+entries below describe the release before this verdict. The accepted renderer
+is exactly V536, with no additional runtime change for this integration.
+
+Next work is OFXR performance inside Luke Ross. The paired AFW marker read
+optimization does not resolve the separate route-generation/delivery slowdown;
+no quantified FPS recovery or all-game/runtime validation is claimed.
+
 ## V536 targeted release validation
 
 49/49 CTest in43.89seconds plus Python benchmark exporter pass, zero skips.
