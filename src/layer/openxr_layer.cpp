@@ -959,6 +959,13 @@ struct SessionState {
     // a busy slot (history_capture_wait_limit_us), which runs under a
     // swapchain's call_mutex and the gpu_mutex and so does not take `mutex`.
     std::atomic<XrDuration> history_capture_wait_period{};
+    // The display period the application's timeline is built on while the
+    // presenter runs, for the synthetic interpolation fraction; 0 inline.
+    // minimum_runtime_display_period is learned only before the presenter
+    // starts, so after Virtual Desktop's refresh rate was lowered from 144 to
+    // 90 Hz mid-session the 3X synthetics were placed at 0.58 and 0.79
+    // instead of a third and two thirds: a regular feed that was not smooth.
+    std::atomic<XrDuration> application_timeline_period{};
     // How long the runtime's own xrWaitFrame blocked, and how many consecutive
     // waits came back too quickly to have been pacing anything. This is what
     // the presenter's existence actually turns on; see
@@ -5333,6 +5340,7 @@ void reset_frame_bookkeeping(const std::shared_ptr<SessionState>& state) {
         state->generation_resume_wall_time = {};
         state->minimum_runtime_display_period = 0;
         state->history_capture_wait_period.store(0, std::memory_order_relaxed);
+        state->application_timeline_period.store(0, std::memory_order_relaxed);
         state->steamvr_throttled_wait_streak = 0;
         state->unpaced_wait_streak = 0;
     }
@@ -5522,6 +5530,8 @@ XrResult layer_wait_frame_impl(
             : state->presenter_display_period > 0
             ? state->presenter_display_period
             : state->presenter_frame_state.predictedDisplayPeriod;
+        state->application_timeline_period.store(
+            runtime_period, std::memory_order_relaxed);
         const XrDuration virtual_period = (state->manual_control.stop_requested() || !state->menu_enabled)
             ? runtime_period
             : virtual_display_period(
@@ -5669,6 +5679,10 @@ XrResult layer_wait_frame_impl(
         static_cast<void>(flush_session_pending_copies(state));
         state->application_wait_pending_begin = true;
         std::scoped_lock lock(state->mutex);
+        if (!use_continuous_presenter) {
+            state->application_timeline_period.store(
+                0, std::memory_order_relaxed);
+        }
         // Every runtime, not only SteamVR: the synthetic interpolation fraction
         // needs a display period wherever generation runs, and the promotion
         // that also reads this guards on the runtime itself. A runtime that
@@ -11456,8 +11470,11 @@ struct PreparedProjectionFrame {
     if (!state || !previous_snapshot) {
         return kFixedMidpoint;
     }
-    XrDuration period = 0;
-    {
+    // While the presenter runs, the period the application's timeline is
+    // built on, so a steady cadence gives exact thirds at any refresh rate.
+    XrDuration period =
+        state->application_timeline_period.load(std::memory_order_relaxed);
+    if (period <= 0) {
         std::scoped_lock lock(state->mutex);
         period = state->minimum_runtime_display_period;
     }
