@@ -189,7 +189,7 @@ std::shared_ptr<SessionState> session() {
     return state;
 }
 
-void pipelined_route_handoff_test(bool steamvr = false) {
+void pipelined_route_handoff_test(bool steamvr = false, bool budget_demotion = false) {
     auto state = session();
     state->presenter_active = false;
     state->graphics_binding = SessionGraphicsBinding::d3d12;
@@ -207,10 +207,13 @@ void pipelined_route_handoff_test(bool steamvr = false) {
         unsigned *waits, *begins, *ends, *errors;
         bool *waited, *begun;
         XrTime time{1'000'000'000};
+        SessionState* state{};
+        bool latch_budget{};
     } journal{&physical_mutex, &physical_waits, &physical_begins, &physical_ends,
               &order_errors, &physical_waited, &physical_begun};
     static Journal* runtime;
     runtime = &journal;
+    journal.state=state.get();
     state->dispatch->wait_frame = +[](XrSession, const XrFrameWaitInfo*, XrFrameState* out) -> XrResult {
         std::scoped_lock lock(*runtime->mutex);
         if (*runtime->waited || *runtime->begun) {
@@ -237,6 +240,10 @@ void pipelined_route_handoff_test(bool steamvr = false) {
             ++*runtime->errors; return XR_ERROR_CALL_ORDER_INVALID;
         }
         ++*runtime->ends; *runtime->begun = false;
+        if(runtime->latch_budget) {
+            runtime->state->luke_aux_budget_inline=true;
+            runtime->latch_budget=false;
+        }
         return XR_SUCCESS;
     };
     const auto original = xrfg::embedded::snapshot().desired;
@@ -281,7 +288,19 @@ void pipelined_route_handoff_test(bool steamvr = false) {
         XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
         end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         end.displayTime = prediction.predictedDisplayTime;
+        journal.latch_budget=budget_demotion;
         check(XR_SUCCEEDED(layer_end_frame_impl(state->handle, &end)), "last virtual End");
+        if(budget_demotion) {
+            check(!continuous_presenter_active(state),"mid-End budget refusal kept virtual owner alive");
+            for(unsigned i=0;i<4;++i) {
+                XrFrameState direct{XR_TYPE_FRAME_STATE};
+                check(XR_SUCCEEDED(layer_wait_frame_impl(state->handle,nullptr,&direct)),"budget direct Wait");
+                check(XR_SUCCEEDED(layer_begin_frame_impl(state->handle,nullptr)),"budget direct Begin");
+                end.displayTime=direct.predictedDisplayTime;
+                check(XR_SUCCEEDED(layer_end_frame_impl(state->handle,&end)),"budget direct End");
+                check(!continuous_presenter_active(state),"budget fallback promoted again");
+            }
+        }
         stop_continuous_presenter(state);
         check(order_errors == 0 && physical_waits > 12 &&
               physical_waits == physical_begins && physical_begins == physical_ends &&
@@ -2057,14 +2076,27 @@ void refused_frame_recovery_test() {
 #include "elliott_controller_layer_tests.inc"
 #include "blackbar_timing_layer_tests.inc"
 #include "djules_v474_layer_tests.inc"
-#include "elliott_compat_layer_tests.inc"
 
 #include "v477_luke_context.inc"
 #include "../src/layer/outlaws_startup_test.inc"
 
 #include "luke_fresh_pacing_fixture.inc"
 #include "luke_clock_continuity_fixture.inc"
+#include "luke_aux_budget_fixture.inc"
+#include "luke_ngx_startup_fixture.inc"
 int main(int argc, char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="luke-ngx-startup") {
+        try {luke_ngx_startup_test();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
+    }
+    if(argc>1 && std::string_view(argv[1])=="luke-aux-budget-handoff") {
+        try {xrfg_fixture::ControlProfile profile;pipelined_route_handoff_test(true,true);return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
+    }
+    if(argc>1 && std::string_view(argv[1])=="luke-aux-budget") {
+        try {luke_aux_budget_test();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
+    }
     xrfg_fixture::ControlProfile autonomous_profile;
     if(argc>3 && std::string_view(argv[1])=="outlaws-startup") {
         const std::string marker=argv[2],provider=argv[3];
@@ -2095,10 +2127,6 @@ int main(int argc, char** argv) {
     }
     if(argc>1 && std::string_view(argv[1])=="v474-policy") {
         try {djules_v474_policy_lifecycle_test();return 0;}
-        catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
-    }
-    if(argc>1 && std::string_view(argv[1])=="elliott-r26") {
-        try {elliott_r26_release_test(true);elliott_r26_release_test(false);elliott_r26_release_test(true,true);return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
     }
     if(argc>1 && std::string_view(argv[1])=="v474-bridge") {

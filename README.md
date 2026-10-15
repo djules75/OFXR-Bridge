@@ -1,3 +1,38 @@
+## V536 AFW beta6 and paired Luke marker readback (2026-10-15)
+
+Owner requests the next KCD2/Luke performance build and explicitly asks to
+update private Git. V536 exports the surviving V535 source on a fresh branch
+from current main; local V533-V535 trial commits/tags/manifests are not imported.
+Withdraw C1/R19, C2/R26 and C3/R35 from the active renderer; keep V532 labels,
+V533 meter corrections, the exact-limit Luke/native-D11/SteamVR inline fallback,
+and cold Luke private-NGX capacity deferral. Their headset effects are not
+reclassified as independently accepted: the owner changed overlays as well.
+
+New work: official pinned PureDark AFW beta6; full/2x2/4x4 Combined shading
+control (NEXT GAME LAUNCH); batch both already-frozen eye barcode reads on one
+queue submission/wait, previously Vulkan-only. No new image of latency, guessed
+eye token, raw/cross-eye guide substitution, or change to accepted KCD603 /
+Indiana701 depth-plus-camera-subtraction mathematics. A/B policy/counts retained.
+Post-AFW Hybrid/native-vector OFXR reports optical-flow fallback; reconstructed
+eye still has no native stereo guide pair for FSR/DLSS-G.
+
+Beta6 integration needs ABI ShadingRate at132, reserved136, sizeof184; a bounded
+null-output configuration handshake; and a scoped renderer Copy adapter for
+its invalid full-image copies between W/H and W+1/H+1 color history. The adapter
+uses region copies and clamps the single border, with no code or command-list
+vtable patch. Full-rate beta5 control passed; unadapted beta6 failed GPU validation.
+Live shading changes separately failed resource-state validation. Do not enable
+hot switching: each AFW instance pins its initial shading rate, active/pending
+are separate in UI/benchmark metadata. Restart the game to compare rates.
+
+KCD run: 2987x4272 eye images. Disabled/AFW-off often84-90FPS; AFW-only often
+53-58FPS (not a controlled same-scene benchmark). Retained final marker reads:
+7318 waits vs3635 evaluations; median2.723ms/p9012.567ms per wait. These are CPU
+GPU-rendezvous durations, not the GPU kernel cost or a promised additive gain.
+Earlier generator timings have rolled out; no generic pacing fix is claimed.
+See [V536 implementation/validation](docs/V536_AFW_BETA6.md).
+IPC53601/provider45601. Runtime and performance validation in headset pending.
+
 ## V532 benchmark-label diagnostic follow-up
 
 Owner requests fixing lost labels before repeating AC Valhalla. The logger

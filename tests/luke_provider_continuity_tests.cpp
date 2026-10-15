@@ -87,6 +87,7 @@ struct FrameWarpEvaluateParams {
     RECT foveated_area{};
     TextureDesc* ue_velocity_buffer{};
     bool use_uint64{};
+    std::uint32_t shading_rate{9}; // beta6 ShadingRate_1X1
     float reserved[12]{};
 };
 
@@ -95,7 +96,8 @@ static_assert(sizeof(FrameBufferDesc) == 168);
 static_assert(sizeof(EyeFrameBuffers) == 336);
 static_assert(sizeof(CameraData) == 768);
 static_assert(sizeof(FrameWarpEvaluateParams) == 184);
-static_assert(offsetof(FrameWarpEvaluateParams, reserved) == 132);
+static_assert(offsetof(FrameWarpEvaluateParams, shading_rate) == 132);
+static_assert(offsetof(FrameWarpEvaluateParams, reserved) == 136);
 
 struct RendererApi;
 using InitDeviceFn = RendererApi* (__stdcall*)(DeviceParams);

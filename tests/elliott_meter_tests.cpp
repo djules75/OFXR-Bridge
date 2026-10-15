@@ -4,6 +4,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <cmath>
+#include <windows.h>
+#include <algorithm>
 using namespace xrfg;
 void check(bool v,const char* s){if(!v)throw std::runtime_error(s);}
 int main(int argc,char** argv){try{
@@ -33,6 +35,33 @@ int main(int argc,char** argv){try{
     check(rasterize_elliott_meter(changed,1000,false,false)!=pixels,"draw supplied measured counter");
     auto stale=rasterize_elliott_meter(s,4000,false,false);
     check(stale!=pixels,"stale metrics show unavailable");
+    auto active=s;
+    const auto now=GetTickCount64();
+    active.runtime.telemetry.updated_ms=active.runtime.heartbeat_ms=now;
+    active.runtime.applied_revision=active.revision;
+    active.runtime.telemetry.generating=true;
+    active.desired.afw_mode=3; // Non-Luke default selection must not be an error.
+    const unsigned green=0xff8ee05c, red=0xff6262ff;
+    const auto good=rasterize_elliott_meter(active,now,false,false);
+    const auto count=[](const auto& p,unsigned color){return std::count(p.begin(),p.end(),color);};
+    check(count(good,green)>100 && count(good,red)==0,"working OFXR label and counters must be green");
+    check(autonomous::interface_status_text(active).find("AFW: N/A")!=std::string::npos,
+        "AFW outside Luke must be not applicable");
+    auto idle=active;idle.runtime.telemetry.generating=false;
+    check(count(rasterize_elliott_meter(idle,now,false,false),red)>100,"non-generating meter red");
+    auto disabled=active;disabled.desired.enabled=false;
+    check(count(rasterize_elliott_meter(disabled,now,false,false),green)==0,"disabled meter not green");
+    auto neural=active;neural.desired.nr_enabled=true;
+    check(count(rasterize_elliott_meter(neural,now,false,false),red)>100,"Neural on but idle red");
+    neural.runtime.nr_running=1;
+    check(count(rasterize_elliott_meter(neural,now,false,false),red)==0,"active Neural green");
+    auto luke=active;luke.runtime.luke_detected=1;
+    check(count(rasterize_elliott_meter(luke,now,false,false),red)>100,"requested Luke AFW idle red");
+    luke.runtime.afw_running=1;
+    check(count(rasterize_elliott_meter(luke,now,false,false),red)==0,"active Luke AFW green");
+    luke.desired.afw_mode=0;luke.runtime.afw_running=0;
+    check(count(rasterize_elliott_meter(luke,now,false,false),red)==0,"AFW off neutral");
+    check(count(rasterize_elliott_meter(active,now+2100,false,false),green)==0,"stale meter not green");
     check(rasterize_elliott_meter(s,1000,false,true)!=pixels,"UNORM linear palette conversion");
     check(rasterize_elliott_meter(s,1000,true,false)!=pixels,"BGRA channels supported");
     if(argc>1){std::ofstream out(argv[1],std::ios::binary);out<<"P6\n1024 "<<rows<<"\n255\n";

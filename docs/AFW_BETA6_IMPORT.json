@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "provider": "PureDark AFW v1.0-beta.6",
+  "release_url": "https://github.com/PureDark/UEVR/releases/tag/UEVR_AFW_v1.0-beta.6",
+  "release_id": 369792988,
+  "asset": [
+    {
+      "name": "UEVR-joeyhodge_AFW_v1.0-beta.6.zip",
+      "id": 512768442,
+      "size": 10300621,
+      "browser_download_url": "https://github.com/PureDark/UEVR/releases/download/UEVR_AFW_v1.0-beta.6/UEVR-joeyhodge_AFW_v1.0-beta.6.zip",
+      "updated_at": "2026-08-13T09:16:55Z"
+    },
+    {
+      "name": "UEVR-nightly_AFW_v1.0-beta.6.zip",
+      "id": 512768317,
+      "size": 9446326,
+      "browser_download_url": "https://github.com/PureDark/UEVR/releases/download/UEVR_AFW_v1.0-beta.6/UEVR-nightly_AFW_v1.0-beta.6.zip",
+      "updated_at": "2026-08-13T09:16:49Z"
+    }
+  ],
+  "archive_sha256": "c5eb5d3f6c356d20d817849c0cf5cc95356ed03aa99100b6237dbb3081dbbe2c",
+  "dll": {
+    "name": "PDAFWPlugin.dll",
+    "bytes": 565248,
+    "sha256": "5f3cfc38903ac438241a3c47cb4bc3ac329cb39b056e33a63c20045fe15336f9"
+  },
+  "abi_source_tree": "fc8de1026622d42d0d1f76c3e9c8bb0d80b11035",
+  "abi_header": "dependencies/pd-afwmod/include/PDAFWPlugin.h",
+  "abi_header_blob": "c5a0aa3f2d87d6951079f9214958a8f8101370b2",
+  "abi_header_url": "https://github.com/PureDark/UEVR/blob/f49cd54e919c368fdf1b253ac5b1266caf56436a/dependencies/pd-afwmod/include/PDAFWPlugin.h",
+  "abi": {
+    "evaluate_bytes": 184,
+    "shading_rate_offset": 132,
+    "reserved_offset": 136,
+    "shading_values": [
+      9,
+      10,
+      12,
+      17,
+      18,
+      20,
+      33,
+      34,
+      36
+    ]
+  },
+  "owner_authority": "Owner explicitly requests AFW beta6 and its reduced-shading control in next build, 2026-10-15.",
+  "source_only_git": true,
+  "abi_header_commit": "f49cd54e919c368fdf1b253ac5b1266caf56436a"
+}

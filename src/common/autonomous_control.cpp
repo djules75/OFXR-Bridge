@@ -57,7 +57,8 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
         return fallback ? "Fallback to optical flow: guide queue ownership mismatch" :
             "Bypass: guide queue ownership mismatch; real frames only";
     default:
-        if (mode == 3) return "Hybrid: game motion vectors + FidelityFX optical flow";
+        if (mode == 3) return motion_source == 1 ? "Hybrid: game motion vectors + FidelityFX optical flow" :
+            "Hybrid fallback: FidelityFX optical flow; no complete native stereo guides";
         if (mode == 1) return "FSR: generating with native stereo motion and depth guides";
         if (mode == 2) return "DLSS-G: generating with native stereo motion and depth guides";
         return motion_source == 1 ? "OFXR: using compatible game motion vectors (optical flow bypassed)" :
@@ -66,7 +67,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465852;
-constexpr std::uint32_t kAbi = 52601;
+constexpr std::uint32_t kAbi = 53601;
 static_assert(offsetof(RuntimeStatus, provider_error)==72); // V471 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==69); // previously reserved padding
 struct Shared {
@@ -219,6 +220,7 @@ Settings sanitize(Settings value) noexcept {
     value.afw_mode = std::clamp(value.afw_mode, 0, 3);
     value.afw_ignore_motion_threshold = bounded(value.afw_ignore_motion_threshold, 0.F, 16.F, 2.5F);
     value.afw_depth_dilate_mode = std::clamp(value.afw_depth_dilate_mode, 0, 2);
+    value.afw_shading_rate = std::clamp(value.afw_shading_rate, 0, 8);
     value.nr_intensity = bounded(value.nr_intensity, 0.F, 2.F, 1.F);
     value.nr_preset = std::clamp(value.nr_preset, 0, 3);
     value.nr_style = std::clamp(value.nr_style, 0, 2);
@@ -309,7 +311,7 @@ Settings parse_settings(std::string_view text) {
         READ_FIELD(backward) READ_FIELD(separate_synthesis) READ_FIELD(lower_vram) READ_FIELD(prefer_fps)
         READ_FIELD(triple_frame_gen) READ_FIELD(native_scale) READ_FIELD(r19_camera)
         READ_FIELD(afw_mode) READ_FIELD(afw_debug) READ_FIELD(afw_clear_before_warping)
-        READ_FIELD(afw_ignore_motion_threshold) READ_FIELD(afw_depth_dilate_mode)
+        READ_FIELD(afw_ignore_motion_threshold) READ_FIELD(afw_depth_dilate_mode) READ_FIELD(afw_shading_rate)
         READ_FIELD(nr_enabled) READ_FIELD(nr_before_sr) READ_FIELD(nr_intensity)
         READ_FIELD(nr_preset) READ_FIELD(nr_style) READ_FIELD(nr_local_structure)
         READ_FIELD(nr_local_tone) READ_FIELD(nr_skin_structure) READ_FIELD(nr_auto_mask)
@@ -341,7 +343,7 @@ std::string serialize_settings(const Settings& settings) {
     WRITE_FIELD(backward) WRITE_FIELD(separate_synthesis) WRITE_FIELD(lower_vram) WRITE_FIELD(prefer_fps)
     WRITE_FIELD(triple_frame_gen) WRITE_FIELD(native_scale) WRITE_FIELD(r19_camera)
     WRITE_FIELD(afw_mode) WRITE_FIELD(afw_debug) WRITE_FIELD(afw_clear_before_warping)
-    WRITE_FIELD(afw_ignore_motion_threshold) WRITE_FIELD(afw_depth_dilate_mode)
+    WRITE_FIELD(afw_ignore_motion_threshold) WRITE_FIELD(afw_depth_dilate_mode) WRITE_FIELD(afw_shading_rate)
     WRITE_FIELD(nr_enabled) WRITE_FIELD(nr_before_sr) WRITE_FIELD(nr_intensity)
     WRITE_FIELD(nr_preset) WRITE_FIELD(nr_style) WRITE_FIELD(nr_local_structure)
     WRITE_FIELD(nr_local_tone) WRITE_FIELD(nr_skin_structure) WRITE_FIELD(nr_auto_mask)
@@ -433,7 +435,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
 #define MERGE_FIELD(name) if (base.name != desired.name) current.name = desired.name;
     MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(hybrid_backend) MERGE_FIELD(r19_camera)
     MERGE_FIELD(afw_mode) MERGE_FIELD(afw_debug) MERGE_FIELD(afw_clear_before_warping)
-    MERGE_FIELD(afw_ignore_motion_threshold) MERGE_FIELD(afw_depth_dilate_mode)
+    MERGE_FIELD(afw_ignore_motion_threshold) MERGE_FIELD(afw_depth_dilate_mode) MERGE_FIELD(afw_shading_rate)
     MERGE_FIELD(nr_enabled) MERGE_FIELD(nr_before_sr) MERGE_FIELD(nr_intensity)
     MERGE_FIELD(nr_preset) MERGE_FIELD(nr_style) MERGE_FIELD(nr_local_structure)
     MERGE_FIELD(nr_local_tone) MERGE_FIELD(nr_skin_structure) MERGE_FIELD(nr_auto_mask)
@@ -573,7 +575,8 @@ std::string interface_status_text(const Snapshot& s) {
     const bool runtime_fresh=r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000;
     const auto generator=r.generation_mode==1 ? "FSR" : r.generation_mode==2 ? "DLSS-G" : "OFXR";
     add(std::string(generator)+(s.desired.enabled ? (generating ? ": Active" : ": Waiting") : ": Off"));
-    add(s.desired.afw_mode==0 ? "AFW: Off" : runtime_fresh && r.afw_running ? "AFW: Active" : "AFW: Waiting");
+    add(!r.luke_detected ? "AFW: N/A" : s.desired.afw_mode==0 ? "AFW: Off" :
+        runtime_fresh && r.afw_running ? "AFW: Active" : "AFW: Waiting");
     add(!s.desired.nr_enabled ? "Neural Render: Off" : runtime_fresh && r.nr_running ? "Neural Render: Active" : "Neural Render: Waiting");
     return result;
 }

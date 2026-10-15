@@ -46,6 +46,7 @@ struct Settings {
     bool afw_clear_before_warping{};
     float afw_ignore_motion_threshold{2.5F};
     int afw_depth_dilate_mode{1};
+    int afw_shading_rate{}; // beta6 Combined; 0 full resolution, 4=2x2, 8=4x4
     bool nr_enabled{};
     bool nr_before_sr{true};
     float nr_intensity{1.F};
@@ -88,6 +89,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 
 struct RuntimeStatus {
     std::uint32_t process_id{};
+    int afw_shading_rate{-1}; // pinned current session; desired can be pending
     std::uint64_t heartbeat_ms{};
     std::uint64_t applied_revision{};
     std::uint32_t sessions{};

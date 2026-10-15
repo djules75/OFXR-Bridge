@@ -1,4 +1,3 @@
-#include "xrfg/d3d12_compat.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include <algorithm>
@@ -798,7 +797,7 @@ struct D3D12NativeDlssG::Impl {
         rd.NumParameters = 3;
         rd.pParameters = rp;
         ComPtr<ID3DBlob> blob, error;
-        HRESULT hr = xrfg::serialize_root_signature(device.Get(), rd, &blob, &error);
+        HRESULT hr = D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error);
         if (FAILED(hr)) {
             return hr;
         }

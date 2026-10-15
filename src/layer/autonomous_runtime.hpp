@@ -42,7 +42,7 @@ inline void apply_runtime_settings() {
     a.mode=s.afw_mode; a.debug=s.afw_debug;
     a.clear_before_warping=s.afw_clear_before_warping;
     a.ignore_motion_threshold=s.afw_ignore_motion_threshold;
-    a.depth_dilate_mode=s.afw_depth_dilate_mode;
+    a.depth_dilate_mode=s.afw_depth_dilate_mode; a.shading_rate=s.afw_shading_rate;
     if (!embedded::request_afw(a)) return;
     if (!embedded::set_djules_triple_frame_gen(s.triple_frame_gen)) return;
     if (!embedded::set_djules_prefer_fps(s.prefer_fps || s.triple_frame_gen)) return;
@@ -72,6 +72,7 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     const auto nr=neural_rendering::status();
     RuntimeStatus out{};
     out.process_id=GetCurrentProcessId();
+    out.afw_shading_rate=afw.active_shading_rate;
     out.applied_revision=applied_runtime_revision.load(std::memory_order_acquire);
     out.sessions=control.sessions; out.ready=control.ready;
     out.pending=control.pending; out.errors=control.errors;
@@ -99,9 +100,12 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     out.upscaler_motion=observed.motion; out.upscaler_depth=observed.depth;
     out.guide_publications=guides.published; out.guide_matches=guides.matched; out.guide_uses=guides.used;
     out.generation_mode=desired.frame_generation; out.motion_source=control.desired.motion_vectors;
+    const bool post_afw = out.luke_detected && afw.desired.mode != 0;
+    if (post_afw && (out.generation_mode == 0 || out.generation_mode == 3))
+        out.motion_source = 0; // Complete post-AFW color pair, no native peer-eye guides.
     if (!control.desired.enabled) generation=GenerationState::paused;
     if ((generation==GenerationState::ready || generation==GenerationState::waiting) &&
-        (out.motion_source==1 || out.generation_mode!=0) &&
+        (out.motion_source==1 || out.generation_mode==1 || out.generation_mode==2) &&
         !(out.generation_mode==2 && generation==GenerationState::ready)) {
         switch(guides.status) {
         case DlssMotionVectorStatus::waiting_for_dlss: generation=GenerationState::missing_motion; break;

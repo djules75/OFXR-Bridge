@@ -115,7 +115,7 @@ void wording() {
     Snapshot s{};
     check(interface_status_text(s)=="No active game" && interface_state_text(s)=="Waiting", "disconnected UI");
     s.connected=true;s.runtime.ready=1;s.runtime.applied_revision=s.revision;
-    check(interface_status_text(s)=="OFXR: Waiting | AFW: Waiting | Neural Render: Off", "clean session reports separate actual activity");
+    check(interface_status_text(s)=="OFXR: Waiting | AFW: N/A | Neural Render: Off", "clean non-Luke session reports AFW not applicable");
     s.desired.afw_mode=3;
     check(interface_status_text(s).find("AFW: Active")==std::string::npos, "Luke selection cannot fake AFW activity");
     s.runtime.luke_detected=s.runtime.vulkan_detected=true;

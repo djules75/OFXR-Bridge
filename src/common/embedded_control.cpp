@@ -87,6 +87,8 @@ struct AfwControl {
         settings.ignore_motion_threshold = std::clamp(read_float(
             L"experimental", L"luke_afw_ignore_motion_threshold", 2.5F),
             0.0F, 64.0F);
+        settings.shading_rate = std::clamp(static_cast<int>(GetPrivateProfileIntW(
+            L"experimental", L"luke_afw_shading_rate", 0, ini().c_str())), 0, 8);
         settings.depth_dilate_mode = std::clamp(static_cast<int>(
             GetPrivateProfileIntW(L"experimental", L"luke_afw_depth_dilate_mode",
                 1, ini().c_str())), 0, 2);
@@ -145,11 +147,14 @@ bool request(Settings s) {
 AfwSnapshot afw_snapshot() {
     auto& c = afw_control();
     std::scoped_lock lock(c.mutex);
-    return c.snapshot;
+    auto result=c.snapshot;
+    result.active_shading_rate=active_afw_shading_rate.load(std::memory_order_relaxed);
+    return result;
 }
 
 bool request_afw(AfwSettings settings) {
     if (settings.mode < 0 || settings.mode > 3 ||
+        settings.shading_rate < 0 || settings.shading_rate > 8 ||
         settings.depth_dilate_mode < 0 || settings.depth_dilate_mode > 2 ||
         !std::isfinite(settings.ignore_motion_threshold) ||
         settings.ignore_motion_threshold < 0.0F ||
@@ -177,6 +182,10 @@ bool request_afw(AfwSettings settings) {
         const wchar_t* modes[]{L"0", L"1", L"2"};
         ok &= write(L"experimental", L"luke_afw_depth_dilate_mode",
             modes[settings.depth_dilate_mode]);
+    }
+    if (old.shading_rate != settings.shading_rate) {
+        wchar_t value[16]{}; swprintf_s(value,L"%d",settings.shading_rate);
+        ok &= write(L"experimental",L"luke_afw_shading_rate",value);
     }
     if (!(old == settings)) {
         c.snapshot.desired = settings;

@@ -1,4 +1,3 @@
-#include "xrfg/d3d12_compat.hpp"
 #include "xrfg/vulkan_native_ingress.hpp"
 #include "xrfg/upscaler_observation.hpp"
 #include "xrfg/vulkan_command_stream.hpp"
@@ -458,7 +457,7 @@ HRESULT initialize_d24_decoder(Device& d,Surface& s,D3D12_RESOURCE_DESC texture)
         parameters[2].Constants.Num32BitValues=2;
         D3D12_ROOT_SIGNATURE_DESC description{};description.NumParameters=3;description.pParameters=parameters.data();
         ComPtr<ID3DBlob> blob,errors;
-        HRESULT result=xrfg::serialize_root_signature(d.owner.Get(), description,&blob,&errors);
+        HRESULT result=D3D12SerializeRootSignature(&description,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&errors);
         if(SUCCEEDED(result))result=d.owner->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&decoder->root));
         if(FAILED(result))return result;
         D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};pipeline.pRootSignature=decoder->root.Get();

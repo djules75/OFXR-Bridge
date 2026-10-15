@@ -275,14 +275,8 @@ bool propagate_d3d11_guide_receipt(ID3D11Resource* destination, ID3D11Resource* 
     return get_d3d11_guide_receipt(destination).publication!=0;
 }
 std::shared_ptr<const DlssMotionVectorSet> resolve_d3d11_dlss_guides(ID3D11Resource* resource, ID3D12CommandQueue* consumer) noexcept {
-    return resolve_d3d11_dlss_guides(resource,consumer,get_d3d11_guide_receipt(resource));
-}
-std::shared_ptr<const DlssMotionVectorSet> resolve_d3d11_dlss_guides(ID3D11Resource* resource,
-    ID3D12CommandQueue* consumer, const D3D11GuideReceipt& receipt) noexcept {
     try {
-        D3D11_TEXTURE2D_DESC description{};
-        if (!shape(resource,description) || description.Width!=receipt.width ||
-            description.Height!=receipt.height) return {};
+        const auto receipt=get_d3d11_guide_receipt(resource);
         ComPtr<ID3D11Device> source; if (!resource || !receipt.publication) return {};
         resource->GetDevice(source.GetAddressOf());
         ComPtr<ID3D12Device> device; ComPtr<ID3D12CommandQueue> queue; std::uint64_t generation{};

@@ -1,4 +1,3 @@
-#include "xrfg/d3d12_compat.hpp"
 #include "xrfg/d3d12_guide_composer.hpp"
 
 #include <algorithm>
@@ -84,7 +83,8 @@ HRESULT D3D12GuideComposer::initialize(ID3D12Device* device) noexcept {
         description.NumParameters = 3;
         description.pParameters = parameters;
         ComPtr<ID3DBlob> blob, error;
-        HRESULT result = xrfg::serialize_root_signature(device, description, &blob, &error);
+        HRESULT result = D3D12SerializeRootSignature(
+            &description, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error);
         if (FAILED(result)) return result;
         result = device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
                                              IID_PPV_ARGS(&root_));

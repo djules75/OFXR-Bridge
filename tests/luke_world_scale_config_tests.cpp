@@ -83,6 +83,10 @@ int main() {
     check(xrfg::luke_host_provider(host/L"game",host/L"bundled.dll")==host/L"bundled.dll","no game provider uses bundled ABI");
     {std::ofstream file(host/L"game"/L"PDAFWPlugin.dll");file<<"selection fixture";}
     check(xrfg::luke_host_provider(host/L"game",host/L"bundled.dll")==host/L"game"/L"PDAFWPlugin.dll","preserve game's OptiScaler provider");
+    {std::ofstream file(host/L"bundled.dll");file<<"pinned beta6 fixture";}
+    check(xrfg::luke_host_provider(host/L"game",host/L"bundled.dll")==host/L"bundled.dll",
+        "pinned beta6 wins over game-local provider");
+    std::filesystem::remove(host/L"bundled.dll");
     xrfg::DiagnosticKeyEdge key;
     check(!key.pressed(false)&&key.pressed(true)&&!key.pressed(true)&&!key.pressed(false)&&key.pressed(true),"held logging key toggles once, re-press toggles again");
     check(xrfg::kImageCaptureKey!=VK_F10 && xrfg::kLoggingKey!=VK_F10,"menu cannot trigger GPU capture or logging");

@@ -9,11 +9,14 @@ inline std::filesystem::path luke_host_game_directory() {
     return std::filesystem::path(executable).parent_path();
 }
 // In the combined host these files live beside OptiScaler, in the game.
-// Preserve that game's provider and phase calibration in standalone as well.
+// Standalone uses its pinned provider when present, so a game-local beta5
+// cannot silently bypass beta6 shading control. Phase calibration stays local.
 inline std::filesystem::path luke_host_provider(const std::filesystem::path& game,
     const std::filesystem::path& bundled) {
     const auto local = game / L"PDAFWPlugin.dll";
     std::error_code error;
+    if (std::filesystem::is_regular_file(bundled, error)) return bundled;
+    error.clear();
     return std::filesystem::is_regular_file(local, error) ? local : bundled;
 }
 inline bool luke_host_odd_serial_is_left(const std::filesystem::path& game,

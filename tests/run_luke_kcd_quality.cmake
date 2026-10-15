@@ -17,7 +17,10 @@ endif()
 file(COPY_FILE "${TEST_EXE}" "${DESTINATION}/${EXE}" ONLY_IF_DIFFERENT)
 file(COPY_FILE "${PROVIDER}" "${DESTINATION}/PDAFWPlugin.dll" ONLY_IF_DIFFERENT)
 file(WRITE "${DESTINATION}/RealVR.ini" "[${TITLE}]\nWorldScale=1.0\n")
-execute_process(COMMAND "${DESTINATION}/${EXE}" "${DESTINATION}/PDAFWPlugin.dll"
+if(NOT DEFINED SHADING_RATE)
+    set(SHADING_RATE 0)
+endif()
+execute_process(COMMAND "${DESTINATION}/${EXE}" "${DESTINATION}/PDAFWPlugin.dll" "${SHADING_RATE}"
     WORKING_DIRECTORY "${DESTINATION}" RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 80)
 message("${output}${error}")
 if(NOT result EQUAL 0)

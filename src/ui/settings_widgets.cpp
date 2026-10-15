@@ -156,7 +156,8 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
         }
         changed |= ImGui::Combo("Motion source", &draft.motion_vectors,
             "Optical flow\0Game motion vectors\0");
-        if (draft.backend != 0 && draft.motion_vectors == 0) {
+        if (draft.backend != 0 && (draft.motion_vectors == 0 ||
+                (state.runtime.luke_detected && draft.afw_mode != 0))) {
             changed |= ImGui::Combo("Flow quality", &draft.preset, "Slow\0Medium\0Fast\0");
             changed |= ImGui::Combo("Flow resolution", &draft.scale, "100%\0" "75%\0" "50%\0");
             changed |= ImGui::Checkbox("Bidirectional flow", &draft.backward);
@@ -166,6 +167,9 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     } else {
         ImGui::TextDisabled("Uses game motion vectors and depth");
     }
+    if (state.runtime.luke_detected && draft.afw_mode != 0 &&
+        (draft.motion_vectors != 0 || draft.frame_generation != 0))
+        ImGui::TextWrapped("AFW reconstructs one eye without native guides for that eye. Post-AFW OFXR/Hybrid uses optical flow; FSR/DLSS-G requires a complete stereo guide pair.");
     const bool djules = draft.frame_generation == 0 && draft.backend == 3;
     const bool dlssg = draft.frame_generation == 2;
     if (djules || dlssg) {
@@ -242,6 +246,18 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
 bool framewarp(Settings& draft, const Snapshot& state) {
     bool changed = ImGui::Combo("Framewarp mode", &draft.afw_mode,
         "Off\0Alternate eye (for debug)\0Previous frame (for debug)\0Combined\0");
+    if (draft.afw_mode == 3) {
+        constexpr int rates[]{0,4,8};
+        int selected=draft.afw_shading_rate==8 ? 2 : draft.afw_shading_rate==4 ? 1 : 0;
+        if(ImGui::Combo("AFW shading rate (next launch)",&selected,
+            "1x1 (full quality)\0" "2x2 (half per axis)\0" "4x4 (quarter per axis)\0")) {
+            draft.afw_shading_rate=rates[selected];changed=true;
+        }
+        ImGui::TextWrapped("Beta6: reduces Combined warping work; output resolution stays unchanged. Restart the game after changing this setting.");
+        if(state.connected && state.runtime.afw_shading_rate>=0 &&
+            state.runtime.afw_shading_rate!=draft.afw_shading_rate)
+            ImGui::TextWrapped("Shading change saved for next launch. Current index: %d",state.runtime.afw_shading_rate);
+    }
     changed |= ImGui::Checkbox("Debug framewarp", &draft.afw_debug);
     ImGui::TextWrapped("Requires Luke Ross and RealVR.ini. Camera and stereo motion correction is always applied; same-eye history reconstructs the missing camera interval.");
     changed |= ImGui::Checkbox("Clear before framewarp", &draft.afw_clear_before_warping);

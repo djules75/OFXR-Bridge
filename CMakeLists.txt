@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.532.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.536.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -29,7 +29,7 @@ option(XRFG_BUILD_STANDALONE "Build the Windows standalone tray launcher" ON)
 set(XRFG_DEPENDENCY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.local/ofxr-autonomous-deps" CACHE PATH "Standalone vendor SDK and runtime store")
 set(XRFG_DLSS_SDK_ROOT "${XRFG_DEPENDENCY_ROOT}/DLSS" CACHE PATH "NVIDIA DLSS SDK")
 set(XRFG_FSR_RUNTIME "${XRFG_DEPENDENCY_ROOT}/runtime/fsr-optiscaler/ofxr_amd_fidelityfx_framegeneration_dx12.dll" CACHE FILEPATH "Private FSR FG provider")
-set(XRFG_AFW_RUNTIME "${XRFG_DEPENDENCY_ROOT}/runtime/PDAFWPlugin.dll" CACHE FILEPATH "Official AFW beta5 provider")
+set(XRFG_AFW_RUNTIME "${XRFG_DEPENDENCY_ROOT}/runtime/afw-beta6/PDAFWPlugin.dll" CACHE FILEPATH "Official AFW beta6 provider")
 set(XRFG_OPENVR_INCLUDE_DIR "${XRFG_DEPENDENCY_ROOT}/OpenVR/include" CACHE PATH "OpenVR headers")
 set(XRFG_VULKAN_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/Vulkan-Headers/include" CACHE PATH "Vulkan headers")
 
@@ -739,18 +739,6 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_executable(xrfg_three_slot_director_tests
             tests/three_slot_director_tests.cpp
             src/common/embedded_control.cpp)
-        foreach(kind invalid_redist healthy_redist)
-            add_executable(xrfg_d3d12_${kind}_tests tests/d3d12_invalid_redist_tests.cpp)
-            target_link_libraries(xrfg_d3d12_${kind}_tests PRIVATE xrfg_d3d12_history)
-            target_compile_definitions(xrfg_d3d12_${kind}_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-            add_test(NAME xrfg_d3d12_${kind}_tests COMMAND xrfg_d3d12_${kind}_tests)
-            set_tests_properties(xrfg_d3d12_${kind}_tests PROPERTIES TIMEOUT 30)
-        endforeach()
-        target_compile_definitions(xrfg_d3d12_invalid_redist_tests PRIVATE XRFG_BROKEN_AGILITY)
-        add_test(NAME xrfg_elliott_r26_release COMMAND xrfg_three_slot_director_tests elliott-r26)
-        set_tests_properties(xrfg_elliott_r26_release PROPERTIES TIMEOUT 30)
-        add_test(NAME xrfg_elliott_array_guides COMMAND xrfg_d3d12_history_tests stellar-guides)
-        set_tests_properties(xrfg_elliott_array_guides PROPERTIES TIMEOUT 30)
         add_executable(xrfg_d3d11_bridge_tests tests/d3d11_bridge_tests.cpp)
         target_link_libraries(xrfg_d3d11_bridge_tests PRIVATE xrfg_d3d12_history)
         target_compile_definitions(xrfg_d3d11_bridge_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -899,6 +887,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_luke_inline_diagnostic COMMAND xrfg_three_slot_director_tests luke-inline-diagnostic)
         add_test(NAME xrfg_luke_afw_output_slot COMMAND xrfg_three_slot_director_tests luke-afw-slot)
         add_test(NAME xrfg_luke_post_afw_director_packet COMMAND xrfg_three_slot_director_tests post-afw-packet)
+        add_test(NAME xrfg_luke_steamvr_aux_budget COMMAND xrfg_three_slot_director_tests luke-aux-budget)
+        add_test(NAME xrfg_luke_steamvr_aux_budget_handoff COMMAND xrfg_three_slot_director_tests luke-aux-budget-handoff)
+        add_test(NAME xrfg_luke_ngx_startup_order COMMAND xrfg_three_slot_director_tests luke-ngx-startup)
         set_tests_properties(xrfg_luke_post_afw_director_packet PROPERTIES TIMEOUT 30)
         set_tests_properties(xrfg_luke_afw_output_slot PROPERTIES TIMEOUT 30)
         add_test(NAME xrfg_luke_cycle_clock COMMAND xrfg_three_slot_director_tests luke-clock)
@@ -935,6 +926,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 "$<TARGET_FILE_DIR:xrfg_three_slot_d3d12_tests>/provider-missing/$<TARGET_FILE_NAME:xrfg_three_slot_d3d12_tests>")
         add_test(NAME xrfg_three_slot_d3d12_split COMMAND xrfg_three_slot_d3d12_tests)
         add_test(NAME xrfg_three_slot_d3d12_capture_busy COMMAND xrfg_three_slot_d3d12_tests capture-busy)
+        add_test(NAME xrfg_composition_failure_diagnostics COMMAND xrfg_three_slot_d3d12_tests composition-failures)
+        add_test(NAME xrfg_djules_prefer_readiness_direct_gpu COMMAND xrfg_three_slot_d3d12_tests deep-readiness-direct-output)
+        add_test(NAME xrfg_djules_prefer_switch_direct_gpu COMMAND xrfg_three_slot_d3d12_tests deep-switch-direct-output)
+        set_tests_properties(xrfg_djules_prefer_readiness_direct_gpu xrfg_djules_prefer_switch_direct_gpu PROPERTIES TIMEOUT 60)
         add_test(NAME xrfg_ram_timing_d3d12 COMMAND xrfg_three_slot_d3d12_tests ram)
         add_test(NAME xrfg_three_slot_d3d12_array COMMAND xrfg_three_slot_d3d12_tests array)
         add_test(NAME xrfg_legacy_nvidia_queue_gpu COMMAND xrfg_three_slot_d3d12_tests legacy-queue)
@@ -1378,6 +1373,14 @@ if(WIN32 AND XRFG_BUILD_TESTS)
       "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
       "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/kcd-quality-bundled"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  foreach(shading_index 4 8 9) # 9 tests that later shading edits remain pending
+    add_test(NAME xrfg_luke_beta6_shading_${shading_index} COMMAND "${CMAKE_COMMAND}"
+        "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+        "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/luke-beta6-shading-${shading_index}"
+        "-DSHADING_RATE=${shading_index}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+    set_tests_properties(xrfg_luke_beta6_shading_${shading_index} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+  endforeach()
   set_tests_properties(xrfg_luke_kcd_quality_bundled PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
       PASS_REGULAR_EXPRESSION "KCD full quality:")
   add_test(NAME xrfg_luke_indiana_quality_bundled COMMAND "${CMAKE_COMMAND}"

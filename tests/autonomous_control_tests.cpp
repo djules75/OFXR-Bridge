@@ -2,6 +2,7 @@
 #include "xrfg/upscaler_observation.hpp"
 #include <windows.h>
 #include <cmath>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -18,6 +19,8 @@ void require(bool value, const char* detail) {
 void codec() {
     using xrfg::autonomous::GenerationState;
     using xrfg::autonomous::generation_status_text;
+    require(generation_status_text(3,0,GenerationState::ready).starts_with("Hybrid fallback:"),
+        "post-AFW Hybrid must identify optical-flow fallback");
     require(generation_status_text(0,1,GenerationState::missing_motion).starts_with("Fallback to optical flow:"),
         "OFXR missing vectors explicitly reports optical-flow fallback");
     require(generation_status_text(1,1,GenerationState::missing_motion).starts_with("Bypass:"),
@@ -58,9 +61,14 @@ void codec() {
     require(migrated_profiles.generation_profiles[1].separate_synthesis == 1 &&
         migrated_profiles.generation_profiles[2].separate_synthesis == 0,
         "old inactive profiles migrate without replacing explicit separation off");
+    for (int rate : {0,4,8,99,-1}) {
+        auto settings = desired; settings.afw_shading_rate = rate;
+        const auto restored=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(settings));
+        require(restored.afw_shading_rate == std::clamp(rate,0,8), "AFW shading rate persistence and bounds");
+    }
     desired.backend = 3;
     desired.triple_frame_gen = true;
-    desired.afw_mode = 2;
+    desired.afw_mode = 2; desired.afw_shading_rate = 8;
     desired.nr_enabled = true;
     desired.nr_working_scale = .731F;
     desired.nr_compare = 2;
@@ -195,7 +203,12 @@ int wmain(int count, wchar_t** arguments) {
         require(xrfg::autonomous::configuration_path().parent_path() == fixture, "fixture profile isolation");
         const auto original = xrfg::autonomous::snapshot();
         auto desired = original.desired;
-        desired.backend = 3;
+        for (int rate : {0,4,8,99,-1}) {
+        auto settings = desired; settings.afw_shading_rate = rate;
+        const auto restored=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(settings));
+        require(restored.afw_shading_rate == std::clamp(rate,0,8), "AFW shading rate persistence and bounds");
+    }
+    desired.backend = 3;
         desired.nr_enabled = true;
         desired.nr_compare = 2;
         xrfg::autonomous::select_generation(desired, 0, 3);

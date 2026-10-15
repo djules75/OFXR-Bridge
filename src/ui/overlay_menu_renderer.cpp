@@ -1,4 +1,3 @@
-#include "xrfg/d3d12_compat.hpp"
 // Immutable D3D12 draw extraction from accepted OptiScaler V33034
 // 6c36e598b9027a852ce2b759a1851378468a0938, InUpscalerDx12Renderer.h.
 // Original licence: src/neural/licenses/OptiScaler-LICENSE. Dear ImGui sources
@@ -125,7 +124,7 @@ float4 PS(P p):SV_Target { return p.color*atlas.Sample(sampleAtlas,p.uv); }
             sampler.ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
             D3D12_ROOT_SIGNATURE_DESC desc{2,p,1,&sampler,D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT};
             ComPtr<ID3DBlob> blob;
-            if (FAILED(xrfg::serialize_root_signature(device_.Get(), desc,&blob,nullptr)) ||
+            if (FAILED(D3D12SerializeRootSignature(&desc,D3D_ROOT_SIGNATURE_VERSION_1,&blob,nullptr)) ||
                 FAILED(device_->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),
                     IID_PPV_ARGS(&root_)))) return false;
         }

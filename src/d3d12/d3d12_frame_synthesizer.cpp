@@ -1,4 +1,3 @@
-#include "xrfg/d3d12_compat.hpp"
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/d3d12_guide_composer.hpp"
@@ -1238,7 +1237,9 @@ struct D3D12FrameSynthesizer::Impl {
 
         ComPtr<ID3DBlob> serialized;
         ComPtr<ID3DBlob> error;
-        HRESULT result = xrfg::serialize_root_signature(device.Get(), root_description,
+        HRESULT result = D3D12SerializeRootSignature(
+            &root_description,
+            D3D_ROOT_SIGNATURE_VERSION_1,
             serialized.GetAddressOf(),
             error.GetAddressOf());
         if (FAILED(result)) {
@@ -1291,7 +1292,9 @@ struct D3D12FrameSynthesizer::Impl {
             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
         serialized.Reset();
         error.Reset();
-        result = xrfg::serialize_root_signature(device.Get(), cinema_root_description,
+        result = D3D12SerializeRootSignature(
+            &cinema_root_description,
+            D3D_ROOT_SIGNATURE_VERSION_1,
             serialized.GetAddressOf(),
             error.GetAddressOf());
         if (FAILED(result)) return result;
@@ -1536,10 +1539,6 @@ struct D3D12FrameSynthesizer::Impl {
             return result;
         }
 
-        // The prebuilt Optical Flow backend uses the global serializer. A
-        // private device factory cannot repair it; refuse only this failing
-        // backend, rather than dispatching an incomplete context.
-        if (!xrfg::global_d3d12_functions_usable()) return xrfg::kD3D12InvalidRedist;
         const size_t scratch_size =
             ffxGetScratchMemorySizeDX12(FFX_OPTICALFLOW_CONTEXT_COUNT);
         if (scratch_size == 0) {

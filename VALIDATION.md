@@ -1,3 +1,14 @@
+## V536 targeted release validation
+
+49/49 CTest in43.89seconds plus Python benchmark exporter pass, zero skips.
+Real beta6 provider pixels/camera/motion, full/2x2/4x4 shading and deferred
+changes, paired marker GPU/CRC/timeouts, KCD/Indiana quality, both Vulkan
+bootstraps, NGX startup, Outlaws bootstrap, post-AFW stereo/quad, native D11,
+SteamVR auxiliary recovery, meter/UI/IPC,24 native transport A/B/runtime cases.
+Headset behavior and performance gains remain pending. V536_VALIDATION.json
+records the exact scope and checks. The hot shading-switch experiment failed
+GPU state checks and is excluded; next-launch selection is tested instead.
+
 ## V532 benchmark-label diagnostic follow-up
 
 Owner requests fixing lost labels before repeating AC Valhalla. The logger

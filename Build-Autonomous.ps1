@@ -12,7 +12,7 @@ if (-not $DependencyRoot) { $DependencyRoot = [IO.Path]::GetFullPath((Join-Path 
 if (-not $BuildRoot) { $BuildRoot = [IO.Path]::GetFullPath((Join-Path $sourceRoot "../builds/ofxr-autonomous-$TestRoute")) }
 $cmake = 'C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe'
 $ctest = Join-Path (Split-Path $cmake) 'ctest.exe'
-& $cmake -S $sourceRoot -B $BuildRoot -G 'Visual Studio 17 2022' -A x64 "-DXRFG_DEPENDENCY_ROOT=$DependencyRoot" "-DXRFG_TEST_NVIDIA_ROUTE=$TestRoute" -DXRFG_BUILD_TESTS=ON
+& $cmake -S $sourceRoot -B $BuildRoot -G 'Visual Studio 17 2022' -A x64 "-DXRFG_DEPENDENCY_ROOT=$DependencyRoot" "-DXRFG_TEST_NVIDIA_ROUTE=$TestRoute" "-DXRFG_AFW_RUNTIME=$DependencyRoot/runtime/afw-beta6/PDAFWPlugin.dll" -DXRFG_BUILD_TESTS=ON
 if ($LASTEXITCODE) { throw "CMake configure failed: $LASTEXITCODE" }
 & $cmake --build $BuildRoot --config Release --parallel
 if ($LASTEXITCODE) { throw "Release build failed: $LASTEXITCODE" }

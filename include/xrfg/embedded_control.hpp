@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <atomic>
 
 namespace xrfg::embedded {
 // Set by successful OpenXR negotiation; shared by layer and host publication.
@@ -35,12 +36,20 @@ struct AfwSettings {
     bool debug{};
     bool clear_before_warping{};
     float ignore_motion_threshold{2.5F};
+    int shading_rate{}; // beta6 Combined: 0=1x1, 1=1x2, ... 8=4x4
     int depth_dilate_mode{1}; // 0 off, 1 horizontal 1x3, 2 square 3x3
     bool operator==(const AfwSettings&) const = default;
 };
 
+// PureDark encodes axis factors (1,2,4), not D3D12_SHADING_RATE.
+constexpr std::uint32_t afw_shading_rate(int index) noexcept {
+    constexpr std::uint32_t rates[]{9,10,12,17,18,20,33,34,36};
+    return rates[index >= 0 && index < 9 ? index : 0];
+}
+
 struct AfwSnapshot {
     AfwSettings desired{};
+    int active_shading_rate{-1};
     std::uint64_t revision{1};
     std::uint64_t projection_frames{};
     std::uint64_t ready_frames{};
@@ -70,6 +79,10 @@ Snapshot snapshot();
 bool request(Settings settings); // persists only owned keys; false means INI write failed
 AfwSnapshot afw_snapshot();
 bool request_afw(AfwSettings settings);
+inline std::atomic_int active_afw_shading_rate{-1};
+inline void report_afw_shading_rate(int index) noexcept {
+    active_afw_shading_rate.store(index,std::memory_order_relaxed);
+}
 bool toggle_afw_debug();
 void report_afw_prepare(std::int64_t reason);
 void report_afw_ingress(bool published, bool camera);

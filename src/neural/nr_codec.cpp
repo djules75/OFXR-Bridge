@@ -1,4 +1,3 @@
-#include "xrfg/d3d12_compat.hpp"
 // Extracted NR composition from accepted OptiScaler V33034 (6c36e598).
 // RenoDX/clshortfuse composition attribution and licence are in licenses/.
 #include "nr_codec.hpp"
@@ -59,7 +58,7 @@ DlssNr_Dx12::DlssNr_Dx12(std::string,ID3D12Device* device):_device(device) {
     sampler.MaxLOD=D3D12_FLOAT32_MAX;sampler.ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
     D3D12_ROOT_SIGNATURE_DESC root{1,&parameter,1,&sampler,D3D12_ROOT_SIGNATURE_FLAG_NONE};
     ComPtr<ID3DBlob> blob,errors;
-    if(FAILED(xrfg::serialize_root_signature(device, root,&blob,&errors))||
+    if(FAILED(D3D12SerializeRootSignature(&root,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&errors))||
         FAILED(device->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),
             IID_PPV_ARGS(&_rootSignature))))return;
     D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};pipeline.pRootSignature=_rootSignature.Get();

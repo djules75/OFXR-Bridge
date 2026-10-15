@@ -136,7 +136,10 @@ unsigned pixel(ID3D12Resource* r, unsigned slice,
         D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource=readback.Get(); dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint=layout;
         list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
         barrier(list,r,D3D12_RESOURCE_STATE_COPY_SOURCE,submitted_state);
-    },(deep_readiness||triple_core)?runtime_queue(*session_state):nullptr);
+    // Read as the downstream runtime would: Reference overlap also uses a
+    // distinct binding queue. Reading its output on the application queue
+    // ignores that queue's readiness dependency and can observe the initial0.
+    },(deep_readiness||triple_core||reference_capture_overlap_test)?runtime_queue(*session_state):nullptr);
     void* mapped=nullptr; hr(readback->Map(0,nullptr,&mapped),"readback");
     const unsigned value=*reinterpret_cast<unsigned*>(static_cast<unsigned char*>(mapped)+layout.Offset+64*layout.Footprint.RowPitch+sample_x*4);
     readback->Unmap(0,nullptr); return value;
@@ -585,6 +588,44 @@ int main(int argc,char** argv) {
         auto right=array?left:source(0x202,1,true);if(!array)chains.push_back(right);
         auto dynamic=source(0x203,2,false);auto fixed=source(0x204,2,false,true);
         chains.push_back(dynamic);chains.push_back(fixed);
+        if(mode=="composition-failures") {
+            const auto directory=xrfg::autonomous::configuration_path().parent_path();
+            {std::ofstream ini(directory/L"ofxr_bridge.ini");ini<<"[diagnostics]\nlogging_enabled=1\n";}
+            auto& logger=xrfg::bridge_flight_logger();logger.initialize(directory);
+            fill(dynamic->enumerated_d3d12_images[0].Get(),1,60);release(dynamic,false);
+            const auto packet=[&] {
+                GeneratedFrameEndInfo info;
+                XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+                quad.subImage.swapchain=dynamic->handle;quad.subImage.imageRect.extent={256,128};
+                info.composition_layers.emplace_back(quad);
+                return info;
+            };
+            // A runtime allocation refusal and retained color exhaustion must
+            // yield distinguishable production-flight records, not just -2.
+            private_budget_limit=static_cast<unsigned>(images.size());
+            auto refused=packet();
+            require(own_composition_images(s,refused)==XR_ERROR_RUNTIME_FAILURE,"auxiliary allocation refusal");
+            private_budget_limit=0;
+            std::array<GeneratedFrameEndInfo,3> held;
+            for(auto& owned:held) { owned=packet();require(XR_SUCCEEDED(own_composition_images(s,owned)),"own retained auxiliary color"); }
+            auto exhausted=packet();
+            require(own_composition_images(s,exhausted)==XR_ERROR_RUNTIME_FAILURE,"auxiliary retained-slot refusal");
+            logger.flush();
+            std::ifstream stream(logger.log_path());const std::string contents{std::istreambuf_iterator<char>(stream),{}};
+            const auto prefix="op=composition_publish result=-2 dur_us=0 a="+std::to_string(handle_value(dynamic->handle));
+            require(contents.find(prefix+" b=1 c="+std::to_string(static_cast<std::uint64_t>(static_cast<std::int64_t>(XR_ERROR_LIMIT_REACHED))))!=std::string::npos,
+                "runtime auxiliary refusal code missing from flight record");
+            require(contents.find(prefix+" b=2 c=0")!=std::string::npos,"retained auxiliary exhaustion mislabeled");
+            held={};
+            auto recovered=packet();require(XR_SUCCEEDED(own_composition_images(s,recovered)),"released auxiliary slot failed recovery");
+            recovered={};
+            for(auto& c:chains){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
+            require(created==destroyed,"auxiliary diagnostic leaked runtime handles");
+            {std::scoped_lock lock(g_state_mutex);g_swapchains.clear();g_sessions.clear();}
+            chains.clear();left.reset();right.reset();dynamic.reset();fixed.reset();session_state.reset();
+            std::cout<<"Actual auxiliary allocation refusal, retained-slot refusal and recovery diagnostics PASS\n";
+            return 0;
+        }
         if(transport_test) {
             const unsigned current=s->lower_vram?1:2;
             const unsigned synthetic=s->lower_vram?1:2;

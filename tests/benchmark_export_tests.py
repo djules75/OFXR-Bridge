@@ -66,3 +66,20 @@ with tempfile.TemporaryDirectory() as directory:
     attempted=m.export([single],'meganex','estimated')[0]
     assert attempted['tsv'].split('\t')[5]=='n.d.' and 'Reference:00' not in attempted['untried']
     print('38 exact spreadsheet measurements/40 cells, Djules3X B-only, A/C process profiles, Pimax rows, cycle selection, missing/short guards PASS')
+
+with tempfile.TemporaryDirectory() as directory:
+    path=Path(directory)/'shading.benchmark.log'
+    events=[event('logger',0,0,0,0,536)]
+    for revision,rate in enumerate((0,4,8),1):
+        start=revision*25000
+        bits=1|(1<<16)|(3<<12)|(rate<<20)
+        events.append(event('benchmark_configuration',start,revision,bits,100<<16))
+        for point in range(81):
+            ms=start+point*250
+            events.append(event('benchmark_rates',ms,(80000<<32)|40000,(40000<<32)|90000,revision,2049))
+            events.append(event('benchmark_cycles',ms,(7000<<32)|55000,44000,revision,7))
+    path.write_text(''.join(events))
+    rows=m.export([path],'meganex','estimated')
+    assert [r['afw_shading_rate'] for r in rows]==[0,4,8]
+    assert all(r['cells']['Fidelity:00']['config']['afw_shading_rate']==r['afw_shading_rate'] for r in rows)
+    print('Active AFW shading rates remain separate portable benchmark rows PASS')

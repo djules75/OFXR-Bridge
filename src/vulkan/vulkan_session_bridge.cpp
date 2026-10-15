@@ -1,4 +1,3 @@
-#include "xrfg/d3d12_compat.hpp"
 #include "xrfg/vulkan_session_bridge.hpp"
 
 #include "xrfg/bridge_flight_logger.hpp"
@@ -383,7 +382,10 @@ HRESULT create_d3d12_device_for_vulkan(
             return result;
         }
         ComPtr<ID3D12Device> device;
-        result = xrfg::create_d3d12_device_on_adapter(adapter.Get(), device.GetAddressOf());
+        result = D3D12CreateDevice(
+            adapter.Get(),
+            D3D_FEATURE_LEVEL_11_0,
+            IID_PPV_ARGS(device.GetAddressOf()));
         if (FAILED(result)) {
             return result;
         }

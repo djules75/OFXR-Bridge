@@ -1,4 +1,3 @@
-#include "xrfg/d3d12_compat.hpp"
 #include "xrfg/luke_afw.hpp"
 #include "xrfg/luke_depth_format.hpp"
 #include "xrfg/luke_motion_format.hpp"
@@ -106,6 +105,7 @@ struct FrameWarpEvaluateParams {
     RECT foveated_area{};
     TextureDesc* ue_velocity_buffer{};
     bool use_uint64{};
+    std::uint32_t shading_rate{9}; // beta6 ShadingRate_1X1
     float reserved[12]{};
 };
 
@@ -114,7 +114,8 @@ static_assert(sizeof(FrameBufferDesc) == 168);
 static_assert(sizeof(EyeFrameBuffers) == 336);
 static_assert(sizeof(CameraData) == 768);
 static_assert(sizeof(FrameWarpEvaluateParams) == 184);
-static_assert(offsetof(FrameWarpEvaluateParams, reserved) == 132);
+static_assert(offsetof(FrameWarpEvaluateParams, shading_rate) == 132);
+static_assert(offsetof(FrameWarpEvaluateParams, reserved) == 136);
 
 struct RendererApi;
 using InitDeviceFn = RendererApi* (__stdcall*)(DeviceParams);
@@ -129,6 +130,73 @@ using CopyTextureFn = void (__fastcall*)(RendererApi*, ID3D12GraphicsCommandList
 constexpr std::size_t kSetupTextureDescSlot = 14;
 constexpr std::size_t kCreateTextureSlot = 16;
 constexpr std::size_t kCopyTextureSlot = 20;
+
+// The beta6 renderer allocates its full-rate color history at (W+1,H+1),
+// then asks its Copy method for an unboxed CopyResource against (W,H).
+// D3D12 rejects that operation. Adapt only this documented one-pixel color
+// padding inside our synchronous provider call; never patch code or a shared
+// command-list vtable. Every other provider method/copy is forwarded unchanged.
+class AfwProviderCopyScope {
+    static inline std::mutex provider_mutex_;
+    static inline thread_local CopyTextureFn original_copy_{};
+    static inline thread_local unsigned repaired_{};
+    std::unique_lock<std::mutex> lock_{provider_mutex_};
+    void*** instance_{};
+    void** original_table_{};
+    std::array<void*,32> table_{}; // pinned beta6 D3D12RendererAPI
+    CopyTextureFn previous_copy_{};
+    unsigned previous_repaired_{};
+    static void __fastcall copy(RendererApi* renderer,ID3D12GraphicsCommandList* list,
+        TextureDesc& destination,TextureDesc& source,D3D12_BOX box,UINT x,UINT y) {
+        if(destination.texture && source.texture && !box.right && !box.bottom && !x && !y) {
+            const auto a=destination.texture->GetDesc(),b=source.texture->GetDesc();
+            const auto width=std::min(a.Width,b.Width);
+            const auto height=std::min(a.Height,b.Height);
+            const bool padding=a.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+                b.Dimension==a.Dimension && a.Format==b.Format &&
+                a.DepthOrArraySize==1 && b.DepthOrArraySize==1 && a.MipLevels==1 && b.MipLevels==1 &&
+                a.SampleDesc.Count==1 && b.SampleDesc.Count==1 && width && height &&
+                std::max(a.Width,b.Width)-width<=1 && std::max(a.Height,b.Height)-height<=1 &&
+                (a.Width!=b.Width || a.Height!=b.Height);
+            if(padding) {
+                ++repaired_;
+                box={0,0,0,static_cast<UINT>(width),height,1};
+                original_copy_(renderer,list,destination,source,box,0,0);
+                // Clamp the optional history border; do not leave undefined texels.
+                if(a.Width>width) {
+                    box={static_cast<UINT>(width-1),0,0,static_cast<UINT>(width),height,1};
+                    original_copy_(renderer,list,destination,source,box,static_cast<UINT>(width),0);
+                }
+                if(a.Height>height) {
+                    box={0,height-1,0,static_cast<UINT>(width),height,1};
+                    original_copy_(renderer,list,destination,source,box,0,height);
+                    if(a.Width>width) {
+                        box={static_cast<UINT>(width-1),height-1,0,static_cast<UINT>(width),height,1};
+                        original_copy_(renderer,list,destination,source,box,static_cast<UINT>(width),height);
+                    }
+                }
+                return;
+            }
+        }
+        original_copy_(renderer,list,destination,source,box,x,y);
+    }
+public:
+    explicit AfwProviderCopyScope(RendererApi* renderer) :
+        instance_(reinterpret_cast<void***>(renderer)),original_table_(*instance_),
+        previous_copy_(original_copy_),previous_repaired_(repaired_) {
+        std::copy_n(original_table_,table_.size(),table_.begin());
+        original_copy_=reinterpret_cast<CopyTextureFn>(table_[kCopyTextureSlot]);
+        repaired_=0;
+        table_[kCopyTextureSlot]=reinterpret_cast<void*>(&copy);
+        *instance_=table_.data();
+    }
+    unsigned repaired() const noexcept {return repaired_;}
+    ~AfwProviderCopyScope() {
+        *instance_=original_table_;
+        original_copy_=previous_copy_;repaired_=previous_repaired_;
+    }
+};
+
 
 enum class AfwStage : std::uint64_t {
     enter = 1,
@@ -374,6 +442,7 @@ struct LukeAfwSynthesizer::Impl {
     std::uint64_t last_submission_fence{};
     std::uint64_t next_submission_fence{1};
     EyeFrameBuffers eye_buffers{};
+    int active_shading_rate{-1}; // beta6 resource-state changes are session-bound
     std::array<CameraData, 2> previous_source_camera{};
     std::uint64_t last_evaluated_publication{};
     unsigned last_evaluated_eye{2};
@@ -536,7 +605,8 @@ struct LukeAfwSynthesizer::Impl {
         root_description.pParameters = parameters.data();
         Microsoft::WRL::ComPtr<ID3DBlob> serialized;
         Microsoft::WRL::ComPtr<ID3DBlob> errors;
-        result = xrfg::serialize_root_signature(device.Get(), root_description, serialized.GetAddressOf(),
+        result = D3D12SerializeRootSignature(&root_description,
+            D3D_ROOT_SIGNATURE_VERSION_1, serialized.GetAddressOf(),
             errors.GetAddressOf());
         if (FAILED(result)) return result;
         Microsoft::WRL::ComPtr<ID3D12RootSignature> root_signature;
@@ -938,7 +1008,8 @@ struct LukeAfwSynthesizer::Impl {
         root_description.pParameters = parameters.data();
         Microsoft::WRL::ComPtr<ID3DBlob> serialized;
         Microsoft::WRL::ComPtr<ID3DBlob> errors;
-        result = xrfg::serialize_root_signature(device.Get(), root_description, serialized.GetAddressOf(),
+        result = D3D12SerializeRootSignature(&root_description,
+            D3D_ROOT_SIGNATURE_VERSION_1, serialized.GetAddressOf(),
             errors.GetAddressOf());
         if (FAILED(result)) return result;
         Microsoft::WRL::ComPtr<ID3D12RootSignature> root;
@@ -1731,6 +1802,10 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             guide.publication, impl_->last_evaluated_publication,
             source_eye, impl_->last_evaluated_eye);
         params.mode = static_cast<FrameWarpMode>(effective_mode);
+        if(impl_->active_shading_rate<0)impl_->active_shading_rate=settings.shading_rate;
+        embedded::report_afw_shading_rate(impl_->active_shading_rate);
+        params.shading_rate = embedded::afw_shading_rate(
+            effective_mode == 3 ? impl_->active_shading_rate : 0);
         bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
             effective_mode, 952, guide.publication, impl_->last_evaluated_publication);
         const std::uint32_t interpreted_eye = source_eye;
@@ -1881,13 +1956,28 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         const std::uint64_t configuration =
             (static_cast<std::uint64_t>(settings.mode) << 0) |
             (static_cast<std::uint64_t>(settings.debug) << 12) |
-            (static_cast<std::uint64_t>(settings.clear_before_warping) << 13);
+            (static_cast<std::uint64_t>(settings.clear_before_warping) << 13) |
+            (static_cast<std::uint64_t>(params.shading_rate) << 16);
         report_stage(AfwStage::configuration,
             static_cast<std::int64_t>(configuration), interpreted_eye,
             guide.publication);
         report_stage(AfwStage::evaluate_begin, S_OK, source_eye,
             guide.publication);
+        {
+        AfwProviderCopyScope provider_copy_scope(impl_->renderer);
         impl_->evaluate(params);
+        // Beta6 returns no output on a shading-rate change, before recording
+        // warping work. Its next call rebuilds the internal shading resources.
+        // Complete that bounded configuration handshake in this same list.
+        if (!params.output_eye_frame_buffer) {
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                S_FALSE, 1004, params.shading_rate, guide.publication);
+            impl_->evaluate(params);
+        }
+        if(provider_copy_scope.repaired())
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                S_OK,1005,provider_copy_scope.repaired(),guide.publication);
+        }
         report_stage(AfwStage::evaluate_end, S_OK, source_eye,
             guide.publication);
         result = S_OK;

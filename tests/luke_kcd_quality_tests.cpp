@@ -31,7 +31,7 @@ constexpr Scene scenes[]{
     {"odd_raster_jitter",411,422,256,256,-256,256,.125F,-.25F,411./512.,422./512.}};
 struct ProviderReceipt {
     xrfg::EvaluateFrameWarpFn original{};
-    unsigned calls{},expected_width{},expected_height{};
+    unsigned calls{},expected_width{},expected_height{},expected_shading_rate{9};
     float expected_gain_x{},expected_gain_y{},gain_x{},gain_y{};
     bool valid{true};
 } provider;
@@ -42,16 +42,18 @@ void __stdcall observe_evaluate(xrfg::FrameWarpEvaluateParams& params) {
             std::bit_cast<std::uint32_t>(provider.expected_gain_x)&&
         std::bit_cast<std::uint32_t>(params.motion_scale[1])==
             std::bit_cast<std::uint32_t>(provider.expected_gain_y)&&
+        params.shading_rate==(params.mode==xrfg::CombinedWarping ? provider.expected_shading_rate : 9u)&&
         params.motion_vectors_type==xrfg::Normal&&params.input_eye_frame_buffer&&
         params.input_eye_frame_buffer->motion_vectors.texture;
     if(params.input_eye_frame_buffer&&params.input_eye_frame_buffer->motion_vectors.texture) {
         const auto motion=params.input_eye_frame_buffer->motion_vectors.texture->GetDesc();
         provider.valid&=motion.Width==provider.expected_width&&motion.Height==provider.expected_height;
     }
+    if(!provider.valid)std::cerr<<"Provider mismatch mode="<<params.mode<<" shading="<<params.shading_rate<<" expected="<<provider.expected_shading_rate<<" gain="<<params.motion_scale[0]<<','<<params.motion_scale[1]<<" expected_gain="<<provider.expected_gain_x<<','<<provider.expected_gain_y<<" mvtype="<<params.motion_vectors_type<<" crop="<<provider.expected_width<<'x'<<provider.expected_height<<'\n';
     provider.original(params);
 }
 void require(bool value,const char* message) {if(!value)throw std::runtime_error(message);}
-void check(HRESULT value,const char* message) {require(SUCCEEDED(value),message);}
+void check(HRESULT value,const char* message) {if(FAILED(value))std::cerr<<"HRESULT="<<std::hex<<unsigned(value)<<std::dec<<'\n';require(SUCCEEDED(value),message);}
 D3D12_RESOURCE_BARRIER transition(ID3D12Resource* resource,D3D12_RESOURCE_STATES from,D3D12_RESOURCE_STATES to) {
     D3D12_RESOURCE_BARRIER result{};result.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     result.Transition={resource,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,from,to};return result;
@@ -129,7 +131,11 @@ FARPROC WINAPI quality_get_proc_address(HMODULE module,LPCSTR name) {
 
 int main(int argc,char** argv) {try {
     using namespace quality;
-    require(argc==2,"provider path argument missing");
+    require(argc==2 || argc==3,"provider path argument missing");
+    const int shading=argc==3 ? std::stoi(argv[2]) : 0;
+    constexpr unsigned upstream_rates[]{9,10,12,17,18,20,33,34,36};
+    for(int i=0;i<9;++i)require(xrfg::embedded::afw_shading_rate(i)==upstream_rates[i],"beta6 non-D3D12 shading encoding");
+    require(shading>=0&&shading<=9,"shading index outside ABI contract");
     const auto config=xrfg::luke_game_camera_config_from_ini(xrfg::luke_host_game_directory()/L"RealVR.ini");
     const bool indiana=config.axes==xrfg::LukeProducerCameraAxes::native_view_rows;
     require(config.world_scale==1,"isolated KCD WorldScale fixture missing");
@@ -240,7 +246,8 @@ int main(int argc,char** argv) {try {
                 1,float(baseline),1,origin,config.axes,sdk_camera),"actual shipping camera builder");
             for(unsigned i=0;i<16;++i)basis_error=std::max(basis_error,double(std::abs(sdk_camera.source_view_to_world.values[i]-current.inverse_view[i])));
             basis_bits_match&=!std::memcmp(sdk_camera.source_view_to_world.values,current.inverse_view.data(),sizeof(current.inverse_view));
-            xrfg::embedded::AfwSettings settings{};settings.mode=mode;settings.depth_dilate_mode=0;
+            xrfg::embedded::AfwSettings settings{};settings.mode=mode;settings.depth_dilate_mode=0;settings.shading_rate=shading==9 ? std::array{0,4,8}[((n-3)/4)%3] : shading;
+            provider.expected_shading_rate=upstream_rates[mode==3 && shading!=9 ? settings.shading_rate : 0];
             provider.calls=0;provider.valid=true;
             provider.expected_width=(scene.guide_width*scene.color_width+width-1)/width;
             provider.expected_height=(scene.guide_height*scene.color_height+height-1)/height;
@@ -250,7 +257,13 @@ int main(int argc,char** argv) {try {
             provider.expected_gain_y=scene.scale_y*float(height)/float(scene.guide_height);
             check(synth.synthesize(source.Get(),destination.Get(),*frame,source_view,destination_view,eye,float(baseline),settings),"actual full rotated AFW synthesis");
             wait();
-            require(provider.calls==1&&provider.valid,"actual PDAFW call changed the accepted raster motion gain/Normal crop contract");
+            ComPtr<ID3D12InfoQueue> stage_info;
+            if(SUCCEEDED(device.As(&stage_info)))for(UINT64 k=0;k<stage_info->GetNumStoredMessages();++k) {
+                SIZE_T bytes{};stage_info->GetMessage(k,nullptr,&bytes);std::vector<char> storage(bytes);
+                auto* m=reinterpret_cast<D3D12_MESSAGE*>(storage.data());stage_info->GetMessage(k,m,&bytes);
+                if(m->Severity<=D3D12_MESSAGE_SEVERITY_ERROR){std::cerr<<"Error frame scene="<<scene.name<<" span="<<span<<" mode="<<mode<<" n="<<n<<" "<<m->pDescription<<'\n';require(false,"first GPU error");}
+            }
+            require(provider.calls>=1&&provider.calls<=2&&provider.valid,"actual PDAFW call changed the accepted raster motion gain/Normal crop or shading contract");
             if(n<9)continue;
             check(allocator->Reset(),"readback allocator");check(list->Reset(allocator.Get(),nullptr),"readback list");
             D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};UINT64 bytes{};const auto desc=destination->GetDesc();
@@ -273,6 +286,7 @@ int main(int argc,char** argv) {try {
         std::cout<<"KCD rotated plane scene="<<scene.name<<" native_span="<<span<<" mode="<<mode<<" RGB_MAE="<<mae
             <<" inverseView_max_error="<<basis_error<<" bit_exact="<<basis_bits_match
             <<" actual_provider_gain="<<provider.gain_x<<','<<provider.gain_y
+            <<" shading_rate="<<provider.expected_shading_rate
             <<" actual_motion_crop="<<provider.expected_width<<'x'<<provider.expected_height<<'\n';
         all_camera_bits_match&=basis_bits_match&&basis_error<1e-6;
         all_mode_pixels_match&=mae<6;

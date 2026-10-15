@@ -312,8 +312,16 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     const auto& m=state.runtime.telemetry;
     const bool current=state.connected && m.updated_ms && now_ms>=m.updated_ms && now_ms-m.updated_ms<2000;
     const auto status=autonomous::interface_state_text(state);
-    const auto tone=status=="Generating" ? PanelTone::good :
-        status=="Fallback" || status=="Applying settings" ? PanelTone::warn : PanelTone::bad;
+    // State labels include the actual generator and active optional stages.
+    // An enabled optional stage must run; AFW has no work outside Luke Ross.
+    const auto& r=state.runtime;
+    const bool fresh=r.heartbeat_ms && now_ms>=r.heartbeat_ms && now_ms-r.heartbeat_ms<2000;
+    const bool optional_ready=(!state.desired.nr_enabled || (fresh && r.nr_running)) &&
+        (!r.luke_detected || state.desired.afw_mode==0 || (fresh && r.afw_running));
+    const bool healthy=current && m.generating && state.desired.enabled &&
+        status.starts_with("Generating") && !r.provider_error && optional_ready;
+    const auto tone=healthy ? PanelTone::good : PanelTone::bad;
+    const auto metric_tone=[&](bool valid){return healthy && valid ? PanelTone::good : PanelTone::bad;};
     const auto value=[](float v,bool valid,bool rate){
         char b[64]="N/A";
         if(valid && std::isfinite(v))std::snprintf(b,sizeof(b),rate?"%.0f":"%.1f ms",v);
@@ -322,12 +330,12 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     struct Number { std::string value; const char* label; PanelTone tone; };
     const Number numbers[]{
         {value(m.output_fps,current&&m.rates_valid,true),"Output FPS",tone},
-        {value(m.game_fps,current&&m.rates_valid,true),"Game FPS",PanelTone::normal},
-        {value(m.generated_fps,current&&m.rates_valid,true),"Generated FPS",PanelTone::normal},
+        {value(m.game_fps,current&&m.rates_valid,true),"Game FPS",metric_tone(m.rates_valid)},
+        {value(m.generated_fps,current&&m.rates_valid,true),"Generated FPS",metric_tone(m.rates_valid)},
         {value(m.display_hz,current&&m.display_hz>0,true),"Display Hz",PanelTone::dim},
-        {value(m.ofxr_time_ms,current&&m.ofxr_time_valid,false),"OFXR time",PanelTone::normal},
-        {value(m.cycle_length_ms,current&&m.cycle_valid,false),"Cycle length",PanelTone::normal},
-        {value(m.cycle_estimated_ms,current&&m.cycle_estimated_valid,false),"Cycle estimated",PanelTone::normal},
+        {value(m.ofxr_time_ms,current&&m.ofxr_time_valid,false),"OFXR time",metric_tone(m.ofxr_time_valid)},
+        {value(m.cycle_length_ms,current&&m.cycle_valid,false),"Cycle length",metric_tone(m.cycle_valid)},
+        {value(m.cycle_estimated_ms,current&&m.cycle_estimated_valid,false),"Cycle estimated",metric_tone(m.cycle_estimated_valid)},
         {std::string(status),"State",tone}};
     const std::string vectors=std::string(autonomous::interface_vectors_text(state,now_ms));
     const std::string explanation=autonomous::interface_status_text(state);

@@ -11,9 +11,10 @@ Dear ImGui: MIT, notice preserved.
 RenoDX colour composition: notice in src/neural/licenses/RenoDX_ATTRIBUTION.txt.
 Khronos Vulkan headers: Apache2/MIT notices preserved.
 NVIDIA DLSS SDK/runtime and AMD FidelityFX runtime: original vendor licences
-are supplied. AFW provider is the official PureDark v1.0-beta5 DLL from the
-explicit shared laboratory provider store. This candidate is a local test
-package; it has not been published.
+are supplied. AFW provider is the official PureDark v1.0-beta.6 DLL from the UEVR release:
+https://github.com/PureDark/UEVR/releases/tag/UEVR_AFW_v1.0-beta.6
+Import hash, ABI provenance and reproduction: docs/AFW_BETA6_IMPORT.json.
+The original provider binary is distributed as a package dependency, not source.
 
 The external NVIDIA Neural Rendering model nvngx_dlssnr.dll is not included.
 The included nvngx.dll_dlssnr.dll is this project's small source-built forwarder.

@@ -578,7 +578,8 @@ std::string build_runtime_ini(
         "\r\nluke_afw_debug=" + std::string(desired.afw_debug ? "1" : "0") +
         "\r\nluke_afw_clear_before_warping=" + (desired.afw_clear_before_warping ? "1" : "0") +
         "\r\nluke_afw_ignore_motion_threshold=" + std::to_string(desired.afw_ignore_motion_threshold) +
-        "\r\nluke_afw_depth_dilate_mode=" + std::to_string(desired.afw_depth_dilate_mode) + "\r\n";
+        "\r\nluke_afw_depth_dilate_mode=" + std::to_string(desired.afw_depth_dilate_mode) + "\r\n" +
+        "luke_afw_shading_rate=" + std::to_string(desired.afw_shading_rate) + "\r\n";
     return result;
 }
 

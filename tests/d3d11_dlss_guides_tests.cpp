@@ -120,18 +120,11 @@ int main() {
         const auto valid=xrfg::get_d3d11_guide_receipt(final0.Get());
         xrfg::set_d3d11_guide_receipt(final0.Get(),{generation,100,valid.publication-1,8,8});
         expect(!xrfg::resolve_d3d11_dlss_guides(final0.Get(),queue.Get()),"stale publication never resolves latest");
-        expect(bool(xrfg::resolve_d3d11_dlss_guides(final0.Get(),queue.Get(),valid)),"frozen exact receipt survives mutable texture metadata");
-        auto wrong_shape=valid;wrong_shape.width=1;
-        expect(!xrfg::resolve_d3d11_dlss_guides(final0.Get(),queue.Get(),wrong_shape),"frozen receipt shape remains validated");
         xrfg::set_d3d11_guide_receipt(final0.Get(),valid);xrfg::retire_dlss_motion_vector_stream(100);
         expect(!xrfg::resolve_d3d11_dlss_guides(final0.Get(),queue.Get()),"retired stream rejected");
-        expect(!xrfg::resolve_d3d11_dlss_guides(final0.Get(),queue.Get(),valid),"frozen receipt cannot resurrect a retired stream");
-        const auto surviving_receipt=xrfg::get_d3d11_guide_receipt(final1.Get());
         xrfg::clear_d3d11_guide_receipt(final1.Get());expect(!xrfg::resolve_d3d11_dlss_guides(final1.Get(),queue.Get()),"unknown eye cannot borrow other eye");
         xrfg::unregister_d3d11_guide_owner(1);xrfg::register_d3d11_guide_owner(3,d11.Get(),d12.Get(),queue.Get());
         expect(!xrfg::resolve_d3d11_dlss_guides(eye1.Get(),queue.Get()),"old session receipt rejected");
-        expect(!xrfg::resolve_d3d11_dlss_guides(final0.Get(),queue.Get(),valid),"frozen receipt cannot cross owner generation");
-        expect(!xrfg::resolve_d3d11_dlss_guides(final1.Get(),queue.Get(),surviving_receipt),"live stream frozen receipt cannot cross owner generation");
         xrfg::unregister_d3d11_guide_owner(3);xrfg::retire_dlss_motion_vector_stream(101);
         // sRGB output cannot carry a typed UAV. Guide capture must still work
         // with its legal RT/shared flags, independently of model composition.

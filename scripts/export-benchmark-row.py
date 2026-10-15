@@ -42,7 +42,7 @@ def decode(bits, quality):
     return dict(route=route, cell=cell, flags=flags, dlssg_preset_request=dlssg_preset,
                 prefer_fps=bool(bits & (1 << 9)), triple=triple,
                 nr=bool(bits & (1 << 14)), separate_queue=bool(bits & (1 << 15)),
-                luke=bool(bits & (1 << 16)), afw_mode=(bits >> 12) & 3,
+                luke=bool(bits & (1 << 16)), afw_mode=(bits >> 12) & 3, afw_shading_rate=(bits >> 20) & 15,
                 hybrid_effective=bool(bits & (1 << 8)), motion_vectors=bool(bits & (1 << 11)),
                 preset=quality & 255, scale=(quality >> 8) & 255, native_scale=(quality >> 16) & 65535)
 
@@ -119,7 +119,8 @@ def export(paths, platform, metric, settle=3, minimum=10):
         for segment in read_segments(path):
             cfg = segment['config']
             group = (cfg['nr'], cfg['separate_queue'], cfg['luke'], cfg['afw_mode'] if cfg['luke'] else 0,
-                     0 if platform == 'meganex' else cfg['dlssg_preset_request'])
+                     0 if platform == 'meganex' else cfg['dlssg_preset_request'],
+                     cfg['afw_shading_rate'] if cfg['luke'] and cfg['afw_mode'] else 0)
             key = cfg['cell'] if platform == 'meganex' else cfg['route']
             attempted.setdefault(group, set()).add(key)
             result = summarize(segment, settle, minimum, metric)
@@ -128,7 +129,8 @@ def export(paths, platform, metric, settle=3, minimum=10):
             cfg = result['config']
             # Queue/NR/Luke-AFW runs must never be merged into one owner row.
             group = (cfg['nr'], cfg['separate_queue'], cfg['luke'], cfg['afw_mode'] if cfg['luke'] else 0,
-                     0 if platform == 'meganex' else cfg['dlssg_preset_request'])
+                     0 if platform == 'meganex' else cfg['dlssg_preset_request'],
+                     cfg['afw_shading_rate'] if cfg['luke'] and cfg['afw_mode'] else 0)
             cells = groups.setdefault(group, {})
             measurements.setdefault(group, []).append(result)
             key = cfg['cell'] if platform == 'meganex' else cfg['route']
@@ -144,7 +146,7 @@ def export(paths, platform, metric, settle=3, minimum=10):
             row += ['', str(versions[0])]  # Meganex BE/BF, Pimax BQ/BR.
         headers = list(slots) + (['Log', 'Tested Build'] if platform in ('meganex', 'pimax') else [])
         results.append(dict(nr=key[0], separate_queue=key[1], luke=key[2], afw_mode=key[3], headers=headers,
-                            dlssg_preset_request=key[4],
+                            dlssg_preset_request=key[4], afw_shading_rate=key[5],
                             start_column='S' if platform == 'meganex' else 'BI' if platform == 'pimax' else 'G',
                             missing=[x for x in slots if x not in cells], cells=cells,
                             untried=[x for x in slots if x not in attempted[key]],
@@ -184,7 +186,7 @@ def main():
         writer = csv.writer(stream, delimiter='\t')
         writer.writerow(['Game', 'Build', 'Route', 'DLSS-G preset request', 'Private synthesis A',
                          'Reduce XR B', 'Prefer FPS', 'Multiplier', 'Neural', 'Separate queue',
-                         'Luke AFW', 'Output FPS range', 'Cycle metric', 'Cycle range ms', 'Warning'])
+                         'Luke AFW', 'AFW shading rate index', 'Output FPS range', 'Cycle metric', 'Cycle range ms', 'Warning'])
         for row in rows:
             for result in row['measurements']:
                 cfg = result['config']
@@ -192,7 +194,7 @@ def main():
                                  {1:'A',3:'C'}.get(cfg['dlssg_preset_request'], 'unverified'),
                                  cfg['flags'][0], cfg['flags'][1], int(cfg['prefer_fps']),
                                  '3X' if cfg['triple'] else '2X', int(row['nr']), int(row['separate_queue']),
-                                 row['afw_mode'] if row['luke'] else 'off',
+                                 row['afw_mode'] if row['luke'] else 'off', row['afw_shading_rate'],
                                  span_text([result['fps_min'], result['fps_max']]), a.metric,
                                  span_text([result['cycle_min'], result['cycle_max']]) if result['cycle_min'] is not None else 'n.d.',
                                  result['warning'] or ''])
