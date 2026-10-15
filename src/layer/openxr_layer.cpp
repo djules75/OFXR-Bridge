@@ -1361,6 +1361,16 @@ struct SessionState {
     // the next frame later still. That spiral throttled the presenter to
     // 3.7 Hz and froze the session.
     XrDuration presenter_display_period{};
+    // The period the application is handed: the one the runtime has
+    // reported for kApplicationPeriodStreak waits in a row. Not
+    // presenter_display_period, which only ever falls and so kept handing
+    // out the old period after Virtual Desktop's refresh rate was lowered
+    // mid-session; and not the latest value, which SteamVR and Virtual
+    // Desktop stretch for a wait or two after a miss (issue 33). The
+    // candidate and its streak are the run being counted.
+    XrDuration application_display_period{};
+    XrDuration application_period_candidate{};
+    std::uint32_t application_period_streak{};
     XrFrameState presenter_frame_state{XR_TYPE_FRAME_STATE};
     XrTime last_virtual_display_time{};
     XrResult presenter_failure{XR_SUCCESS};
@@ -5496,18 +5506,20 @@ XrResult layer_wait_frame_impl(
             state->presenter_stop_requested) {
             return XR_ERROR_SESSION_NOT_RUNNING;
         }
-        // The period the presenter paces on, not the one the runtime reported
-        // for this frame. SteamVR reports two periods on the wait after a
-        // missed vsync, and handed on that becomes a 66.7 ms period at 3X:
-        // MSFS 2024 submits the previous wait's time plus its period, so the
-        // next frame overshoots by a period and the one after goes backwards,
-        // which clears continuity. The prime that follows misses the next
-        // slot, SteamVR reports two periods again, and the loop held at a
-        // reset every fourth frame - 30 real and 45 synthetic per second at
-        // 90 Hz, for as long as the race that breaks it took to come up
-        // (issue 33). A constant period cannot go backwards: the time below
-        // is strictly increasing.
-        const XrDuration runtime_period = state->presenter_display_period > 0
+        // The period the runtime has held, not the one it reported for this
+        // frame. SteamVR reports two periods on the wait after a missed vsync,
+        // and handed on that becomes a 66.7 ms period at 3X: MSFS 2024 submits
+        // the previous wait's time plus its period, so the next frame
+        // overshoots by a period and the one after goes backwards, which
+        // clears continuity. The prime that follows misses the next slot,
+        // SteamVR reports two periods again, and the loop held at a reset
+        // every fourth frame - 30 real and 45 synthetic per second at 90 Hz,
+        // for as long as the race that breaks it took to come up (issue 33).
+        // A constant period cannot go backwards: the time below is strictly
+        // increasing. Until a period has held, the smallest seen.
+        const XrDuration runtime_period = state->application_display_period > 0
+            ? state->application_display_period
+            : state->presenter_display_period > 0
             ? state->presenter_display_period
             : state->presenter_frame_state.predictedDisplayPeriod;
         const XrDuration virtual_period = (state->manual_control.stop_requested() || !state->menu_enabled)
@@ -8423,6 +8435,37 @@ void continuous_presenter_main(
                 state->presenter_display_period =
                     frame_state.predictedDisplayPeriod;
             }
+            // The application's period follows a value only once it holds.
+            // Across 411 captured sessions a stretch that returned to the
+            // previous period lasted one to four waits in 99.5% of cases,
+            // so eight in a row is a period the runtime is actually on - a
+            // refresh-rate change, adopted 60-110 ms after it.
+            if (frame_state.predictedDisplayPeriod >=
+                    kShortestCredibleDisplayPeriod &&
+                frame_state.predictedDisplayPeriod <=
+                    kLongestCredibleDisplayPeriod) {
+                constexpr std::uint32_t kApplicationPeriodStreak = 8;
+                const XrDuration reported = frame_state.predictedDisplayPeriod;
+                const XrDuration candidate =
+                    state->application_period_candidate;
+                const XrDuration difference = reported > candidate
+                    ? reported - candidate
+                    : candidate - reported;
+                if (candidate > 0 && difference * 100 <= candidate) {
+                    if (state->application_period_streak <
+                        kApplicationPeriodStreak) {
+                        ++state->application_period_streak;
+                    }
+                } else {
+                    state->application_period_candidate = reported;
+                    state->application_period_streak = 1;
+                }
+                if (state->application_period_streak >=
+                    kApplicationPeriodStreak) {
+                    state->application_display_period =
+                        state->application_period_candidate;
+                }
+            }
             // And never longer than the headset's own scanout: the runtime
             // reports a throttled period as if it were the display's. The
             // grid paced to 27.8 ms on a 72 Hz headset that way, and the
@@ -9784,6 +9827,9 @@ void continuous_presenter_main(
         state->presenter_last_predicted_valid = false;
         state->presenter_schedule_valid = false;
         state->presenter_display_period = 0;
+        state->application_display_period = 0;
+        state->application_period_candidate = 0;
+        state->application_period_streak = 0;
         state->presenter_stop_requested = false;
         state->presenter_active = true;
         state->presenter_thread = std::thread(continuous_presenter_main, state);
