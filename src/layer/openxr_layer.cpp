@@ -508,6 +508,9 @@ struct Dispatch {
     // Best-effort, like destroy_space above: forwarded unchanged, so the
     // flight record can say what kind of space a projection layer names.
     PFN_xrCreateReferenceSpace create_reference_space{};
+    // Best-effort, like destroy_space above: forwarded unchanged, recorded
+    // so a capture can say which locate a submitted pose came from.
+    PFN_xrLocateViews locate_views{};
     // Best-effort, like destroy_space above. The layer does not act on events
     // and never consumes one; it records session state transitions so a
     // capture can say whether the runtime stopped asking for frames, and why.
@@ -4038,6 +4041,13 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_create_reference_space(
     XrSession session,
     const XrReferenceSpaceCreateInfo* create_info,
     XrSpace* space);
+XRAPI_ATTR XrResult XRAPI_CALL layer_locate_views(
+    XrSession session,
+    const XrViewLocateInfo* view_locate_info,
+    XrViewState* view_state,
+    std::uint32_t view_capacity_input,
+    std::uint32_t* view_count_output,
+    XrView* views);
 // The runtime's list with the sharing extensions a D3D12 interop needs added
 // where it lacks them. SteamVR asks for external memory and timeline
 // semaphores but not for exporting a semaphore to D3D12, so a list from it
@@ -4451,6 +4461,10 @@ XrResult layer_get_instance_proc_addr_impl(
             layer_create_reference_space,
             function);
     }
+    if (std::strcmp(name, "xrLocateViews") == 0) {
+        return expose_intercept(
+            dispatch, dispatch->locate_views, layer_locate_views, function);
+    }
     if (std::strcmp(name, "xrPollEvent") == 0) {
         return expose_intercept(
             dispatch, dispatch->poll_event, layer_poll_event, function);
@@ -4668,6 +4682,12 @@ XrResult layer_create_api_layer_instance_impl(
              created_instance,
              "xrCreateReferenceSpace",
              dispatch->create_reference_space)),
+         true) &&
+        (static_cast<void>(load_function(
+             next_get_instance_proc_addr,
+             created_instance,
+             "xrLocateViews",
+             dispatch->locate_views)),
          true) &&
         // Best effort, deliberately not a load requirement: a runtime without
         // it keeps working, the recorder just never sees a state transition.
@@ -13810,6 +13830,41 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_create_reference_space(
                 pack_pose_orientation(create_info->poseInReferenceSpace.orientation),
                 pack_pose_position(create_info->poseInReferenceSpace.position),
                 handle_value(*space));
+        }
+        return result;
+    });
+}
+
+// Forwarded unchanged; recorded so a capture can say which locate a
+// submitted pose came from (view_locate).
+XRAPI_ATTR XrResult XRAPI_CALL layer_locate_views(
+    XrSession session,
+    const XrViewLocateInfo* view_locate_info,
+    XrViewState* view_state,
+    std::uint32_t view_capacity_input,
+    std::uint32_t* view_count_output,
+    XrView* views) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        const auto state = find_session(session);
+        if (!state || state->dispatch->locate_views == nullptr) {
+            return XR_ERROR_FUNCTION_UNSUPPORTED;
+        }
+        const XrResult result = state->dispatch->locate_views(
+            session,
+            view_locate_info,
+            view_state,
+            view_capacity_input,
+            view_count_output,
+            views);
+        if (XR_SUCCEEDED(result) && view_locate_info != nullptr &&
+            views != nullptr && view_capacity_input > 0 &&
+            view_count_output != nullptr && *view_count_output > 0) {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::view_locate,
+                static_cast<std::int64_t>(handle_value(view_locate_info->space)),
+                static_cast<std::uint64_t>(view_locate_info->displayTime),
+                pack_pose_orientation(views[0].pose.orientation),
+                pack_pose_position(views[0].pose.position));
         }
         return result;
     });

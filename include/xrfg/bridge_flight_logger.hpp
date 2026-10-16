@@ -241,6 +241,12 @@ enum class BridgeFlightOperation : std::uint32_t {
     // A reference space the application created. result the reference space
     // type, a and b its offset pose packed as above, c the handle.
     reference_space,
+    // An xrLocateViews call the application made, forwarded unchanged:
+    // result the space it located in, a the display time it asked for, b and
+    // c the located pose of view 0 packed as projection_pose. The thread is
+    // the record's own. Lined up against projection_pose this says which
+    // locate a submitted pose came from.
+    view_locate,
 };
 
 struct BridgeFlightToken {

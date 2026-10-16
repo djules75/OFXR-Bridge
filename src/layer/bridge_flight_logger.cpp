@@ -92,6 +92,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
         return "projection_pose";
     case BridgeFlightOperation::reference_space:
         return "reference_space";
+    case BridgeFlightOperation::view_locate:
+        return "view_locate";
     case BridgeFlightOperation::view_configuration:
         return "view_configuration";
     case BridgeFlightOperation::projection_view_rect:
