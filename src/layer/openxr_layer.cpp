@@ -28,6 +28,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
@@ -504,6 +505,9 @@ struct Dispatch {
     // Best-effort: a runtime that does not expose it simply never has a space
     // destroyed underneath a queued submission through this layer.
     PFN_xrDestroySpace destroy_space{};
+    // Best-effort, like destroy_space above: forwarded unchanged, so the
+    // flight record can say what kind of space a projection layer names.
+    PFN_xrCreateReferenceSpace create_reference_space{};
     // Best-effort, like destroy_space above. The layer does not act on events
     // and never consumes one; it records session state transitions so a
     // capture can say whether the runtime stopped asking for frames, and why.
@@ -4030,6 +4034,10 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_create_swapchain(
     XrSwapchain* swapchain);
 XRAPI_ATTR XrResult XRAPI_CALL layer_destroy_swapchain(XrSwapchain swapchain);
 XRAPI_ATTR XrResult XRAPI_CALL layer_destroy_space(XrSpace space);
+XRAPI_ATTR XrResult XRAPI_CALL layer_create_reference_space(
+    XrSession session,
+    const XrReferenceSpaceCreateInfo* create_info,
+    XrSpace* space);
 // The runtime's list with the sharing extensions a D3D12 interop needs added
 // where it lacks them. SteamVR asks for external memory and timeline
 // semaphores but not for exporting a semaphore to D3D12, so a list from it
@@ -4436,6 +4444,13 @@ XrResult layer_get_instance_proc_addr_impl(
         return expose_intercept(
             dispatch, dispatch->destroy_space, layer_destroy_space, function);
     }
+    if (std::strcmp(name, "xrCreateReferenceSpace") == 0) {
+        return expose_intercept(
+            dispatch,
+            dispatch->create_reference_space,
+            layer_create_reference_space,
+            function);
+    }
     if (std::strcmp(name, "xrPollEvent") == 0) {
         return expose_intercept(
             dispatch, dispatch->poll_event, layer_poll_event, function);
@@ -4647,6 +4662,12 @@ XrResult layer_create_api_layer_instance_impl(
              created_instance,
              "xrDestroySpace",
              dispatch->destroy_space)),
+         true) &&
+        (static_cast<void>(load_function(
+             next_get_instance_proc_addr,
+             created_instance,
+             "xrCreateReferenceSpace",
+             dispatch->create_reference_space)),
          true) &&
         // Best effort, deliberately not a load requirement: a runtime without
         // it keeps working, the recorder just never sees a state transition.
@@ -10337,6 +10358,32 @@ enqueue_presenter_submission(
     }
 }
 
+// A pose in the flight record's fields: the orientation as four signed 16-bit
+// fixed-point components x, y, z, w (32767 = 1.0), the position as three
+// signed 21-bit millimetre components x, y, z. See projection_pose.
+[[nodiscard]] std::uint64_t pack_pose_orientation(
+    const XrQuaternionf& orientation) noexcept {
+    const auto fixed = [](float value) {
+        const long scaled = std::lround(std::clamp(value, -1.0F, 1.0F) * 32767.0F);
+        return static_cast<std::uint64_t>(
+            static_cast<std::uint16_t>(static_cast<std::int16_t>(scaled)));
+    };
+    return fixed(orientation.x) | (fixed(orientation.y) << 16) |
+        (fixed(orientation.z) << 32) | (fixed(orientation.w) << 48);
+}
+
+[[nodiscard]] std::uint64_t pack_pose_position(
+    const XrVector3f& position) noexcept {
+    const auto fixed = [](float metres) {
+        const long millimetres =
+            std::lround(std::clamp(metres, -1000.0F, 1000.0F) * 1000.0F);
+        return static_cast<std::uint64_t>(
+            static_cast<std::uint32_t>(millimetres) & 0x1FFFFFU);
+    };
+    return fixed(position.x) | (fixed(position.y) << 21) |
+        (fixed(position.z) << 42);
+}
+
 [[nodiscard]] bool capture_projection_snapshot(
     const XrFrameEndInfo* source,
     ProjectionSnapshot* output) {
@@ -10373,6 +10420,20 @@ enqueue_presenter_submission(
                 return false;
             }
             stored.views[view_index].next = nullptr;
+        }
+        // The poses the application submits, every frame and every view:
+        // what the synthesizer's A-to-B reprojection and the compositor's
+        // reprojection are given. Star Citizen, 2026-10-16: generated
+        // frames unstable under head motion with every interval in the log
+        // regular, and nothing in the record said what the poses were.
+        for (std::uint32_t view_index = 0; view_index < projection->viewCount; ++view_index) {
+            const XrPosef& pose = projection->views[view_index].pose;
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::projection_pose,
+                view_index,
+                pack_pose_orientation(pose.orientation),
+                pack_pose_position(pose.position),
+                handle_value(projection->space));
         }
         snapshot.layers.push_back(std::move(stored));
     }
@@ -13729,6 +13790,31 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_create_swapchain(
 //
 // Upstream never needed this because the application waited for the queue to
 // empty inside xrEndFrame; it does not any more.
+// Forwarded unchanged; recorded so the space a projection layer names can be
+// read as a type (reference_space).
+XRAPI_ATTR XrResult XRAPI_CALL layer_create_reference_space(
+    XrSession session,
+    const XrReferenceSpaceCreateInfo* create_info,
+    XrSpace* space) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        const auto state = find_session(session);
+        if (!state || state->dispatch->create_reference_space == nullptr) {
+            return XR_ERROR_FUNCTION_UNSUPPORTED;
+        }
+        const XrResult result =
+            state->dispatch->create_reference_space(session, create_info, space);
+        if (XR_SUCCEEDED(result) && create_info != nullptr && space != nullptr) {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::reference_space,
+                static_cast<std::int64_t>(create_info->referenceSpaceType),
+                pack_pose_orientation(create_info->poseInReferenceSpace.orientation),
+                pack_pose_position(create_info->poseInReferenceSpace.position),
+                handle_value(*space));
+        }
+        return result;
+    });
+}
+
 XRAPI_ATTR XrResult XRAPI_CALL layer_destroy_space(XrSpace space) {
     return guard_c_api_boundary([&]() -> XrResult {
         std::shared_ptr<Dispatch> dispatch;

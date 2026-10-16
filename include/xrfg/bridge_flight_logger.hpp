@@ -231,6 +231,16 @@ enum class BridgeFlightOperation : std::uint32_t {
     // swapchain, b microseconds waited, c the limit in microseconds << 32 |
     // the image index. Nothing is written for a capture whose slot was free.
     history_capture_wait,
+    // The pose the application submitted for one projection view, every
+    // frame: what the synthesizer's A-to-B reprojection and the compositor's
+    // reprojection are given. result the view index, a the orientation as
+    // four signed 16-bit fixed-point components x, y, z, w (32767 = 1.0),
+    // b the position as three signed 21-bit millimetre components x, y, z,
+    // c the layer's space handle.
+    projection_pose,
+    // A reference space the application created. result the reference space
+    // type, a and b its offset pose packed as above, c the handle.
+    reference_space,
 };
 
 struct BridgeFlightToken {

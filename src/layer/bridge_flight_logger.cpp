@@ -88,6 +88,10 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
         return "steamvr_delivery";
     case BridgeFlightOperation::vram_usage:
         return "vram_usage";
+    case BridgeFlightOperation::projection_pose:
+        return "projection_pose";
+    case BridgeFlightOperation::reference_space:
+        return "reference_space";
     case BridgeFlightOperation::view_configuration:
         return "view_configuration";
     case BridgeFlightOperation::projection_view_rect:
