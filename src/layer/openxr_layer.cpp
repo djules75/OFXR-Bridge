@@ -7084,22 +7084,32 @@ void release_pending_bridge_image_locked(
                 .count();
         const XrResult result =
             release_swapchain_image_locked(state, state->handle, &release_info);
-        // 4: a deferred release ran. a the swapchain, b the image, c how long
-        // after the application's release. A failure is the runtime's code,
-        // with b 4 for this stage and c the image.
+        // 4 (d3d11_bridge) or 5 (vulkan_bridge): a deferred release ran. a
+        // the swapchain, b the image, c how long after the application's
+        // release. A failure is the runtime's code, with b the stage and c
+        // the image.
+        bool vulkan = false;
+        {
+            std::scoped_lock lock(state->mutex);
+            vulkan = state->vulkan_bridge != nullptr;
+        }
+        const auto operation = vulkan
+            ? xrfg::BridgeFlightOperation::vulkan_bridge
+            : xrfg::BridgeFlightOperation::d3d11_bridge;
+        const std::int64_t stage = vulkan ? 5 : 4;
         if (XR_SUCCEEDED(result)) {
             xrfg::bridge_flight_logger().event(
-                xrfg::BridgeFlightOperation::d3d11_bridge,
-                4,
+                operation,
+                stage,
                 handle_value(state->handle),
                 index,
                 deferred_for > 0 ? static_cast<std::uint64_t>(deferred_for) : 0);
         } else {
             xrfg::bridge_flight_logger().event(
-                xrfg::BridgeFlightOperation::d3d11_bridge,
+                operation,
                 static_cast<std::int64_t>(result),
                 handle_value(state->handle),
-                4,
+                static_cast<std::uint64_t>(stage),
                 index);
         }
     } catch (...) {
@@ -7121,16 +7131,25 @@ void release_pending_bridge_images(
     }
 }
 
-// Whether an application's release on the D3D11 bridge waits for its
-// xrEndFrame (SwapchainState::pending_bridge_release). The bridge's copy
-// reads what the application's context had submitted when it signalled, and
-// at the release that may not be the whole image: IL-2 Great Battles releases
-// one eye 3.8 ms before xrEndFrame and showed a stutter in that eye alone,
+// Whether an application's release on a bridge waits for its xrEndFrame
+// (SwapchainState::pending_bridge_release). The bridge's copy reads what the
+// application had submitted when it signalled, and at the release that may
+// not be the whole image: IL-2 Great Battles releases one eye 3.8 ms before
+// xrEndFrame on the D3D11 bridge and showed a stutter in that eye alone,
 // which OpenXR Toolkit hid by releasing its own swapchains at xrEndFrame
-// (0.07 ms before it). Only on the thread that calls xrEndFrame, which is
-// where the deferred copy will use the application's context, and only for a
+// (0.07 ms before it). Star Citizen on the Vulkan bridge releases all three
+// of its swapchains at the top of its frame, 1.5 ms before xrEndFrame when it
+// renders ahead of the acquire and 40 ms before it when it renders between
+// begin and end, so the copy on its queue held the image's previous
+// contents against the frame's own pose: a wobble under head motion in
+// every state the layer was in, armed, paused or disarmed, and nothing
+// natively, where the runtime reads the image at xrEndFrame. Only for a
 // release the runtime would accept as made, so that saying it succeeded is
-// not a lie. Called under the swapchain's call_mutex.
+// not a lie. On the D3D11 bridge only on the thread that calls xrEndFrame,
+// where the deferred copy will use the application's context; the Vulkan
+// bridge's copy goes through the queue layer's lock from any thread, and
+// Star Citizen ends its frames from three threads in turn. Called under the
+// swapchain's call_mutex.
 [[nodiscard]] bool defer_bridged_release(
     SwapchainState& state,
     const XrSwapchainImageReleaseInfo* release_info) noexcept {
@@ -7139,14 +7158,23 @@ void release_pending_bridge_images(
         release_info->next != nullptr) {
         return false;
     }
+    // Not before the application's first xrEndFrame on either bridge: until
+    // then nothing will run the deferred release.
     const DWORD end_thread =
         state.session->application_end_thread.load(std::memory_order_relaxed);
-    if (end_thread == 0 || end_thread != GetCurrentThreadId()) {
+    if (end_thread == 0) {
         return false;
     }
     std::scoped_lock lock(state.mutex);
-    return state.bridge && !state.vulkan_bridge &&
-        state.ownership_tracking_valid && state.waited_count > 0 &&
+    const bool vulkan = state.vulkan_bridge != nullptr;
+    const bool d3d11 = state.bridge && !vulkan;
+    if (!vulkan && !d3d11) {
+        return false;
+    }
+    if (d3d11 && end_thread != GetCurrentThreadId()) {
+        return false;
+    }
+    return state.ownership_tracking_valid && state.waited_count > 0 &&
         !state.acquired_indices.empty();
 }
 

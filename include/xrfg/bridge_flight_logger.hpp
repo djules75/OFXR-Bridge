@@ -208,8 +208,10 @@ enum class BridgeFlightOperation : std::uint32_t {
     // (a= graphics extensions, b= the ini, c= flags), 1 the session bridged
     // (c= adapter LUID low half), 2 a swapchain bridged (b= path<<32|image
     // count, c= shared format<<32|requested VkFormat), 3 a failed release
-    // copy, 4 a format the bridge cannot translate; negative values are the
-    // failing call's result with the stage in b.
+    // copy, 4 a format the bridge cannot translate, 5 a release deferred to
+    // the application's xrEndFrame ran (b= image, c= microseconds after the
+    // application's release); negative values are the failing call's result
+    // with the stage in b.
     vulkan_bridge,
     // The recorder was switched on (result 1) or off (result 0) while the
     // process ran. On: a the session records written ahead of this one from
