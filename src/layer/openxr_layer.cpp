@@ -2401,6 +2401,26 @@ void stop_continuous_presenter(
 [[nodiscard]] bool continuous_presenter_active(
     const std::shared_ptr<SessionState>& state) noexcept;
 [[nodiscard]] bool presenter_holds_by_count(const SessionState& state) noexcept;
+
+// Whether the presenter keeps a pipelined application's real frame to repeat,
+// as it keeps every other application's. It did not keep one anywhere, as a
+// precaution against handles the application might destroy once its
+// xrEndFrame returned; PresenterResourceLifetimeGuard has since covered that
+// for every application, draining the presenter and dropping the retained
+// frame before any swapchain or space it could name is destroyed. Without a
+// frame to repeat a pipelined title got none of what the frame buys: the
+// deeper pipeline's hold handed every synthetic over unwritten, the
+// once-per-frame hold read an empty presenter as starved and never paced the
+// application, and the timeline it was handed re-anchored on a stale slot.
+// Star Citizen on SteamVR, 32 ms a frame, showed all three: 35 of 62
+// submitted frames a second shown at 2X, and at 3X a one-refresh jump in the
+// pose's prediction every eight frames or so, where the handed times stepped
+// 44.4 or 22.2 ms instead of 33.3. SteamVR only, where this was measured.
+[[nodiscard]] bool presenter_keeps_pipelined_frames(
+    const SessionState& state) noexcept {
+    return state.dispatch && state.dispatch->steamvr_runtime &&
+        state.pipelined_presenter_mode;
+}
 // Prevent new enqueues, finish queued/in-flight submissions, then retire any
 // autonomous repeat before invalidating an application-owned handle.
 struct PresenterResourceLifetimeGuard {
@@ -8642,7 +8662,8 @@ void continuous_presenter_main(
                     // previous frame to show. A pipelined application gets
                     // none - its frames may name handles it destroys as soon
                     // as its xrEndFrame returns, so the presenter never keeps
-                    // one - and neither does a presenter that has not
+                    // one, except on SteamVR (presenter_keeps_pipelined_frames)
+                    // - and neither does a presenter that has not
                     // submitted yet. Held there, the slot went down with no
                     // layers, and SteamVR shows black for that: measured on
                     // MSFS 2024, 31 of 32 empty submissions in one run were
@@ -9755,7 +9776,8 @@ void continuous_presenter_main(
                     --state->outstanding_presenter_submissions;
                 }
                 if (XR_SUCCEEDED(end_result) && request->owned_frame &&
-                    !state->pipelined_presenter_mode) {
+                    (!state->pipelined_presenter_mode ||
+                     presenter_keeps_pipelined_frames(*state))) {
                     state->presenter_last_frame = request->owned_frame;
                 } else if (state->pipelined_presenter_mode) {
                     // A persistent pipelined application may destroy or replace
@@ -9763,6 +9785,8 @@ void continuous_presenter_main(
                     // its xrEndFrame returns. Never repeat retained application
                     // handles beyond that call boundary; let the runtime hold
                     // the last submitted image until the next owned pair.
+                    // Except where presenter_keeps_pipelined_frames: the
+                    // lifetime guard drops the frame before such a destroy.
                     state->presenter_last_frame.reset();
                 }
             }
