@@ -258,43 +258,56 @@ struct PrivateOpenXrRuntime::Impl {
     void run() noexcept {
         bool waited=false,begun=false;
         XrFrameState prediction{XR_TYPE_FRAME_STATE};
-        XrTime last_target{};
         try {
             PrivateOutputSchedule schedule;
             auto result=real_wait(prediction);if(XR_FAILED(result)){fail(result);return;}
             waited=true;
+            // Seed the producer's virtual clock, then close this empty cycle
+            // immediately. Holding the seed Wait until a level finishes loading
+            // would make the first content prediction arbitrarily old.
+            XrFrameBeginInfo seed_begin{XR_TYPE_FRAME_BEGIN_INFO};
+            result=options.real.begin(options.real.session,&seed_begin);
+            if(XR_SUCCEEDED(result)) {
+                waited=false;begun=true;
+                XrFrameEndInfo seed_end{XR_TYPE_FRAME_END_INFO};
+                seed_end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+                seed_end.displayTime=prediction.predictedDisplayTime;
+                result=options.real.end(options.real.session,&seed_end);begun=false;
+            }
+            if(XR_FAILED(result))fail(result);
             while(!stopping) {
                 auto entry=fifo->pop();if(!entry)break;auto packet=std::move(*entry);
                 HRESULT ready=d12()?await(ready12.Get(),packet->ready):await(ready11.Get(),packet->ready);
                 if(FAILED(ready)){retire(packet);fifo->retire();if(!stopping)fail(XR_ERROR_RUNTIME_FAILURE);break;}
-                if(!waited)result=real_wait(prediction);
-                if(XR_SUCCEEDED(result)) {
-                    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};result=options.real.begin(options.real.session,&begin);
-                    if(XR_SUCCEEDED(result)){waited=false;begun=true;}
-                }
-                if(XR_SUCCEEDED(result))result=publish(*packet);
+                trace(4,packet->sequence);
+                // Pace before selecting the runtime cycle. Begin still precedes
+                // the real image copy, as recommended by the OpenXR frame loop.
+                // Never insert our pacing sleep after the runtime prediction.
                 const auto physical=period(prediction.predictedDisplayPeriod);
                 schedule.period(physical);schedule.ready(clock_ns());
                 if(XR_SUCCEEDED(result) && sleep_until(schedule.deadline())) {
-                    auto end=packet->info;
-                    // CPU pacing and XR prediction are different clocks. Retain
-                    // the raw runtime target, moving FORWARD only if it expired
-                    // or the throttled horizon moved backwards. V555's backward
-                    // phase subtraction is deliberately impossible here.
-                    end.displayTime=std::max(prediction.predictedDisplayTime,last_target+physical);
-                    LARGE_INTEGER at{},freq{};
-                    if(options.real.to_qpc && XR_SUCCEEDED(options.real.to_qpc(options.real.instance,prediction.predictedDisplayTime,&at))) {
-                        QueryPerformanceFrequency(&freq);
-                        const auto target_ns=at.QuadPart/freq.QuadPart*1'000'000'000LL+at.QuadPart%freq.QuadPart*1'000'000'000LL/freq.QuadPart;
-                        const auto late=clock_ns()-target_ns;
-                        if(late>=0)end.displayTime=std::max<XrTime>(end.displayTime,prediction.predictedDisplayTime+(late/physical+1)*physical);
+                    trace(7,packet->sequence);
+                    result=real_wait(prediction);
+                    if(XR_SUCCEEDED(result)) {
+                        waited=true;trace(6,packet->sequence);
+                        XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+                        result=options.real.begin(options.real.session,&begin);
+                        if(XR_SUCCEEDED(result)){waited=false;begun=true;}
                     }
+                    if(XR_FAILED(result)){retire(packet);fifo->retire();fail(result);break;}
+                    result=publish(*packet);
+                    if(XR_FAILED(result)){retire(packet);fifo->retire();fail(result);break;}
+                    trace(5,packet->sequence);
+                    auto end=packet->info;
+                    // Let the runtime select the display time. CPU cadence is
+                    // not a reason to invent a different XR prediction.
+                    end.displayTime=prediction.predictedDisplayTime;
                     if(!prediction.shouldRender){end.layerCount=0;end.layers=nullptr;}
                     const auto at_end=clock_ns();
                     if(!schedule.delivered(at_end)){result=XR_ERROR_RUNTIME_FAILURE;}
                     else {
                         if(options.trace)options.trace(3,packet->sequence,end.displayTime,prediction.predictedDisplayTime);
-                        result=options.real.end(options.real.session,&end);begun=false;last_target=end.displayTime;
+                        result=options.real.end(options.real.session,&end);begun=false;
                         if(XR_SUCCEEDED(result))trace(2,packet->sequence,schedule.delay());
                     }
                 }
@@ -307,12 +320,7 @@ struct PrivateOpenXrRuntime::Impl {
         if(waited) {XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};begun=XR_SUCCEEDED(options.real.begin(options.real.session,&begin));}
         if(begun) {
             XrFrameEndInfo empty{XR_TYPE_FRAME_END_INFO};empty.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-            empty.displayTime=std::max(prediction.predictedDisplayTime,last_target+period(prediction.predictedDisplayPeriod));
-            LARGE_INTEGER q{},f{};
-            if(options.real.to_qpc && XR_SUCCEEDED(options.real.to_qpc(options.real.instance,empty.displayTime,&q))) {
-                QueryPerformanceFrequency(&f);const auto display_ns=q.QuadPart/f.QuadPart*1'000'000'000LL+q.QuadPart%f.QuadPart*1'000'000'000LL/f.QuadPart;
-                empty.displayTime+=std::max<std::int64_t>(0,clock_ns()-display_ns)+period(prediction.predictedDisplayPeriod);
-            }
+            empty.displayTime=prediction.predictedDisplayTime;
             options.real.end(options.real.session,&empty);
         }
     }

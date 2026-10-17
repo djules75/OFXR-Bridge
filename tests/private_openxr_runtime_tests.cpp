@@ -46,6 +46,9 @@ struct Fixture {
     std::atomic_uint real_acquires{},real_waits{},real_begins{},real_ends{};
     bool cycle_waited{},cycle_begun{};
     bool throttled{true},real_common{};
+    std::atomic_bool check_intake_window{};
+    std::int64_t intake_deadline{};
+    std::atomic_uint missed_intake{},empty_ends{};
     unsigned expected_views{1};
     std::function<XrResult(XrSwapchain,unsigned)> release_callback;
     std::function<D3D12_RESOURCE_STATES()> create_state;
@@ -85,9 +88,10 @@ struct Fixture {
     static XrResult XRAPI_CALL wait(XrSession,const XrFrameWaitInfo*,XrFrameState* output) {
         auto& f=*current;const auto n=++f.real_waits;
         check(!f.cycle_waited && !f.cycle_begun,"one real Wait per cycle");f.cycle_waited=true;
-        // Deliberately alternate an unthrottled and 3-refresh horizon. XR time
-        // has a different epoch than QPC, exercising the actual conversion.
-        f.raw_prediction=epoch+ns()+((!f.throttled || n%2)?period:period*3);
+        // Vary the runtime horizon while retaining the monotonic prediction
+        // required by OpenXR. XR time deliberately has another epoch than QPC.
+        f.raw_prediction=std::max(f.raw_prediction+1,epoch+ns()+((!f.throttled || n%2)?period:period*3));
+        f.intake_deadline=ns()+period*3/4;
         output->predictedDisplayTime=f.raw_prediction;output->predictedDisplayPeriod=(!f.throttled || n%2)?period:period*2;output->shouldRender=XR_TRUE;return XR_SUCCESS;
     }
     static XrResult XRAPI_CALL begin(XrSession,const XrFrameBeginInfo*){auto& f=*current;check(f.cycle_waited && !f.cycle_begun,"real Begin follows real Wait");f.cycle_waited=false;f.cycle_begun=true;++f.real_begins;return XR_SUCCESS;}
@@ -95,8 +99,10 @@ struct Fixture {
         auto& f=*current;
         check(f.cycle_begun && !f.cycle_waited,"real End follows real Begin");f.cycle_begun=false;
         const auto start=ns();
+        if(!info->layerCount){++f.empty_ends;return XR_SUCCESS;}
+        if(f.check_intake_window && start>f.intake_deadline)++f.missed_intake;
         if(info->layerCount){std::unique_lock lock(f.mutex);f.end_entered=true;f.changed.notify_all();f.changed.wait(lock,[&]{return !f.block_end.load();});}
-        check(info->displayTime>=f.raw_prediction,"runtime target never rewritten backwards");
+        check(info->displayTime==f.raw_prediction,"End must retain this cycle's exact runtime prediction");
         unsigned color{};float position{};
         if(info->layerCount) {
             auto* p=reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
@@ -139,8 +145,8 @@ struct Fixture {
         auto& f=*current;auto& chain=f.chains.at(handle);*count=2;if(!capacity)return XR_SUCCESS;if(capacity<2)return XR_ERROR_SIZE_INSUFFICIENT;
         for(unsigned i=0;i<2;++i)if(f.native12)reinterpret_cast<XrSwapchainImageD3D12KHR*>(images)[i].texture=chain.d12[i].Get();else reinterpret_cast<XrSwapchainImageD3D11KHR*>(images)[i].texture=chain.d11[i].Get();return XR_SUCCESS;
     }
-    static XrResult XRAPI_CALL acquire(XrSwapchain h,const XrSwapchainImageAcquireInfo*,std::uint32_t* index){auto& f=*current;auto& c=f.chains.at(h);check(!c.owned,"physical image ownership");c.acquired=(c.released+1)%2;c.owned=true;c.waited=false;*index=c.acquired;++f.real_acquires;return XR_SUCCESS;}
-    static XrResult XRAPI_CALL wait_image(XrSwapchain h,const XrSwapchainImageWaitInfo*){auto& c=current->chains.at(h);check(c.owned,"physical wait after acquire");c.waited=true;return XR_SUCCESS;}
+    static XrResult XRAPI_CALL acquire(XrSwapchain h,const XrSwapchainImageAcquireInfo*,std::uint32_t* index){auto& f=*current;check(f.cycle_begun,"real image preparation belongs after Begin");auto& c=f.chains.at(h);check(!c.owned,"physical image ownership");c.acquired=(c.released+1)%2;c.owned=true;c.waited=false;*index=c.acquired;++f.real_acquires;return XR_SUCCESS;}
+    static XrResult XRAPI_CALL wait_image(XrSwapchain h,const XrSwapchainImageWaitInfo*){auto& f=*current;auto& c=f.chains.at(h);check(c.owned,"physical wait after acquire");c.waited=true;return XR_SUCCESS;}
     static XrResult XRAPI_CALL release(XrSwapchain h,const XrSwapchainImageReleaseInfo*){auto& c=current->chains.at(h);check(c.owned && c.waited,"physical release after wait");c.released=c.acquired;c.owned=false;return XR_SUCCESS;}
     static XrResult XRAPI_CALL to_qpc(XrInstance,XrTime t,LARGE_INTEGER* q){LARGE_INTEGER f{};QueryPerformanceFrequency(&f);const auto n=t-epoch;q->QuadPart=n/1'000'000'000LL*f.QuadPart+n%1'000'000'000LL*f.QuadPart/1'000'000'000LL;return XR_SUCCESS;}
     XrSwapchain make_chain() {
@@ -204,11 +210,24 @@ void pending_gpu() {
     Fixture f(true);f.unblock();auto chain=f.make_chain();f.write(chain,77);
     ok(f.queue->Wait(f.gate.Get(),1),"independently hold producer GPU");f.begin_virtual();
     xr_ok(f.submit(chain,1),"accept while producer GPU is pending");std::this_thread::sleep_for(20ms);
-    check(f.real_begins==0 && f.real_acquires==0,"no real image cycle before FIFO head GPU completion");
+    check(f.real_begins==f.empty_ends && f.real_acquires==0,"no content cycle before FIFO head GPU completion (startup empty clock cycle is allowed)");
     ok(f.gate->Signal(1),"release GPU independently of XR");f.wait_count(1);xr_ok(f.transport->drain(),"GPU pending drain");check(f.pixels==std::vector<unsigned>{77},"pending frame retains actual source");
     f.transport->stop();check(!f.cycle_waited && !f.cycle_begun,"stop closes the real frame cycle");
     xr_ok(f.transport->start(),"restart same session endpoint");f.begin_virtual();xr_ok(f.submit(chain,2),"same endpoint works after restart");f.wait_count(2);xr_ok(f.transport->drain(),"restart drain");
     std::puts("Private End returns before GPU readiness; real consumer waits exact fence; session restart PASS");
 }
+void intake_window(bool d12) {
+    Fixture f(d12);f.unblock();f.throttled=false;
+    f.check_intake_window=true;
+    auto chain=f.make_chain();
+    // Saturate the private FIFO. The intentional one-refresh pacing wait must
+    // precede real Wait, leaving only the actual copy inside the runtime cycle.
+    for(unsigned i=1;i<=8;++i){f.write(chain,i*25);f.begin_virtual();xr_ok(f.submit(chain,float(i)),"accept paced packet");}
+    f.wait_count(8);xr_ok(f.transport->drain(),"paced FIFO drain");
+    check(f.missed_intake==0,"CPU pacing must not occupy the fresh runtime window (small-copy fixture)");
+    check(f.pixels==std::vector<unsigned>({25,50,75,100,125,150,175,200}),"paced delivery preserves every FIFO image");
+    for(unsigned i=1;i<f.handoffs.size();++i)check(f.handoffs[i]-f.handoffs[i-1]>=period,"fresh prediction keeps physical refresh minimum");
+    std::printf("%s fresh Wait, Begin-before-copy, exact runtime time and pre-Wait pacing PASS\n",d12?"D3D12":"D3D11");
 }
-int main(){ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();return 0;}
+}
+int main(int argc,char** argv){if(argc>1){intake_window(true);intake_window(false);return 0;}ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();intake_window(true);intake_window(false);return 0;}

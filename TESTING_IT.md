@@ -1,3 +1,11 @@
+## V572: consegna OpenXR
+
+Riavvia tray e gioco con V572. Stesso punto Ghostwire, Neural invariato, 2X,
+F9 acceso: circa 15 secondi Fidelity e 15 Djules. Controlla fluidita e meter
+del compositor. Non serve ancora un benchmark completo. Le attese del
+distributore precedono Wait; Begin precede la copia; End usa il tempo del
+runtime senza correzioni nostre. Il recupero nel visore e da verificare.
+
 ## V571: prima prova SteamVR
 
 Riavvia tray e gioco. Prima Ghostwire nello stesso punto, A/B spenti,2X,Neural invariato e F9: Fidelity -> Djules -> Hybrid -> FSR -> DLSS-G,circa15s ciascuno. Verifica movimento visibile e meter del compositor. Non rifare ancora tutto il benchmark. Su SteamVR la privatizzazione e sempre presente; A non aggiunge staging. B mantiene il controllo degli anelli. Poi MSFS strafe. Nessuna installazione automatica. V570 conservata.

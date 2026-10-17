@@ -1,3 +1,12 @@
+## V572 engineering validation
+
+34 focused checks pass in 23.56 seconds. The common SteamVR consumer paces
+before real Wait, keeps Begin before real image preparation, and uses the
+runtime's exact prediction. Actual GPU fixtures cover all existing routes,
+D3D11/D3D12, FIFO ownership, blocked GPU/runtime, route switches and unchanged
+VDXR/AFW controls. The downstream runtime is mocked. See
+[V572_VALIDATION.json](docs/V572_VALIDATION.json); headset loss recovery pending.
+
 ## V571 engineering validation
 
 34 focused checks pass, including actual GPU private endpoint/generators and unchanged VDXR/AFW controls. Exact evidence and fixture reruns: [V571_VALIDATION.json](docs/V571_VALIDATION.json). The downstream runtime is mocked; actual SteamVR visibility, cadence and performance remain owner-pending.

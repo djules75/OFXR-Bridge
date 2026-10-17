@@ -1,3 +1,9 @@
+## V572 local: OpenXR handoff after distributor pacing
+
+The common SteamVR consumer now waits before real Wait, keeps Begin before its
+GPU copy, and uses the exact runtime prediction in End. VDXR retains its path.
+Headset loss recovery is pending. See [handoff details](docs/V572_OPENXR_HANDOFF.md).
+
 ## V571 local: private SteamVR delivery
 
 Common private-image delivery across existing generators; bounded FIFO and one physical refresh between runtime handoffs. VDXR retains its path. Runtime/headset verdict pending. See [architecture and trial](docs/V571_STEAMVR_PRIVATE_RUNTIME.md).
