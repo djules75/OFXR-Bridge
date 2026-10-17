@@ -83,6 +83,17 @@ struct LauncherSettings {
     // parse_hotkey's form. No menu entry; edit tray.ini. Empty, "off" or
     // anything parse_hotkey refuses means no key.
     std::string pause_hotkey{"ctrl+alt+f7"}; // kDefaultPauseHotkey
+    // The composition's edge ghosting reduction and repeating-pattern lock
+    // (the layer's edge_ghosting_reduction and repeating_pattern_lock). On by
+    // default and not in the menu; 0 in tray.ini turns either off, and the
+    // running game follows within a quarter second of the next arm or option
+    // change. Reset to default turns them back on.
+    bool edge_ghosting_reduction{true};
+    bool repeating_pattern_lock{true};
+    // Shows "Frame generation tuning (live)..." in the menu: the diagnostic
+    // window for the composition's parameters. Off by default, set to 1 by
+    // hand in tray.ini; Reset to default leaves it as it is.
+    bool expert_mode{};
 };
 
 // A key chord for RegisterHotKey: `modifiers` in its MOD_ALT (1),

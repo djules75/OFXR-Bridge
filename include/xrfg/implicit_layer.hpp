@@ -105,6 +105,14 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_triple_frame_gen(
     const std::filesystem::path& module_directory) noexcept;
 
+// `[ofxr] edge_ghosting_reduction` and `[ofxr] repeating_pattern_lock`: the
+// composition's two refinements. On unless set to 0; followed while the
+// session runs.
+[[nodiscard]] bool read_edge_ghosting_reduction(
+    const std::filesystem::path& module_directory) noexcept;
+[[nodiscard]] bool read_repeating_pattern_lock(
+    const std::filesystem::path& module_directory) noexcept;
+
 // `[ofxr] vulkan_session_bridge`: a Vulkan game's session is handed to the
 // runtime as a D3D12 one on the layer's device, the game rendering into
 // Vulkan imports of the layer's shared textures, so every path downstream is

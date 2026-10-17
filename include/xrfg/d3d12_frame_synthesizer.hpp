@@ -293,4 +293,12 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+// The composition's two refinements as the ini sets them (edge_ghosting_
+// reduction, repeating_pattern_lock), for every synthesizer in the process.
+// Both on by default. The tray's live tuning window, where it is open
+// (expert mode), overrides them.
+void set_composition_switches(
+    bool edge_ghosting_reduction,
+    bool repeating_pattern_lock) noexcept;
+
 }  // namespace xrfg

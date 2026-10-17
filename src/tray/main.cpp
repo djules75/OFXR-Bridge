@@ -35,11 +35,6 @@ constexpr wchar_t kCleanupArgument[] = L"--cleanup-manual-arm";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kTrayId = 1;
 constexpr int kPauseHotkeyId = 1;
-// Temporary, for A/B in the headset: Ctrl+Alt+F8 toggles edge ghosting
-// reduction and Ctrl+Alt+F9 the repeating-pattern lock, through the live
-// tuning block. See toggle_tuning_switch.
-constexpr int kEdgeGhostingHotkeyId = 2;
-constexpr int kPatternLockHotkeyId = 3;
 constexpr UINT kArmPollMilliseconds = 250;
 constexpr std::uint32_t kImplementationVersion = XRFG_IMPLEMENTATION_VERSION;
 // One Donate entry each, creator first, as in the About box and the README.
@@ -911,7 +906,10 @@ void apply_pause_hotkey(AppState& state, const std::string& setting) {
 // recorder's two knobs that only the layer's ini holds.
 void reset_to_factory_settings(AppState& state) {
     unregister_pause_hotkey(state);
+    // expert_mode is a hand-set key for testers; a reset leaves it as it is.
+    const bool expert_mode = state.settings.expert_mode;
     state.settings = xrfg::standalone::LauncherSettings{};
+    state.settings.expert_mode = expert_mode;
     // write_runtime_configuration carries max_file_mb and flush_each_event
     // forward from this version's ini, now or at the next arm, so the
     // defaults are written there first.
@@ -993,9 +991,9 @@ struct TuningSwitch {
 };
 
 constexpr std::array<TuningSwitch, 2> kTuningSwitches{{
-    {L"Edge ghosting reduction (Ctrl+Alt+F8)",
+    {L"Edge ghosting reduction",
      &xrfg::live_tuning::Block::edge_ghosting_reduction},
-    {L"Repeating-pattern lock (Ctrl+Alt+F9)",
+    {L"Repeating-pattern lock",
      &xrfg::live_tuning::Block::pattern_lock},
 }};
 
@@ -1084,8 +1082,8 @@ LRESULT CALLBACK tuning_procedure(
     }
 }
 
-// Creates the shared block on the built-in values the first time either the
-// window or the hotkey needs it.
+// Creates the shared block the first time the window needs it, on the
+// built-in values with the two switches as tray.ini has them.
 [[nodiscard]] bool ensure_tuning_block(AppState& state) {
     if (state.tuning_block != nullptr) {
         return true;
@@ -1104,32 +1102,12 @@ LRESULT CALLBACK tuning_procedure(
     // Values first, then the header that makes the block valid.
     xrfg::live_tuning::Block values = xrfg::live_tuning::kDefaults;
     values.magic = 0;
+    values.edge_ghosting_reduction = state.settings.edge_ghosting_reduction ? 1U : 0U;
+    values.pattern_lock = state.settings.repeating_pattern_lock ? 1U : 0U;
     *state.tuning_block = values;
     MemoryBarrier();
     state.tuning_block->magic = xrfg::live_tuning::kMagic;
     return true;
-}
-
-// Temporary: the hotkeys flip one of the window's switches in the block, and
-// its checkbox when the window is open, with a different beep for on and off
-// so the state can be told apart in the headset.
-void toggle_tuning_switch(AppState& state, std::size_t index) {
-    if (!ensure_tuning_block(state)) {
-        return;
-    }
-    const auto field = kTuningSwitches[index].field;
-    const bool enabled = state.tuning_block->*field == 0U;
-    if (state.tuning_window != nullptr) {
-        SendMessageW(state.tuning_switches[index], BM_SETCHECK,
-            enabled ? BST_CHECKED : BST_UNCHECKED, 0);
-        write_tuning(state);
-    } else {
-        state.tuning_block->*field = enabled ? 1U : 0U;
-        MemoryBarrier();
-        InterlockedIncrement(
-            reinterpret_cast<volatile LONG*>(&state.tuning_block->sequence));
-    }
-    static_cast<void>(MessageBeep(enabled ? MB_ICONASTERISK : MB_ICONHAND));
 }
 
 void show_tuning_window(AppState& state) {
@@ -1315,11 +1293,15 @@ void show_context_menu(AppState& state) {
             (state.settings.nvidia_bidirectional ? MF_CHECKED : MF_UNCHECKED),
         toggle_nvidia_bidirectional,
         L"NVIDIA bidirectional consistency");
-    AppendMenuW(
-        backend_menu,
-        MF_STRING,
-        show_live_tuning,
-        L"Frame generation tuning (live)...");
+    // Expert mode only (tray.ini expert_mode=1): a diagnostic window, not a
+    // setting.
+    if (state.settings.expert_mode) {
+        AppendMenuW(
+            backend_menu,
+            MF_STRING,
+            show_live_tuning,
+            L"Frame generation tuning (live)...");
+    }
     AppendMenuW(
         menu,
         MF_POPUP,
@@ -1547,7 +1529,8 @@ void handle_command(AppState& state, UINT command) {
                 L"Optical flow: NVIDIA Medium at 50%, bidirectional "
                 L"consistency off. Prefer FPS over latency: on. 3X Frame "
                 L"Gen: off. Lower VRAM: on. FPS overlay: upper right. Bridge "
-                L"flight recorder: off. Pause key: Ctrl + Alt + F7. Settings "
+                L"flight recorder: off. Pause key: Ctrl + Alt + F7. Edge "
+                L"ghosting reduction and repeating-pattern lock: on. Settings "
                 L"only reachable in tray.ini go back to their defaults too.\n\n"
                 L"The FPS overlay, the flight recorder and 3X Frame Gen change "
                 L"in running games at once; the rest applies the next time the "
@@ -1741,8 +1724,6 @@ LRESULT CALLBACK window_procedure(
         return 0;
     case WM_HOTKEY:
         if (wparam == kPauseHotkeyId) handle_command(*state, toggle_pause);
-        if (wparam == kEdgeGhostingHotkeyId) toggle_tuning_switch(*state, 0);
-        if (wparam == kPatternLockHotkeyId) toggle_tuning_switch(*state, 1);
         return 0;
     case WM_CLOSE: {
         std::wstring error;
@@ -1777,8 +1758,6 @@ LRESULT CALLBACK window_procedure(
         std::wstring error;
         if (!disarm_bridge(*state, &error))
             log_lifecycle(state->local_directory, L"destroy-cleanup", error);
-        UnregisterHotKey(window, kEdgeGhostingHotkeyId);
-        UnregisterHotKey(window, kPatternLockHotkeyId);
         Shell_NotifyIconW(NIM_DELETE, &state->icon);
         PostQuitMessage(0);
         return 0;
@@ -1969,18 +1948,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (window) DestroyWindow(window);
         CloseHandle(single_instance);
         return EXIT_FAILURE;
-    }
-    // Temporary A/B key; held for as long as the tray runs. A key another
-    // program already holds is left to it.
-    if (!RegisterHotKey(window, kEdgeGhostingHotkeyId,
-            MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_F8)) {
-        log_lifecycle(state.local_directory, L"edge-ghosting-hotkey",
-            last_error_message(L"Registering Ctrl+Alt+F8"));
-    }
-    if (!RegisterHotKey(window, kPatternLockHotkeyId,
-            MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_F9)) {
-        log_lifecycle(state.local_directory, L"pattern-lock-hotkey",
-            last_error_message(L"Registering Ctrl+Alt+F9"));
     }
 
     // Arm straight away: launching the tray is the user asking for the

@@ -22,6 +22,27 @@ int main() {
 
     const LauncherSettings release_defaults;
     const std::string default_runtime_ini = build_runtime_ini(release_defaults);
+    // The composition's two switches: on by default, in both inis, round-trip;
+    // expert_mode is tray.ini only and off by default.
+    {
+        LauncherSettings off;
+        off.edge_ghosting_reduction = false;
+        off.repeating_pattern_lock = false;
+        off.expert_mode = true;
+        const LauncherSettings round_trip = parse_settings(serialize_settings(off));
+        if (!release_defaults.edge_ghosting_reduction ||
+            !release_defaults.repeating_pattern_lock || release_defaults.expert_mode ||
+            !contains(default_runtime_ini, "edge_ghosting_reduction=1") ||
+            !contains(default_runtime_ini, "repeating_pattern_lock=1") ||
+            contains(default_runtime_ini, "expert_mode") ||
+            round_trip.edge_ghosting_reduction || round_trip.repeating_pattern_lock ||
+            !round_trip.expert_mode ||
+            !contains(build_runtime_ini(round_trip), "edge_ghosting_reduction=0") ||
+            !contains(build_runtime_ini(round_trip), "repeating_pattern_lock=0")) {
+            std::cerr << "composition switches or expert_mode did not round-trip\n";
+            return 1;
+        }
+    }
     if (release_defaults.overlay_position != xrfg::FpsOverlayPosition::upper_right ||
         !contains(default_runtime_ini, "[overlay]\r\nposition=upper_right")) return 1;
     for (auto position : {xrfg::FpsOverlayPosition::off, xrfg::FpsOverlayPosition::upper_left,

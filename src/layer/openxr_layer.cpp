@@ -12523,6 +12523,26 @@ struct PrivateDepthStrip {
 // follows primes rather than pairing across the change. The application
 // sees its period step between two and three display periods at its next
 // wait, and one frame without synthetics.
+// The ini's edge_ghosting_reduction and repeating_pattern_lock, followed
+// while the session runs like triple_frame_gen: a read every quarter second,
+// handed to the synthesizers, which take it at their next pair.
+void follow_composition_switches() noexcept {
+    static std::atomic<std::int64_t> next_poll{0};
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    if (now < next_poll.load(std::memory_order_relaxed)) {
+        return;
+    }
+    next_poll.store(
+        now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                  std::chrono::milliseconds(250))
+                  .count(),
+        std::memory_order_relaxed);
+    const auto directory = current_layer_directory();
+    xrfg::set_composition_switches(
+        xrfg::implicit_layer::read_edge_ghosting_reduction(directory),
+        xrfg::implicit_layer::read_repeating_pattern_lock(directory));
+}
+
 void apply_live_frame_multiplier(
     const std::shared_ptr<SessionState>& state,
     bool use_continuous_presenter) noexcept {
@@ -12728,6 +12748,7 @@ XrResult layer_end_frame_impl(
     };
 
     apply_live_frame_multiplier(state, use_continuous_presenter);
+    follow_composition_switches();
     log_video_memory_periodically(*state);
     apply_embedded_control(state, use_continuous_presenter);
     const bool manually_disarmed = state->manual_control.stop_requested();

@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -327,6 +328,33 @@ constexpr UINT kEncodeSrgbFlowInputFlag = 2U;
     return packed << 8U;
 }
 
+// The ini's switches (set_composition_switches): bit 0 edge ghosting
+// reduction, bit 1 repeating-pattern lock.
+std::atomic<std::uint32_t> g_composition_switches{3U};
+
+// Where the live window is not open: the built-in values with the ini's two
+// switches, in the same constants. Both on leaves the constants alone, which
+// is what the shader's built-in values already are. Each change of the
+// switches is recorded once, as embedded_configuration result=812 with a the
+// two bits.
+void apply_composition_switches(SynthesisParameters& parameters) noexcept {
+    static std::atomic<std::uint32_t> recorded{0xFFFFFFFFU};
+    const std::uint32_t switches = g_composition_switches.load(std::memory_order_relaxed);
+    if (recorded.exchange(switches, std::memory_order_relaxed) != switches) {
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::embedded_configuration,
+            812,
+            switches);
+    }
+    if (switches == 3U) {
+        return;
+    }
+    parameters.game_motion_padding = 1U | ((switches & 1U) != 0U ? 2U : 0U) |
+        ((switches & 2U) != 0U ? 4U : 0U) | (3U << 4U) | (1U << 8U);
+    parameters.game_motion_rect = {8.0F, 24.0F / 255.0F, 2.0F / 255.0F, 1.0F};
+    parameters.game_motion_scale = {0.1F, 1.0F / 255.0F};
+}
+
 // The tray's live tuning window (xrfg::live_tuning) for edge ghosting
 // reduction, carried in the game-motion constants, which only the
 // game-motion branch reads; frame_synthesis.hlsl decodes them (see
@@ -354,12 +382,14 @@ void apply_live_composition_tuning(SynthesisParameters& parameters) noexcept {
     if (block == nullptr) {
         const auto now = std::chrono::steady_clock::now();
         if (now < next_attempt) {
+            apply_composition_switches(parameters);
             return;
         }
         next_attempt = now + std::chrono::seconds(1);
         mapping = OpenFileMappingW(
             FILE_MAP_READ, FALSE, xrfg::live_tuning::kMappingName);
         if (mapping == nullptr) {
+            apply_composition_switches(parameters);
             return;
         }
         block = static_cast<const xrfg::live_tuning::Block*>(MapViewOfFile(
@@ -367,12 +397,14 @@ void apply_live_composition_tuning(SynthesisParameters& parameters) noexcept {
         if (block == nullptr) {
             CloseHandle(mapping);
             mapping = nullptr;
+            apply_composition_switches(parameters);
             return;
         }
     }
     const volatile xrfg::live_tuning::Block* live = block;
     if (live->magic != xrfg::live_tuning::kMagic ||
         live->version != xrfg::live_tuning::kVersion) {
+        apply_composition_switches(parameters);
         return;
     }
     // One copy of the whole block, so the values used and recorded belong
@@ -5350,6 +5382,14 @@ bool D3D12FrameSynthesizer::initialized() const noexcept {
     } catch (...) {
         return false;
     }
+}
+
+void set_composition_switches(
+    bool edge_ghosting_reduction,
+    bool repeating_pattern_lock) noexcept {
+    g_composition_switches.store(
+        (edge_ghosting_reduction ? 1U : 0U) | (repeating_pattern_lock ? 2U : 0U),
+        std::memory_order_relaxed);
 }
 
 }  // namespace xrfg
