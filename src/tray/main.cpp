@@ -982,9 +982,13 @@ void apply_pause_hotkey(AppState& state, const std::string& setting) {
     log_lifecycle(state.local_directory, L"pause-hotkey-changed");
 }
 
+void write_tuning(AppState& state);
+void reset_tuning_controls(AppState& state);
+
 // Everything tray.ini holds goes back to LauncherSettings' defaults, the
 // keys with no menu entry and the pause key included, and so do the flight
-// recorder's two knobs that only the layer's ini holds.
+// recorder's two knobs that only the layer's ini holds, and the live tuning
+// window if it was opened.
 void reset_to_factory_settings(AppState& state) {
     unregister_pause_hotkey(state);
     // expert_mode is a hand-set key for testers; a reset leaves it as it is.
@@ -1004,6 +1008,12 @@ void reset_to_factory_settings(AppState& state) {
     WritePrivateProfileStringW(L"diagnostics", L"flush_each_event", L"0",
         runtime_ini.c_str());
     update_runtime_options(state);
+    // Once opened, the window's block is what a running game follows instead
+    // of the ini's switches, so its controls and the block go back too.
+    if (state.tuning_window != nullptr) {
+        reset_tuning_controls(state);
+        write_tuning(state);
+    }
     if (state.armed) register_pause_hotkey(state);
     log_lifecycle(state.local_directory, L"reset-to-default");
 }
