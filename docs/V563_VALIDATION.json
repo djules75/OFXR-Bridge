@@ -1,0 +1,30 @@
+{
+  "version": "V563",
+  "base": "2d766382410967e58c2b7f672d8de12e2c975046",
+  "status": "runtime-pending",
+  "passed": 16,
+  "failed": 0,
+  "ctest_seconds": 16.03,
+  "headset_validation": "Owner V562: stationary improved, green on mouse turn and54->45fps unresolved. V563 reduces CPU decode cost and adds missing pre-dispatch evidence; no green-motion correction or headset FPS gain claimed.",
+  "ipc_abi": 55801,
+  "provider_abi": 45601,
+  "decoder": "Same exhaustive per-row luma/preamble/fit/CRC and ambiguity reduction, bounded4CPU lanes, no skipped rows and no GPU/presentation/frame queue changes.",
+  "captured_decoder_median_ms": {
+    "serial": 1.6015,
+    "parallel": 0.4593,
+    "token0": 5040,
+    "token1": 5041,
+    "ambiguous": [
+      false,
+      false
+    ],
+    "samples": 14,
+    "hardware_readback": true
+  },
+  "afw_motion_math_changed": false,
+  "shaders_changed": false,
+  "presentation_pacing_changed": false,
+  "swapchain_counts_changed": false,
+  "marker_geometry_changed": false,
+  "v558_csv_preserved": true
+}

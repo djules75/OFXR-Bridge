@@ -1183,6 +1183,48 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
         const auto result=forward();invocation_camera.finish_public(result);return result;
     };
     NgxEvaluationBoundary scope(slot,state().modules[slot].typed_implementation,native_available);
+    if(sr && scope.outermost() && !state().modules[slot].typed_implementation &&
+        crimson_desert_process() && two_frame_capture_images_active() && native_ingress::luke_detected()) {
+        // F8 evidence before the generic dispatcher forwards to REALVR/native
+        // SR. Do not publish a guide, alter a camera or select runtime motion.
+        auto motion=native(get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_MotionVectors));
+        auto command=native(list);
+        if(motion && command) {
+            ComPtr<ID3D12Device> owner;
+            if(SUCCEEDED(motion->GetDevice(IID_PPV_ARGS(&owner)))) {
+                const auto desc=motion->GetDesc();
+                DlssMotionVectorPublication original{};
+                const bool camera=native_ingress::apply_camera(original,command.Get());
+                TwoFrameImageInfo info{};info.stage="crimson_public_motion_before_dispatch";
+                info.stream=reinterpret_cast<UINT64>(h);info.capture_serial=original.camera_frame_token;
+                info.width=UINT(desc.Width);info.height=desc.Height;
+                info.scale_x=get<float>(p,NVSDK_NGX_Parameter_MV_Scale_X,1);
+                info.scale_y=get<float>(p,NVSDK_NGX_Parameter_MV_Scale_Y,1);
+                info.jitter_x=get<float>(p,NVSDK_NGX_Parameter_Jitter_Offset_X);
+                info.jitter_y=get<float>(p,NVSDK_NGX_Parameter_Jitter_Offset_Y);
+                two_frame_capture_record_ng_x(info,owner.Get(),command.Get(),motion.Get(),
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                TwoFrameGuideContract contract{};contract.stage="crimson_public_camera_before_dispatch";
+                contract.stream=info.stream;contract.native_camera_token=original.camera_frame_token;
+                contract.motion_width=info.width;contract.motion_height=info.height;
+                contract.scale_x=info.scale_x;contract.scale_y=info.scale_y;
+                contract.jitter_x=info.jitter_x;contract.jitter_y=info.jitter_y;
+                contract.camera_near=original.camera_near;contract.camera_far=original.camera_far;
+                contract.camera_fov_vertical=original.camera_fov_vertical;
+                contract.raw_camera_motion_included=original.raw_camera_motion_included;
+                contract.depth_inverted=original.depth_inverted;contract.depth_infinite=original.depth_infinite;
+                contract.camera_position=original.camera_position;contract.camera_right=original.camera_right;
+                contract.camera_up=original.camera_up;contract.camera_forward=original.camera_forward;
+                contract.view_to_clip=original.camera_view_to_clip;contract.clip_to_view=original.camera_clip_to_view;
+                contract.raw_clip_to_previous_clip=original.raw_clip_to_previous_clip;
+                contract.raw_previous_clip_to_clip=original.raw_previous_clip_to_clip;
+                two_frame_capture_guide_contract(contract);
+                two_frame_capture_timeline("crimson_public_camera",camera?1:0,info.stream,
+                    original.camera_frame_token,slot);
+            }
+        }
+    }
+
     static std::atomic_uint boundary_reports{};
     if(boundary_reports.fetch_add(1,std::memory_order_relaxed)<16)
         log("ngx_observation_boundary",slot,state().modules[slot].typed_implementation,

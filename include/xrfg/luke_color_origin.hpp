@@ -218,6 +218,14 @@ inline float luke_origin_luma(const std::byte* pixel, DXGI_FORMAT format) noexce
     default: return NAN;
     }
 }
+// Immutable mapped readback descriptions; no GPU work or identity inference.
+struct LukeColorOriginImage {
+    const std::byte* pixels{};
+    DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
+    unsigned width{},height{},row_pitch{};
+};
+void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
+    std::span<LukeColorOriginDecode> results) noexcept;
 struct LukeColorOriginRect { unsigned x{}, y{}, width{}, height{}; };
 inline constexpr unsigned kLukeOriginHeight = 8;
 inline constexpr unsigned kLukeOriginMargin = 2;

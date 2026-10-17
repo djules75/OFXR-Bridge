@@ -1590,7 +1590,11 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         report_stage(AfwStage::command_list_reset, S_OK, source_eye,
             guide.publication);
         if (two_frame_capture_active()) {
-            if (guide.output != nullptr) {
+            // Interleaved native output is a reused public SR allocation,
+            // not this retained production's colour. Keep the exact XR source
+            // and completion-stage colour; reserve F8 budget for pre-dispatch
+            // motion instead of two redundant full-size mutable SR images.
+            if (guide.output != nullptr && !(interleaved && guide.raw_motion_native_span==2)) {
                 TwoFrameImageInfo output{};
                 output.stage = "afw_ngx_output_at_consume";
                 output.stream = guide.stream;

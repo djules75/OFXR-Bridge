@@ -24,6 +24,7 @@ public:
     NgxEvaluationBoundary(const NgxEvaluationBoundary&) = delete;
     NgxEvaluationBoundary& operator=(const NgxEvaluationBoundary&) = delete;
     bool observes() const noexcept { return owns_; }
+    bool outermost() const noexcept { return parent_==nullptr; }
     bool can_complete() const noexcept { return owns_ && !recursive_; }
 };
 }

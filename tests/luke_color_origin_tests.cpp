@@ -6,7 +6,11 @@
 #include <wrl/client.h>
 #include <array>
 #include <chrono>
+#include <thread>
 #include <iostream>
+#include <fstream>
+#include <chrono>
+#include <thread>
 #include <stdexcept>
 #include <vector>
 #include <limits>
@@ -190,14 +194,14 @@ struct Gpu {
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> list;
-    Gpu() {
+    Gpu(bool hardware=false) {
         ComPtr<ID3D12Debug> debug;
         check(D3D12GetDebugInterface(IID_PPV_ARGS(debug.GetAddressOf())),"debug layer");
         debug->EnableDebugLayer();
         ComPtr<IDXGIFactory6> factory; ComPtr<IDXGIAdapter> adapter;
         check(CreateDXGIFactory1(IID_PPV_ARGS(factory.GetAddressOf())),"DXGI");
         check(factory->EnumWarpAdapter(IID_PPV_ARGS(adapter.GetAddressOf())),"WARP");
-        check(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(device.GetAddressOf())),"device");
+        check(D3D12CreateDevice(hardware?nullptr:adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(device.GetAddressOf())),"device");
         const D3D12_COMMAND_QUEUE_DESC desc{};
         check(device->CreateCommandQueue(&desc,IID_PPV_ARGS(queue.GetAddressOf())),"queue");
         check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(allocator.GetAddressOf())),"allocator");
@@ -494,7 +498,38 @@ void gpu_tests() {
 
 }
 }
-int main() {
-    try { codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }
+
+void cpu_batch_tests() {
+ constexpr unsigned w=260,pitch=w*4;
+ std::array<unsigned,2> heights{67,303};std::array<std::vector<std::byte>,2> bytes;
+ std::array<xrfg::LukeColorOriginImage,2> images;std::array<xrfg::LukeColorOriginDecode,2> results;
+ for(unsigned i=0;i<2;++i){bytes[i].resize(pitch*heights[i],std::byte{128});images[i]={bytes[i].data(),DXGI_FORMAT_R8G8B8A8_UNORM,w,heights[i],pitch};
+  for(unsigned row:{1u,heights[i]-1})for(unsigned x=0;x<256;++x)xrfg::luke_origin_pixel(bytes[i].data()+row*pitch+(x+2)*4,images[i].format,xrfg::luke_origin_white(100+i,x));}
+ for(unsigned n=0;n<20;++n){xrfg::decode_luke_origin_images(images,results);require(results[0].token==100&&!results[0].ambiguous&&results[1].token==101&&!results[1].ambiguous,"parallel rows mixed or lost exact independent identities");}
+ for(unsigned x=0;x<256;++x)xrfg::luke_origin_pixel(bytes[0].data()+33*pitch+(x+2)*4,images[0].format,xrfg::luke_origin_white(103,x));
+ xrfg::decode_luke_origin_images(images,results);require(results[0].ambiguous&&results[1].token==101&&!results[1].ambiguous,"parallel reader lost conflicting-row rejection");
+ std::array<std::thread,4> callers;
+ for(auto& t:callers)t=std::thread([&]{for(unsigned n=0;n<5;++n){std::array<xrfg::LukeColorOriginDecode,2> out;xrfg::decode_luke_origin_images(images,out);require(out[0].ambiguous&&out[1].token==101&&!out[1].ambiguous,"concurrent decode batches mixed independent results");}});
+ for(auto& t:callers)t.join();
+ images[0].row_pitch=3;xrfg::decode_luke_origin_images(images,results);require(!results[0].token&&results[1].token==101,"invalid stride consumed or poisoned peer");
+}
+int captured_decode_benchmark(char** argv) {
+ constexpr unsigned width=260,height=303,pitch=14080;
+ std::array<std::vector<std::byte>,2> bytes;
+ std::array<xrfg::LukeColorOriginImage,2> images;
+ for(unsigned i=0;i<2;++i){std::ifstream in(argv[1+i],std::ios::binary);require(bool(in),"decode benchmark capture missing");bytes[i].resize(std::size_t(pitch)*height);in.read(reinterpret_cast<char*>(bytes[i].data()),bytes[i].size());require(in.gcount()==bytes[i].size(),"decode benchmark image truncated");images[i]={bytes[i].data(),DXGI_FORMAT_R8G8B8A8_UNORM,width,height,pitch};}
+
+ Gpu gpu(true);std::array<ComPtr<ID3D12Resource>,2> readback,uploads;
+ for(unsigned i=0;i<2;++i){for(unsigned j=0;j<2;++j){D3D12_HEAP_PROPERTIES heap{};heap.Type=j?D3D12_HEAP_TYPE_READBACK:D3D12_HEAP_TYPE_UPLOAD;D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;d.Width=bytes[i].size();d.Height=d.DepthOrArraySize=d.MipLevels=d.SampleDesc.Count=1;d.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;auto& r=j?readback[i]:uploads[i];check(gpu.device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,j?D3D12_RESOURCE_STATE_COPY_DEST:D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,IID_PPV_ARGS(&r)),"benchmark hardware buffer");if(!j){void* data{};check(r->Map(0,nullptr,&data),"benchmark upload map");std::memcpy(data,bytes[i].data(),bytes[i].size());r->Unmap(0,nullptr);}}gpu.list->CopyResource(readback[i].Get(),uploads[i].Get());}
+ gpu.submit();ComPtr<ID3D12Fence> fence;check(gpu.device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence)),"benchmark fence");HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);check(gpu.queue->Signal(fence.Get(),1),"benchmark signal");check(fence->SetEventOnCompletion(1,event),"benchmark event");require(WaitForSingleObject(event,5000)==WAIT_OBJECT_0,"benchmark GPU timeout");CloseHandle(event);
+ for(unsigned i=0;i<2;++i){void* data{};check(readback[i]->Map(0,nullptr,&data),"benchmark readback map");images[i].pixels=static_cast<const std::byte*>(data);}
+ const auto serial=[&](){std::array<xrfg::LukeColorOriginDecode,2> out{};std::vector<float> row(width);
+  for(unsigned i=0;i<2;++i)for(unsigned y=0;y<height;++y){for(unsigned x=0;x<width;++x)row[x]=xrfg::luke_origin_luma(images[i].pixels+y*pitch+x*4,images[i].format);const auto d=xrfg::decode_luke_origin_row(row);out[i].ambiguous|=d.ambiguous;if(d.token){out[i].ambiguous|=out[i].token&&out[i].token!=d.token;out[i].token=d.token;}}return out;};
+ const auto expected=serial();std::array<xrfg::LukeColorOriginDecode,2> results;std::vector<double> serial_ms,parallel_ms;
+ for(unsigned n=0;n<15;++n){auto a=std::chrono::steady_clock::now();const auto reference=serial();auto b=std::chrono::steady_clock::now();xrfg::decode_luke_origin_images(images,results);auto c=std::chrono::steady_clock::now();for(unsigned i=0;i<2;++i)require(results[i].token==reference[i].token&&results[i].ambiguous==reference[i].ambiguous,"captured parallel decode differs from original exhaustive search");if(n){serial_ms.push_back(std::chrono::duration<double,std::milli>(b-a).count());parallel_ms.push_back(std::chrono::duration<double,std::milli>(c-b).count());}}
+ std::sort(serial_ms.begin(),serial_ms.end());std::sort(parallel_ms.begin(),parallel_ms.end());std::cout<<"CAPTURED_DECODE serial_ms="<<serial_ms[7]<<" parallel_ms="<<parallel_ms[7]<<" token0="<<expected[0].token<<" token1="<<expected[1].token<<" ambiguous="<<expected[0].ambiguous<<','<<expected[1].ambiguous<<'\n';return 0;
+}
+int main(int argc,char** argv) {
+    try { if(argc==3)return captured_decode_benchmark(argv);cpu_batch_tests();codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }
     catch(const std::exception& e) {std::cerr<<"Compact origin FAIL: "<<e.what()<<"\n";return 1;}
 }

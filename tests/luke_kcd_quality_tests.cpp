@@ -22,6 +22,8 @@ namespace quality {
 using Microsoft::WRL::ComPtr;
 using xrfg::DlssMotionVectorFrame;
 constexpr unsigned width=512,height=512;
+bool consumer_probe{};
+float consumer_probe_gain=1.F;
 constexpr double near_plane=.1,baseline=.064,plane_z=-3;
 constexpr double relative_xr_yaw=.025;
 struct Scene {
@@ -60,6 +62,11 @@ void __stdcall observe_evaluate(xrfg::FrameWarpEvaluateParams& params) {
         provider.valid&=motion.Width==provider.expected_width&&motion.Height==provider.expected_height;
     }
     if(!provider.valid)std::cerr<<"Provider mismatch mode="<<params.mode<<" shading="<<params.shading_rate<<" expected="<<provider.expected_shading_rate<<" gain="<<params.motion_scale[0]<<','<<params.motion_scale[1]<<" expected_gain="<<provider.expected_gain_x<<','<<provider.expected_gain_y<<" mvtype="<<params.motion_vectors_type<<" crop="<<provider.expected_width<<'x'<<provider.expected_height<<'\n';
+    if(consumer_probe) {
+        params.debug=true;
+        params.motion_scale[0]*=consumer_probe_gain;
+        params.motion_scale[1]*=consumer_probe_gain;
+    }
     provider.original(params);
 }
 void require(bool value,const char* message) {if(!value)throw std::runtime_error(message);}
@@ -115,6 +122,7 @@ std::array<double,3> project(const Camera& camera,const std::array<double,3>& po
         .5-.5*(point[1]/-vz-camera.center_y),near_plane/-vz};
 }
 std::array<unsigned char,4> color(const std::array<double,3>& point) {
+    if(consumer_probe) {const auto g=static_cast<unsigned char>(80+60*std::sin(point[0]*8)*std::cos(point[1]*7));return {g,g,g,255};}
     return {static_cast<unsigned char>(20+100*(1+std::sin(point[0]*8))),
         static_cast<unsigned char>(40+80*(1+std::sin(point[1]*7))),
         static_cast<unsigned char>(40+80*(1+std::sin((point[0]+point[1])*6))),255};
@@ -145,10 +153,15 @@ FARPROC WINAPI quality_get_proc_address(HMODULE module,LPCSTR name) {
     return actual;
 }
 
+#include "luke_capture_replay.inc"
+
 int main(int argc,char** argv) {try {
+    if(argc==4 && std::filesystem::is_directory(argv[2]))return replay::run(argv[1],argv[2],argv[3]);
     using namespace quality;
     require(argc>=2 && argc<=4,"provider path argument missing");
     const bool interleaved=argc==4 && std::string_view(argv[3])=="interleaved";
+    consumer_probe=GetEnvironmentVariableW(L"XRFG_TEST_AFW_CONSUMER_PROBE",nullptr,0)!=0;
+    if(GetEnvironmentVariableW(L"XRFG_TEST_AFW_CONSUMER_HALF",nullptr,0))consumer_probe_gain=.5F;
     original_provider_file=argv[1];
     const int shading=argc>=3 ? std::stoi(argv[2]) : 0;
     const auto diagnostic_root=std::filesystem::temp_directory_path()/
@@ -189,11 +202,12 @@ int main(int argc,char** argv) {try {
             nullptr,IID_PPV_ARGS(&result)),"fixture buffer");return result;};
     bool all_camera_bits_match=true,all_mode_pixels_match=true;
     for(const auto& scene:scenes) for(unsigned span:{1u,2u}) for(int mode:{1,2,3}) {
+        if(consumer_probe && (std::string_view(scene.name)!="full" || span!=2 || mode!=3))continue;
         xrfg::LukeAfwSynthesizer synth;check(synth.initialize(device.Get(),queue.Get(),std::filesystem::path(argv[1])),"full AFW provider initialization");
         std::vector<std::shared_ptr<DlssMotionVectorFrame>> frames;
         std::vector<ComPtr<ID3D12Resource>> colors;
         xrfg::LukeCameraOrigin origin;require(origin.update(1,1,{0,0,0}).has_value(),"oracle camera origin");
-        double error_sum{};std::uint64_t samples{};double basis_error{};bool basis_bits_match=true;
+        double error_sum{};std::uint64_t samples{},green{},pixels{};double basis_error{};bool basis_bits_match=true;
         for(unsigned n=1;n<=18;++n) {
             const auto current=camera(n,scene),previous=camera(n>=span?n-span:0,scene);
             auto frame=std::make_shared<DlssMotionVectorFrame>();frame->stream=1;frame->epoch=1;
@@ -311,6 +325,7 @@ int main(int argc,char** argv) {try {
                 for(unsigned x=scene.color_width/4;x<3*scene.color_width/4;x+=2) {
                 const auto expected=color(world(expected_camera,x,y,scene.color_width,scene.color_height,scene.span_x,scene.span_y));
                 const auto* pixel=static_cast<unsigned char*>(data)+footprint.Offset+y*footprint.Footprint.RowPitch+x*4;
+                if(consumer_probe) {++pixels;if(pixel[1]>pixel[0]+50 && pixel[1]>pixel[2]+50)++green;}
                 for(unsigned channel=0;channel<3;++channel){error_sum+=std::abs(int(pixel[channel])-int(expected[channel]));++samples;}
             }
             readback->Unmap(0,nullptr);
@@ -322,7 +337,8 @@ int main(int argc,char** argv) {try {
             <<" shading_rate="<<provider.expected_shading_rate
             <<" actual_motion_crop="<<provider.expected_width<<'x'<<provider.expected_height<<'\n';
         all_camera_bits_match&=basis_bits_match&&basis_error<1e-6;
-        all_mode_pixels_match&=mae<6;
+        if(consumer_probe)std::cout<<"CONSUMER_PROBE gain="<<consumer_probe_gain<<" green="<<double(green)/double(pixels)<<'\n';
+        all_mode_pixels_match&=consumer_probe || mae<6;
     }
     wait();ComPtr<ID3D12InfoQueue> info;
     if(SUCCEEDED(device.As(&info)))for(UINT64 i=0;i<info->GetNumStoredMessages();++i) {

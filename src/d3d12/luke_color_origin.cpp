@@ -8,6 +8,9 @@
 #include <mutex>
 #include <vector>
 #include <cstdio>
+#include <thread>
+#include <condition_variable>
+#include <functional>
 
 namespace xrfg {
 namespace {
@@ -30,6 +33,41 @@ struct Reader {
     HANDLE event{};
     bool poisoned{};
     ~Reader() { if (event) CloseHandle(event); }
+};
+// Three sleeping helpers plus the caller: bounded CPU parallelism, no frame
+// queue, GPU submission, skipped row or additional history. Process-lifetime
+// ownership follows the existing pinned capture cache.
+class OriginDecodeWorkers {
+    std::mutex call_mutex_,mutex_;
+    std::condition_variable work_,done_;
+    std::uint64_t epoch_{};
+    unsigned pending_{};
+    std::function<void(unsigned)> job_;
+    bool stopping_{};
+public:
+    OriginDecodeWorkers() {
+        std::array<std::thread,3> threads;
+        try { for(unsigned i=1;i<4;++i)threads[i-1]=std::thread([this,i] {
+            std::uint64_t observed{};
+            for(;;) {
+                std::unique_lock lock(mutex_);
+                work_.wait(lock,[&]{return stopping_ || epoch_!=observed;});
+                if(stopping_)return;
+                observed=epoch_;
+                lock.unlock();job_(i);lock.lock();if(--pending_==0)done_.notify_one();
+            }
+        }); } catch(...) {
+            {std::scoped_lock lock(mutex_);stopping_=true;}
+            work_.notify_all();for(auto& t:threads)if(t.joinable())t.join();throw;
+        }
+        for(auto& t:threads)t.detach();
+    }
+    void run(std::function<void(unsigned)> job) {
+        std::scoped_lock caller(call_mutex_);
+        {std::scoped_lock lock(mutex_);job_=std::move(job);pending_=3;++epoch_;}
+        work_.notify_all();job_(0);
+        std::unique_lock lock(mutex_);done_.wait(lock,[&]{return pending_==0;});job_={};
+    }
 };
 struct Cache {
     std::mutex mutex;
@@ -316,7 +354,7 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
     try {
         if (!queue) return finish(E_POINTER);
         const auto output_extent=g_output_extent.load(std::memory_order_acquire);
-        unsigned valid_count{}, row_width{};
+        unsigned valid_count{};
         for (unsigned i=0; i<count; ++i) {
             auto& plan=plans[i];
             if (!colors[i]) { results[i]=E_POINTER; continue; }
@@ -339,7 +377,6 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
             }
             plan.valid=true; ++valid_count;
             reports[i].width=plan.layout.scan.width; reports[i].height=plan.layout.scan.height;
-            row_width=std::max(row_width,plan.layout.scan.width);
         }
         if (!valid_count) return finish(results[0]);
         std::shared_ptr<Reader> reader;
@@ -375,8 +412,9 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
             if (FAILED(result)) return finish(result);
             reader->readback=std::move(buffer); reader->bytes=bytes;
         }
-        // Allocate scratch before Map, so no throwing allocation can leave it mapped.
-        std::vector<float> row(row_width);
+        // The batch decoder is noexcept and fails closed, so every Map below
+        // reaches Unmap even when worker or scratch allocation fails.
+
         result=reader->allocator->Reset();
         if (SUCCEEDED(result)) result=reader->list->Reset(reader->allocator.Get(),nullptr);
         if (FAILED(result)) return finish(result);
@@ -419,26 +457,19 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
         void* mapped{}; const D3D12_RANGE range{0,static_cast<SIZE_T>(bytes)};
         result=reader->readback->Map(0,&range,&mapped);
         if (FAILED(result)) return finish(result);
+        std::array<LukeColorOriginImage,2> image_rows{};
+        std::array<LukeColorOriginDecode,2> decoded{};
+        for(unsigned i=0;i<count;++i)if(plans[i].valid) {
+            const auto& p=plans[i];
+            image_rows[i]={static_cast<const std::byte*>(mapped)+p.footprint.Offset,
+                p.original.Format,p.layout.scan.width,p.layout.scan.height,p.footprint.Footprint.RowPitch};
+        }
+        decode_luke_origin_images(std::span(image_rows.data(),count),std::span(decoded.data(),count));
         HRESULT decode_status=S_OK;
-        for (unsigned i=0; i<count; ++i) if (plans[i].valid) {
-            const auto& plan=plans[i];
-            const auto pixel_bytes=luke_origin_pixel_bytes(plan.original.Format);
-            std::uint32_t exact_token{}; bool ambiguous=false;
-            for (UINT y=0; y<plan.layout.scan.height; ++y) {
-                const auto* pixels=static_cast<const std::byte*>(mapped)+plan.footprint.Offset+
-                    UINT64(y)*plan.footprint.Footprint.RowPitch;
-                for (UINT x=0; x<plan.layout.scan.width; ++x)
-                    row[x]=luke_origin_luma(pixels+x*pixel_bytes,plan.original.Format);
-                const auto decoded=decode_luke_origin_row(std::span<const float>(row.data(),plan.layout.scan.width));
-                ambiguous|=decoded.ambiguous;
-                if (!decoded.token) continue;
-                if (exact_token && exact_token!=decoded.token) ambiguous=true;
-                exact_token=decoded.token;
-            }
-            results[i]=ambiguous ? HRESULT_FROM_WIN32(ERROR_INVALID_DATA) :
-                exact_token ? S_OK : HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
-            if (SUCCEEDED(results[i])) tokens[i]=exact_token;
-            else decode_status=results[i];
+        for(unsigned i=0;i<count;++i)if(plans[i].valid) {
+            results[i]=decoded[i].ambiguous ? HRESULT_FROM_WIN32(ERROR_INVALID_DATA) :
+                decoded[i].token ? S_OK : HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+            if(SUCCEEDED(results[i]))tokens[i]=decoded[i].token;else decode_status=results[i];
         }
         const D3D12_RANGE no_write{0,0}; reader->readback->Unmap(0,&no_write);
         phase(125,decode_status);
@@ -448,6 +479,44 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
 }
 } // namespace
 
+void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
+    std::span<LukeColorOriginDecode> results) noexcept {
+    if(results.size()!=images.size())return;
+    std::fill(results.begin(),results.end(),LukeColorOriginDecode{});
+    try {
+        std::size_t total{};
+        std::vector<std::size_t> offsets{0};
+        for(const auto& image:images) {
+            if(image.pixels && luke_origin_pixel_bytes(image.format) && image.width<=16384 &&
+                image.height<=8192 && image.row_pitch>=image.width*luke_origin_pixel_bytes(image.format))total+=image.height;
+            offsets.push_back(total);
+        }
+        std::vector<LukeColorOriginDecode> rows(total);
+        const auto decode=[&](unsigned worker,unsigned step) noexcept {
+            try {
+                std::vector<float> row;
+                for(unsigned i=0;i<images.size();++i) {
+                    const auto& image=images[i];const auto bpp=luke_origin_pixel_bytes(image.format);
+                    if(offsets[i]==offsets[i+1])continue;
+                    row.resize(image.width);
+                    for(std::size_t index=offsets[i]+((worker+step-offsets[i]%step)%step);index<offsets[i+1];index+=step) {
+                        const auto* pixels=image.pixels+(index-offsets[i])*image.row_pitch;
+                        for(unsigned x=0;x<image.width;++x)row[x]=luke_origin_luma(pixels+x*bpp,image.format);
+                        rows[index]=decode_luke_origin_row(row);
+                    }
+                }
+            } catch(...) {for(std::size_t i=worker;i<rows.size();i+=step)rows[i].ambiguous=true;}
+        };
+        if(total>=64) {
+            static auto* workers=new OriginDecodeWorkers;
+            workers->run([&](unsigned worker) noexcept {decode(worker,4);});
+        } else decode(0,1);
+        for(unsigned i=0;i<images.size();++i)for(std::size_t y=offsets[i];y<offsets[i+1];++y) {
+            const auto row=rows[y];auto& result=results[i];result.ambiguous|=row.ambiguous;
+            if(row.token) {if(result.token&&result.token!=row.token)result.ambiguous=true;result.token=row.token;}
+        }
+    } catch(...) {for(auto& result:results)result={0,true};}
+}
 HRESULT read_luke_color_origin(ID3D12CommandQueue* queue, ID3D12Resource* color,
     std::uint32_t* token, D3D12_RESOURCE_STATES state, DWORD timeout_ms) noexcept {
     if (!token) return E_POINTER;
