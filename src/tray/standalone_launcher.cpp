@@ -1,5 +1,7 @@
 #include "xrfg/standalone_launcher.hpp"
 
+#include <cstdio>
+#include <cmath>
 #include <windows.h>
 
 #include <algorithm>
@@ -257,6 +259,75 @@ LauncherSettings parse_settings(std::string_view text) {
         offset = newline + 1;
     }
     return settings;
+}
+
+namespace {
+
+[[nodiscard]] std::string json_string(std::string_view value) {
+    return "\"" + escape_json(value) + "\"";
+}
+
+[[nodiscard]] std::string json_rate(float value) {
+    char text[32]{};
+    std::snprintf(text, sizeof(text), "%.1f",
+        std::isfinite(value) ? static_cast<double>(value) : 0.0);
+    return text;
+}
+
+[[nodiscard]] const char* json_bool(bool value) { return value ? "true" : "false"; }
+
+}  // namespace
+
+std::string build_status_json(const StatusInputs& inputs) {
+    const LauncherSettings& settings = inputs.settings;
+    const std::uint32_t configured = settings.triple_frame_gen ? 3U : 2U;
+    const bool session = inputs.session_present;
+    const StatusSession& running = inputs.session;
+    std::string json = "{\n";
+    json += "  \"schema\": 1,\n";
+    json += std::string("  \"armed\": ") + json_bool(inputs.armed) + ",\n";
+    json += std::string("  \"paused\": ") + json_bool(inputs.paused) + ",\n";
+    json += "  \"multiplier\": " +
+        std::to_string(session ? running.multiplier : configured) + ",\n";
+    json += std::string("  \"generating\": ") +
+        (session ? json_bool(running.generating) : "null") + ",\n";
+    json += "  \"app_fps\": " + (session ? json_rate(running.app_fps) : "null") + ",\n";
+    json += "  \"output_fps\": " + (session ? json_rate(running.output_fps) : "null") + ",\n";
+    json += "  \"display_hz\": " +
+        (session && running.display_hz > 0.0f ? json_rate(running.display_hz) : "null") +
+        ",\n";
+    json += "  \"updated\": " + json_string(inputs.updated) + ",\n";
+    json += "  \"ofxr\": { \"build\": " + std::to_string(inputs.build) + " },\n";
+    if (session) {
+        json += "  \"session\": {\n";
+        json += "    \"process\": " + json_string(running.process) + ",\n";
+        json += "    \"pid\": " + std::to_string(running.pid) + ",\n";
+        json += "    \"runtime\": " + json_string(running.runtime) + ",\n";
+        json += std::string("    \"deep_pipeline\": ") + json_bool(running.deep_pipeline) + "\n";
+        json += "  },\n";
+    } else {
+        json += "  \"session\": null,\n";
+    }
+    const char* preset = settings.nvidia_preset == NvidiaPerformancePreset::slow
+        ? "slow"
+        : settings.nvidia_preset == NvidiaPerformancePreset::fast ? "fast" : "medium";
+    const int flow_resolution = settings.nvidia_input_scale == NvidiaInputScale::half
+        ? 50
+        : settings.nvidia_input_scale == NvidiaInputScale::three_quarter ? 75 : 100;
+    json += "  \"settings\": {\n";
+    json += "    \"multiplier\": " + std::to_string(configured) + ",\n";
+    json += std::string("    \"backend\": \"") +
+        (settings.backend == FlowBackend::nvidia ? "nvidia" : "fidelityfx") + "\",\n";
+    json += std::string("    \"preset\": \"") + preset + "\",\n";
+    json += "    \"flow_resolution\": " + std::to_string(flow_resolution) + ",\n";
+    json += std::string("    \"bidirectional\": ") + json_bool(settings.nvidia_bidirectional) + ",\n";
+    json += std::string("    \"deep_pipeline\": ") + json_bool(settings.deep_pipeline) + ",\n";
+    json += std::string("    \"edge_ghosting_reduction\": ") +
+        json_bool(settings.edge_ghosting_reduction) + ",\n";
+    json += std::string("    \"repeating_pattern_lock\": ") +
+        json_bool(settings.repeating_pattern_lock) + "\n";
+    json += "  }\n}\n";
+    return json;
 }
 
 std::string serialize_settings(const LauncherSettings& settings) {

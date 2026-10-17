@@ -22,6 +22,47 @@ int main() {
 
     const LauncherSettings release_defaults;
     const std::string default_runtime_ini = build_runtime_ini(release_defaults);
+    // status.json: the top-level keys, null without a session, the running
+    // session's multiplier over the setting's, escaping.
+    {
+        xrfg::standalone::StatusInputs idle;
+        idle.armed = true;
+        idle.build = 488;
+        idle.updated = "2026-10-17T09:12:03.512Z";
+        const std::string without = xrfg::standalone::build_status_json(idle);
+        xrfg::standalone::StatusInputs running = idle;
+        running.paused = true;
+        running.settings.triple_frame_gen = false;
+        running.session_present = true;
+        running.session.pid = 23456;
+        running.session.process = "Flight\"Sim\\2024.exe";
+        running.session.runtime = "SteamVR/OpenXR : steamvr";
+        running.session.multiplier = 3;
+        running.session.generating = true;
+        running.session.app_fps = 29.84f;
+        running.session.output_fps = 89.36f;
+        running.session.display_hz = 90.0f;
+        const std::string with = xrfg::standalone::build_status_json(running);
+        if (!contains(without, "\"schema\": 1,") || !contains(without, "\"armed\": true,") ||
+            !contains(without, "\"paused\": false,") ||
+            !contains(without, "\"multiplier\": 2,") ||
+            !contains(without, "\"generating\": null,") ||
+            !contains(without, "\"output_fps\": null,") ||
+            !contains(without, "\"session\": null,") ||
+            !contains(without, "\"build\": 488") ||
+            !contains(without, "\"updated\": \"2026-10-17T09:12:03.512Z\"") ||
+            !contains(with, "\"paused\": true,") || !contains(with, "\"multiplier\": 3,") ||
+            !contains(with, "\"generating\": true,") ||
+            !contains(with, "\"app_fps\": 29.8,") ||
+            !contains(with, "\"output_fps\": 89.4,") ||
+            !contains(with, "\"display_hz\": 90.0,") ||
+            !contains(with, "\"process\": \"Flight\\\"Sim\\\\2024.exe\"") ||
+            !contains(with, "\"pid\": 23456,") ||
+            !contains(with, "    \"multiplier\": 2,")) {
+            std::cerr << "status.json was not as documented\n";
+            return 1;
+        }
+    }
     // The composition's two switches: on by default, in both inis, round-trip;
     // expert_mode is tray.ini only and off by default.
     {

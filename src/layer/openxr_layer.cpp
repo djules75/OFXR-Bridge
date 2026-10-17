@@ -1,3 +1,4 @@
+#include "xrfg/status_block.hpp"
 #include "xrfg/d3d12_history.hpp"
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
@@ -12523,6 +12524,112 @@ struct PrivateDepthStrip {
 // follows primes rather than pairing across the change. The application
 // sees its period step between two and three display periods at its next
 // wait, and one frame without synthetics.
+// The block status.json is written from (xrfg::status), created or opened on
+// first use. Mapped for the life of the process.
+xrfg::status::Block* status_block() noexcept {
+    static std::mutex mutex;
+    static xrfg::status::Block* block = nullptr;
+    static bool attempted = false;
+    std::scoped_lock lock(mutex);
+    if (!attempted) {
+        attempted = true;
+        const HANDLE mapping = CreateFileMappingW(
+            INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+            sizeof(xrfg::status::Block), xrfg::status::kMappingName);
+        if (mapping != nullptr) {
+            block = static_cast<xrfg::status::Block*>(MapViewOfFile(
+                mapping, FILE_MAP_WRITE, 0, 0, sizeof(xrfg::status::Block)));
+            if (block == nullptr) {
+                CloseHandle(mapping);
+            }
+        }
+    }
+    return block;
+}
+
+// Writes the block under its sequence counter: odd while the fields change.
+template <typename Fill>
+void write_status_block(Fill&& fill) noexcept {
+    xrfg::status::Block* block = status_block();
+    if (block == nullptr) {
+        return;
+    }
+    auto* sequence = reinterpret_cast<volatile LONG*>(&block->sequence);
+    InterlockedIncrement(sequence);
+    fill(*block);
+    block->magic = xrfg::status::kMagic;
+    block->version = xrfg::status::kVersion;
+    InterlockedIncrement(sequence);
+}
+
+[[nodiscard]] std::uint64_t unix_time_ms() noexcept {
+    FILETIME now{};
+    GetSystemTimeAsFileTime(&now);
+    const std::uint64_t ticks =
+        (static_cast<std::uint64_t>(now.dwHighDateTime) << 32U) | now.dwLowDateTime;
+    // FILETIME counts 100 ns from 1601-01-01.
+    return ticks / 10'000ULL - 11'644'473'600'000ULL;
+}
+
+// Once a second, from the application's xrEndFrame: what status.json reports
+// about the running game. A memory write; the tray does the file.
+void publish_status(SessionState& state) noexcept {
+    try {
+        static std::atomic<std::int64_t> next_publish{0};
+        const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+        if (now < next_publish.load(std::memory_order_relaxed)) {
+            return;
+        }
+        next_publish.store(
+            now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                      std::chrono::seconds(1))
+                      .count(),
+            std::memory_order_relaxed);
+        const auto rates = state.fps_overlay
+            ? state.fps_overlay->status()
+            : xrfg::OpenXrFpsOverlay::Status{};
+        std::array<wchar_t, MAX_PATH> module{};
+        const DWORD length = GetModuleFileNameW(
+            nullptr, module.data(), static_cast<DWORD>(module.size()));
+        const std::wstring path(module.data(), length);
+        const std::wstring name = path.substr(path.find_last_of(L"\\/") + 1);
+        write_status_block([&](xrfg::status::Block& block) {
+            block.active = 1U;
+            block.pid = GetCurrentProcessId();
+            block.multiplier = state.frames_per_application_frame.load();
+            block.deep_pipeline = state.deep_pipeline ? 1U : 0U;
+            block.generating =
+                !state.pause_applied && rates.synthetic_fps >= 1.0f ? 1U : 0U;
+            block.app_fps = rates.app_fps;
+            block.output_fps = rates.output_fps;
+            block.display_hz = rates.display_hz;
+            block.updated_unix_ms = unix_time_ms();
+            std::fill(std::begin(block.process), std::end(block.process), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, name.c_str(), -1, block.process,
+                static_cast<int>(sizeof(block.process)) - 1, nullptr, nullptr);
+            std::fill(std::begin(block.runtime), std::end(block.runtime), '\0');
+            const std::string& runtime = state.dispatch ? state.dispatch->runtime_name : std::string{};
+            std::copy_n(runtime.begin(),
+                std::min<std::size_t>(runtime.size(), sizeof(block.runtime) - 1),
+                block.runtime);
+        });
+    } catch (...) {
+    }
+}
+
+// At xrDestroySession: no session runs in this process any more, so the tray
+// reports none - unless another game has published since.
+void clear_status() noexcept {
+    xrfg::status::Block* block = status_block();
+    if (block == nullptr || block->pid != GetCurrentProcessId()) {
+        return;
+    }
+    write_status_block([](xrfg::status::Block& written) {
+        written.active = 0U;
+        written.updated_unix_ms = unix_time_ms();
+    });
+}
+
 // The ini's edge_ghosting_reduction and repeating_pattern_lock, followed
 // while the session runs like triple_frame_gen: a read every quarter second,
 // handed to the synthesizers, which take it at their next pair.
@@ -12749,6 +12856,7 @@ XrResult layer_end_frame_impl(
 
     apply_live_frame_multiplier(state, use_continuous_presenter);
     follow_composition_switches();
+    publish_status(*state);
     log_video_memory_periodically(*state);
     apply_embedded_control(state, use_continuous_presenter);
     const bool manually_disarmed = state->manual_control.stop_requested();
@@ -13787,6 +13895,7 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_destroy_session(XrSession session) {
     const XrResult result = guard_c_api_boundary([&] {
         return layer_destroy_session_impl(session);
     });
+    clear_status();
     xrfg::bridge_flight_logger().end(
         token,
         xrfg::BridgeFlightOperation::session_destroy,

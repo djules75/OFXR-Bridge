@@ -48,6 +48,10 @@ struct OpenXrFpsOverlay::Impl {
     std::filesystem::path ini;
     std::mutex mutex;
     FpsCounter counter;
+    // status.json's game and synthetic rates; counted whether the overlay is
+    // shown or not.
+    FpsCounter application_counter;
+    FpsCounter synthetic_counter;
     FpsOverlayPosition position{FpsOverlayPosition::upper_right};
     std::int64_t next_refresh{};
     bool attempted{}, initialized{}, image_valid{}, acquired{}, waited{}, disabled{};
@@ -279,6 +283,7 @@ struct OpenXrFpsOverlay::Impl {
     void application_frame(const XrFrameEndInfo* info) {
         const auto now = now_ns();
         if (!info || info->type != XR_TYPE_FRAME_END_INFO) return;
+        application_counter.submitted(now, false, true);
         if (now < next_refresh) return;
         next_refresh = now + 250'000'000;
         std::array<wchar_t, 32> setting{};
@@ -329,8 +334,15 @@ struct OpenXrFpsOverlay::Impl {
         // suspecting the upload path.
         quad.pose.position = {placement.x, placement.y, placement.z};
         quad.size = {placement.width, placement.height};
-        auto snapshot = counter.snapshot(now);
+        auto snapshot = displayed_snapshot(now);
         snapshot.paused = paused;
+        upload(snapshot);
+    }
+
+    // The figure the overlay draws: what the headset received where SteamVR
+    // reports it, less the repeats, snapped to the refresh rate within 2%.
+    FpsSnapshot displayed_snapshot(std::int64_t now) const {
+        auto snapshot = counter.snapshot(now);
         if (delivery) {
             if (const auto received = delivery->delivered_fps(now)) {
                 snapshot.submitted_fps = delivered_new_images(*received, snapshot);
@@ -340,7 +352,7 @@ struct OpenXrFpsOverlay::Impl {
             snapshot.submitted_fps = displayed_rate(
                 snapshot.submitted_fps, 1.0e9f / static_cast<float>(period));
         }
-        upload(snapshot);
+        return snapshot;
     }
 };
 
@@ -364,6 +376,8 @@ void OpenXrFpsOverlay::application_frame(const XrFrameEndInfo* info) noexcept {
 void OpenXrFpsOverlay::reset_metrics() noexcept {
     std::scoped_lock lock(impl_->mutex);
     impl_->counter.reset();
+    impl_->application_counter.reset();
+    impl_->synthetic_counter.reset();
     impl_->image_valid = false;
     impl_->next_refresh = 0;
     impl_->placement_valid = false;
@@ -385,11 +399,29 @@ void OpenXrFpsOverlay::suspend() noexcept {
     impl_->disabled = true;
     impl_->image_valid = false;
     impl_->counter.reset();
+    impl_->application_counter.reset();
+    impl_->synthetic_counter.reset();
 }
 
 FpsSnapshot OpenXrFpsOverlay::metrics() const noexcept {
     std::scoped_lock lock(impl_->mutex);
     return impl_->counter.snapshot(now_ns());
+}
+
+OpenXrFpsOverlay::Status OpenXrFpsOverlay::status() const noexcept {
+    try {
+        std::scoped_lock lock(impl_->mutex);
+        const auto now = now_ns();
+        Status status;
+        status.app_fps = impl_->application_counter.snapshot(now).submitted_fps;
+        status.synthetic_fps = impl_->synthetic_counter.snapshot(now).submitted_fps;
+        status.output_fps = impl_->displayed_snapshot(now).submitted_fps;
+        const auto period = impl_->display_period_ns.load(std::memory_order_relaxed);
+        status.display_hz = period > 0 ? 1.0e9f / static_cast<float>(period) : 0.0f;
+        return status;
+    } catch (...) {
+        return {};
+    }
 }
 
 std::optional<OverlayPlacement> OpenXrFpsOverlay::marker_placement() const noexcept {
@@ -416,8 +448,11 @@ XrResult OpenXrFpsOverlay::end_frame(
         submitted = &composed;
     }
     const auto result = impl_->downstream_end(impl_->session, submitted);
-    if (result == XR_SUCCESS && nonempty)
-        impl_->counter.submitted(now_ns(), synthetic, new_content);
+    if (result == XR_SUCCESS && nonempty) {
+        const auto now = now_ns();
+        impl_->counter.submitted(now, synthetic, new_content);
+        if (synthetic && new_content) impl_->synthetic_counter.submitted(now, false, true);
+    }
     return result;
 }
 

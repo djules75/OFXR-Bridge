@@ -1,5 +1,6 @@
 #include "xrfg/implicit_layer.hpp"
 #include "xrfg/live_tuning.hpp"
+#include "xrfg/status_block.hpp"
 #include "xrfg/standalone_launcher.hpp"
 #include "resource.h"
 
@@ -36,6 +37,10 @@ constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kTrayId = 1;
 constexpr int kPauseHotkeyId = 1;
 constexpr UINT kArmPollMilliseconds = 250;
+// status.json is rewritten on this timer, and at once on every command, arm
+// and exit (write_status).
+constexpr UINT_PTR kStatusTimerId = 2;
+constexpr UINT kStatusMilliseconds = 1000;
 constexpr std::uint32_t kImplementationVersion = XRFG_IMPLEMENTATION_VERSION;
 // One Donate entry each, creator first, as in the About box and the README.
 constexpr wchar_t kDonateCreatorUrl[] = L"https://ko-fi.com/tig3rmast3r";
@@ -204,6 +209,82 @@ void load_settings(AppState& state) {
     std::ostringstream text;
     text << stream.rdbuf();
     state.settings = xrfg::standalone::parse_settings(text.str());
+}
+
+// status.json beside tray.ini (docs/STATUS_JSON.md): the tray's state, the
+// running game as its layer last published it (xrfg::status), the settings.
+// Written to a temporary file and moved over the old one, so a reader never
+// sees half a file; a reader holding it open only delays the next write.
+void write_status(const AppState& state) {
+    try {
+        xrfg::standalone::StatusInputs inputs;
+        inputs.armed = state.armed;
+        inputs.paused = state.paused;
+        inputs.build = kImplementationVersion;
+        inputs.settings = state.settings;
+        SYSTEMTIME now{};
+        GetSystemTime(&now);
+        char updated[40]{};
+        std::snprintf(updated, sizeof(updated), "%04u-%02u-%02uT%02u:%02u:%02u.%03uZ",
+            now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond,
+            now.wMilliseconds);
+        inputs.updated = updated;
+        FILETIME file_now{};
+        SystemTimeToFileTime(&now, &file_now);
+        const std::uint64_t now_ms =
+            ((static_cast<std::uint64_t>(file_now.dwHighDateTime) << 32U) |
+             file_now.dwLowDateTime) / 10'000ULL - 11'644'473'600'000ULL;
+        if (const HANDLE mapping = OpenFileMappingW(
+                FILE_MAP_READ, FALSE, xrfg::status::kMappingName)) {
+            if (const auto* block = static_cast<const xrfg::status::Block*>(
+                    MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, sizeof(xrfg::status::Block)))) {
+                xrfg::status::Block copy{};
+                for (int attempt = 0; attempt < 4; ++attempt) {
+                    const auto* sequence =
+                        reinterpret_cast<const volatile LONG*>(&block->sequence);
+                    const LONG before = *sequence;
+                    MemoryBarrier();
+                    std::memcpy(&copy, block, sizeof(copy));
+                    MemoryBarrier();
+                    if ((before & 1) == 0 && before == *sequence) break;
+                }
+                // A game that stopped publishing without its xrDestroySession
+                // (a crash) counts as gone after three seconds.
+                if (copy.magic == xrfg::status::kMagic &&
+                    copy.version == xrfg::status::kVersion && copy.active != 0U &&
+                    now_ms >= copy.updated_unix_ms &&
+                    now_ms - copy.updated_unix_ms <= 3'000ULL) {
+                    copy.process[sizeof(copy.process) - 1] = '\0';
+                    copy.runtime[sizeof(copy.runtime) - 1] = '\0';
+                    inputs.session_present = true;
+                    inputs.session.pid = copy.pid;
+                    inputs.session.process = copy.process;
+                    inputs.session.runtime = copy.runtime;
+                    inputs.session.multiplier = copy.multiplier;
+                    inputs.session.deep_pipeline = copy.deep_pipeline != 0U;
+                    inputs.session.generating = copy.generating != 0U;
+                    inputs.session.app_fps = copy.app_fps;
+                    inputs.session.output_fps = copy.output_fps;
+                    inputs.session.display_hz = copy.display_hz;
+                }
+                UnmapViewOfFile(block);
+            }
+            CloseHandle(mapping);
+        }
+        const std::string json = xrfg::standalone::build_status_json(inputs);
+        const auto target = state.local_directory / L"status.json";
+        auto temporary = target;
+        temporary += L".tmp";
+        {
+            std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+            if (!file) return;
+            file.write(json.data(), static_cast<std::streamsize>(json.size()));
+            if (!file) return;
+        }
+        static_cast<void>(MoveFileExW(temporary.c_str(), target.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH));
+    } catch (...) {
+    }
 }
 
 void save_settings(const AppState& state) {
@@ -1721,9 +1802,14 @@ LRESULT CALLBACK window_procedure(
         return 0;
     case WM_COMMAND:
         handle_command(*state, LOWORD(wparam));
+        write_status(*state);
         return 0;
     case WM_HOTKEY:
         if (wparam == kPauseHotkeyId) handle_command(*state, toggle_pause);
+        write_status(*state);
+        return 0;
+    case WM_TIMER:
+        if (wparam == kStatusTimerId) write_status(*state);
         return 0;
     case WM_CLOSE: {
         std::wstring error;
@@ -1758,6 +1844,9 @@ LRESULT CALLBACK window_procedure(
         std::wstring error;
         if (!disarm_bridge(*state, &error))
             log_lifecycle(state->local_directory, L"destroy-cleanup", error);
+        KillTimer(window, kStatusTimerId);
+        // The last word: disarmed, whatever a game last published.
+        write_status(*state);
         Shell_NotifyIconW(NIM_DELETE, &state->icon);
         PostQuitMessage(0);
         return 0;
@@ -1949,6 +2038,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         CloseHandle(single_instance);
         return EXIT_FAILURE;
     }
+    SetTimer(window, kStatusTimerId, kStatusMilliseconds, nullptr);
 
     // Arm straight away: launching the tray is the user asking for the
     // bridge. A failure leaves it disarmed with the reason shown, exactly as

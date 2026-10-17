@@ -44,6 +44,17 @@ public:
     // stop adding the quad or uploading textures immediately.
     void suspend() noexcept;
     [[nodiscard]] FpsSnapshot metrics() const noexcept;
+    // For status.json: one-second averages of the game's frames, of the
+    // synthetic frames handed to the runtime, and the figure the overlay
+    // draws - computed whether the overlay is shown or not - with the refresh
+    // rate it was judged against (0 where not known yet).
+    struct Status {
+        float app_fps{};
+        float synthetic_fps{};
+        float output_fps{};
+        float display_hz{};
+    };
+    [[nodiscard]] Status status() const noexcept;
     // Angular counter bounds for a diagnostic burned into the S projection.
     // Available without a spare runtime quad layer; Off/suspend disables it.
     [[nodiscard]] std::optional<OverlayPlacement> marker_placement() const noexcept;
