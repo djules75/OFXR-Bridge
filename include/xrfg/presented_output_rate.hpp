@@ -9,6 +9,14 @@ namespace xrfg {
         std::isfinite(value.output_fps) && value.output_fps >= 0;
 }
 
+// Known output sources have different boundaries. Accepted unique images are
+// useful delivery measurements, but never claim those are physical scanout.
+[[nodiscard]] inline bool output_rate_valid(const InterfaceTelemetry& value) noexcept {
+    return presented_output_valid(value) || (value.rates_valid &&
+        value.output_source==InterfaceSource::accepted_scene_submissions &&
+        std::isfinite(value.output_fps) && value.output_fps>=0);
+}
+
 // Read through the delivery source. gpu_render_timing() only observes its cache;
 // a meter must not depend on a different overlay polling that cache first.
 template<class Delivery>

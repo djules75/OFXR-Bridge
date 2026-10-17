@@ -412,10 +412,29 @@ int main(int argc, char** argv) {
             stamp={402,xrfg::interface_clock_ns(),0};
             check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS && clock_conversions==conversions,"hidden UI cannot read display clock");
             clock_available=true;
+            set_interface_visible(InterfaceSurface::desktop,true);
             overlay.set_luke_scene_measurement(true);
-            check(!overlay.metrics().sample_valid,"Luke cannot fall back to XR submissions without scene delivery proof");
             overlay.reset_metrics();
-            check(!overlay.metrics().sample_valid,"Luke proof requirement survives settings/reset");
+            stamp={600,xrfg::interface_clock_ns(),0};stamp.scene_owner=42;stamp.scene_serial=7;
+            fail_end=true;
+            check(XR_FAILED(overlay.end_frame(&info,false,true,{},0,stamp)),"Luke failed send");
+            check(!overlay.metrics().sample_valid,"Failed Luke send cannot count");
+            check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS,"Luke unique real accepted without compositor timing");
+            std::this_thread::sleep_for(std::chrono::milliseconds(260));
+            check(overlay.metrics().sample_valid,"Known accepted identity is measured without SteamVR");
+            stamp.scene_serial=8;
+            check(overlay.end_frame(&info,true,true,{},0,stamp)==XR_SUCCESS,"Luke confirmed generated send");
+            check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS,"Luke matching real send");
+            overlay.application_frame(&info);measured=snapshot().runtime.telemetry;
+            check(measured.output_source==xrfg::InterfaceSource::accepted_scene_submissions &&
+                measured.output_fps>0 && measured.rates_valid && measured.generated_fps>0 && measured.game_fps>0,
+                "Luke counters available with asynchronous or absent SteamVR timing");
+            const auto totals=overlay.metrics();
+            for(int n=0;n<12;++n)check(overlay.end_frame(&info,false,false,{},0,stamp)==XR_SUCCESS,"Luke held repeat");
+            check(overlay.metrics().delivered_fps<=totals.delivered_fps+.01F,"held repeats cannot inflate total");
+            check(overlay.metrics().generated_fps>0,"existing real/generated counter preserved");
+            overlay.reset_metrics();
+            check(!overlay.metrics().sample_valid,"Luke reset clears counts");
             overlay.set_luke_scene_measurement(false);
             const auto uploads_before_stop = releases;
             overlay.suspend();

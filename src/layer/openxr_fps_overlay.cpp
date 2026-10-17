@@ -3,6 +3,7 @@
 #include "xrfg/benchmark_log.hpp"
 #include "xrfg/elliott_meter.hpp"
 #include "xrfg/presented_output_rate.hpp"
+#include "xrfg/accepted_scene_rate.hpp"
 #include "xrfg/steamvr_delivery.hpp"
 #include "xrfg/overlay_menu_renderer.hpp"
 #include "xrfg/settings_widgets.hpp"
@@ -56,6 +57,7 @@ struct OpenXrFpsOverlay::Impl {
     std::filesystem::path ini;
     std::mutex mutex;
     FpsCounter counter;
+    AcceptedSceneRate accepted_scenes;
     InterfaceTimingWindow timings;
     DisplayTimeConverter converter{};
     void* converter_user{};
@@ -67,6 +69,7 @@ struct OpenXrFpsOverlay::Impl {
         unsigned output{};
         std::shared_ptr<InterfaceCycle> cycle;
         std::int64_t accepted_qpc{}, period{};
+        SceneIdentity scene;
     };
     std::vector<PendingNativeCount> pending_native_counts;
     void poll_native_counts(std::int64_t now) noexcept {
@@ -76,6 +79,7 @@ struct OpenXrFpsOverlay::Impl {
             if(pending && now-i->submitted_ns < 1'000'000'000) { ++i; continue; }
             if(!pending && classify_native_frame_content(i->results,i->output,true,true).synthetic) {
                 counter.submitted(i->submitted_ns,true,true);
+                if(luke_scene_measurement)accepted_scenes.accepted(i->submitted_ns,i->scene);
                 if(i->cycle)i->cycle->synthetic_accepted(i->accepted_qpc,i->period);
             }
             i=pending_native_counts.erase(i);
@@ -109,7 +113,6 @@ struct OpenXrFpsOverlay::Impl {
     bool fps_unfenced_submission{};
     bool unique_content_only{};
     bool luke_scene_measurement{};
-    SceneIdentity last_scene;
     HANDLE event{};
     struct Image {
         ComPtr<ID3D12Resource> texture12, upload;
@@ -824,11 +827,16 @@ struct OpenXrFpsOverlay::Impl {
         out.generated_fps = fps.generated_fps;
         out.rates_valid = fps.sample_valid;
         if(luke_scene_measurement) {
-            out.output_fps=out.game_fps=out.generated_fps=0;
-            out.output_source=InterfaceSource::none;out.rates_valid=false;
-            if(delivery)if(const auto scene=delivery->scene_fps(now)) {
-                out.output_fps=scene->output;out.game_fps=scene->real;out.generated_fps=scene->generated;
-                out.output_source=InterfaceSource::steamvr_scene_delivery;out.rates_valid=true;
+            // Preserve the established real/generated OFXR counters. Only the
+            // total changes source: new accepted images rather than compositor
+            // records (which include held images submitted again).
+            out.output_fps=0;out.output_source=InterfaceSource::none;
+            if(const auto scene=accepted_scenes.rate(now)) {
+                out.output_fps=scene->output;
+                out.output_source=InterfaceSource::accepted_scene_submissions;
+                // Without OFXR the old real counter counts held AFW pairs/XR
+                // calls. Use actual source/AFW production identities instead.
+                if(!fps.active) {out.game_fps=scene->real;out.generated_fps=scene->generated;}
             }
         }
         out.generating = fps.generated_fps > 0;
@@ -949,7 +957,7 @@ struct OpenXrFpsOverlay::Impl {
         }
         if(luke_scene_measurement) {
             snapshot.delivered_valid=false;
-            if(delivery)if(const auto scene=delivery->scene_fps(now)) {
+            if(const auto scene=accepted_scenes.rate(now)) {
                 snapshot.delivered_fps=scene->output;snapshot.delivered_valid=true;
             }
         }
@@ -1019,7 +1027,7 @@ void OpenXrFpsOverlay::set_grip_spaces(XrSpace left,XrSpace right) noexcept {
     std::scoped_lock lock(impl_->mutex);impl_->grips={left,right};
 }
 void OpenXrFpsOverlay::set_luke_scene_measurement(bool enabled) noexcept {
-    std::scoped_lock lock(impl_->mutex);impl_->luke_scene_measurement=enabled;impl_->last_scene={};
+    std::scoped_lock lock(impl_->mutex);impl_->luke_scene_measurement=enabled;impl_->accepted_scenes={};
 }
 void OpenXrFpsOverlay::set_display_period(std::int64_t period_ns) noexcept {
     impl_->display_period_ns.store(period_ns > 0 ? period_ns : 0, std::memory_order_relaxed);
@@ -1028,6 +1036,7 @@ void OpenXrFpsOverlay::set_display_period(std::int64_t period_ns) noexcept {
 void OpenXrFpsOverlay::reset_metrics() noexcept {
     std::scoped_lock lock(impl_->mutex);
     impl_->counter.reset();
+    impl_->accepted_scenes={};
     impl_->timings = {};
     impl_->next_telemetry = 0;
     impl_->native_content_counter=impl_->unique_content_only;
@@ -1044,6 +1053,7 @@ void OpenXrFpsOverlay::suspend() noexcept {
     autonomous::set_interface_visible(autonomous::InterfaceSurface::meter,false);
     impl_->image_valid = false;
     impl_->counter.reset();
+    impl_->accepted_scenes={};
     impl_->native_content_counter=impl_->unique_content_only;
     impl_->pending_native_counts.clear();
     impl_->close_menu();
@@ -1072,10 +1082,10 @@ FpsSnapshot OpenXrFpsOverlay::metrics() const noexcept {
     impl_->poll_native_counts(now);
     auto result=impl_->counter.snapshot(now);
     if(impl_->luke_scene_measurement) {
-        result.sample_valid=false;
-        if(impl_->delivery)if(const auto scene=impl_->delivery->scene_fps(now)) {
+        result.delivered_valid=false;
+        if(const auto scene=impl_->accepted_scenes.rate(now)) {
             result.submitted_fps=result.delivered_fps=scene->output;
-            result.real_fps=scene->real;result.generated_fps=scene->generated;
+            if(!result.active) {result.real_fps=scene->real;result.generated_fps=scene->generated;}
             result.sample_valid=result.delivered_valid=true;
         }
     }
@@ -1120,17 +1130,7 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
     if (measure && !synthetic && nonempty && impl_->converter)
         if (!impl_->converter(impl_->converter_user, info->displayTime, display)) display = 0;
     const auto submit_clock = measure ? interface_clock_ns() : 0;
-    const auto probe=impl_->luke_scene_measurement && impl_->delivery
-        ? impl_->delivery->scene_submission_probe() : SteamVrDelivery::SubmissionProbe{};
     const auto result = impl_->downstream_end(impl_->session, submitted);
-    if(impl_->luke_scene_measurement && impl_->delivery && result==XR_SUCCESS && nonempty) {
-        SceneIdentity scene{stamp.scene_owner,stamp.scene_serial,synthetic?native_output+1:0};
-        const auto native=classify_native_frame_content(native_results,native_output,synthetic,new_content);
-        if(synthetic && !native.synthetic)scene={};
-        if(!new_content)scene=impl_->last_scene;
-        impl_->delivery->scene_submission_completed(probe,scene);
-        impl_->last_scene=scene;
-    }
     const auto accepted_clock = measure ? interface_clock_ns() : 0;
     if (measure && !synthetic) impl_->timings.submitted(stamp, submit_clock, result == XR_SUCCESS,
         nonempty, synthetic, new_content, display, accepted_clock);
@@ -1143,6 +1143,9 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
         impl_->poll_native_counts(now);
         impl_->native_content_counter=impl_->unique_content_only || !native_results.empty();
         const auto metrics=classify_native_frame_content(native_results,native_output,synthetic,new_content);
+        SceneIdentity scene{stamp.scene_owner,stamp.scene_serial,metrics.synthetic?native_output+1:0};
+        if(impl_->luke_scene_measurement && metrics.new_content)
+            impl_->accepted_scenes.accepted(now,scene);
         impl_->counter.submitted(now,metrics.synthetic,metrics.new_content);
         if(measure && stamp.cycle && metrics.synthetic)
             stamp.cycle->synthetic_accepted(accepted_clock,impl_->estimate_period());
@@ -1151,7 +1154,8 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
             for(const auto& r:native_results) pending |= r && r->resolve()==D3D12NativeFrameResult::pending;
             if(pending && impl_->pending_native_counts.size()<64)
                 impl_->pending_native_counts.push_back({{native_results.begin(),native_results.end()},now,native_output,
-                    measure ? stamp.cycle : nullptr,accepted_clock,impl_->estimate_period()});
+                    measure ? stamp.cycle : nullptr,accepted_clock,impl_->estimate_period(),
+                    {stamp.scene_owner,stamp.scene_serial,native_output+1}});
         }
     }
     return result;

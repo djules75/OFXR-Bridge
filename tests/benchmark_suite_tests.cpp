@@ -39,6 +39,8 @@ int main() {
         m.output_source=xrfg::InterfaceSource::steamvr_scene_delivery;
         ++m.updated_ms;
         unknown.observe(m,1000,11000);check(unknown.fps.size()==1,"Measured distinct Luke scene FPS enters benchmark");
+        ++m.updated_ms;m.output_source=xrfg::InterfaceSource::accepted_scene_submissions;
+        unknown.observe(m,1000,11000);check(unknown.fps.size()==2,"Distinct accepted Luke total enters benchmark with explicit source");
         baseline.benchmark_csv=true;check(request(baseline),"Save isolated test profile");baseline=snapshot().desired;
         RuntimeStatus runtime{};runtime.sessions=1;runtime.dlssg_preset_request=3;
         runtime.applied_revision=snapshot().revision;report_runtime(runtime);

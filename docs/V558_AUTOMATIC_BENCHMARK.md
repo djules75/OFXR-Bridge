@@ -1,3 +1,8 @@
+V566 note: Luke total is New submitted FPS (distinct images accepted by the
+runtime), not physical scanout. Existing OFXR real/generated counters restored.
+The suite still has18AFW-quality trials and noAFW-off pass. V565 synchronous
+compositor receipt mapping is withdrawn. See V566_LUKE_TOTAL_COUNTER.md.
+
 > Current behavior from V565: Luke runs18tests, only1x1/2x2/4x4. The six
 > AFW-disabled measurements are removed. Six metric rows remain; the Luke CSV
 > has18qualitycolumns. Output FPS and real/generated Luke values require

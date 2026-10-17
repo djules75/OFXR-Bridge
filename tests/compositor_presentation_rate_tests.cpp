@@ -1,6 +1,7 @@
 #include "xrfg/presented_output_rate.hpp"
 #include "xrfg/compositor_presentation_rate.hpp"
 #include "xrfg/scene_presentation_rate.hpp"
+#include "xrfg/accepted_scene_rate.hpp"
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -48,6 +49,33 @@ int main() {
             records[40].m_nNumFramePresents=0;
             rate=unknown.rate(std::span<const Timing>(records));
             if(!rate||rate->output!=89)throw std::runtime_error("unshown source was counted");
+        }
+        {
+            // A runtime may publish no timing record during xrEndFrame. Count
+            // known successfully accepted images independently of that API.
+            xrfg::AcceptedSceneRate accepted;
+            xrfg::SceneIdentity id{1,1,0};
+            for(unsigned i=0;i<=180;++i) {
+                if(i && i*50/90>(i-1)*50/90)id={1,1+i*50/90,unsigned((i*50/90)%2)};
+                accepted.accepted(std::int64_t(i)*1'000'000'000/90,id);
+            }
+            auto r=accepted.rate(2'000'000'000);
+            if(!r||r->output!=50||r->real!=25||r->generated!=25)
+                throw std::runtime_error("accepted total includes held resubmissions");
+            xrfg::AcceptedSceneRate raw;unsigned serial=1;
+            for(unsigned i=0;i<=180;++i) {
+                if(i&&i*47/90>(i-1)*47/90)++serial;
+                raw.accepted(std::int64_t(i)*1'000'000'000/90,{2,serial,0});
+            }
+            r=raw.rate(2'000'000'000);
+            if(!r||r->output!=47)throw std::runtime_error("AFW-only held sources inflate total");
+            raw.accepted(2'100'000'000,{});
+            if(raw.rate(2'200'000'000))throw std::runtime_error("unknown identity invents new content");
+            // Explicitly separate accepted deliveries from display proof.
+            xrfg::InterfaceTelemetry t;t.rates_valid=true;t.output_fps=50;
+            t.output_source=xrfg::InterfaceSource::accepted_scene_submissions;
+            if(!xrfg::output_rate_valid(t)||xrfg::presented_output_valid(t))
+                throw std::runtime_error("accepted images misrepresented as physical presentation");
         }
         struct Delivery {
             std::optional<float> rate{45};unsigned calls{};

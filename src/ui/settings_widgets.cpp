@@ -48,10 +48,10 @@ void status(const Snapshot& state) {
     };
     if (ImGui::BeginTable("Interface metrics", 4, ImGuiTableFlags_SizingStretchSame)) {
         ImGui::TableNextRow();
-        value("Output FPS", m.output_fps, current && presented_output_valid(m), true,
-            state.runtime.luke_detected ? "Distinct scene identities matched to SteamVR presented records. Both repeated scanouts and resubmitted held images excluded. N/A if source identity or exact compositor attribution is unavailable; no refresh/submission fallback." : "SteamVR compositor frames actually presented per second. Zero-present records excluded; repeated scanouts counted once. Source pixel identity is not measured.");
-        value(state.runtime.luke_detected?"Real presented":"Real submitted", m.game_fps, current && m.rates_valid, true, "Luke: distinct real scene identities confirmed in presented SteamVR records. Other paths: distinct successfully submitted real frames.");
-        value(state.runtime.luke_detected?"Gen presented":"Gen submitted", m.generated_fps, current && m.rates_valid, true, "Luke: distinct generated scene identities confirmed in presented SteamVR records. Other paths: successfully submitted generated frames with native GPU confirmation.");
+        value(state.runtime.luke_detected?"New submitted FPS":"Output FPS", m.output_fps, current && output_rate_valid(m), true,
+            state.runtime.luke_detected ? "Distinct new images successfully accepted by the OpenXR runtime per second; held images and repeats excluded. This measures delivery to the runtime, not physical headset scanout. N/A only when source identity is unavailable." : "SteamVR compositor frames actually presented per second. Zero-present records excluded; repeated scanouts counted once. Source pixel identity is not measured.");
+        value("Real submitted", m.game_fps, current && m.rates_valid, true, "Successfully submitted real frames. Luke OFXR counter preserved; AFW-only held source identities are excluded.");
+        value("Gen submitted", m.generated_fps, current && m.rates_valid, true, "Successfully submitted generated frames with native GPU confirmation.");
         value("Display Hz", m.display_hz, current && m.display_hz > 0, true,
             m.display_source == InterfaceSource::steamvr_display ? "SteamVR physical display frequency." : "OpenXR shortest observed predicted display period; may reflect runtime throttling.");
         ImGui::TableNextRow();

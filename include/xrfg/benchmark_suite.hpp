@@ -64,7 +64,8 @@ struct BenchmarkSamples {
         if(!m.updated_ms || m.updated_ms==last_ms || m.updated_ms<started+3000 || m.updated_ms>=end) return;
         last_ms=m.updated_ms;
         if((m.output_source==InterfaceSource::steamvr_delivery ||
-            m.output_source==InterfaceSource::steamvr_scene_delivery) && m.rates_valid &&
+            m.output_source==InterfaceSource::steamvr_scene_delivery ||
+            m.output_source==InterfaceSource::accepted_scene_submissions) && m.rates_valid &&
             std::isfinite(m.output_fps) && m.output_fps>=0) fps.push_back(m.output_fps);
         if(m.cycle_estimated_valid && std::isfinite(m.cycle_estimated_ms) && m.cycle_estimated_ms>=0)
             latency.push_back(m.cycle_estimated_ms);
