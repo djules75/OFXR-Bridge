@@ -15,11 +15,11 @@ struct BenchmarkStep {
 inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false) {
     if(luke) {
         std::vector<BenchmarkStep> result;
-        for(const int quality:{-1,0,4,8}) {
+        for(const int quality:{0,4,8}) {
             for(auto step:benchmark_plan(false)) {
                 if(step.a || step.b || (step.prefer && !step.triple))continue;
-                step.afw=quality<0 ? 0 : 3;step.shading=std::max(0,quality);
-                if(step.disabled && quality>=0)step.label="AFW only";
+                step.afw=3;step.shading=quality;
+                if(step.disabled)step.label="AFW only";
                 result.push_back(std::move(step));
             }
         }
@@ -63,7 +63,8 @@ struct BenchmarkSamples {
     void observe(const InterfaceTelemetry& m,std::uint64_t started,std::uint64_t end) {
         if(!m.updated_ms || m.updated_ms==last_ms || m.updated_ms<started+3000 || m.updated_ms>=end) return;
         last_ms=m.updated_ms;
-        if(m.output_source==InterfaceSource::steamvr_delivery && m.rates_valid &&
+        if((m.output_source==InterfaceSource::steamvr_delivery ||
+            m.output_source==InterfaceSource::steamvr_scene_delivery) && m.rates_valid &&
             std::isfinite(m.output_fps) && m.output_fps>=0) fps.push_back(m.output_fps);
         if(m.cycle_estimated_valid && std::isfinite(m.cycle_estimated_ms) && m.cycle_estimated_ms>=0)
             latency.push_back(m.cycle_estimated_ms);

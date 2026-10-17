@@ -412,6 +412,11 @@ int main(int argc, char** argv) {
             stamp={402,xrfg::interface_clock_ns(),0};
             check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS && clock_conversions==conversions,"hidden UI cannot read display clock");
             clock_available=true;
+            overlay.set_luke_scene_measurement(true);
+            check(!overlay.metrics().sample_valid,"Luke cannot fall back to XR submissions without scene delivery proof");
+            overlay.reset_metrics();
+            check(!overlay.metrics().sample_valid,"Luke proof requirement survives settings/reset");
+            overlay.set_luke_scene_measurement(false);
             const auto uploads_before_stop = releases;
             overlay.suspend();
             check(!overlay.marker_placement(), "manual stop left diagnostic marker enabled");

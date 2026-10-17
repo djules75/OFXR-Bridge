@@ -552,11 +552,11 @@ void csv_layout(const SuiteRecorder& rec,const BenchmarkStatus& b) {
     if(rec.layout_path.empty())return;
     auto steps=benchmark_plan(b.full,b.luke);
     if(b.luke) {
-        // Execute whole quality passes, export each route's blank/1x1/2x2/4x4 together.
+        // Execute whole quality passes, export each route's1x1/2x2/4x4 together.
         std::vector<BenchmarkStep> ordered;
         constexpr std::size_t routes=6;
         for(std::size_t route=0;route<routes;++route)
-            for(std::size_t quality=0;quality<4;++quality)ordered.push_back(steps[quality*routes+route]);
+            for(std::size_t quality=0;quality<3;++quality)ordered.push_back(steps[quality*routes+route]);
         steps=std::move(ordered);
     }
     std::ofstream output(rec.layout_path,std::ios::trunc);output.imbue(std::locale::classic());
@@ -570,7 +570,7 @@ void csv_layout(const SuiteRecorder& rec,const BenchmarkStatus& b) {
     output<<'\n'<<std::fixed<<std::setprecision(3);
     const char* metrics[]{"Output FPS min","Output FPS median","Output FPS max","Cycle estimated min ms","Cycle estimated median ms","Cycle estimated max ms"};
     for(unsigned metric=0;metric<6;++metric) {
-        output<<quoted(rec.game)<<",558,"<<metrics[metric];
+        output<<quoted(rec.game)<<','<<XRFG_IMPLEMENTATION_VERSION<<','<<metrics[metric];
         for(const auto& step:steps) {
             const auto wanted=benchmark_settings(rec.settings,step);
             const SuiteResult* result=nullptr;
@@ -589,7 +589,7 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
     if(!rec.revision)return;
     if(rec.stream.is_open()) {
         const auto& s=rec.settings;
-        rec.stream<<"558,"<<b.run_id<<','<<b.game_pid<<','<<quoted(rec.game)<<','<<rec.index+1<<','<<quoted(rec.label)<<','
+        rec.stream<<XRFG_IMPLEMENTATION_VERSION<<','<<b.run_id<<','<<b.game_pid<<','<<quoted(rec.game)<<','<<rec.index+1<<','<<quoted(rec.label)<<','
             <<s.separate_synthesis<<','<<s.lower_vram<<','<<(s.triple_frame_gen ? 3 : 2)<<','<<s.prefer_fps<<','
             <<s.nr_enabled<<','<<s.afw_mode<<','<<s.afw_shading_rate<<','<<(s.frame_generation==2 ? "C startup request" : "N/A")
             <<",3,"<<std::max(0.0,(double(ended)-double(rec.started)-3000.0)/1000.0)<<',';
@@ -608,7 +608,7 @@ void csv_open(SuiteRecorder& rec,BenchmarkStatus& b) {
     if(!b.csv)return;
     const auto folder=configuration_path().parent_path()/L"Benchmarks";
     std::filesystem::create_directories(folder);
-    const auto stem=L"OFXR-V558-"+std::to_wstring(b.run_id);
+    const auto stem=L"OFXR-V"+std::to_wstring(XRFG_IMPLEMENTATION_VERSION)+L"-"+std::to_wstring(b.run_id);
     rec.layout_path=folder/(stem+L".csv");
     const auto path=folder/(stem+L"-details.csv");
     rec.stream.open(path,std::ios::out|std::ios::trunc);

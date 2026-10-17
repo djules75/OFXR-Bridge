@@ -35,6 +35,7 @@ public:
     void set_afw_active(bool active) noexcept;
     void set_delivery_source(SteamVrDelivery* delivery) noexcept;
     void set_unique_content_only(bool enabled) noexcept;
+    void set_luke_scene_measurement(bool enabled) noexcept;
     [[nodiscard]] XrResult end_frame(const XrFrameEndInfo* info, bool synthetic, bool new_content = true,
         std::span<const std::shared_ptr<D3D12NativeFrameResult>> native_results = {}, unsigned native_output = 0,
         InterfaceFrameStamp stamp = {});

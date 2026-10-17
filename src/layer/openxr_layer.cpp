@@ -5507,6 +5507,7 @@ XrResult layer_create_session_impl(
             }, dispatch.get());
         state->fps_overlay->set_delivery_source(state->steamvr_delivery.get());
         state->fps_overlay->set_unique_content_only(state->luke_fresh_only);
+        state->fps_overlay->set_luke_scene_measurement(xrfg::native_ingress::luke_detected());
     } catch (...) {}
     if (state->graphics_binding == SessionGraphicsBinding::d3d11 &&
         (state->graphics_binding_capabilities & 3ULL) == 3ULL) {
@@ -10988,6 +10989,7 @@ struct PreparedProjectionFrame {
     bool preserve_previous{};
     std::shared_ptr<const HeldAfwPair> held_afw_pair;
     std::optional<LukeAfwStartupCandidate> startup_candidate;
+    std::uint64_t scene_serial{};
 };
 
 void attach_djules_outputs(PreparedProjectionFrame& prepared,
@@ -12519,6 +12521,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     output.anchor_is_current = true;
     output.resources = std::move(resources);
     output.held_afw_pair = pair;
+    output.scene_serial=pair->production_serial;
     return true;
 }
 
@@ -12547,6 +12550,8 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         // displayTime names this physical presentation interval; the retained
         // render pose/FOV still describe the pixels generated on the old one.
     }
+    terminal.interface_stamp.scene_owner=0x4146570000000001ULL;
+    terminal.interface_stamp.scene_serial=produced.scene_serial;
     const bool captured = capture_projection_snapshot(&terminal.info, &terminal_snapshot);
     terminal_snapshot.blackbar_pose=snapshot.blackbar_pose;
     terminal_snapshot.interface_stamp = terminal.interface_stamp;
@@ -13162,6 +13167,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         output.startup_candidate = LukeAfwStartupCandidate{
             {source.guide->stream, source.guide->epoch},
             source.guide->publication};
+        output.scene_serial=frame_serial;
         output.resources.reserve(entries.size());
         for (std::size_t index = 0; index < entries.size(); ++index) {
             output.resources.push_back({
@@ -14419,6 +14425,10 @@ XrResult layer_end_frame_impl(
         state->interface_serial.fetch_add(1, std::memory_order_relaxed) + 1,
         interface_entered_ns,
         state->interface_begun_ns.exchange(0, std::memory_order_relaxed)};
+    if(xrfg::native_ingress::luke_detected())if(const auto source=xrfg::query_luke_render_identity()) {
+        interface_stamp.scene_owner=source->object;
+        interface_stamp.scene_serial=source->render+1;
+    }
     xrfg::autonomous::poll_diagnostic_logging_key();
     if(state->luke_fresh_only && state->frame_capture) {
         const bool save_down=(GetAsyncKeyState(VK_F8)&0x8000)!=0;
@@ -15753,7 +15763,7 @@ XrResult layer_end_frame_impl(
                !handover_djules_outputs(state.get(),first_generated.pending_outputs)) return XR_ERROR_RUNTIME_FAILURE;
             report_native_frame_content(state.get(),&first_generated);
             return state->fps_overlay
-                ? state->fps_overlay->end_frame(physical_end, pair_ready,true,native_frame_results(&first_generated),first_generated.native_output, interface_stamp)
+                ? state->fps_overlay->end_frame(physical_end, pair_ready,true,native_frame_results(&first_generated),first_generated.native_output, produced_snapshot.interface_stamp)
                 : content_end_frame(session, physical_end);
         });
         log_luke_physical_boundary(state, submitted_end_info, frame_serial, 5, &prepared, result);

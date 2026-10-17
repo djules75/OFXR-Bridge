@@ -1,5 +1,6 @@
 #include "xrfg/presented_output_rate.hpp"
 #include "xrfg/compositor_presentation_rate.hpp"
+#include "xrfg/scene_presentation_rate.hpp"
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -16,6 +17,38 @@ void check(const std::vector<Timing>& records, float expected) {
 }
 int main() {
     try {
+        {
+            // All90 compositor submissions are shown, but only25real+25gen
+            // identities are new; forty held re-submissions are not new FPS.
+            xrfg::ScenePresentationRate scenes;
+            std::vector<Timing> records;
+            xrfg::SceneIdentity identity{1,1,0};
+            for(unsigned i=0;i<=90;++i) {
+                if(i&&i<=50)identity={1,2+(i-1)/2,i%2};
+                scenes.record(i,identity);records.push_back({i,1,0,i/90.0});
+            }
+            auto rate=scenes.rate(std::span<const Timing>(records));
+            if(!rate||std::abs(rate->output-50)>.01||rate->real!=25||rate->generated!=25)
+                throw std::runtime_error("scene repeats became extra FPS");
+            xrfg::ScenePresentationRate raw;unsigned serial=1;
+            for(unsigned i=0;i<=90;++i) {
+                if(i&&i*47/90>(i-1)*47/90)++serial;
+                raw.record(i,{2,serial,0});
+            }
+            rate=raw.rate(std::span<const Timing>(records));
+            if(!rate||rate->output!=47||rate->real!=47||rate->generated!=0)
+                throw std::runtime_error("47 source frames became90XR calls");
+            scenes.record(30,{99,99,1});
+            if(scenes.rate(std::span<const Timing>(records)))
+                throw std::runtime_error("ambiguous compositor attribution was accepted");
+            xrfg::ScenePresentationRate unknown;
+            for(unsigned i=0;i<=90;++i)unknown.record(i,i==40?xrfg::SceneIdentity{}:xrfg::SceneIdentity{1,i+1,0});
+            if(unknown.rate(std::span<const Timing>(records)))
+                throw std::runtime_error("unknown source identity became inventedFPS");
+            records[40].m_nNumFramePresents=0;
+            rate=unknown.rate(std::span<const Timing>(records));
+            if(!rate||rate->output!=89)throw std::runtime_error("unshown source was counted");
+        }
         struct Delivery {
             std::optional<float> rate{45};unsigned calls{};
             std::optional<float> delivered_fps(std::int64_t) noexcept {++calls;return rate;}

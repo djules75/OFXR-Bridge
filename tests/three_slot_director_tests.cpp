@@ -857,6 +857,10 @@ void held_afw_pair_gpu_test(const std::shared_ptr<SessionState>& state,
         ProjectionSnapshot terminal_snapshot;
         check(build_afw_terminal_submission(&newer.info, current, held, terminal, terminal_snapshot),
             "held terminal construction");
+        check(terminal.interface_stamp.scene_serial==pixel_serial &&
+            terminal_snapshot.interface_stamp.scene_serial==pixel_serial &&
+            terminal.interface_stamp.scene_owner!=0,
+            "held AFW image acquired a new scene identity from an XR interval");
         // This downstream call inspects what the runtime receives, and reads
         // BOTH retained D3D11 images. A metadata-only cache cannot pass it.
         const auto runtime_end = [&](const XrFrameEndInfo* frame) {
@@ -1372,8 +1376,11 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
                 }
                 GeneratedFrameEndInfo terminal;
                 ProjectionSnapshot terminal_snapshot;
+                terminal_prepared.scene_serial=n;
                 check(build_afw_terminal_submission(&end, snapshot, terminal_prepared,
                     terminal, terminal_snapshot), "single terminal submission builder");
+                check(terminal_snapshot.interface_stamp.scene_serial==n,
+                    "post AFW director packet lost its source scene identity");
                 if (n == 1) {
                     auto& terminal_view = terminal.projections.front().views.front();
                     terminal_view.next = reinterpret_cast<const void*>(0x123);

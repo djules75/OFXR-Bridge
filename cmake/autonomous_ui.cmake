@@ -1,5 +1,6 @@
 # Standalone controls never link an OptiScaler runtime or its host/menu.
 add_library(xrfg_autonomous_control STATIC src/common/autonomous_control.cpp src/common/dlssg_profile.cpp)
+target_compile_definitions(xrfg_autonomous_control PRIVATE XRFG_IMPLEMENTATION_VERSION=${PROJECT_VERSION_MINOR})
 target_include_directories(xrfg_autonomous_control PUBLIC include)
 target_compile_features(xrfg_autonomous_control PUBLIC cxx_std_20)
 target_compile_definitions(xrfg_autonomous_control PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

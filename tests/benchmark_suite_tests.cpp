@@ -36,6 +36,9 @@ int main() {
         m.updated_ms=10999;samples.observe(m,1000,11000);check(samples.fps.size()==4,"Repeated telemetry cannot overweight the median");
         BenchmarkSamples unknown;m.updated_ms=5000;m.output_source=xrfg::InterfaceSource::accepted_submissions;
         unknown.observe(m,1000,11000);check(unknown.fps.empty(),"Submitted rate is never a presentation measurement");
+        m.output_source=xrfg::InterfaceSource::steamvr_scene_delivery;
+        ++m.updated_ms;
+        unknown.observe(m,1000,11000);check(unknown.fps.size()==1,"Measured distinct Luke scene FPS enters benchmark");
         baseline.benchmark_csv=true;check(request(baseline),"Save isolated test profile");baseline=snapshot().desired;
         RuntimeStatus runtime{};runtime.sessions=1;runtime.dlssg_preset_request=3;
         runtime.applied_revision=snapshot().revision;report_runtime(runtime);
@@ -66,9 +69,10 @@ int main() {
         check(snapshot().benchmark.phase==BenchmarkPhase::stopped && !snapshot().desired.nr_enabled,"Manual changes cancel automation and are kept");
         runtime.applied_revision=snapshot().revision;report_runtime(runtime);check(start_benchmark(false),"Restart optical suite");stop_benchmark();tick_benchmark();
         check(snapshot().benchmark.phase==BenchmarkPhase::stopped,"Explicit Stop");
-        const auto luke=benchmark_plan(false,true);check(luke.size()==24,"Luke has six routes times four AFW states");
+        const auto luke=benchmark_plan(false,true);check(luke.size()==18,"Luke has six routes times three AFW qualities");
         unsigned afw_only=0;
         for(const auto& step:luke) {
+            check(step.afw==3,"Luke never tests AFW disabled");
             check(step.generation==0 && !step.a && !step.b,"Luke ends at 0.3.0 without vector generators or A/B permutations");
             if(step.disabled && step.afw==3)++afw_only;
         }
@@ -85,7 +89,7 @@ int main() {
         state=snapshot();check(state.benchmark.phase==BenchmarkPhase::complete,"Luke completes");
         std::ifstream layout(std::filesystem::u8path(state.benchmark.csv_path));std::string header;std::getline(layout,header);
         const auto blank=header.find("Fidelity 00 / blank"),one=header.find("Fidelity 00 / 1x1"),two=header.find("Fidelity 00 / 2x2"),four=header.find("Fidelity 00 / 4x4");
-        check(blank<one && one<two && two<four && four!=std::string::npos,"Luke CSV groups blank/1x1/2x2/4x4 per route despite execution by passes");
+        check(blank==std::string::npos && one<two && two<four && four!=std::string::npos,"Luke CSV groups only1x1/2x2/4x4; no disabled AFW tests");
         std::cout<<"Automatic suite: full/optical, C-only, hidden sampling without F9, timing, median, CSV, restore/manual cancellation PASS\n";
         return 0;
     } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}

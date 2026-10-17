@@ -166,6 +166,8 @@ struct SteamVrDelivery::Impl {
     std::chrono::steady_clock::time_point display_period_read{};
     AttachRoute route{AttachRoute::none};
     bool owns_context{};
+    ScenePresentationRate scene_receipts;
+    std::optional<ScenePresentationRate::Rate> scene_rate;
 
     float delivered{};
     std::int64_t delivered_at_ns{-1};
@@ -307,6 +309,8 @@ struct SteamVrDelivery::Impl {
         presentation_rate = filled <= window.size()
             ? compositor_presentation_rate(std::span<const vr::Compositor_FrameTiming>(window.data(), filled))
             : std::nullopt;
+        scene_rate=filled<=window.size() ? scene_receipts.rate(
+            std::span<const vr::Compositor_FrameTiming>(window.data(),filled)) : std::nullopt;
     }
 
     void close_window(std::int64_t now) noexcept {
@@ -321,6 +325,43 @@ struct SteamVrDelivery::Impl {
     }
 
 };
+
+SteamVrDelivery::SubmissionProbe SteamVrDelivery::scene_submission_probe() noexcept {
+    try {
+        if(!impl_)return {};
+        std::scoped_lock lock(impl_->mutex);
+        if(!impl_->established)return {};
+        if(!impl_->attempted)impl_->attach();
+        if(!impl_->usable||!impl_->compositor)return {};
+        vr::Compositor_CumulativeStats stats{};
+        impl_->compositor->GetCumulativeStats(&stats,sizeof(stats));
+        if(stats.m_nPid!=GetCurrentProcessId())return {};
+        vr::Compositor_FrameTiming t{};t.m_nSize=sizeof(t);
+        if(!impl_->compositor->GetFrameTiming(&t,0))return {};
+        return {t.m_nFrameIndex,t.m_flSystemTimeInSeconds,t.m_flNewFrameReadyMs,true};
+    }catch(...){return {};}
+}
+void SteamVrDelivery::scene_submission_completed(SubmissionProbe before,SceneIdentity scene) noexcept {
+    const auto after=scene_submission_probe();
+    // A changed current record (or a newly filled ready field in that same
+    // record) witnesses the synchronous scene submission. Unchanged/stale
+    // records and asynchronous handoffs cannot be attributed by guessing.
+    const bool matched=before.valid&&after.valid&&after.frame>=before.frame&&std::isfinite(after.ready)&&after.ready!=0&&
+        !(after.frame==before.frame&&after.time==before.time&&after.ready==before.ready);
+    bridge_flight_logger().event(BridgeFlightOperation::presenter_source,matched?5650:5651,
+        before.frame,after.frame,(before.valid?1U:0U)|(after.valid?2U:0U));
+    if(!matched)return;
+    try {std::scoped_lock lock(impl_->mutex);impl_->scene_receipts.record(after.frame,scene);
+        bridge_flight_logger().event(BridgeFlightOperation::presenter_source,5652,
+            after.frame,scene.owner,scene.serial);}
+    catch(...){}
+}
+std::optional<ScenePresentationRate::Rate> SteamVrDelivery::scene_fps(std::int64_t now) noexcept {
+    try {
+        if(!delivered_fps(now))return {};
+        std::scoped_lock lock(impl_->mutex);return impl_->scene_rate;
+    }catch(...){return {};}
+}
 
 SteamVrDelivery::SteamVrDelivery(bool steamvr_runtime) noexcept
     : impl_(nullptr) {

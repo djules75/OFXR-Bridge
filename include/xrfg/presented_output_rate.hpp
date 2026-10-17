@@ -4,7 +4,8 @@
 
 namespace xrfg {
 [[nodiscard]] inline bool presented_output_valid(const InterfaceTelemetry& value) noexcept {
-    return value.rates_valid && value.output_source == InterfaceSource::steamvr_delivery &&
+    return value.rates_valid && (value.output_source == InterfaceSource::steamvr_delivery ||
+        value.output_source == InterfaceSource::steamvr_scene_delivery) &&
         std::isfinite(value.output_fps) && value.output_fps >= 0;
 }
 

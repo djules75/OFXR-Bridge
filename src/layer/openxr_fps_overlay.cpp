@@ -108,6 +108,8 @@ struct OpenXrFpsOverlay::Impl {
     std::uint64_t next_fence{1}, last_fence{};
     bool fps_unfenced_submission{};
     bool unique_content_only{};
+    bool luke_scene_measurement{};
+    SceneIdentity last_scene;
     HANDLE event{};
     struct Image {
         ComPtr<ID3D12Resource> texture12, upload;
@@ -821,6 +823,14 @@ struct OpenXrFpsOverlay::Impl {
         out.game_fps = fps.real_fps;
         out.generated_fps = fps.generated_fps;
         out.rates_valid = fps.sample_valid;
+        if(luke_scene_measurement) {
+            out.output_fps=out.game_fps=out.generated_fps=0;
+            out.output_source=InterfaceSource::none;out.rates_valid=false;
+            if(delivery)if(const auto scene=delivery->scene_fps(now)) {
+                out.output_fps=scene->output;out.game_fps=scene->real;out.generated_fps=scene->generated;
+                out.output_source=InterfaceSource::steamvr_scene_delivery;out.rates_valid=true;
+            }
+        }
         out.generating = fps.generated_fps > 0;
         auto period = display_period_ns.load(std::memory_order_relaxed);
         out.display_source = period > 0 ? InterfaceSource::openxr_period : InterfaceSource::none;
@@ -929,12 +939,18 @@ struct OpenXrFpsOverlay::Impl {
         poll_native_counts(now);
         auto snapshot = counter.snapshot(now);
         snapshot.afw_active = afw_active;
-        if (delivery) {
+        if (delivery && !luke_scene_measurement) {
             if (const auto measured = delivery->delivered_fps(now)) {
                 // A compositor also counts copied B slots. Its delivery rate
                 // can cap confirmed unique native content, never inflate it.
                 snapshot.delivered_fps = *measured;
                 snapshot.delivered_valid = true;
+            }
+        }
+        if(luke_scene_measurement) {
+            snapshot.delivered_valid=false;
+            if(delivery)if(const auto scene=delivery->scene_fps(now)) {
+                snapshot.delivered_fps=scene->output;snapshot.delivered_valid=true;
             }
         }
         if (const auto period = display_period_ns.load(std::memory_order_relaxed); period > 0) {
@@ -1002,6 +1018,9 @@ void OpenXrFpsOverlay::set_unique_content_only(bool enabled) noexcept {
 void OpenXrFpsOverlay::set_grip_spaces(XrSpace left,XrSpace right) noexcept {
     std::scoped_lock lock(impl_->mutex);impl_->grips={left,right};
 }
+void OpenXrFpsOverlay::set_luke_scene_measurement(bool enabled) noexcept {
+    std::scoped_lock lock(impl_->mutex);impl_->luke_scene_measurement=enabled;impl_->last_scene={};
+}
 void OpenXrFpsOverlay::set_display_period(std::int64_t period_ns) noexcept {
     impl_->display_period_ns.store(period_ns > 0 ? period_ns : 0, std::memory_order_relaxed);
 }
@@ -1051,7 +1070,16 @@ FpsSnapshot OpenXrFpsOverlay::metrics() const noexcept {
     std::scoped_lock lock(impl_->mutex);
     const auto now=now_ns();
     impl_->poll_native_counts(now);
-    return impl_->counter.snapshot(now);
+    auto result=impl_->counter.snapshot(now);
+    if(impl_->luke_scene_measurement) {
+        result.sample_valid=false;
+        if(impl_->delivery)if(const auto scene=impl_->delivery->scene_fps(now)) {
+            result.submitted_fps=result.delivered_fps=scene->output;
+            result.real_fps=scene->real;result.generated_fps=scene->generated;
+            result.sample_valid=result.delivered_valid=true;
+        }
+    }
+    return result;
 }
 
 std::optional<OverlayPlacement> OpenXrFpsOverlay::marker_placement() const noexcept {
@@ -1092,7 +1120,17 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
     if (measure && !synthetic && nonempty && impl_->converter)
         if (!impl_->converter(impl_->converter_user, info->displayTime, display)) display = 0;
     const auto submit_clock = measure ? interface_clock_ns() : 0;
+    const auto probe=impl_->luke_scene_measurement && impl_->delivery
+        ? impl_->delivery->scene_submission_probe() : SteamVrDelivery::SubmissionProbe{};
     const auto result = impl_->downstream_end(impl_->session, submitted);
+    if(impl_->luke_scene_measurement && impl_->delivery && result==XR_SUCCESS && nonempty) {
+        SceneIdentity scene{stamp.scene_owner,stamp.scene_serial,synthetic?native_output+1:0};
+        const auto native=classify_native_frame_content(native_results,native_output,synthetic,new_content);
+        if(synthetic && !native.synthetic)scene={};
+        if(!new_content)scene=impl_->last_scene;
+        impl_->delivery->scene_submission_completed(probe,scene);
+        impl_->last_scene=scene;
+    }
     const auto accepted_clock = measure ? interface_clock_ns() : 0;
     if (measure && !synthetic) impl_->timings.submitted(stamp, submit_clock, result == XR_SUCCESS,
         nonempty, synthetic, new_content, display, accepted_clock);

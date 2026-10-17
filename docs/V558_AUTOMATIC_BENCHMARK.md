@@ -1,3 +1,10 @@
+> Current behavior from V565: Luke runs18tests, only1x1/2x2/4x4. The six
+> AFW-disabled measurements are removed. Six metric rows remain; the Luke CSV
+> has18qualitycolumns. Output FPS and real/generated Luke values require
+> source-identity and compositor-presentation receipts. Unknown isN/A, never
+> refresh/submitted FPS. See V565_LUKE_SCENE_METER.md. Earlier V558 details
+> below describe its original24-step format, still accepted by the local adapter.
+
 # V558 automatic benchmark suites
 
 Local candidate on shared V557. All controls are in the Display tab in both

@@ -49,9 +49,9 @@ void status(const Snapshot& state) {
     if (ImGui::BeginTable("Interface metrics", 4, ImGuiTableFlags_SizingStretchSame)) {
         ImGui::TableNextRow();
         value("Output FPS", m.output_fps, current && presented_output_valid(m), true,
-            "SteamVR compositor frames actually presented per second. Zero-present records excluded; repeated scanouts counted once. N/A without a current measurement; no submission fallback. Source pixel identity is not measured.");
-        value("Real submitted", m.game_fps, current && m.rates_valid, true, "Distinct real frames successfully submitted per second; presentation is not confirmed for each source frame.");
-        value("Gen submitted", m.generated_fps, current && m.rates_valid, true, "Fresh generated frames successfully submitted per second, not confirmed display delivery. Native DLSS-G requires GPU interpolation confirmation.");
+            state.runtime.luke_detected ? "Distinct scene identities matched to SteamVR presented records. Both repeated scanouts and resubmitted held images excluded. N/A if source identity or exact compositor attribution is unavailable; no refresh/submission fallback." : "SteamVR compositor frames actually presented per second. Zero-present records excluded; repeated scanouts counted once. Source pixel identity is not measured.");
+        value(state.runtime.luke_detected?"Real presented":"Real submitted", m.game_fps, current && m.rates_valid, true, "Luke: distinct real scene identities confirmed in presented SteamVR records. Other paths: distinct successfully submitted real frames.");
+        value(state.runtime.luke_detected?"Gen presented":"Gen submitted", m.generated_fps, current && m.rates_valid, true, "Luke: distinct generated scene identities confirmed in presented SteamVR records. Other paths: successfully submitted generated frames with native GPU confirmation.");
         value("Display Hz", m.display_hz, current && m.display_hz > 0, true,
             m.display_source == InterfaceSource::steamvr_display ? "SteamVR physical display frequency." : "OpenXR shortest observed predicted display period; may reflect runtime throttling.");
         ImGui::TableNextRow();
@@ -354,7 +354,7 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     }
     if(state.benchmark.message[0])ImGui::TextWrapped("%s",state.benchmark.message);
     if(state.benchmark.csv_path[0])ImGui::TextWrapped("CSV: %s",state.benchmark.csv_path);
-    ImGui::TextWrapped("Luke Ross: OFXR only through 0.3.0, no A/B changes. AFW off, 1x1, 2x2, 4x4; every pass also tests OFXR off (AFW alone). CSV groups the four states in that order for each route.");
+    ImGui::TextWrapped("Luke Ross: 18 tests through OFXR 0.3.0, no A/B changes. Three AFW quality passes: 1x1, 2x2, 4x4. Each includes AFW alone once. AFW-disabled tests are omitted; CSV groups the three qualities for each route.");
     ImGui::TextWrapped("Close the menu and keep the same test scene. Original settings are restored after Stop or completion. Djules 3X B-only is skipped because it cannot retain 3X. Complete tests require preset C selected before starting the game; a live profile edit does not prove a model change.");
     return changed;
 }
