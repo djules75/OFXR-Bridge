@@ -5,19 +5,18 @@
 #include <d3d12sdklayers.h>
 #include <wrl/client.h>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <thread>
 #include <iostream>
 #include <fstream>
-#include <chrono>
-#include <thread>
 #include <stdexcept>
 #include <vector>
 #include <limits>
 
 namespace {
 using Microsoft::WRL::ComPtr;
-unsigned checks{};
+std::atomic_uint checks{};
 void require(bool condition, const char* message) {
     ++checks;
     if (!condition) throw std::runtime_error(message);

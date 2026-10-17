@@ -1,0 +1,19 @@
+{
+  "version": "V564",
+  "base": "50b05023ad66ff21825dc16029c66784e4e97324",
+  "status": "runtime-pending",
+  "passed": 16,
+  "failed": 0,
+  "ctest_seconds": 16.07,
+  "headset_validation": "Crimson V563 matched public/native evidence analyzed. V564 original public N-1 guides plus completed wrapper color awaits headset mouse-motion/green and FPS verdict;45FPS GPU wait not claimed resolved.",
+  "ipc_abi": 55801,
+  "provider_abi": 45601,
+  "afw_motion_math_changed": false,
+  "guide_capture_point_changed": "Crimson known public SR only; span1; typed NR retained",
+  "shaders_changed": false,
+  "presentation_pacing_changed": false,
+  "swapchain_counts_changed": false,
+  "marker_geometry_changed": false,
+  "v558_csv_preserved": true,
+  "test": "Actual GPU overwrite of original motion/depth before typed SR; immutable current/previous bytes and final caller color/CRC checked on independent GPU queue."
+}

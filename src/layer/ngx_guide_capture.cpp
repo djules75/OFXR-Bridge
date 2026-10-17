@@ -175,7 +175,7 @@ template<class T> ComPtr<T> native(T* object);
 bool same(IUnknown*,IUnknown*);
 std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList*,const NVSDK_NGX_Handle*,
     const NVSDK_NGX_Parameter*,std::uint64_t,std::uint64_t,KcdCameraInvocationScope*,std::uint32_t,bool*,const Feature*,
-    ID3D12Resource* = nullptr);
+    ID3D12Resource* = nullptr,unsigned = 0);
 // REAL VR's public handle can predate interception and own two physical-eye
 // RR handles. Its exact synchronous invocation proves production ownership,
 // independently of any creation dimensions or flags. A late lifetime is never
@@ -425,7 +425,7 @@ public:
 class KcdCameraInvocationScope;
 std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList*,const NVSDK_NGX_Handle*,
     const NVSDK_NGX_Parameter*,std::uint64_t,std::uint64_t,KcdCameraInvocationScope*,std::uint32_t,bool*,const Feature* = nullptr,
-    ID3D12Resource*);
+    ID3D12Resource*,unsigned);
 HRESULT complete_color(ID3D12GraphicsCommandList*,const NVSDK_NGX_Parameter*,
     const std::shared_ptr<const DlssMotionVectorFrame>&,bool);
 HRESULT complete_color_resource(ID3D12GraphicsCommandList*,ID3D12Resource*,
@@ -728,7 +728,7 @@ void update_uevr_projection() {
 std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* list,const NVSDK_NGX_Handle* handle,
     const NVSDK_NGX_Parameter* p,std::uint64_t production_sequence,std::uint64_t guide_stream,
     KcdCameraInvocationScope* invocation_camera=nullptr,std::uint32_t public_production=0,bool* snapshot_attempted=nullptr,
-    const Feature* invocation_feature,ID3D12Resource* final_caller_output) {
+    const Feature* invocation_feature,ID3D12Resource* final_caller_output,unsigned observed_motion_span) {
     if(snapshot_attempted)*snapshot_attempted=false;
     auto& s=state(); if(!s.active.load())return {};
     const auto call=++s.calls;
@@ -797,6 +797,7 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     // the adjacent opposite camera advertised by Streamline's clip matrix.
     // Keep the measured field contract separate from camera receipt order.
     if(luke && !invocation_camera && crimson_desert_process())g.raw_motion_native_span=2;
+    if(observed_motion_span)g.raw_motion_native_span=observed_motion_span;
     // Scoped camera values replace apply_camera's camera read, while its Luke
     // snapshot-lifetime contract must still protect all queued GPU consumers.
     g.protect_snapshot_lifetime=luke;
@@ -1182,7 +1183,15 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
     const auto forward_public=[&] {
         const auto result=forward();invocation_camera.finish_public(result);return result;
     };
-    NgxEvaluationBoundary scope(slot,state().modules[slot].typed_implementation,native_available);
+    // V563 matched public/native F8 and color features: Crimson's public field
+    // is exact N-1; REALVR modifies it into an approximate N-2 field before the
+    // typed SR body. Own this known SR invocation before that modification,
+    // freeze guides there, and complete its color only after the wrapper.
+    const bool crimson_public=crimson_desert_process() && native_ingress::luke_detected() &&
+        !state().modules[slot].typed_implementation;
+    const bool crimson_delegate_nr=crimson_public && native_available;
+    NgxEvaluationBoundary scope(slot,state().modules[slot].typed_implementation,
+        native_available && !crimson_public,crimson_public);
     if(sr && scope.outermost() && !state().modules[slot].typed_implementation &&
         crimson_desert_process() && two_frame_capture_images_active() && native_ingress::luke_detected()) {
         // F8 evidence before the generic dispatcher forwards to REALVR/native
@@ -1239,7 +1248,19 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
         std::scoped_lock lock(state().mutex);
         state().guide_streams[h]=kKcdPublicStreamNamespace|public_production;
     }
-    if(!scope.observes())return forward_public();
+    if(!scope.observes()) {
+        // Only guide/color ownership moves to the public boundary. NR retains
+        // its existing typed-native before/after SR execution points.
+        if(sr && state().modules[slot].typed_implementation && scope.public_guide_parent()) {
+            try {neural_rendering::before_sr(identity,list,p,queue.Get());}
+            catch(...){log("native_pre_sr_exception");}
+            const auto result=forward_public();
+            if(NVSDK_NGX_SUCCEED(result))try {neural_rendering::after_sr(identity,list,p,queue.Get());}
+            catch(...){log("native_completion_exception");}
+            return result;
+        }
+        return forward_public();
+    }
     bool outlaws_family{};
     if(outlaws_production&&state().modules[slot].typed_implementation) {
         outlaws_family=OutlawsPublicInvocationScope::claim(evaluation_metadata.type,
@@ -1275,18 +1296,24 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
         if(outlaws_family)public_transaction=OutlawsPublicInvocationScope::consume_public_frame(evaluation_metadata,p,
             production_sequence,native_list_identity.Get(),native_device_identity.Get(),frame);
         if(!public_transaction&&(!logical_production || production_sequence))frame=capture(list,h,p,production_sequence,guide_stream,
-            kcd_production?&invocation_camera:nullptr,public_production);
-        neural_rendering::before_sr(identity,list,p,queue.Get());
+            kcd_production?&invocation_camera:nullptr,public_production,nullptr,nullptr,nullptr,
+            crimson_public?1U:0U);
+        if(!crimson_delegate_nr)neural_rendering::before_sr(identity,list,p,queue.Get());
     }catch(...){log("native_pre_sr_exception");}
     const auto result=forward();
     if(sr&&NVSDK_NGX_SUCCEED(result))try {
-        neural_rendering::after_sr(identity,list,p,queue.Get());
-        if(scope.can_complete()&&!public_transaction&&!outlaws_family)complete_color(list,p,frame,hdr);
+        if(!crimson_delegate_nr)neural_rendering::after_sr(identity,list,p,queue.Get());
+        if(scope.can_complete()&&!public_transaction&&!outlaws_family) {
+            if(crimson_public&&frame)complete_color_resource(list,frame->output.Get(),frame,hdr);
+            else complete_color(list,p,frame,hdr);
+        }
     }catch(...){log("native_completion_exception");}
     if(outlaws_family)OutlawsPublicInvocationScope::complete_native(evaluation_metadata.type,
         native_list_identity.Get(),native_device_identity.Get(),frame,hdr,result,scope.can_complete());
     if(public_transaction)invocation_camera.complete_native(result,scope.can_complete());
     invocation_camera.finish_public(result);
+    if(crimson_public && (NVSDK_NGX_FAILED(result)||!scope.can_complete()))
+        invalidate_dlss_motion_vector_stream_history(guide_stream);
     if(logical_production) {
         if(NVSDK_NGX_FAILED(result) || !scope.can_complete() || !production_sequence)
             invalidate_dlss_motion_vector_stream_history(guide_stream);

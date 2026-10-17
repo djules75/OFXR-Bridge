@@ -385,6 +385,19 @@ void actual_fixture_copy(ID3D12GraphicsCommandList* list,ID3D12Resource* destina
         transition(source,D3D12_RESOURCE_STATE_COPY_SOURCE,source_state)};
     list->ResourceBarrier(source_state==D3D12_RESOURCE_STATE_COPY_SOURCE?1:2,after.data());
 }
+NVSDK_NGX_Result actual_crimson_public_forwarder(ID3D12GraphicsCommandList* list,
+    const NVSDK_NGX_Handle* handle,const NVSDK_NGX_Parameter* parameters,void* callback) {
+    const auto& c=*actual_ngx_capture_context;
+    // In-place guide overwrite before native SR; pointer retention alone fails.
+    actual_fixture_copy(list,c.public_motion,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        c.injector_motion,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    actual_fixture_copy(list,c.public_depth,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        c.injector_depth,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    const auto result=evaluate<0>(list,handle,parameters,callback);
+    if(NVSDK_NGX_SUCCEED(result))actual_fixture_copy(list,c.public_output,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,c.composited_color,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    return result;
+}
 NVSDK_NGX_Result actual_outlaws_native_original(ID3D12GraphicsCommandList* list,const NVSDK_NGX_Handle* handle,
     const NVSDK_NGX_Parameter* parameters,void*) {
     actual_family_stage_mask|=1u;
@@ -683,6 +696,8 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             require(!d3d_owner::same(foreign_device.Get(),device.Get()),"foreign hardware owner equals WARP");
             check(foreign_device->CreateCommandQueue(&qd,IID_PPV_ARGS(&foreign_queue)),"foreign actual consumer queue");
         }
+        if(test_crimson_native_motion)check(device->CreateCommandQueue(&qd,IID_PPV_ARGS(&execution)),
+            "Crimson independent snapshot read queue");
         auto* consumer=execution?execution.Get():queue.Get();
 
         const auto texture=[&](unsigned width,unsigned height,DXGI_FORMAT format,
@@ -698,7 +713,7 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
         auto motion=texture(7,3,DXGI_FORMAT_R32G32_FLOAT,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         auto depth=texture(7,3,DXGI_FORMAT_R32_FLOAT,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         ComPtr<ID3D12Resource> injector_motion,injector_depth,injector_output,composited_color;
-        if(scene_camera||outlaws) {
+        if(scene_camera||outlaws||test_crimson_native_motion) {
             injector_motion=texture(7,3,DXGI_FORMAT_R32G32_FLOAT,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             injector_depth=texture(7,3,DXGI_FORMAT_R32_FLOAT,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             injector_output=texture(512,32,DXGI_FORMAT_R8G8B8A8_UNORM,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -723,6 +738,11 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             "actual native SR creation");
         parameters.present=true;
         const auto direct_identity=state().features.at(handle).identity;
+        if(test_crimson_native_motion) {
+            state().modules[0].typed_implementation=true;
+            state().modules[0].evaluate=state().modules[3].evaluate;
+            state().modules[3].evaluate=&actual_crimson_public_forwarder;
+        }
         if(logical_family) {
             actual_family_alias=reinterpret_cast<const NVSDK_NGX_Handle*>(alias_storage.data());
             actual_family_direct=handle;actual_realvr_evaluate=evaluate_feature;
@@ -941,7 +961,7 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             const auto old_stream=retained.empty()?0:retained.back()->stream;
             const auto old_token=retained.empty()?0:retained.back()->color_origin_token;
             std::array<ComPtr<ID3D12Resource>,5> uploads;
-            for(unsigned index=0;index<(scene_camera||outlaws?5u:2u);++index) {
+            for(unsigned index=0;index<(scene_camera||outlaws||test_crimson_native_motion?5u:2u);++index) {
                 auto* resource=index==0?motion.Get():index==1?depth.Get():index==2?injector_motion.Get():
                     index==3?injector_depth.Get():composited_color.Get();
                 const auto desc=resource->GetDesc();
@@ -1014,7 +1034,7 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             require(set_constants(constants,n,0)&&evaluate_sl(reinterpret_cast<sl1::CommandBuffer*>(list.Get()),sl1::eFeatureDLSS,n,0),
                 "actual capture original Streamline results");
             if(context.frame && !scene_camera)require(
-                context.frame->raw_motion_native_span==(test_crimson_native_motion?2u:1u),
+                context.frame->raw_motion_native_span==1,
                 "actual generic/Crimson capture used the wrong native motion interval");
             const unsigned successful=n>=recycle_production?n-recycle_production+1:
                 n-(logical_family&&n>=12?1:0);
@@ -1141,6 +1161,10 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
                         "private ingress weakened previous submission or real foreign owner admission");
                     verify_private_snapshots(joined);
                     if(scene_camera||outlaws)verify_final_public_color(n);
+                }
+                if(test_crimson_native_motion) {
+                    verify_private_snapshots(joined);
+                    verify_final_public_color(n);
                 }
                 if(logical_family) {
                     LukeNativeMotionConstants corrected{};unsigned why{};

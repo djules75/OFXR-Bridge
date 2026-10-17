@@ -1594,7 +1594,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             // not this retained production's colour. Keep the exact XR source
             // and completion-stage colour; reserve F8 budget for pre-dispatch
             // motion instead of two redundant full-size mutable SR images.
-            if (guide.output != nullptr && !(interleaved && guide.raw_motion_native_span==2)) {
+            if (guide.output != nullptr && !interleaved) {
                 TwoFrameImageInfo output{};
                 output.stage = "afw_ngx_output_at_consume";
                 output.stream = guide.stream;
