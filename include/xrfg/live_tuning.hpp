@@ -13,10 +13,11 @@ namespace xrfg::live_tuning {
 
 inline constexpr wchar_t kMappingName[] = L"Local\\OFXRBridgeLiveTuning";
 inline constexpr std::uint32_t kMagic = 0x4C565446U;  // "FTVL"
-// 4: edge ghosting reduction only (V477). 3 was V475's, which also carried
-// the background fill and the hardware bilinear switch; 1 and 2 were the
-// V374 flow-history window, which never reached main.
-inline constexpr std::uint32_t kVersion = 4U;
+// 5: edge ghosting reduction and the repeating-pattern lock (V478). 4 was
+// V477's (edge ghosting reduction only); 3 was V475's, which also carried the
+// background fill and the hardware bilinear switch; 1 and 2 were the V374
+// flow-history window, which never reached main.
+inline constexpr std::uint32_t kVersion = 5U;
 
 // Edge ghosting reduction: the search for the vector of what an in-between
 // pixel actually shows, beside a motion boundary. Fractions of the colour
@@ -43,6 +44,10 @@ struct Block {
     // base + speed * |candidate|.
     std::uint32_t fixed_point_base_centipixels;
     std::uint32_t fixed_point_speed_permille;
+    // Repeating-pattern lock: where the pose alone ("nothing moved beyond the
+    // head") matches within this margin of the flow's motion, the pose wins.
+    std::uint32_t pattern_lock;  // 0 off, 1 on
+    std::uint32_t pattern_lock_margin_255ths;
 };
 
 // The composition's built-in values (frame_synthesis.hlsl), so the window
@@ -54,6 +59,7 @@ inline constexpr Block kDefaults{
     3U, 1U,
     800U, 24U, 2U,
     100U, 100U,
+    1U, 4U,
 };
 
 }  // namespace xrfg::live_tuning

@@ -338,6 +338,7 @@ constexpr UINT kEncodeSrgbFlowInputFlag = 2U;
 //      24-31 endpoint error trigger (255ths)
 //   b: spread trigger (centipixels) << 32 | lands-on-itself tolerance
 //      (centipixels) << 16 | tolerance per pixel of speed (permille)
+//   c: repeating-pattern lock on << 8 | its margin (255ths), from V478
 // (810 was V475's record, which also carried the background fill.)
 void apply_live_composition_tuning(SynthesisParameters& parameters) noexcept {
     static std::mutex mutex;
@@ -390,9 +391,12 @@ void apply_live_composition_tuning(SynthesisParameters& parameters) noexcept {
         std::min<std::uint32_t>(values.fixed_point_base_centipixels, 0xFFFFU);
     const std::uint32_t fixed_speed =
         std::min<std::uint32_t>(values.fixed_point_speed_permille, 0xFFFFU);
+    const bool pattern_lock = values.pattern_lock != 0U;
+    const std::uint32_t lock_margin =
+        std::min<std::uint32_t>(values.pattern_lock_margin_255ths, 255U);
 
-    parameters.game_motion_padding =
-        1U | (enabled ? 2U : 0U) | (rings << 4U) | (survivors << 8U);
+    parameters.game_motion_padding = 1U | (enabled ? 2U : 0U) |
+        (pattern_lock ? 4U : 0U) | (rings << 4U) | (survivors << 8U);
     parameters.game_motion_rect = {
         static_cast<float>(spread) / 100.0F,
         static_cast<float>(error) / 255.0F,
@@ -401,7 +405,7 @@ void apply_live_composition_tuning(SynthesisParameters& parameters) noexcept {
     };
     parameters.game_motion_scale = {
         static_cast<float>(fixed_speed) / 1000.0F,
-        0.0F,
+        static_cast<float>(lock_margin) / 255.0F,
     };
     if (!recorded_any || sequence != recorded_sequence) {
         recorded_any = true;
@@ -415,7 +419,7 @@ void apply_live_composition_tuning(SynthesisParameters& parameters) noexcept {
                 (static_cast<std::uint64_t>(error) << 24U),
             (static_cast<std::uint64_t>(spread) << 32U) |
                 (static_cast<std::uint64_t>(fixed_base) << 16U) | fixed_speed,
-            0);
+            (static_cast<std::uint64_t>(pattern_lock ? 1U : 0U) << 8U) | lock_margin);
     }
 }
 

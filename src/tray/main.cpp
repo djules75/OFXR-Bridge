@@ -36,8 +36,10 @@ constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kTrayId = 1;
 constexpr int kPauseHotkeyId = 1;
 // Temporary, for A/B in the headset: Ctrl+Alt+F8 toggles edge ghosting
-// reduction through the live tuning block. See toggle_edge_ghosting_reduction.
+// reduction and Ctrl+Alt+F9 the repeating-pattern lock, through the live
+// tuning block. See toggle_tuning_switch.
 constexpr int kEdgeGhostingHotkeyId = 2;
+constexpr int kPatternLockHotkeyId = 3;
 constexpr UINT kArmPollMilliseconds = 250;
 constexpr std::uint32_t kImplementationVersion = XRFG_IMPLEMENTATION_VERSION;
 // One Donate entry each, creator first, as in the About box and the README.
@@ -109,9 +111,9 @@ struct AppState {
     // it writes (xrfg::live_tuning). The block lives as long as the tray, so
     // values set once hold for every game started after them.
     HWND tuning_window{};
-    std::array<HWND, 1> tuning_switches{};
-    std::array<HWND, 7> tuning_sliders{};
-    std::array<HWND, 7> tuning_labels{};
+    std::array<HWND, 2> tuning_switches{};
+    std::array<HWND, 8> tuning_sliders{};
+    std::array<HWND, 8> tuning_labels{};
     HANDLE tuning_mapping{};
     xrfg::live_tuning::Block* tuning_block{};
 };
@@ -959,7 +961,7 @@ struct TuningSlider {
     const wchar_t* hint;
 };
 
-constexpr std::array<TuningSlider, 7> kTuningSliders{{
+constexpr std::array<TuningSlider, 8> kTuningSliders{{
     {L"Search reach", 1, 5, &xrfg::live_tuning::Block::search_rings, 1U, 1.0,
      L"", L"farther finds faster objects (wings)"},
     {L"Search survivors", 1, 3, &xrfg::live_tuning::Block::survivor_limit, 1U, 1.0,
@@ -978,18 +980,23 @@ constexpr std::array<TuningSlider, 7> kTuningSliders{{
     {L"Lands-on-itself, per px of speed", 0, 50,
      &xrfg::live_tuning::Block::fixed_point_speed_permille, 10U, 0.01, L"",
      L"extra allowance for fast motion"},
+    {L"Pattern lock margin", 0, 32,
+     &xrfg::live_tuning::Block::pattern_lock_margin_255ths, 1U, 1.0, L"/255",
+     L"higher = steadier patterns, risk of blur on slow movers"},
 }};
 
-// Unticked, edge ghosting reduction is off: the composition V476 ran, for an
-// A/B in the same scene.
+// Unticked, each is off, for an A/B in the same scene: without both, the
+// composition is V476's.
 struct TuningSwitch {
     const wchar_t* label;
     std::uint32_t xrfg::live_tuning::Block::*field;
 };
 
-constexpr std::array<TuningSwitch, 1> kTuningSwitches{{
-    {L"Edge ghosting reduction - untick to compare without it",
+constexpr std::array<TuningSwitch, 2> kTuningSwitches{{
+    {L"Edge ghosting reduction (Ctrl+Alt+F8)",
      &xrfg::live_tuning::Block::edge_ghosting_reduction},
+    {L"Repeating-pattern lock (Ctrl+Alt+F9)",
+     &xrfg::live_tuning::Block::pattern_lock},
 }};
 
 constexpr int kTuningSwitchBaseId = 2101;
@@ -1103,20 +1110,21 @@ LRESULT CALLBACK tuning_procedure(
     return true;
 }
 
-// Temporary: Ctrl+Alt+F8 flips edge ghosting reduction in the block, and in
-// the window's checkbox when it is open, with a different beep for on and off
+// Temporary: the hotkeys flip one of the window's switches in the block, and
+// its checkbox when the window is open, with a different beep for on and off
 // so the state can be told apart in the headset.
-void toggle_edge_ghosting_reduction(AppState& state) {
+void toggle_tuning_switch(AppState& state, std::size_t index) {
     if (!ensure_tuning_block(state)) {
         return;
     }
-    const bool enabled = state.tuning_block->edge_ghosting_reduction == 0U;
+    const auto field = kTuningSwitches[index].field;
+    const bool enabled = state.tuning_block->*field == 0U;
     if (state.tuning_window != nullptr) {
-        SendMessageW(state.tuning_switches[0], BM_SETCHECK,
+        SendMessageW(state.tuning_switches[index], BM_SETCHECK,
             enabled ? BST_CHECKED : BST_UNCHECKED, 0);
         write_tuning(state);
     } else {
-        state.tuning_block->edge_ghosting_reduction = enabled ? 1U : 0U;
+        state.tuning_block->*field = enabled ? 1U : 0U;
         MemoryBarrier();
         InterlockedIncrement(
             reinterpret_cast<volatile LONG*>(&state.tuning_block->sequence));
@@ -1154,7 +1162,7 @@ void show_tuning_window(AppState& state) {
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW);
         state.tuning_window = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kTuningWindowClass,
-            L"OFXR edge ghosting reduction (live)",
+            L"OFXR frame generation tuning (live)",
             WS_CAPTION | WS_SYSMENU,
             CW_USEDEFAULT, CW_USEDEFAULT,
             frame.right - frame.left, frame.bottom - frame.top,
@@ -1197,10 +1205,13 @@ void show_tuning_window(AppState& state) {
             SendMessageW(state.tuning_sliders[index], TBM_SETPAGESIZE, 0, fine ? 4 : 1);
         }
         reset_tuning_controls(state);
-        SendMessageW(state.tuning_switches[0], BM_SETCHECK,
-            state.tuning_block->edge_ghosting_reduction != 0U ? BST_CHECKED
-                                                             : BST_UNCHECKED,
-            0);
+        for (std::size_t index = 0; index < kTuningSwitches.size(); ++index) {
+            SendMessageW(state.tuning_switches[index], BM_SETCHECK,
+                state.tuning_block->*kTuningSwitches[index].field != 0U
+                    ? BST_CHECKED
+                    : BST_UNCHECKED,
+                0);
+        }
         const HWND reset = CreateWindowExW(
             0, L"BUTTON", L"Reset to defaults",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -1308,7 +1319,7 @@ void show_context_menu(AppState& state) {
         backend_menu,
         MF_STRING,
         show_live_tuning,
-        L"Edge ghosting reduction tuning (live)...");
+        L"Frame generation tuning (live)...");
     AppendMenuW(
         menu,
         MF_POPUP,
@@ -1730,7 +1741,8 @@ LRESULT CALLBACK window_procedure(
         return 0;
     case WM_HOTKEY:
         if (wparam == kPauseHotkeyId) handle_command(*state, toggle_pause);
-        if (wparam == kEdgeGhostingHotkeyId) toggle_edge_ghosting_reduction(*state);
+        if (wparam == kEdgeGhostingHotkeyId) toggle_tuning_switch(*state, 0);
+        if (wparam == kPatternLockHotkeyId) toggle_tuning_switch(*state, 1);
         return 0;
     case WM_CLOSE: {
         std::wstring error;
@@ -1766,6 +1778,7 @@ LRESULT CALLBACK window_procedure(
         if (!disarm_bridge(*state, &error))
             log_lifecycle(state->local_directory, L"destroy-cleanup", error);
         UnregisterHotKey(window, kEdgeGhostingHotkeyId);
+        UnregisterHotKey(window, kPatternLockHotkeyId);
         Shell_NotifyIconW(NIM_DELETE, &state->icon);
         PostQuitMessage(0);
         return 0;
@@ -1963,6 +1976,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_F8)) {
         log_lifecycle(state.local_directory, L"edge-ghosting-hotkey",
             last_error_message(L"Registering Ctrl+Alt+F8"));
+    }
+    if (!RegisterHotKey(window, kPatternLockHotkeyId,
+            MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_F9)) {
+        log_lifecycle(state.local_directory, L"pattern-lock-hotkey",
+            last_error_message(L"Registering Ctrl+Alt+F9"));
     }
 
     // Arm straight away: launching the tray is the user asking for the

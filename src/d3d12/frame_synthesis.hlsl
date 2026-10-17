@@ -69,11 +69,12 @@ uint repeated_capture_flag() {
 // there; without it - no window, or a game-motion pair, whose padding is the
 // guide's output height - every accessor returns its built-in value, the set
 // chosen in the headset on V475 (2026-10-17).
-//   GameMotionPadding: bit 1 edge ghosting reduction on, bits 4-7 search
-//     rings, bits 8-11 survivors.
+//   GameMotionPadding: bit 1 edge ghosting reduction on, bit 2 repeating-
+//     pattern lock on, bits 4-7 search rings, bits 8-11 survivors.
 //   GameMotionRect: spread trigger (px), endpoint error trigger, survivor
 //     margin, lands-on-itself tolerance (px).
-//   GameMotionScale.x: lands-on-itself tolerance per pixel of speed.
+//   GameMotionScale: lands-on-itself tolerance per pixel of speed, pattern
+//     lock margin.
 bool live_tuning_present() {
     return UseGameMotion == 0u && (GameMotionPadding & 1u) != 0u;
 }
@@ -87,6 +88,10 @@ uint live_field(uint shift, uint built_in) {
 }
 
 bool edge_ghosting_reduction_enabled() { return live_flag(2u, true); }
+bool pattern_lock_enabled() { return live_flag(4u, true); }
+float pattern_lock_margin() {
+    return live_tuning_present() ? GameMotionScale.y : 4.0 / 255.0;
+}
 uint midpoint_search_rings() { return clamp(live_field(4u, 3u), 1u, 5u); }
 uint midpoint_survivor_limit() { return clamp(live_field(8u, 1u), 1u, 3u); }
 float midpoint_spread_trigger() {
@@ -1037,6 +1042,11 @@ float4 synthesize_midpoint(
                 CameraSample previous_sample = (CameraSample)0;
                 CameraSample current_sample = (CameraSample)0;
                 bool endpoints_valid = true;
+                // The previous frame at the pixel itself, through the pose
+                // mapping alone: what a static surface shows there. The stable
+                // fallback blends it, and the pattern lock compares it.
+                CameraSample previous_at_pixel = sample_previous_target(
+                    pixel, Slice, ViewIndex);
                 if (use_game_motion_pipeline) {
                     // A B-to-A vector is attached to its B endpoint. Sampling
                     // it once at the desired midpoint is exact only for a
@@ -1101,6 +1111,32 @@ float4 synthesize_midpoint(
                     if (input_pose_compensated) {
                         raw_backward = motion.residual;
                     }
+                    // Repeating-pattern lock. On a checkerboard, a grille or a
+                    // row of identical squares the block one period away
+                    // matches as well as the right one, and the flow
+                    // occasionally takes it: that frame's in-between image puts
+                    // the pattern a period off, then it snaps back - smooth, a
+                    // jump, smooth. The search above never sees it (the whole
+                    // patch carries the same wrong vector, so neither the
+                    // spread nor the endpoint error triggers). The pose already
+                    // explains a static surface, so where "nothing moved beyond
+                    // the head" matches about as well as the flow's motion, the
+                    // pose wins and the pixel is the stable blend. A moving
+                    // object's pose-only samples disagree, and its flow stands.
+                    // Both pose-only samples are read anyway, for the fallback.
+                    [branch] if (pattern_lock_enabled() &&
+                                 repeated_capture_flag() == 0 &&
+                                 length(motion.residual) >= 1.0 &&
+                                 previous_at_pixel.valid >= 0.5 &&
+                                 current_fallback.valid >= 0.5 &&
+                                 previous_sample.valid >= 0.5 &&
+                                 current_sample.valid >= 0.5 &&
+                                 rgb_error(previous_at_pixel.color, current_fallback.color) <=
+                                     rgb_error(previous_sample.color, current_sample.color) +
+                                         pattern_lock_margin()) {
+                        previous_sample = previous_at_pixel;
+                        current_sample = current_fallback;
+                    }
                 }
                 if (endpoints_valid) {
                     if (previous_sample.valid >= 0.5 && current_sample.valid >= 0.5) {
@@ -1113,7 +1149,7 @@ float4 synthesize_midpoint(
                             abs(previous_sample.color.b - current_sample.color.b)));
                     float confidence = saturate(1.0 - disagreement * 6.0);
                     float4 stable_midpoint = lerp(
-                        sample_previous_target(pixel, Slice, ViewIndex).color,
+                        previous_at_pixel.color,
                         current_fallback.color,
                         synthesis_fraction());
                     if (use_nvidia_cost) {
