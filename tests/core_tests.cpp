@@ -243,6 +243,17 @@ int main() {
         xrfg::LukeCameraOrigin uninitialized;
         expect(!std::isfinite(uninitialized.position_relative(left)[0]),
             "uninitialized origin does not manufacture usable camera coordinates");
+        xrfg::LukeCameraOrigin paired;
+        const std::array<std::uint64_t,4> producers{101,7,202,3};
+        const auto paired_start=paired.update_producers(producers,left);
+        const auto paired_anchor=paired.origin();
+        const auto paired_peer=paired.update_producers(producers,right);
+        expect(paired_start && *paired_start && paired_peer && !*paired_peer && paired.origin()==paired_anchor,
+            "two original feature epochs preserve one AFW world origin across eye alternation");
+        auto next_producers=producers;++next_producers[3];
+        const auto paired_reset=paired.update_producers(next_producers,moved);
+        expect(paired_reset && *paired_reset && paired.position_relative(moved)==std::array<float,3>{},
+            "opposite native feature reset invalidates the common paired origin");
     }
     // Every combination of missing devices, optional depth, adapter and strict
     // queue/list identity must preserve the old guard's acceptance exactly.

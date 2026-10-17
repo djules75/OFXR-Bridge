@@ -147,9 +147,10 @@ FARPROC WINAPI quality_get_proc_address(HMODULE module,LPCSTR name) {
 
 int main(int argc,char** argv) {try {
     using namespace quality;
-    require(argc==2 || argc==3,"provider path argument missing");
+    require(argc>=2 && argc<=4,"provider path argument missing");
+    const bool interleaved=argc==4 && std::string_view(argv[3])=="interleaved";
     original_provider_file=argv[1];
-    const int shading=argc==3 ? std::stoi(argv[2]) : 0;
+    const int shading=argc>=3 ? std::stoi(argv[2]) : 0;
     const auto diagnostic_root=std::filesystem::temp_directory_path()/
         ("ofxr-afw-timing-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(GetTickCount64()));
     if(shading==9) {
@@ -188,6 +189,7 @@ int main(int argc,char** argv) {try {
             nullptr,IID_PPV_ARGS(&result)),"fixture buffer");return result;};
     bool all_camera_bits_match=true,all_mode_pixels_match=true;
     for(const auto& scene:scenes) for(unsigned span:{1u,2u}) for(int mode:{1,2,3}) {
+        if(interleaved && span!=1)continue;
         xrfg::LukeAfwSynthesizer synth;check(synth.initialize(device.Get(),queue.Get(),std::filesystem::path(argv[1])),"full AFW provider initialization");
         std::vector<std::shared_ptr<DlssMotionVectorFrame>> frames;
         std::vector<ComPtr<ID3D12Resource>> colors;
@@ -199,6 +201,12 @@ int main(int argc,char** argv) {try {
             frame->raw_motion_native_span=span;
             frame->serial=frame->publication=frame->camera_frame_token=frame->native_production_sequence=n;
             frame->previous_serial=n>=3?n-2:0;
+            if(interleaved) {
+                frame->stream=1+(n&1);frame->epoch=n&1?7:3;
+                frame->serial=(n+1)/2;frame->native_production_sequence=0;
+                frame->previous_serial=n>=3?(n-1)/2:0;
+                frame->luke_interleaved_history=true;
+            }
             frame->camera_data_valid=frame->camera_matrices_valid=frame->camera_frame_token_valid=true;
             frame->camera_position=current.packet.position;frame->camera_right=current.packet.right;
             frame->camera_up=current.packet.up;frame->camera_forward=current.packet.forward;
@@ -251,7 +259,7 @@ int main(int argc,char** argv) {try {
             if(n>=2)frame->previous_opposite_guide=frames[n-2];
             if(n>=3){frame->previous_same_guide=frames[n-3];frame->previous_same_native_camera=xrfg::dlss_native_camera_history(*frames[n-3]);}
             frames.push_back(frame);colors.push_back(source);
-            if(n<3)continue;
+            if(n<(interleaved?4u:3u))continue;
             const unsigned eye=n&1?0:1;
             xrfg::D3D12ReprojectionView source_view{},destination_view{};
             // The first odd-raster beta5 Combined probe had MAE6.7346 and
@@ -363,5 +371,5 @@ int main(int argc,char** argv) {try {
     }
     require(all_camera_bits_match,"KCD plugin camera reflects decoded inverseView instead of preserving its actual view basis");
     require(all_mode_pixels_match,"full PDAFW rotated static-world reconstruction diverges from independent same-time peer oracle");
-    std::cout<<(indiana?"Indiana full quality:":"KCD full quality:")<<" actual decoded camera, depth/Normal-motion shaders and PDAFW three modes match independent rotated-plane peer PASS\n";return 0;
+    std::cout<<(interleaved?"Interleaved AER full quality:":indiana?"Indiana full quality:":"KCD full quality:")<<" actual decoded camera, depth/Normal-motion shaders and PDAFW three modes match independent rotated-plane peer PASS\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

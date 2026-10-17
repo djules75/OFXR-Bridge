@@ -1,6 +1,7 @@
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/luke_camera_units.hpp"
 #include "xrfg/luke_color_token.hpp"
+#include "xrfg/luke_interleaved_history.hpp"
 #include "xrfg/two_frame_capture.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 
@@ -110,6 +111,34 @@ bool same_device(IUnknown* left, IUnknown* right) noexcept {
         SUCCEEDED(left_child->GetDevice(IID_PPV_ARGS(left_device.GetAddressOf()))) &&
         SUCCEEDED(right_child->GetDevice(IID_PPV_ARGS(right_device.GetAddressOf()))) &&
         same_identity(left_device.Get(), right_device.Get());
+}
+
+std::shared_ptr<const DlssMotionVectorFrame> protected_publication(
+    const Registry& state, std::uint64_t publication) {
+    std::shared_ptr<const DlssMotionVectorFrame> found;
+    for (const auto& [id, stream] : state.streams)
+        for (const auto& frame : stream.luke_origin_history)
+            if (frame->publication == publication) {
+                if (found || frame->stream != id || frame->epoch != stream.epoch) return {};
+                found = frame;
+            }
+    return found;
+}
+
+bool interleaved_frames(const DlssMotionVectorFrame& current,
+    const std::shared_ptr<const DlssMotionVectorFrame>& middle,
+    const std::shared_ptr<const DlssMotionVectorFrame>& older) {
+    if (!middle || !older || !luke_interleaved_history_matches(dlss_native_camera_history(current),
+            dlss_native_camera_history(*middle), dlss_native_camera_history(*older))) return false;
+    // Protected keys and canonical allocation owners also agree. Keep every
+    // original feature identity and its independent reset epoch unchanged.
+    return older->color_origin_token &&
+        std::uint64_t(older->color_origin_token) + 1 == middle->color_origin_token &&
+        std::uint64_t(middle->color_origin_token) + 1 == current.color_origin_token &&
+        same_identity(current.motion_snapshot_device.Get(), middle->motion_snapshot_device.Get()) &&
+        same_identity(current.motion_snapshot_device.Get(), older->motion_snapshot_device.Get()) &&
+        same_identity(current.producer_queue.Get(), middle->producer_queue.Get()) &&
+        same_identity(current.producer_queue.Get(), older->producer_queue.Get());
 }
 
 bool valid(const DlssMotionVectorPublication& publication) noexcept {
@@ -573,6 +602,14 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->raw_clip_to_previous_clip = publication.raw_clip_to_previous_clip;
         frame->raw_previous_clip_to_clip = publication.raw_previous_clip_to_clip;
         frame->producer_command_list = publication.producer_command_list;
+        const bool may_interleave = publication.protect_snapshot_lifetime &&
+            !frame->native_production_sequence && frame->publication >= 3 && stream.latest &&
+            stream.latest->publication + 1 != frame->publication;
+        const auto interleaved_middle = may_interleave
+            ? protected_publication(state, frame->publication - 1) : nullptr;
+        const auto interleaved_older = may_interleave
+            ? protected_publication(state, frame->publication - 2) : nullptr;
+        const bool interleaved = interleaved_frames(*frame, interleaved_middle, interleaved_older);
         if (publication.protect_snapshot_lifetime) {
             // Calibrate exactly once in immutable production order. Consumer
             // queries may lag, repeat or skip; none may select newer cameras
@@ -581,9 +618,9 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
                 return LukeUnitCamera{value->camera_position, value->camera_right,
                     value->frame_time_delta_ms, value->camera_data_valid && !value->reset};
             };
-            const auto& older = stream.previous;
-            const auto& middle = stream.latest;
-            const bool consecutive = older && middle &&
+            const auto& older = interleaved ? interleaved_older : stream.previous;
+            const auto& middle = interleaved ? interleaved_middle : stream.latest;
+            const bool consecutive = interleaved || (older && middle &&
                 older->stream == frame->stream && middle->stream == frame->stream &&
                 older->epoch == frame->epoch && middle->epoch == frame->epoch &&
                 older->serial + 1 == middle->serial && middle->serial + 1 == frame->serial &&
@@ -591,7 +628,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
                 middle->publication + 1 == frame->publication &&
                 older->color_origin_token != 0 &&
                 std::uint64_t(older->color_origin_token) + 1 == middle->color_origin_token &&
-                std::uint64_t(middle->color_origin_token) + 1 == frame->color_origin_token;
+                std::uint64_t(middle->color_origin_token) + 1 == frame->color_origin_token);
             const float sample = consecutive
                 ? luke_camera_separation(camera_sample(older), camera_sample(middle), camera_sample(frame)) : 0;
             frame->calibrated_game_eye_baseline = stream.camera_units.observe(
@@ -603,10 +640,15 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
             // Exact N-2 scalar camera survives eviction of that GPU snapshot.
             frame->previous_same_native_camera=dlss_native_camera_history(*stream.previous);
         }
+        if (interleaved)
+            frame->previous_same_native_camera = dlss_native_camera_history(*interleaved_older);
         report_luke_ingress_contract(*frame);
         if (two_frame_capture_active()) {
             TwoFrameGuideContract contract{};
             contract.stage = "ngx_ingress";
+            contract.native_camera_token = frame->camera_frame_token;
+            contract.color_origin_token = frame->color_origin_token;
+            contract.native_production_sequence = frame->native_production_sequence;
             contract.stream = frame->stream;
             contract.publication = frame->publication;
             contract.serial = frame->serial;
@@ -630,6 +672,9 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
             contract.depth_infinite = frame->depth_infinite;
             contract.camera_position = frame->camera_position;
             contract.camera_right = frame->camera_right;
+            contract.camera_up = frame->camera_up;
+            contract.camera_forward = frame->camera_forward;
+            contract.camera_fov_vertical = frame->camera_fov_vertical;
             contract.view_to_clip = frame->camera_view_to_clip;
             contract.raw_camera_motion_included = frame->raw_camera_motion_included;
             contract.raw_motion_native_span = frame->raw_motion_native_span;
@@ -1544,12 +1589,20 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
             return {};
         }
         const auto& current = *origin;
-        const auto& previous = *std::prev(origin);
-        if (current->stream != owner_stream || current->stream != previous->stream ||
+        auto previous = *std::prev(origin);
+        const bool may_interleave = !current->native_production_sequence && current->publication >= 3 &&
+            previous->publication + 1 != current->publication;
+        const auto interleaved_middle = may_interleave
+            ? protected_publication(state, current->publication - 1) : nullptr;
+        const auto interleaved_older = may_interleave
+            ? protected_publication(state, current->publication - 2) : nullptr;
+        const bool interleaved = interleaved_frames(*current, interleaved_middle, interleaved_older);
+        if (interleaved) previous = interleaved_middle;
+        if (!interleaved && (current->stream != owner_stream || current->stream != previous->stream ||
             current->epoch != previous->epoch ||
             current->epoch != stream.epoch ||
             previous->serial + 1 != current->serial ||
-            previous->publication + 1 != current->publication) {
+            previous->publication + 1 != current->publication)) {
             ++state.statistics.resolve_stale_pairs;
             const unsigned reason=current->stream!=owner_stream||current->stream!=previous->stream?5:
                 current->epoch!=previous->epoch||current->epoch!=stream.epoch?6:
@@ -1603,6 +1656,12 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
         auto resolved = std::make_shared<DlssMotionVectorFrame>(*current);
         resolved->previous_serial = resolved->serial > 2 ? resolved->serial - 2 : 0;
         resolved->previous_opposite_guide = previous;
+        if (interleaved) {
+            resolved->luke_interleaved_history = true;
+            resolved->previous_serial = interleaved_older->serial;
+            resolved->previous_same_native_camera = dlss_native_camera_history(*interleaved_older);
+            resolved->previous_same_guide = interleaved_older;
+        }
         if (std::distance(stream.luke_origin_history.begin(), origin) >= 2) {
             const auto& native_previous = *std::prev(origin, 2);
             if (native_previous->stream == current->stream &&

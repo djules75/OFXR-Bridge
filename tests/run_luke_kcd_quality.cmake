@@ -20,7 +20,11 @@ file(WRITE "${DESTINATION}/RealVR.ini" "[${TITLE}]\nWorldScale=1.0\n")
 if(NOT DEFINED SHADING_RATE)
     set(SHADING_RATE 0)
 endif()
-execute_process(COMMAND "${DESTINATION}/${EXE}" "${DESTINATION}/PDAFWPlugin.dll" "${SHADING_RATE}"
+set(EXTRA_ARGS)
+if(INTERLEAVED)
+    list(APPEND EXTRA_ARGS interleaved)
+endif()
+execute_process(COMMAND "${DESTINATION}/${EXE}" "${DESTINATION}/PDAFWPlugin.dll" "${SHADING_RATE}" ${EXTRA_ARGS}
     WORKING_DIRECTORY "${DESTINATION}" RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 80)
 message("${output}${error}")
 if(NOT result EQUAL 0)

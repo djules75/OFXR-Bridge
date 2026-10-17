@@ -44,6 +44,9 @@ struct TwoFrameImageInfo {
 };
 
 struct TwoFrameGuideContract {
+    std::uint32_t native_camera_token{}, color_origin_token{};
+    std::uint64_t native_production_sequence{};
+    bool interleaved_history{};
     std::uint32_t raw_motion_native_span{1};
     const char* stage{};
     std::uint64_t stream{};

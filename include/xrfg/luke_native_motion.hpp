@@ -2,6 +2,7 @@
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/luke_motion_format.hpp"
 #include "xrfg/luke_pose_camera.hpp"
+#include "xrfg/luke_interleaved_history.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -88,11 +89,13 @@ inline bool luke_native_motion_constants(const DlssMotionVectorFrame& guide,
     const auto middle=dlss_native_camera_history(*guide.previous_opposite_guide);
     const auto& older=*guide.previous_same_native_camera;
     failure=2;
-    if(guide.serial<3 || !guide.stream || !guide.epoch || !guide.publication ||
+    const bool interleaved = guide.luke_interleaved_history &&
+        luke_interleaved_history_matches(current, middle, older);
+    if((!interleaved && (guide.serial<3 || !guide.stream || !guide.epoch || !guide.publication ||
         middle.stream!=current.stream || older.stream!=current.stream ||
         middle.epoch!=current.epoch || older.epoch!=current.epoch ||
         middle.serial+1!=current.serial || older.serial+2!=current.serial ||
-        middle.publication+1!=current.publication || older.publication+2!=current.publication ||
+        middle.publication+1!=current.publication || older.publication+2!=current.publication)) ||
         guide.previous_serial!=older.serial)return false;
     failure=3;
     if((guide.raw_motion_native_span!=1&&guide.raw_motion_native_span!=2)||

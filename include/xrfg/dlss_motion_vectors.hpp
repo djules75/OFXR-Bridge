@@ -173,6 +173,9 @@ struct DlssMotionVectorFrame {
     // Exact native N-2 same-eye camera. Resolver results retain plain producer
     // frames, never recursive history chains; no additional GPU copy is needed.
     std::shared_ptr<const DlssMotionVectorFrame> previous_same_guide;
+    // Resolver-proven chronological A/B/A cameras; original stream/epoch/
+    // serial identities remain intact, never rewritten as a virtual feature.
+    bool luke_interleaved_history{};
     // Calibrated same-time eye separation in the producer camera units.
     float calibrated_game_eye_baseline{};
     std::shared_ptr<DlssSnapshotRetention> motion_retention;

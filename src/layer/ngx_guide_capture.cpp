@@ -893,6 +893,30 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     }
     if(snapshot_attempted)*snapshot_attempted=true;
     auto frame=publish_dlss_motion_vectors(g);
+    if(frame && !invocation_camera && two_frame_capture_images_active()) {
+        // Generic Luke titles may refuse AFW before its input captures run.
+        // F8 must still show the exact retained native guides, independently
+        // of whether the AFW resolver admits this production.
+        for(unsigned i=0;i<2;++i) {
+            TwoFrameImageInfo info{};
+            info.stage=i?"ngx_native_depth":"ngx_native_motion";
+            info.stream=frame->stream;info.capture_serial=frame->publication;
+            info.width=i?frame->depth_width:frame->motion_width;
+            info.height=i?frame->depth_height:frame->motion_height;
+            info.scale_x=frame->scale_x;info.scale_y=frame->scale_y;
+            info.jitter_x=frame->jitter_x;info.jitter_y=frame->jitter_y;
+            two_frame_capture_record_ng_x(info,qd.Get(),cmd.Get(),
+                i?frame->depth.Get():frame->motion_vectors.Get(),
+                i?frame->depth_resource_state:frame->resource_state);
+        }
+        if(g.input_color) {
+            TwoFrameImageInfo info{};info.stage="ngx_input_color";
+            info.stream=frame->stream;info.capture_serial=frame->publication;
+            info.width=g.input_color_width;info.height=g.input_color_height;
+            two_frame_capture_record_ng_x(info,qd.Get(),cmd.Get(),g.input_color,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+    }
     if(final_caller_output&&two_frame_capture_images_active()) {
         TwoFrameGuideContract boundary{};boundary.stage="kcd_native_input_contract";
         boundary.stream=g.stream;boundary.serial=production_sequence;boundary.publication=frame?frame->publication:0;
@@ -990,6 +1014,13 @@ HRESULT complete_color_resource(ID3D12GraphicsCommandList* list,ID3D12Resource* 
         if(now-previous>=1000&&last_failure.compare_exchange_strong(previous,now))
             log("origin_marker_resource",desc.Format,desc.Dimension,
                 (UINT64(desc.DepthOrArraySize)<<32)|desc.SampleDesc.Count,view);
+    }
+    if(two_frame_capture_images_active()) {
+        TwoFrameImageInfo info{};info.stage="ngx_completed_color";
+        info.stream=frame->stream;info.capture_serial=frame->publication;
+        info.width=frame->output_width;info.height=frame->output_height;
+        two_frame_capture_record_ng_x(info,frame->verified_producer_device.Get(),
+            cmd.Get(),color.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
     return result;
 }

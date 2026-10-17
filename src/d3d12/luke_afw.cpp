@@ -450,6 +450,7 @@ struct LukeAfwSynthesizer::Impl {
     int active_shading_rate{-1}; // changes replace retired provider state, never mutate it
     std::array<CameraData, 2> previous_source_camera{};
     std::uint64_t last_evaluated_publication{};
+    std::array<std::uint64_t,4> paired_unit_identity{};
     unsigned last_evaluated_eye{2};
     std::array<std::uint64_t, 2> previous_source_stream{};
     std::array<std::uint64_t, 2> previous_source_epoch{};
@@ -1398,8 +1399,16 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         impl_->gpu_timing.harvest();
         if (!std::isfinite(xr_eye_baseline) || xr_eye_baseline < .01F || xr_eye_baseline > .20F)
             return E_INVALIDARG;
-        if (impl_->unit_epoch != guide.epoch) {
+        const bool interleaved = guide.luke_interleaved_history && guide.previous_opposite_guide &&
+            guide.previous_same_native_camera && luke_interleaved_history_matches(
+                dlss_native_camera_history(guide), dlss_native_camera_history(*guide.previous_opposite_guide),
+                *guide.previous_same_native_camera);
+        const auto paired_key = interleaved ? luke_interleaved_producer_key(
+            dlss_native_camera_history(guide), dlss_native_camera_history(*guide.previous_opposite_guide))
+            : std::array<std::uint64_t,4>{};
+        if (impl_->paired_unit_identity != paired_key || (!interleaved && impl_->unit_epoch != guide.epoch)) {
             impl_->unit_epoch = guide.epoch;
+            impl_->paired_unit_identity = paired_key;
             impl_->calibrated_units_per_metre = 0;
         }
         if (settings.mode==3 && impl_->active_shading_rate>=0 &&
@@ -1411,12 +1420,14 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             const auto camera_origin=impl_->camera_origin;
             const auto calibrated_units=impl_->calibrated_units_per_metre;
             const auto unit_epoch=impl_->unit_epoch;
+            const auto paired_unit_identity=impl_->paired_unit_identity;
             const auto result=initialize_locked(impl_->device.Get(),impl_->queue.Get(),provider,true);
             report_stage(AfwStage::frame_warp_init_begin,result,1044,settings.shading_rate);
             if (FAILED(result)) return result;
             impl_->camera_origin=camera_origin;
             impl_->calibrated_units_per_metre=calibrated_units;
             impl_->unit_epoch=unit_epoch;
+            impl_->paired_unit_identity=paired_unit_identity;
         }
         if (impl_->calibrated_units_per_metre == 0 && guide.calibrated_game_eye_baseline > 0)
             impl_->calibrated_units_per_metre = guide.calibrated_game_eye_baseline * impl_->world_scale / xr_eye_baseline;
@@ -1430,8 +1441,9 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             units_ready ? S_OK : S_FALSE, 104, guide.publication,
             (std::uint64_t(baseline_bits_units) << 32) | units_bits);
         if (!units_ready) return HRESULT_FROM_WIN32(ERROR_NOT_READY);
-        const auto origin_changed = impl_->camera_origin.update(
-            guide.stream, guide.epoch, guide.camera_position, guide.reset);
+        const auto origin_changed = interleaved
+            ? impl_->camera_origin.update_producers(paired_key,guide.camera_position,guide.reset)
+            : impl_->camera_origin.update(guide.stream, guide.epoch, guide.camera_position, guide.reset);
         if (!origin_changed) return E_INVALIDARG;
         if (*origin_changed) {
             // AFW's private history and ours must never span two origins.
@@ -1679,7 +1691,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             impl_->previous_source_epoch[source_eye] == guide.epoch &&
             impl_->previous_source_stream[source_eye] == guide.stream;
         if (middle &&
-            middle->stream == guide.stream && middle->epoch == guide.epoch &&
+            (interleaved || (middle->stream == guide.stream && middle->epoch == guide.epoch)) &&
             middle->publication + 1 == guide.publication) {
             CameraData middle_camera{};
             // The middle guide is an NGX camera at its own publication. Its
@@ -1713,7 +1725,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 // successful AFW input (which may be N-4 after a skipped frame).
                 if (native_previous && native_previous->stream == guide.stream &&
                     native_previous->epoch == guide.epoch &&
-                    native_previous->serial + 2 == guide.serial &&
+                    native_previous->serial + (interleaved ? 1 : 2) == guide.serial &&
                     native_previous->publication + 2 == guide.publication &&
                     camera_data(source_view, source_view, *native_previous,
                         source_eye, impl_->world_scale, xr_eye_baseline, units,
@@ -1877,6 +1889,10 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         if (two_frame_capture_active()) {
             TwoFrameGuideContract contract{};
             contract.stage = "afw_evaluate";
+            contract.native_camera_token = guide.camera_frame_token;
+            contract.color_origin_token = guide.color_origin_token;
+            contract.native_production_sequence = guide.native_production_sequence;
+            contract.interleaved_history = guide.luke_interleaved_history;
             contract.stream = guide.stream;
             contract.publication = guide.publication;
             contract.serial = guide.serial;

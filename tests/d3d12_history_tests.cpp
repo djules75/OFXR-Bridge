@@ -2208,6 +2208,67 @@ void test_luke_multi_handle_origins(D3D12WarpFixture& fixture) {
     std::cout<<"Multi-handle native color: actual CRC transport, exact own N-1/N-2, old/current pixels, crossqueue/device/interval/reset/retirement/eviction guards PASS\n";
 }
 
+void test_luke_interleaved_origins(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    auto color=create_source_texture(fixture),motion=create_source_texture(fixture),depth=create_source_texture(fixture);
+    std::vector<std::shared_ptr<const xrfg::DlssMotionVectorFrame>> produced;
+    const auto publish=[&](unsigned n, unsigned token=0, bool reset=false) {
+        upload_pattern(fixture,motion.Get(),make_pattern(static_cast<std::uint8_t>(n*3)));
+        upload_pattern(fixture,depth.Get(),make_pattern(static_cast<std::uint8_t>(n*5)));
+        std::shared_ptr<const xrfg::DlssMotionVectorFrame> frame;
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            xrfg::DlssMotionVectorPublication p;
+            p.stream=91000+(n&1);p.output=color.Get();p.motion_vectors=motion.Get();p.depth=depth.Get();
+            p.producer_queue=fixture.queue();p.producer_command_list=list;
+            p.output_width=p.motion_width=p.depth_width=kWidth;
+            p.output_height=p.motion_height=p.depth_height=kHeight;
+            p.resource_state=p.depth_resource_state=D3D12_RESOURCE_STATE_RENDER_TARGET;
+            p.protect_snapshot_lifetime=true;p.reset=reset;
+            p.camera_frame_token_valid=p.camera_data_valid=p.camera_matrices_valid=true;
+            p.camera_frame_token=token?token:n+100;
+            p.camera_right={1,0,0};p.camera_up={0,1,0};p.camera_forward={0,0,-1};
+            p.camera_position={n*.2F+((n&1)?-.5F:.5F)*6.4F,0,0};
+            p.camera_view_to_clip[0]=p.camera_view_to_clip[5]=1;p.camera_view_to_clip[11]=-1;p.camera_view_to_clip[14]=.1F;
+            p.camera_clip_to_view[0]=p.camera_clip_to_view[5]=1;p.camera_clip_to_view[11]=10;p.camera_clip_to_view[14]=-1;
+            p.frame_time_delta_ms=16;
+            frame=xrfg::publish_dlss_motion_vectors(p);
+        });
+        require(frame!=nullptr,"interleaved publication");
+        return frame;
+    };
+    for(unsigned n=1;n<=24;++n) {
+        auto frame=publish(n);produced.push_back(frame);
+        if(n<4)continue;
+        const auto joined=xrfg::resolve_luke_guide_token(frame->color_origin_token,fixture.queue(),fixture.device());
+        require(joined && joined->luke_interleaved_history && joined->stream==frame->stream &&
+            joined->serial==frame->serial && joined->previous_opposite_guide && joined->previous_same_guide &&
+            joined->previous_opposite_guide->stream!=joined->stream &&
+            joined->previous_same_guide->stream==joined->stream &&
+            joined->previous_opposite_guide->camera_frame_token==n+99 &&
+            joined->previous_same_native_camera && joined->previous_same_native_camera->token==n+98 &&
+            joined->previous_serial==joined->previous_same_guide->serial,
+            "interleaved exact A/B/A camera history was rejected or relabelled");
+        require_readback_matches(fixture,joined->motion_vectors.Get(),make_pattern(static_cast<std::uint8_t>(n*3)),
+            "interleaved current MV",joined->resource_state);
+        require_readback_matches(fixture,joined->previous_opposite_guide->depth.Get(),make_pattern(static_cast<std::uint8_t>((n-1)*5)),
+            "interleaved exact N-1 depth",joined->previous_opposite_guide->depth_resource_state);
+        if(n>=22)require(std::abs(joined->calibrated_game_eye_baseline-6.4F)<.0001F,
+            "interleaved production calibration did not cancel camera translation");
+    }
+    auto bad=publish(25,999);
+    require(!xrfg::resolve_luke_guide_token(bad->color_origin_token,fixture.queue(),fixture.device()),
+        "interleaved token discontinuity accepted");
+    const auto good_token=produced.back()->color_origin_token;
+    xrfg::invalidate_dlss_motion_vector_stream_history(produced[22]->stream);
+    require(!xrfg::resolve_luke_guide_token(good_token,fixture.queue(),fixture.device()),
+        "interleaved retired opposite epoch remained usable");
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    produced.clear();xrfg::retire_disabled_dlss_motion_vector_resources();
+    std::cout<<"Interleaved A/B/A: original identities, exact GPU pixels, calibration, missing token and opposite epoch rejection PASS\n";
+}
+
 void test_luke_production_camera_units(D3D12WarpFixture& fixture) {
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_disabled_dlss_motion_vector_resources();
@@ -5313,6 +5374,7 @@ int main(int argc, char** argv) {
             test_public_video_allocation_owner(fixture);
             test_protected_guide_snapshots(fixture);
             test_luke_multi_handle_origins(fixture);
+            test_luke_interleaved_origins(fixture);
             test_luke_production_camera_units(fixture);
             fixture.require_no_debug_errors();
             return 0;

@@ -1186,6 +1186,13 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
                 XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
                 check(XR_SUCCEEDED(layer_release_swapchain_image_impl(c->handle,&release)),"extra projection release");
             }
+            if (private_mode == 6) {
+                // Crimson gameplay releases alternating-eye AER sources with
+                // different render counters. Both exact XR captures exist;
+                // the raw optical path must not require one shared counter.
+                chain->luke_released_identity = xrfg::LukeRenderIdentity{0x12340000, n * 2};
+                right_chain->luke_released_identity = xrfg::LukeRenderIdentity{0x12340000, n * 2 - 1};
+            }
             std::array<XrCompositionLayerQuad, 2> quads{};
             XrBaseInStructure unsupported_extension{XR_TYPE_UNKNOWN};
             if (with_layers) {

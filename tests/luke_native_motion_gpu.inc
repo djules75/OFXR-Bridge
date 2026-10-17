@@ -80,6 +80,17 @@
         const auto axes=native_view_rows?xrfg::LukeProducerCameraAxes::native_view_rows:
             doom_pitch?xrfg::LukeProducerCameraAxes::right_down_forward:xrfg::LukeProducerCameraAxes::view;
         expect(xrfg::luke_native_motion_constants(g,2,2,constants,failure,axes) && failure==0);
+        if(native_span==1) {
+            const auto single_stream_constants=constants;
+            // Same three physical cameras, two native feature histories:
+            // A2 / B2 / A3. Feature identities must remain distinct while
+            // depth/subtraction produces the identical corrected field.
+            g.luke_interleaved_history=true;g.serial=3;g.previous_serial=2;
+            middle->stream=11;middle->epoch=5;middle->serial=2;
+            old.serial=2;g.previous_same_native_camera=xrfg::dlss_native_camera_history(old);
+            expect(xrfg::luke_native_motion_constants(g,2,2,constants,failure,axes) && failure==0);
+            expect(!std::memcmp(&constants,&single_stream_constants,sizeof(constants)));
+        }
         const auto d=[&](unsigned x,unsigned y) {
             if(scenario==5)return 0.F;
             if(scenario==6 && x==2 && y==2)return NAN;
@@ -158,6 +169,11 @@
             }
         }
         readback->Unmap(0,nullptr);++scenarios;
+        if(native_span==1) {
+            g.luke_interleaved_history=false;g.serial=5;g.previous_serial=3;
+            middle->stream=10;middle->epoch=3;middle->serial=4;
+            old.serial=3;g.previous_same_native_camera=xrfg::dlss_native_camera_history(old);
+        }
         // Guard failures never borrow newer cameras or fall back to uncorrected vectors.
         auto admission=[&](unsigned wanted) {xrfg::LukeNativeMotionConstants ignored{};unsigned why{};const bool ok=xrfg::luke_native_motion_constants(g,2,2,ignored,why,axes);expect(why==wanted && ok==(wanted==0));};
         const auto saved=g.previous_same_native_camera;g.previous_same_native_camera.reset();admission(1);g.previous_same_native_camera=saved;

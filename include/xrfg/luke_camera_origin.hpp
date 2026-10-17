@@ -14,8 +14,7 @@ namespace xrfg {
 // products without changing stereo separation or temporal camera motion.
 class LukeCameraOrigin {
     std::array<double, 3> origin_{};
-    std::uint64_t stream_{};
-    std::uint64_t epoch_{};
+    std::array<std::uint64_t,4> producers_{};
     bool initialized_{};
 
 public:
@@ -24,11 +23,18 @@ public:
     [[nodiscard]] std::optional<bool> update(std::uint64_t stream,
         std::uint64_t epoch, const std::array<float, 3>& position,
         bool force_reset = false) noexcept {
+        return update_producers({stream,epoch,0,0},position,force_reset);
+    }
+
+    // A verified two-feature AER sequence shares one world origin. The key
+    // contains both original stream/epoch pairs in canonical order.
+    [[nodiscard]] std::optional<bool> update_producers(
+        const std::array<std::uint64_t,4>& producers,
+        const std::array<float,3>& position, bool force_reset=false) noexcept {
         for (const float value : position)
             if (!std::isfinite(value)) return std::nullopt;
 
-        const bool changed = !initialized_ || stream != stream_ ||
-            epoch != epoch_ || force_reset;
+        const bool changed = !initialized_ || producers != producers_ || force_reset;
         if (!changed) {
             for (unsigned axis = 0; axis < 3; ++axis)
                 if (std::abs(static_cast<double>(position[axis]) - origin_[axis]) >
@@ -37,8 +43,7 @@ public:
         }
         for (unsigned axis = 0; axis < 3; ++axis)
             origin_[axis] = static_cast<double>(position[axis]);
-        stream_ = stream;
-        epoch_ = epoch;
+        producers_ = producers;
         initialized_ = true;
         return true;
     }

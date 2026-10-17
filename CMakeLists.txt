@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.560.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.561.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1450,6 +1450,12 @@ if(WIN32 AND XRFG_BUILD_TESTS)
       "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
       "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/kcd-quality-bundled"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  add_test(NAME xrfg_luke_interleaved_quality_bundled COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/luke-interleaved-quality" -DINTERLEAVED=ON
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_interleaved_quality_bundled PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+      PASS_REGULAR_EXPRESSION "Interleaved AER full quality:")
   foreach(shading_index 4 8 9) # 9 exercises live 1x1 -> 2x2 -> 4x4 -> 1x1
     add_test(NAME xrfg_luke_beta6_shading_${shading_index} COMMAND "${CMAKE_COMMAND}"
         "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"

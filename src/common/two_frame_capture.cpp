@@ -340,7 +340,8 @@ void write_session(const std::shared_ptr<Session>& session) {
         "\tmotion_temporal_valid\tmotion_previous_publication\tmotion_middle_publication"
         "\tmotion_current_to_middle_same\tmotion_current_to_previous_same\tmotion_current_to_middle_opposite"
         "\tdepth_native_history_valid\tdepth_native_previous_publication\tdepth_current_to_native_previous"
-        "\tcamera_forward_sign\tcamera_up_sign\traw_motion_native_span\n";
+        "\tcamera_forward_sign\tcamera_up_sign\traw_motion_native_span"
+        "\tnative_camera_token\tcolor_origin_token\tnative_production_sequence\tinterleaved_history\n";
     const auto write_array = [&guide_manifest](const auto& values) {
         for (std::size_t i = 0; i < values.size(); ++i) {
             if (i) guide_manifest << ',';
@@ -410,7 +411,9 @@ void write_session(const std::shared_ptr<Session>& session) {
         guide_manifest << c.depth_native_history_valid << '\t'
             << c.depth_native_previous_publication << '\t';
         write_array(c.depth_current_to_native_previous); guide_manifest << '\t';
-        guide_manifest << c.camera_forward_sign << '\t' << c.camera_up_sign << '\t' << c.raw_motion_native_span << '\n';
+        guide_manifest << c.camera_forward_sign << '\t' << c.camera_up_sign << '\t' << c.raw_motion_native_span
+            << '\t' << c.native_camera_token << '\t' << c.color_origin_token
+            << '\t' << c.native_production_sequence << '\t' << c.interleaved_history << '\n';
     }
     const auto deadline = std::chrono::steady_clock::now() +
         std::chrono::seconds(15);

@@ -15243,8 +15243,12 @@ XrResult layer_end_frame_impl(
             return bypass_generation(GenerationPrepareReason::presenter_unsafe_composition);
         // In AFW the peer is reconstructed, not a second AER source release.
         // The original Luke pair filter cannot classify that completed pair.
-        const auto luke = afw_selected ? LukePairDecision{} : luke_pair_decision(projection_mappings);
-        update_luke_application_clock(*state, afw_selected || luke.identity.has_value() || luke.action == LukePairDecision::Action::drop,
+        // Raw AER can release different render identities for the two eyes.
+        // The optical consumer owns the exact XR captures, not a native SR
+        // pair. Preserve the separately pinned HFW source-filter contract.
+        const bool raw_luke_optical = !state->luke_fresh_only && luke_color_only_ofxr(*state);
+        const auto luke = afw_selected || raw_luke_optical ? LukePairDecision{} : luke_pair_decision(projection_mappings);
+        update_luke_application_clock(*state, afw_selected || raw_luke_optical || luke.identity.has_value() || luke.action == LukePairDecision::Action::drop,
             luke.action == LukePairDecision::Action::drop);
         if (luke.reset) {
             clear_generation_continuity(state);
