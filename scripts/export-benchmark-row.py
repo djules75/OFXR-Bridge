@@ -7,6 +7,7 @@ import csv
 import hashlib
 import json
 import re
+import statistics
 from pathlib import Path
 
 FIELDS = re.compile(r'(\w+)=([^\s]+)')
@@ -40,6 +41,7 @@ def decode(bits, quality):
     if route == 'Djules' and flags == '00' and bits & (1 << 9):
         cell += ':prefer'
     return dict(route=route, cell=cell, flags=flags, dlssg_preset_request=dlssg_preset,
+                automatic=bool(bits & (1 << 24)), suite_step=(bits >> 25) & 63,
                 prefer_fps=bool(bits & (1 << 9)), triple=triple,
                 nr=bool(bits & (1 << 14)), separate_queue=bool(bits & (1 << 15)),
                 luke=bool(bits & (1 << 16)), afw_mode=(bits >> 12) & 3, afw_shading_rate=(bits >> 20) & 15,
@@ -59,10 +61,16 @@ def read_segments(path):
         if f['phase'] == 'M':
             continue  # Startup replay is not a continuous measurement interval.
         ms, a, b, c = float(f['ms']), int(f['a']), int(f['b']), int(f['c'])
-        if op == 'benchmark_configuration':
+        if op == 'benchmark_command':
+            if active is not None and a != active['signature'][0]:
+                active['end'] = ms
+                active = None
+        elif op == 'benchmark_configuration':
             signature = (a, b, c)
             configurations[a] = decode(b, c)
             if active is None or active['signature'] != signature or ms - active['last'] > 1000:
+                if active is not None:
+                    active['end'] = ms
                 active = dict(signature=signature, config=configurations[a], start=ms, last=ms,
                               rates=[], cycles=[], gaps=0, file=str(path), version=version)
                 segments.append(active)
@@ -88,7 +96,9 @@ def span_text(values):
     return str(low) if low == high else f'{low}-{high}'
 
 def summarize(segment, settle, minimum, metric):
-    lo, hi = segment['start'] + settle * 1000, segment['last'] - 3000
+    modern = (segment.get('version') or 0) >= 558
+    tail = 0 if modern else 3000
+    lo, hi = segment['start'] + settle * 1000, segment.get('end', segment['last']) - tail
     if hi - lo < minimum * 1000 or segment['gaps']:
         return None
     rates = [x for x in segment['rates'] if lo <= x['ms'] <= hi]
@@ -102,39 +112,42 @@ def summarize(segment, settle, minimum, metric):
     text = span_text(fps)
     if config['route'] != 'Disabled':
         text += '(' + (span_text(cycles) if len(cycles) >= minimum * 2 else 'n.d.') + ')'
-    return dict(config=config, value=text, fps_min=min(fps), fps_max=max(fps),
+    return dict(config=config, value=text, fps_min=min(fps), fps_median=statistics.median(fps), fps_max=max(fps),
                 real_min=min(real), real_max=max(real), generated_min=min(generated), generated_max=max(generated),
-                cycle_min=min(cycles) if cycles else None, cycle_max=max(cycles) if cycles else None,
+                cycle_min=min(cycles) if cycles else None, cycle_median=statistics.median(cycles) if cycles else None, cycle_max=max(cycles) if cycles else None,
                 metric=metric, sample_count=len(rates), start_s=lo / 1000, end_s=hi / 1000,
                 output_sources=sorted(set(x['source'] for x in rates)), file=segment['file'], version=segment['version'],
                 warning='Hybrid selection lacked effective guide activation' if config['route'] == 'Hybrid' and not config['hybrid_effective']
                 else 'No confirmed generated output' if config['route'] != 'Disabled' and max(generated) == 0
                 else 'DLSS-G preset is a startup driver-profile request; active NVIDIA model is not independently verified' if config['route'].startswith('DLSS-G') else None)
 
-def export(paths, platform, metric, settle=3, minimum=10):
+def export(paths, platform, metric, settle=3, minimum=None):
     groups = {}
     measurements = {}
     attempted = {}
-    for path in paths:
-        for segment in read_segments(path):
-            cfg = segment['config']
-            group = (cfg['nr'], cfg['separate_queue'], cfg['luke'], cfg['afw_mode'] if cfg['luke'] else 0,
-                     0 if platform == 'meganex' else cfg['dlssg_preset_request'],
-                     cfg['afw_shading_rate'] if cfg['luke'] and cfg['afw_mode'] else 0)
-            key = cfg['cell'] if platform == 'meganex' else cfg['route']
-            attempted.setdefault(group, set()).add(key)
-            result = summarize(segment, settle, minimum, metric)
-            if result is None:
-                continue
-            cfg = result['config']
-            # Queue/NR/Luke-AFW runs must never be merged into one owner row.
-            group = (cfg['nr'], cfg['separate_queue'], cfg['luke'], cfg['afw_mode'] if cfg['luke'] else 0,
-                     0 if platform == 'meganex' else cfg['dlssg_preset_request'],
-                     cfg['afw_shading_rate'] if cfg['luke'] and cfg['afw_mode'] else 0)
-            cells = groups.setdefault(group, {})
-            measurements.setdefault(group, []).append(result)
-            key = cfg['cell'] if platform == 'meganex' else cfg['route']
-            cells[key] = result  # Last complete repeat wins; evidence preserves exact file/window.
+    segments = [segment for path in paths for segment in read_segments(path)]
+    if any(segment['config'].get('automatic') for segment in segments):
+        segments = [segment for segment in segments if segment['config'].get('automatic')]
+    for segment in segments:
+        cfg = segment['config']
+        group = (cfg['nr'], cfg['separate_queue'], cfg['luke'], cfg['afw_mode'] if cfg['luke'] else 0,
+                 0 if platform == 'meganex' else cfg['dlssg_preset_request'],
+                 cfg['afw_shading_rate'] if cfg['luke'] and cfg['afw_mode'] else 0)
+        key = cfg['cell'] if platform == 'meganex' else cfg['route']
+        attempted.setdefault(group, set()).add(key)
+        useful_minimum = minimum if minimum is not None else (5 if (segment.get('version') or 0) >= 558 else 10)
+        result = summarize(segment, settle, useful_minimum, metric)
+        if result is None:
+            continue
+        cfg = result['config']
+        # Queue/NR/Luke-AFW runs must never be merged into one owner row.
+        group = (cfg['nr'], cfg['separate_queue'], cfg['luke'], cfg['afw_mode'] if cfg['luke'] else 0,
+                 0 if platform == 'meganex' else cfg['dlssg_preset_request'],
+                 cfg['afw_shading_rate'] if cfg['luke'] and cfg['afw_mode'] else 0)
+        cells = groups.setdefault(group, {})
+        measurements.setdefault(group, []).append(result)
+        key = cfg['cell'] if platform == 'meganex' else cfg['route']
+        cells[key] = result  # Last complete repeat wins; evidence preserves exact file/window.
     results = []
     for key, cells in sorted(groups.items()):
         slots = MEGANEX if platform == 'meganex' else QUEST
@@ -178,7 +191,7 @@ def main():
         raise SystemExit('No complete benchmark intervals. V529+ compact logs are required; no row fabricated.')
     a.out.mkdir(parents=True, exist_ok=True)
     report = dict(game=a.game, platform=a.platform, metric=a.metric, sync_mode=a.sync_mode, hags=a.hags,
-                  method='Output FPS and menu cycle field, min/max after excluding first 3s and last 3s of every configuration interval; >=10s useful window. Rounded to integers. Export starts at S for Meganex; R is the separate run without OFXR loaded.',
+                  method='V558+: exclude first 3s only, retain samples until next command, >=5s useful; legacy builds retain first/last3s and >=10s. Output FPS and Cycle estimated min/median/max, ranges rounded for sheet. S for Meganex; R remains a separate run without OFXR loaded.',
                   files=[dict(path=str(x), sha256=hashlib.sha256(x.read_bytes()).hexdigest()) for x in paths], rows=rows)
     (a.out / 'benchmark-results.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
     # Portable named measurements, independent of destination cell addresses.

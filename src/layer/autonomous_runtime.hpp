@@ -12,6 +12,7 @@
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/diagnostic_hotkeys.hpp"
 #include "xrfg/luke_vulkan_scope.hpp"
+#include "xrfg/dlssg_profile.hpp"
 
 namespace xrfg::autonomous {
 inline std::atomic_uint64_t applied_runtime_revision{};
@@ -72,6 +73,7 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     const auto afw=embedded::afw_snapshot();
     const auto nr=neural_rendering::status();
     RuntimeStatus out{};
+    out.dlssg_preset_request=xrfg::standalone::process_dlssg_preset();
     if (swapchains) out.swapchains=*swapchains;
     out.process_id=GetCurrentProcessId();
     out.afw_shading_rate=afw.active_shading_rate;

@@ -1,0 +1,33 @@
+{
+  "version": "V558",
+  "base": "a3c6d1db22db5728851e58c425676dca113a940c",
+  "status": "runtime-pending",
+  "passed": 14,
+  "failed": 0,
+  "ctest_passed": 13,
+  "ctest_seconds": 10.12,
+  "python_exporter_passed": true,
+  "ipc_abi": 55801,
+  "provider_abi": 45601,
+  "renderer_algorithms_changed": false,
+  "automated_suites": {
+    "optical_configurations": 21,
+    "complete_C_only_configurations": 33,
+    "luke_configurations": 24,
+    "seconds_per_applied_configuration": 10,
+    "leading_settle_seconds": 3,
+    "trailing_trim_seconds": 0
+  },
+  "checks": [
+    "benchmark suite timing/application/median/CSV/restore/manual cancellation/Luke layout",
+    "actual Display buttons and Stop",
+    "D3D11/D3D12 menu and Elliott meter",
+    "runtime control IPC/producer API",
+    "packaged call chain",
+    "DLSSG profile read/write mocks",
+    "exporter late-tail/median/command boundaries"
+  ],
+  "headset_validation": "New automation not yet tested by owner in game. V557 renderer retained. Full C requires a process-start C profile request; no live NGX model-switch proof claimed.",
+  "csv": "Main horizontal layout has six statistic rows, detail CSV has per-configuration metadata/status. Luke columns group blank/1x1/2x2/4x4 per route.",
+  "diagnostic_logging": "Preserved. Metrics use an expiring lease without verbose flight logging or open menus. CSV I/O only in tray/desktop timer process."
+}

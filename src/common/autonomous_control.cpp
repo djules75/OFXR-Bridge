@@ -1,4 +1,7 @@
 #include "xrfg/autonomous_control.hpp"
+#include "xrfg/benchmark_suite.hpp"
+#include "xrfg/dlssg_profile.hpp"
+#include "xrfg/presented_output_rate.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -13,6 +16,7 @@
 #include <sstream>
 #include <type_traits>
 #include <atomic>
+#include <locale>
 #ifdef _WIN32
 #include <windows.h>
 #include <shlobj.h>
@@ -73,7 +77,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465852;
-constexpr std::uint32_t kAbi = 54201;
+constexpr std::uint32_t kAbi = 55801;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==72); // V471 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==69); // previously reserved padding
@@ -84,6 +88,8 @@ struct Shared {
     std::uint32_t bytes{};
     Snapshot snapshot{};
     alignas(8) std::uint64_t visible_until_ms[3]{};
+    alignas(8) std::uint64_t benchmark_metrics_until_ms{};
+    Settings benchmark_saved{};
 };
 static_assert(std::is_trivially_copyable_v<Shared>);
 
@@ -162,7 +168,7 @@ public:
             identity ^= static_cast<std::uint64_t>(std::towlower(character));
             identity *= 1099511628211ULL;
         }
-        const auto prefix = L"Local\\OFXRAutonomousV487-" + std::to_wstring(identity);
+        const auto prefix = L"Local\\OFXRAutonomousV558-" + std::to_wstring(identity);
         mutex = CreateMutexW(nullptr, FALSE, (prefix + L"-mutex").c_str());
         if (!mutex) return;
         const DWORD waited = WaitForSingleObject(mutex, 2000);
@@ -327,7 +333,7 @@ Settings parse_settings(std::string_view text) {
         READ_FIELD(nr_max_ratio) READ_FIELD(nr_working_scale) READ_FIELD(nr_white_point_scale)
         READ_FIELD(nr_debug_view) READ_FIELD(nr_compare) READ_FIELD(nr_compare_split)
         READ_FIELD(nr_compare_zoom) READ_FIELD(nr_compare_swap)
-        READ_FIELD(diagnostics) READ_FIELD(overlay_position)
+        READ_FIELD(diagnostics) READ_FIELD(benchmark_csv) READ_FIELD(overlay_position)
         READ_FIELD(menu_scale) READ_FIELD(menu_offset_x) READ_FIELD(menu_offset_y)
 #undef READ_FIELD
     }
@@ -359,7 +365,7 @@ std::string serialize_settings(const Settings& settings) {
     WRITE_FIELD(nr_max_ratio) WRITE_FIELD(nr_working_scale) WRITE_FIELD(nr_white_point_scale)
     WRITE_FIELD(nr_debug_view) WRITE_FIELD(nr_compare) WRITE_FIELD(nr_compare_split)
     WRITE_FIELD(nr_compare_zoom) WRITE_FIELD(nr_compare_swap)
-    WRITE_FIELD(diagnostics) WRITE_FIELD(overlay_position)
+    WRITE_FIELD(diagnostics) WRITE_FIELD(benchmark_csv) WRITE_FIELD(overlay_position)
     WRITE_FIELD(menu_scale) WRITE_FIELD(menu_offset_x) WRITE_FIELD(menu_offset_y)
 #undef WRITE_FIELD
     for (std::size_t i = 0; i < profile_sections.size(); ++i) {
@@ -420,6 +426,11 @@ bool request(Settings desired) noexcept {
         Lock lock(connection, 2000);
         if (!lock.acquired || !save(desired)) return false;
         if (connection.data->snapshot.desired != desired) {
+            if(benchmark_active(connection.data->snapshot.benchmark)) {
+                auto& b=connection.data->snapshot.benchmark;b.phase=BenchmarkPhase::stopped;
+                b.requested_ms=GetTickCount64();
+                std::snprintf(b.message,sizeof(b.message),"Stopped by a manual settings change; your edit is kept.");
+            }
             connection.data->snapshot.desired = desired;
             ++connection.data->snapshot.revision;
         }
@@ -451,7 +462,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
     MERGE_FIELD(nr_max_ratio) MERGE_FIELD(nr_working_scale) MERGE_FIELD(nr_white_point_scale)
     MERGE_FIELD(nr_debug_view) MERGE_FIELD(nr_compare) MERGE_FIELD(nr_compare_split)
     MERGE_FIELD(nr_compare_zoom) MERGE_FIELD(nr_compare_swap)
-    MERGE_FIELD(diagnostics) MERGE_FIELD(overlay_position)
+    MERGE_FIELD(diagnostics) MERGE_FIELD(benchmark_csv) MERGE_FIELD(overlay_position)
     MERGE_FIELD(menu_scale) MERGE_FIELD(menu_offset_x) MERGE_FIELD(menu_offset_y)
 #undef MERGE_FIELD
     restore_preferences(current);
@@ -466,10 +477,254 @@ bool request_changes(const Settings& base, const Settings& desired) noexcept {
         const auto merged = merge_changes(connection.data->snapshot.desired, base, desired);
         if (merged == connection.data->snapshot.desired) return true;
         if (!save(merged)) return false;
+        if(benchmark_active(connection.data->snapshot.benchmark)) {
+            auto& b=connection.data->snapshot.benchmark;b.phase=BenchmarkPhase::stopped;
+            b.requested_ms=GetTickCount64();
+            std::snprintf(b.message,sizeof(b.message),"Stopped by a manual settings change; your edit is kept.");
+        }
         connection.data->snapshot.desired = merged;
         ++connection.data->snapshot.revision;
         return true;
     } catch (...) { return false; }
+}
+
+namespace {
+struct SuiteResult { Settings settings;BenchmarkSamples samples; };
+struct SuiteRecorder {
+    std::uint64_t run{}, revision{}, started{}, next_sample{};
+    unsigned index{};
+    std::ofstream stream;
+    BenchmarkSamples samples;
+    Settings settings;
+    std::string label,game;
+    std::filesystem::path layout_path;
+    std::vector<SuiteResult> results;
+    bool afw_success{};
+};
+SuiteRecorder& suite_recorder() { static SuiteRecorder value;return value; }
+std::string quoted(std::string text) {
+    std::string result="\"";
+    for(char c:text) {if(c=='\"')result+='\"';result+=c;}
+    return result+'\"';
+}
+std::string utf8_path(const std::filesystem::path& p) {
+    const auto value=p.u8string();return {reinterpret_cast<const char*>(value.data()),value.size()};
+}
+std::filesystem::path benchmark_game_path(unsigned pid) {
+    const auto handle=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
+    if(!handle)return {};
+    wchar_t path[32768]{};DWORD size=32768;
+    const bool found=QueryFullProcessImageNameW(handle,0,path,&size)!=FALSE;
+    CloseHandle(handle);return found ? std::filesystem::path(path) : std::filesystem::path{};
+}
+bool suite_runtime_fresh(const RuntimeStatus& r) {
+    const auto now=GetTickCount64();
+    return r.process_id && r.sessions && now>=r.heartbeat_ms && now-r.heartbeat_ms<5000;
+}
+bool suite_publish(Shared& shared,Settings desired,std::uint64_t now) {
+    desired=sanitize(desired);
+    if(!save(desired)) return false;
+    auto& s=shared.snapshot;
+    s.desired=desired;++s.revision;
+    s.benchmark.revision=s.revision;
+    s.benchmark.requested_ms=now;s.benchmark.started_ms=0;
+    std::atomic_ref<std::uint64_t>(shared.benchmark_metrics_until_ms).store(GetTickCount64()+2000,std::memory_order_release);
+    return true;
+}
+void suite_restore(Shared& shared,BenchmarkPhase phase,const char* message,std::uint64_t now) {
+    const bool restored=suite_publish(shared,shared.benchmark_saved,now);
+    auto& b=shared.snapshot.benchmark;
+    b.phase=restored ? phase : BenchmarkPhase::error;
+    std::atomic_ref<std::uint64_t>(shared.benchmark_metrics_until_ms).store(0,std::memory_order_release);
+    std::snprintf(b.message,sizeof(b.message),"%s",restored ? message : "Could not restore the original settings; check the local profile.");
+}
+void csv_stat(std::ostream& stream,const std::vector<double>& values) {
+    if(values.empty()) {stream<<"N/A,N/A,N/A";return;}
+    stream<<*std::min_element(values.begin(),values.end())<<','<<benchmark_median(values)<<','<<*std::max_element(values.begin(),values.end());
+}
+bool same_trial(const Settings& a,const Settings& b) {
+    return a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation &&
+        a.triple_frame_gen==b.triple_frame_gen && a.prefer_fps==b.prefer_fps &&
+        a.separate_synthesis==b.separate_synthesis && a.lower_vram==b.lower_vram &&
+        a.afw_mode==b.afw_mode && (!a.afw_mode || a.afw_shading_rate==b.afw_shading_rate);
+}
+void csv_layout(const SuiteRecorder& rec,const BenchmarkStatus& b) {
+    if(rec.layout_path.empty())return;
+    auto steps=benchmark_plan(b.full,b.luke);
+    if(b.luke) {
+        // Execute whole quality passes, export each route's blank/1x1/2x2/4x4 together.
+        std::vector<BenchmarkStep> ordered;
+        constexpr std::size_t routes=6;
+        for(std::size_t route=0;route<routes;++route)
+            for(std::size_t quality=0;quality<4;++quality)ordered.push_back(steps[quality*routes+route]);
+        steps=std::move(ordered);
+    }
+    std::ofstream output(rec.layout_path,std::ios::trunc);output.imbue(std::locale::classic());
+    if(!output)throw std::runtime_error("Cannot write layout CSV");
+    output<<"Game,Build,Metric";
+    for(const auto& step:steps) {
+        auto label=step.disabled ? std::string("OFXR Off") : step.label;
+        if(b.luke)label+=" / "+std::string(!step.afw ? "blank" : step.shading==0 ? "1x1" : step.shading==4 ? "2x2" : "4x4");
+        output<<','<<quoted(label);
+    }
+    output<<'\n'<<std::fixed<<std::setprecision(3);
+    const char* metrics[]{"Output FPS min","Output FPS median","Output FPS max","Cycle estimated min ms","Cycle estimated median ms","Cycle estimated max ms"};
+    for(unsigned metric=0;metric<6;++metric) {
+        output<<quoted(rec.game)<<",558,"<<metrics[metric];
+        for(const auto& step:steps) {
+            const auto wanted=benchmark_settings(rec.settings,step);
+            const SuiteResult* result=nullptr;
+            for(const auto& candidate:rec.results)if(same_trial(wanted,candidate.settings))result=&candidate;
+            output<<',';
+            if(!result){output<<"n.a.";continue;}
+            const auto& values=metric<3 ? result->samples.fps : result->samples.latency;
+            if(values.empty()){output<<"N/A";continue;}
+            output<<(metric%3==0 ? *std::min_element(values.begin(),values.end()) : metric%3==1 ? benchmark_median(values) : *std::max_element(values.begin(),values.end()));
+        }
+        output<<'\n';
+    }
+    output.flush();if(!output)throw std::runtime_error("Layout CSV write failed");
+}
+void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,const char* verdict) {
+    if(!rec.revision)return;
+    if(rec.stream.is_open()) {
+        const auto& s=rec.settings;
+        rec.stream<<"558,"<<b.run_id<<','<<b.game_pid<<','<<quoted(rec.game)<<','<<rec.index+1<<','<<quoted(rec.label)<<','
+            <<s.separate_synthesis<<','<<s.lower_vram<<','<<(s.triple_frame_gen ? 3 : 2)<<','<<s.prefer_fps<<','
+            <<s.nr_enabled<<','<<s.afw_mode<<','<<s.afw_shading_rate<<','<<(s.frame_generation==2 ? "C startup request" : "N/A")
+            <<",3,"<<std::max(0.0,(double(ended)-double(rec.started)-3000.0)/1000.0)<<',';
+        csv_stat(rec.stream,rec.samples.fps);rec.stream<<','<<rec.samples.fps.size()<<',';
+        csv_stat(rec.stream,rec.samples.latency);rec.stream<<','<<rec.samples.latency.size()<<','
+            <<quoted(verdict)<<'\n';
+        rec.stream.flush();
+        if(!rec.stream)throw std::runtime_error("CSV write failed");
+        rec.results.push_back({rec.settings,rec.samples});csv_layout(rec,b);
+    }
+    rec.revision=0;rec.samples={};
+}
+void csv_open(SuiteRecorder& rec,BenchmarkStatus& b) {
+    rec=SuiteRecorder{};rec.run=b.run_id;
+    rec.game=utf8_path(benchmark_game_path(b.game_pid).filename());
+    if(!b.csv)return;
+    const auto folder=configuration_path().parent_path()/L"Benchmarks";
+    std::filesystem::create_directories(folder);
+    const auto stem=L"OFXR-V558-"+std::to_wstring(b.run_id);
+    rec.layout_path=folder/(stem+L".csv");
+    const auto path=folder/(stem+L"-details.csv");
+    rec.stream.open(path,std::ios::out|std::ios::trunc);
+    rec.stream.imbue(std::locale::classic());rec.stream<<std::fixed<<std::setprecision(3);
+    if(!rec.stream)throw std::runtime_error("Cannot create benchmark CSV");
+    rec.stream<<"Build,Run,GamePID,Game,Step,Route,SeparateA,ReduceB,Multiplier,PreferFPS,Neural,AFWMode,AFWShadingRate,DLSSGPreset,SettleSeconds,UsefulSeconds,OutputFPSMin,OutputFPSMedian,OutputFPSMax,FPSSamples,CycleEstimatedMinMs,CycleEstimatedMedianMs,CycleEstimatedMaxMs,CycleSamples,Status\n";
+    rec.stream.flush();if(!rec.stream)throw std::runtime_error("Cannot write benchmark CSV header");
+    std::snprintf(b.csv_path,sizeof(b.csv_path),"%s",utf8_path(rec.layout_path).c_str());
+}
+} // namespace
+
+bool start_benchmark(bool full,bool luke) noexcept {
+    try {
+        auto& c=channel();Lock lock(c,2000);if(!lock.acquired)return false;
+        auto& shared=*c.data;auto& s=shared.snapshot;auto& b=s.benchmark;
+        if(benchmark_active(b))return false;
+        if(!suite_runtime_fresh(s.runtime)) {
+            b={};b.phase=BenchmarkPhase::error;
+            std::snprintf(b.message,sizeof(b.message),"Open the game and load the test scene first.");return false;
+        }
+        if(luke && !s.runtime.luke_detected) {
+            b={};b.phase=BenchmarkPhase::error;
+            std::snprintf(b.message,sizeof(b.message),"Luke Ross was not detected in the active game.");return false;
+        }
+        if(full && s.runtime.dlssg_preset_request!=3) {
+            const auto game=benchmark_game_path(s.runtime.process_id);std::wstring error;
+            const bool saved=!game.empty() && standalone::write_dlssg_profile(game,standalone::DlssgPreset::c,error);
+            b={};b.phase=saved ? BenchmarkPhase::restart_required : BenchmarkPhase::error;
+            std::snprintf(b.message,sizeof(b.message),"%s",saved
+                ? "Preset C saved for this game. Restart it, load the test scene, then press Complete tests."
+                : "Could not select preset C for the running game. Select C in its NVIDIA profile before starting the game.");
+            return false;
+        }
+        shared.benchmark_saved=s.desired;
+        const auto now=GetTickCount64();
+        const auto run=std::max(b.run_id+1,(now<<16)^GetCurrentProcessId());
+        b={};b.full=full;b.luke=luke;b.csv=s.desired.benchmark_csv;b.game_pid=s.runtime.process_id;
+        b.run_id=run;
+        const auto plan=benchmark_plan(full,luke);b.count=static_cast<unsigned>(plan.size());
+        b.phase=BenchmarkPhase::applying;
+        std::snprintf(b.label,sizeof(b.label),"%s",plan[0].label.c_str());
+        if(!suite_publish(shared,benchmark_settings(shared.benchmark_saved,plan[0]),now)) {
+            b.phase=BenchmarkPhase::error;std::snprintf(b.message,sizeof(b.message),"Could not save the first test settings.");return false;
+        }
+        return true;
+    } catch(...) {return false;}
+}
+void stop_benchmark() noexcept {
+    try {
+        auto& c=channel();Lock lock(c,2000);if(!lock.acquired)return;
+        if(benchmark_active(c.data->snapshot.benchmark))
+            suite_restore(*c.data,BenchmarkPhase::stopped,"Stopped. Original settings restored.",GetTickCount64());
+    } catch(...) {}
+}
+void tick_benchmark(std::uint64_t now) noexcept {
+    try {
+        auto& c=channel();Lock lock(c);if(!lock.acquired)return;
+        if(!now)now=GetTickCount64();
+        auto& shared=*c.data;auto& s=shared.snapshot;auto& b=s.benchmark;auto& rec=suite_recorder();
+        const auto own_pid=GetCurrentProcessId();
+        if(!benchmark_active(b)) {
+            std::atomic_ref<std::uint64_t>(shared.benchmark_metrics_until_ms).store(0,std::memory_order_release);
+            if(rec.run==b.run_id && b.controller_pid==own_pid) {
+                csv_finish(rec,b,b.requested_ms,b.phase==BenchmarkPhase::complete ? "complete" : "stopped / partial");
+                rec.stream.close();
+            }
+            return;
+        }
+        if(b.controller_pid && b.controller_pid!=own_pid)return;
+        b.controller_pid=own_pid;
+        std::atomic_ref<std::uint64_t>(shared.benchmark_metrics_until_ms).store(GetTickCount64()+2000,std::memory_order_release);
+        try {
+            if(rec.run!=b.run_id)csv_open(rec,b);
+            if(!suite_runtime_fresh(s.runtime) || s.runtime.process_id!=b.game_pid) {
+                csv_finish(rec,b,now,"game disconnected / partial");
+                suite_restore(shared,BenchmarkPhase::error,"Game disconnected. Original settings restored.",now);rec.stream.close();return;
+            }
+            if(s.revision!=b.revision) {
+                b.phase=BenchmarkPhase::stopped;
+                std::snprintf(b.message,sizeof(b.message),"Settings changed outside the suite; stopped.");return;
+            }
+            if(b.phase==BenchmarkPhase::applying) {
+                const bool quality_pending=b.luke && s.desired.afw_mode &&
+                    s.runtime.afw_shading_rate!=s.desired.afw_shading_rate;
+                if(s.runtime.applied_revision!=b.revision || s.runtime.pending || quality_pending) {
+                    if(now>=b.requested_ms+30000)
+                        suite_restore(shared,BenchmarkPhase::error,"Settings not applied within 30 seconds; stopped.",now);
+                    return;
+                }
+                b.phase=BenchmarkPhase::running;b.started_ms=now;
+                rec.revision=b.revision;rec.index=b.index;rec.started=now;
+                rec.settings=s.desired;rec.label=b.label;rec.samples={};
+                rec.afw_success=false;
+                rec.next_sample=now;
+            }
+            if(now>=rec.next_sample) {
+                rec.next_sample=now+250;
+                if(s.runtime.applied_revision==b.revision && s.runtime.telemetry.updated_ms<=GetTickCount64())
+                    rec.samples.observe(s.runtime.telemetry,b.started_ms,now+1);
+                rec.afw_success |= s.runtime.afw_running;
+            }
+            if(now<b.started_ms+10000)return;
+            csv_finish(rec,b,now,b.luke && s.desired.afw_mode && !rec.afw_success ? "no confirmed AFW output" : rec.samples.fps.empty() ? "no measured presentation rate" :
+                s.desired.enabled && !rec.samples.generated ? "no confirmed generation" : "complete");
+            const auto plan=benchmark_plan(b.full,b.luke);
+            if(++b.index>=plan.size()) {
+                suite_restore(shared,BenchmarkPhase::complete,"Complete. Original settings restored.",now);rec.stream.close();return;
+            }
+            b.phase=BenchmarkPhase::applying;
+            std::snprintf(b.label,sizeof(b.label),"%s",plan[b.index].label.c_str());
+            if(!suite_publish(shared,benchmark_settings(shared.benchmark_saved,plan[b.index]),now))
+                suite_restore(shared,BenchmarkPhase::error,"Could not apply the next test; stopped.",now);
+        } catch(...) {
+            rec.stream.close();suite_restore(shared,BenchmarkPhase::error,"CSV output failed; suite stopped. Check the Benchmarks folder.",now);
+        }
+    } catch(...) {}
 }
 
 void report_runtime(RuntimeStatus status) noexcept {
@@ -513,7 +768,9 @@ void set_interface_visible(InterfaceSurface surface, bool visible) noexcept {
 bool interface_telemetry_requested() noexcept {
     try {
         auto& c = channel(); if (!c.data) return false;
+        // CSV samples need the same metrics with F9 and both menus off.
         const auto now = GetTickCount64();
+        if(std::atomic_ref<std::uint64_t>(c.data->benchmark_metrics_until_ms).load(std::memory_order_acquire)>now)return true;
         for (auto& deadline : c.data->visible_until_ms)
             if (std::atomic_ref<std::uint64_t>(deadline).load(std::memory_order_acquire) > now) return true;
     } catch (...) {}

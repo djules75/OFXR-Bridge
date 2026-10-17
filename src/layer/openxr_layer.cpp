@@ -718,6 +718,7 @@ struct SessionState {
     std::unordered_map<XrSwapchain, std::array<std::optional<std::array<std::uint64_t, 3>>, 4>> logged_view_rects;
     std::unique_ptr<xrfg::SteamVrDelivery> steamvr_delivery;
     std::chrono::steady_clock::time_point compositor_diagnostic_next_poll{};
+    std::uint64_t benchmark_command_revision{};
     std::uint32_t application_frames_submitted{};
     // The D3D11 bridge. The application bound D3D11; the runtime was handed
     // a D3D12 session on the layer's own device, so from here on the session
@@ -1665,6 +1666,11 @@ void log_benchmark_configuration(SessionState& state) noexcept {
     if (!logger.enabled()) return;
     const auto control = xrfg::autonomous::snapshot();
     // UI/AFW/pipeline revisions and embedded renderer revisions are independent.
+    if(state.benchmark_command_revision!=control.revision) {
+        state.benchmark_command_revision=control.revision;
+        logger.event(xrfg::BridgeFlightOperation::benchmark_command,558,control.revision,
+            xrfg::autonomous::benchmark_active(control.benchmark) ? 1 : 0,control.benchmark.run_id);
+    }
     // PreferFPS/3X must not erase all subsequent benchmark labels.
     if (control.revision != xrfg::autonomous::applied_runtime_revision.load(std::memory_order_acquire) ||
         xrfg::embedded::snapshot().revision != state.control_revision) return;
@@ -1680,7 +1686,8 @@ void log_benchmark_configuration(SessionState& state) noexcept {
         (std::uint64_t(s.afw_mode) << 12) | (s.nr_enabled ? 1ULL << 14 : 0ULL) |
         (state.binding_queue ? 1ULL << 15 : 0ULL) | (state.luke_afw_enabled ? 1ULL << 16 : 0ULL) |
         (std::uint64_t(xrfg::standalone::process_dlssg_preset()) << 17) |
-        (std::uint64_t(std::max(0,xrfg::embedded::afw_snapshot().active_shading_rate)) << 20);
+        (std::uint64_t(std::max(0,xrfg::embedded::afw_snapshot().active_shading_rate)) << 20) |
+        (xrfg::autonomous::benchmark_active(control.benchmark) ? (1ULL<<24) | (std::uint64_t(control.benchmark.index)<<25) : 0ULL);
     logger.event(xrfg::BridgeFlightOperation::benchmark_configuration, 0, control.revision, bits,
         std::uint64_t(s.preset) | (std::uint64_t(s.scale) << 8) | (std::uint64_t(s.native_scale) << 16));
 }

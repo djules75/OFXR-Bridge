@@ -172,6 +172,7 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     if (operation == BridgeFlightOperation::benchmark_configuration) return "benchmark_configuration";
     if (operation == BridgeFlightOperation::benchmark_rates) return "benchmark_rates";
     if (operation == BridgeFlightOperation::benchmark_cycles) return "benchmark_cycles";
+    if (operation == BridgeFlightOperation::benchmark_command) return "benchmark_command";
     if (operation == BridgeFlightOperation::gpu_afw) return "gpu_afw";
     return "unknown";
 }
@@ -385,6 +386,7 @@ struct BridgeFlightLogger::Impl {
         // The same asynchronous writer keeps a compact benchmark sidecar.
         // It does not wrap when verbose flight records reach their size limit.
         const bool benchmark = record.operation == BridgeFlightOperation::benchmark_configuration ||
+            record.operation == BridgeFlightOperation::benchmark_command ||
             record.operation == BridgeFlightOperation::benchmark_rates || record.operation == BridgeFlightOperation::benchmark_cycles ||
             record.operation == BridgeFlightOperation::logger || record.operation == BridgeFlightOperation::session_binding ||
             record.operation == BridgeFlightOperation::steamvr_queue_configuration || record.operation == BridgeFlightOperation::view_configuration ||

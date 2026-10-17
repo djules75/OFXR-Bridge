@@ -2,6 +2,7 @@
 #include "xrfg/standalone_launcher.hpp"
 #include "xrfg/autonomous_control.hpp"
 #include "xrfg/autonomous_ui.hpp"
+#include "xrfg/benchmark_suite.hpp"
 #include "resource.h"
 
 #include <windows.h>
@@ -29,10 +30,15 @@
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"OFXRAutonomousTrayWindow";
-constexpr wchar_t kApplicationName[] = L"OFXR 0.3.0 (v474)";
+#define XRFG_STRING_IMPL(x) #x
+#define XRFG_STRING(x) XRFG_STRING_IMPL(x)
+#define XRFG_WIDE_IMPL(x) L##x
+#define XRFG_WIDE(x) XRFG_WIDE_IMPL(x)
+constexpr wchar_t kApplicationName[] = L"OFXR Autonomous V" XRFG_WIDE(XRFG_STRING(XRFG_IMPLEMENTATION_VERSION));
 constexpr wchar_t kCleanupArgument[] = L"--cleanup-manual-arm";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kTrayId = 1;
+constexpr UINT_PTR kBenchmarkTimer = 558;
 constexpr int kPauseHotkeyId = 1;
 constexpr UINT kArmPollMilliseconds = 250;
 constexpr std::uint32_t kImplementationVersion = XRFG_IMPLEMENTATION_VERSION;
@@ -1069,6 +1075,9 @@ LRESULT CALLBACK window_procedure(
             handle_command(*state, show_settings);
         }
         return 0;
+    case WM_TIMER:
+        if(wparam==kBenchmarkTimer) {xrfg::autonomous::tick_benchmark();return 0;}
+        return DefWindowProcW(window,message,wparam,lparam);
     case WM_COMMAND:
         handle_command(*state, LOWORD(wparam));
         return 0;
@@ -1105,6 +1114,8 @@ LRESULT CALLBACK window_procedure(
         }
         return 0;
     case WM_DESTROY: {
+        KillTimer(window,kBenchmarkTimer);
+        xrfg::autonomous::stop_benchmark();xrfg::autonomous::tick_benchmark();
         xrfg::autonomous::close_settings_window();
         std::wstring error;
         if (!disarm_bridge(*state, &error))
@@ -1333,6 +1344,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
     }
 
     // Normal startup auto-arms through the same validated path as Enable.
+    SetTimer(window,kBenchmarkTimer,100,nullptr);
     // Settings-only/preview and watchdog helpers returned before this point.
     std::wstring auto_arm_error;
     if (!arm_bridge(state, &auto_arm_error)) {

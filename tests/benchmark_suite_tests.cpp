@@ -1,0 +1,92 @@
+#include "xrfg/benchmark_suite.hpp"
+#include <windows.h>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <iostream>
+#include <stdexcept>
+using namespace xrfg::autonomous;
+void check(bool condition,const char* text) {if(!condition)throw std::runtime_error(text);}
+int main() {
+    const auto folder=std::filesystem::temp_directory_path()/(L"ofxr-suite-"+std::to_wstring(GetCurrentProcessId()));
+    SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",folder.c_str());
+    try {
+        const auto optical=benchmark_plan(false),full=benchmark_plan(true);
+        check(optical.size()==21 && full.size()==33,"Complete plan counts include B variants, skip impossible 3X B-only");
+        for(const auto& step:optical)check(step.generation==0,"Optical suite must never request vector-only generators");
+        unsigned csteps=0,prefer=0;
+        Settings baseline;baseline.diagnostics=false;baseline.nr_enabled=true;baseline.afw_mode=2;
+        for(const auto& step:full) {
+            auto s=benchmark_settings(baseline,step);
+            check(!s.diagnostics && s.nr_enabled && s.afw_mode==2,"Keep diagnostics, Neural and AFW choices");
+            check(!s.triple_frame_gen || s.separate_synthesis || !s.lower_vram,"Never silently test 2X as 3X");
+            if(step.generation==2){++csteps;check(step.label.starts_with("DLSS-G C"),"Only C is in the full suite");}
+            if(step.prefer && !step.triple)++prefer;
+        }
+        check(csteps==4 && prefer==1,"Four C transport variants and explicit Prefer FPS trial");
+        BenchmarkSamples samples;xrfg::InterfaceTelemetry m{};
+        m.rates_valid=true;m.output_source=xrfg::InterfaceSource::steamvr_delivery;
+        m.cycle_estimated_valid=true;m.generating=true;
+        for(const auto time:{3999ULL,4000ULL,5000ULL,6000ULL,10999ULL,11000ULL}) {
+            m.updated_ms=time;m.output_fps=time==3999 ? 999.F : time==4000 ? 40.F : time==5000 ? 60.F : time==6000 ? 80.F : 100.F;
+            m.cycle_estimated_ms=m.output_fps/2;
+            samples.observe(m,1000,11000);
+        }
+        check(samples.fps.size()==4 && benchmark_median(samples.fps)==70 && benchmark_median(samples.latency)==35,"Discard leading 3s only; include final samples and correct even median");
+        m.updated_ms=10999;samples.observe(m,1000,11000);check(samples.fps.size()==4,"Repeated telemetry cannot overweight the median");
+        BenchmarkSamples unknown;m.updated_ms=5000;m.output_source=xrfg::InterfaceSource::accepted_submissions;
+        unknown.observe(m,1000,11000);check(unknown.fps.empty(),"Submitted rate is never a presentation measurement");
+        baseline.benchmark_csv=true;check(request(baseline),"Save isolated test profile");baseline=snapshot().desired;
+        RuntimeStatus runtime{};runtime.sessions=1;runtime.dlssg_preset_request=3;
+        runtime.applied_revision=snapshot().revision;report_runtime(runtime);
+        check(start_benchmark(true),"Start full C suite with process-start C request");
+        auto state=snapshot();check(!start_benchmark(false),"A second UI cannot start a competing suite");
+        const auto first_requested=state.benchmark.requested_ms;
+        tick_benchmark(first_requested+250);
+        check(snapshot().benchmark.phase==BenchmarkPhase::applying,"Do not start the ten-second clock before settings apply");
+        runtime.applied_revision=state.revision;report_runtime(runtime);
+        auto clock=first_requested+500;
+        for(std::size_t i=0;i<full.size();++i) {
+            state=snapshot();runtime.applied_revision=state.revision;report_runtime(runtime);
+            tick_benchmark(clock);state=snapshot();
+            check(state.benchmark.phase==BenchmarkPhase::running && state.benchmark.index==i,"Advance after actual application without an open menu");
+            check(interface_telemetry_requested(),"Hidden suite requests metrics even with diagnostics off");
+            tick_benchmark(clock+9999);check(snapshot().benchmark.index==i,"Never shorten a configuration below ten seconds");
+            tick_benchmark(clock+10000);clock+=10200;
+        }
+        state=snapshot();check(state.benchmark.phase==BenchmarkPhase::complete && state.desired==baseline,"Completion restores every original setting/profile");
+        std::ifstream csv(std::filesystem::u8path(state.benchmark.csv_path));std::stringstream text;text<<csv.rdbuf();
+        check(text.str().find("Output FPS median")!=std::string::npos && text.str().find("Cycle estimated median ms")!=std::string::npos,"CSV has both medians");
+        const auto csv_text=text.str();
+        check(std::count(csv_text.begin(),csv_text.end(),'\n')==7,"Layout CSV: headers plus six statistics rows");
+        // A manual edit wins instead of being overwritten at the next timed tick.
+        runtime.applied_revision=state.revision;report_runtime(runtime);check(start_benchmark(false),"Start optical suite");
+        state=snapshot();auto edited=state.desired;edited.nr_enabled=false;
+        check(request_changes(state.desired,edited),"Manual edit");tick_benchmark();
+        check(snapshot().benchmark.phase==BenchmarkPhase::stopped && !snapshot().desired.nr_enabled,"Manual changes cancel automation and are kept");
+        runtime.applied_revision=snapshot().revision;report_runtime(runtime);check(start_benchmark(false),"Restart optical suite");stop_benchmark();tick_benchmark();
+        check(snapshot().benchmark.phase==BenchmarkPhase::stopped,"Explicit Stop");
+        const auto luke=benchmark_plan(false,true);check(luke.size()==24,"Luke has six routes times four AFW states");
+        unsigned afw_only=0;
+        for(const auto& step:luke) {
+            check(step.generation==0 && !step.a && !step.b,"Luke ends at 0.3.0 without vector generators or A/B permutations");
+            if(step.disabled && step.afw==3)++afw_only;
+        }
+        check(afw_only==3,"AFW-only Full/Half/Quarter trials");
+        runtime.luke_detected=true;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
+        check(start_benchmark(false,true),"Start Luke suite");clock=snapshot().benchmark.requested_ms+500;
+        for(std::size_t i=0;i<luke.size();++i) {
+            state=snapshot();runtime.applied_revision=state.revision;
+            runtime.afw_shading_rate=state.desired.afw_shading_rate;
+            runtime.afw_running=state.desired.afw_mode!=0;report_runtime(runtime);
+            tick_benchmark(clock);check(snapshot().benchmark.phase==BenchmarkPhase::running,"Luke quality applied before timing");
+            tick_benchmark(clock+10000);clock+=10200;
+        }
+        state=snapshot();check(state.benchmark.phase==BenchmarkPhase::complete,"Luke completes");
+        std::ifstream layout(std::filesystem::u8path(state.benchmark.csv_path));std::string header;std::getline(layout,header);
+        const auto blank=header.find("Fidelity 00 / blank"),one=header.find("Fidelity 00 / 1x1"),two=header.find("Fidelity 00 / 2x2"),four=header.find("Fidelity 00 / 4x4");
+        check(blank<one && one<two && two<four && four!=std::string::npos,"Luke CSV groups blank/1x1/2x2/4x4 per route despite execution by passes");
+        std::cout<<"Automatic suite: full/optical, C-only, hidden sampling without F9, timing, median, CSV, restore/manual cancellation PASS\n";
+        return 0;
+    } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
+}

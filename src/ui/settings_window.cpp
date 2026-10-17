@@ -1,5 +1,6 @@
 #include "xrfg/autonomous_ui.hpp"
 #include "xrfg/settings_widgets.hpp"
+#include "xrfg/benchmark_suite.hpp"
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
@@ -161,7 +162,7 @@ LRESULT CALLBACK procedure(HWND handle, UINT message, WPARAM wparam, LPARAM lpar
     }
     switch (message) {
     case WM_TIMER:
-        if (state && wparam == kRenderTimer) { state->render(); return 0; }
+        if (state && wparam == kRenderTimer) { tick_benchmark();state->render(); return 0; }
         break;
     case WM_SIZE:
         if (state && state->swapchain && wparam != SIZE_MINIMIZED) {
@@ -193,8 +194,9 @@ bool show_settings_window(HWND owner) noexcept {
             cls.lpszClassName = kClassName;
             if (!RegisterClassExW(&cls) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
             auto candidate = std::make_unique<Window>();
+            const auto title=L"OFXR Autonomous V"+std::to_wstring(XRFG_IMPLEMENTATION_VERSION)+L" - Settings";
             const HWND handle = CreateWindowExW(WS_EX_APPWINDOW, kClassName,
-                L"OFXR 0.3.0 (v474) - Settings", WS_OVERLAPPEDWINDOW,
+                title.c_str(), WS_OVERLAPPEDWINDOW,
                 CW_USEDEFAULT, CW_USEDEFAULT, 690, 900, owner, nullptr,
                 cls.hInstance, candidate.get());
             if (!handle || !candidate->initialize()) {

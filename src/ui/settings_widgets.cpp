@@ -1,6 +1,7 @@
 #include "xrfg/presented_output_rate.hpp"
 #include "xrfg/settings_widgets.hpp"
 #include "xrfg/dlssg_profile.hpp"
+#include "xrfg/benchmark_suite.hpp"
 #include "imgui.h"
 #include <windows.h>
 #include <commdlg.h>
@@ -29,7 +30,7 @@ void status(const Snapshot& state) {
     const auto& m = state.runtime.telemetry;
     const auto now = GetTickCount64();
     const bool current = state.connected && m.updated_ms && now >= m.updated_ms && now - m.updated_ms < 2000;
-    ImGui::TextDisabled("OFXR 0.3.0 (v474)");
+    ImGui::TextDisabled("OFXR Autonomous V%d",XRFG_IMPLEMENTATION_VERSION);
     const auto value = [](const char* label, float number, bool valid, bool rate,
                           const char* tip, bool late = false) {
         ImGui::TableNextColumn();
@@ -315,7 +316,8 @@ bool neural(SettingsWidgetState& ui, const Snapshot& state) {
     return changed;
 }
 
-bool display(Settings& draft, const Snapshot& state) {
+bool display(SettingsWidgetState& ui, const Snapshot& state) {
+    auto& draft=ui.draft;
     bool changed = ImGui::Combo("Headset FPS counter", &draft.overlay_position,
         "Off\0Upper left\0Upper right\0Lower left\0Lower right\0Elliottate's follow controller\0Elliottate's stick to bottom\0");
     changed |= ImGui::Checkbox("Diagnostic logging", &draft.diagnostics);
@@ -323,6 +325,37 @@ bool display(Settings& draft, const Snapshot& state) {
     if (state.connected) ImGui::TextDisabled(state.runtime.logging_active
         ? (draft.diagnostics ? "Logging active" : "Stopping logging...")
         : (draft.diagnostics ? "Starting logging..." : "Logging disabled"));
+    ImGui::SeparatorText("Automatic tests");
+    const bool active=benchmark_active(state.benchmark);
+    ImGui::BeginDisabled(active);
+    changed |= ImGui::Checkbox("Output CSV",&draft.benchmark_csv);
+    ImGui::EndDisabled();
+    ImGui::TextWrapped("10 seconds per configuration; discard only the first 3 seconds. CSV: min / median / max Output FPS and Cycle estimated. Works with diagnostic logging off. Neural and AFW choices are kept.");
+    ImGui::BeginDisabled(active || !state.connected);
+    const bool optical=ImGui::Button("Tests without vectors");
+    ImGui::SameLine();
+    const bool complete=ImGui::Button("Complete tests (DLSS-G C)");
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(active || !state.connected || !state.runtime.luke_detected);
+    const bool luke=ImGui::Button("Test Luke Ross");
+    ImGui::EndDisabled();
+    if(optical || complete || luke) {
+        ui.dirty|=changed;finish_settings_widget_edits(ui);
+        if(!ui.dirty) static_cast<void>(start_benchmark(complete,luke));
+        synchronize_settings_widgets(ui,snapshot());changed=false;
+    }
+    if(active) {
+        if(ImGui::Button("Stop tests"))stop_benchmark();
+        const auto& b=state.benchmark;
+        const auto remaining=b.started_ms && GetTickCount64()>=b.started_ms
+            ? std::max(0.0,10.0-double(GetTickCount64()-b.started_ms)/1000.0) : 10.0;
+        ImGui::TextWrapped("%u / %u: %s (%s, %.1f s)",b.index+1,b.count,b.label,
+            b.phase==BenchmarkPhase::applying ? "applying" : "running",remaining);
+    }
+    if(state.benchmark.message[0])ImGui::TextWrapped("%s",state.benchmark.message);
+    if(state.benchmark.csv_path[0])ImGui::TextWrapped("CSV: %s",state.benchmark.csv_path);
+    ImGui::TextWrapped("Luke Ross: OFXR only through 0.3.0, no A/B changes. AFW off, 1x1, 2x2, 4x4; every pass also tests OFXR off (AFW alone). CSV groups the four states in that order for each route.");
+    ImGui::TextWrapped("Close the menu and keep the same test scene. Original settings are restored after Stop or completion. Djules 3X B-only is skipped because it cannot retain 3X. Complete tests require preset C selected before starting the game; a live profile edit does not prove a model change.");
     return changed;
 }
 } // namespace
@@ -446,7 +479,7 @@ bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& state,
         if (ImGui::BeginTabItem("Display")) {
             ImGui::BeginChild("Display", ImVec2(0, 0));
             ImGui::PushItemWidth(std::clamp(ImGui::GetContentRegionAvail().x * .56F, 180.F, 580.F));
-            changed |= display(ui.draft, state);
+            changed |= display(ui, state);
             ImGui::PopItemWidth();
             ImGui::EndChild();
             ImGui::EndTabItem();

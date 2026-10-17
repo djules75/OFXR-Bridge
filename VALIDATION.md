@@ -1,3 +1,12 @@
+## V558 local: automatic benchmark suites
+
+Display now has optical-only, complete C-only, and Luke Ross benchmark buttons.
+10s per applied configuration; discard first3s only. Optional CSV includes FPS
+and Cycle estimated min/median/max, works with F9 off and menus hidden. Luke
+exports each route as blank/1x1/2x2/4x4, including AFW-only.
+See [suite instructions and validation](docs/V558_AUTOMATIC_BENCHMARK.md). IPC55801/provider45601.
+Local candidate; headset/game validation pending. Shared main remains V557.
+
 ## Current shared endpoint: V557 (2026-10-17)
 
 Owner-authorized V557 publication supersedes earlier local-only entries.

@@ -83,3 +83,25 @@ with tempfile.TemporaryDirectory() as directory:
     assert [r['afw_shading_rate'] for r in rows]==[0,4,8]
     assert all(r['cells']['Fidelity:00']['config']['afw_shading_rate']==r['afw_shading_rate'] for r in rows)
     print('Active AFW shading rates remain separate portable benchmark rows PASS')
+
+# Ten-second automatic intervals use the full tail and exclude restored/manual
+# settings outside the suite. Known median and a late extreme catch tail loss.
+with tempfile.TemporaryDirectory() as directory:
+    path=Path(directory)/'automatic.benchmark.log'
+    events=[event('logger',0,0,0,0,558),event('benchmark_command',0,1,1,99,558),
+            event('benchmark_configuration',0,1,1|(1<<1)|(1<<24),0)]
+    for i in range(40):
+        ms=i*250
+        fps=999 if ms<3000 else 42 if ms<9500 else 84
+        latency=999 if ms<3000 else 44 if ms<9500 else 66
+        events += [event('benchmark_rates',ms,(fps*1000<<32)|21000,(21000<<32)|90000,1,2049),
+                   event('benchmark_cycles',ms,(1000<<32)|55000,latency*1000,1,7)]
+    events += [event('benchmark_command',10000,2,0,99,558),event('benchmark_configuration',10200,2,1|(1<<1),0)]
+    for i in range(80):
+        events.append(event('benchmark_rates',10200+i*250,(999000<<32)|21000,90000,2,2049))
+    path.write_text(''.join(events))
+    rows=m.export([path],'meganex','estimated')
+    result=rows[0]['cells']['Reference:00']
+    assert result['value']=='42-84(44-66)' and result['fps_median']==42 and result['cycle_median']==44
+    assert result['start_s']==3 and result['end_s']==10 and len(rows[0]['measurements'])==1
+    print('V558 10-second suite, first3s only, medians, final samples and command boundary PASS')

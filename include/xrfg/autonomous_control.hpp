@@ -68,6 +68,7 @@ struct Settings {
     bool nr_compare_swap{};
     bool r19_camera{}; // opt-in own camera for every FG route; live pair snapshot
     bool diagnostics{};
+    bool benchmark_csv{true}; // automatic suite CSV; independent of the flight log
     int overlay_position{2}; // 0 off, 1 upper-left, 2 upper-right, 3 lower-left, 4 lower-right, 5 Elliott controller, 6 Elliott bottom
     float menu_scale{1.F}; // physical headset interface multiplier, 0.5 to 1.25
     float menu_offset_x{}; // common-FOV centre offset, normalized -1 to 1
@@ -124,12 +125,25 @@ struct RuntimeStatus {
     std::uint64_t guide_publications{}, guide_matches{}, guide_uses{};
     char message[192]{};
     SwapchainBudgetStatus swapchains{};
+    unsigned dlssg_preset_request{}; // frozen process-start profile, not active NGX model proof
 };
+enum class BenchmarkPhase : unsigned { idle, applying, running, complete, stopped, error, restart_required };
+struct BenchmarkStatus {
+    BenchmarkPhase phase{};
+    bool full{}, csv{}, luke{};
+    unsigned index{}, count{}, game_pid{}, controller_pid{};
+    std::uint64_t run_id{}, revision{}, requested_ms{}, started_ms{};
+    char label[80]{}, message[192]{}, csv_path[1024]{};
+};
+inline bool benchmark_active(const BenchmarkStatus& b) noexcept {
+    return b.phase==BenchmarkPhase::applying || b.phase==BenchmarkPhase::running;
+}
 struct Snapshot {
     Settings desired{};
     std::uint64_t revision{1};
     RuntimeStatus runtime{};
     bool connected{}; // runtime reported within the last five seconds
+    BenchmarkStatus benchmark{};
 };
 
 // Persistent values are independent of the original OFXR/OptiScaler profile.

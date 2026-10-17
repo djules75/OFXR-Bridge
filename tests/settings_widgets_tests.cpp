@@ -1,4 +1,5 @@
 #include "xrfg/settings_widgets.hpp"
+#include "xrfg/benchmark_suite.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 
@@ -354,6 +355,18 @@ void actual_widgets() {
     require(tray.rendered_text.find("Swapchain fallback")==std::string::npos,"fallback warning does not stick after a fresh healthy session");
 
 }
+void automatic_buttons() {
+    RuntimeStatus runtime{};runtime.sessions=1;runtime.luke_detected=true;
+    runtime.dlssg_preset_request=3;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
+    const auto prior=snapshot().desired;
+    Context tray({690,900},false);tray.draw();tray.draw();tray.select_tab("Display");tray.draw(true);
+    for(const auto label:{"Tests without vectors","Complete tests (DLSS-G C)","Test Luke Ross","Output CSV"})
+        require(tray.rendered_text.find(label)!=std::string::npos,"All automatic controls are in Display");
+    tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
+    require(benchmark_active(snapshot().benchmark),"Display button starts actual shared suite command");
+    tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
+    require(snapshot().benchmark.phase==BenchmarkPhase::stopped && snapshot().desired==prior,"Display Stop restores original settings");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -364,7 +377,7 @@ int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::strcmp(argv[1], "--route-motion") == 0) route_motion_widgets();
         else if (argc == 2 && std::strcmp(argv[1], "--route-multiplier") == 0) route_multiplier_widgets();
-        else { rebase_and_publish(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); }
+        else { rebase_and_publish(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); automatic_buttons(); }
         std::filesystem::remove(configuration_path());
         std::filesystem::remove(profile);
         std::cout << checks << " shared settings widget checks passed\n";
