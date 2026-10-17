@@ -19,6 +19,12 @@
 #endif
 
 namespace xrfg::autonomous {
+std::string_view overlay_limit_text(std::uint32_t mask) noexcept {
+    if(mask&4) return "OpenXR swapchain limit reached: the headset F10 menu could not open. Turn off unused overlays and retry F10. Settings remain available on the desktop.";
+    if(mask&2) return "OpenXR swapchain limit reached: the OFXR meter could not be created. Turn off unused overlays and select the meter again.";
+    if(mask&1) return "OpenXR swapchain limit reached: the OFXR FPS overlay could not be created. Turn off unused overlays and select it again.";
+    return {};
+}
 std::string_view generation_status_text(int mode, int motion_source, GenerationState state) noexcept {
     switch (state) {
     case GenerationState::paused: return "Frame generation paused: real frames only";
@@ -67,9 +73,11 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465852;
-constexpr std::uint32_t kAbi = 53601;
+constexpr std::uint32_t kAbi = 54201;
+std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==72); // V471 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==69); // previously reserved padding
+static_assert(offsetof(RuntimeStatus, overlay_limit_mask)==76); // previous reserved padding
 struct Shared {
     std::uint32_t magic{};
     std::uint32_t abi{};
@@ -213,7 +221,7 @@ Settings sanitize(Settings value) noexcept {
     value.motion_vectors = std::clamp(value.motion_vectors, 0, 1);
     value.frame_generation = std::clamp(value.frame_generation, 0, 3);
     value.preset = std::clamp(value.preset, 0, 2);
-    value.scale = std::clamp(value.scale, 0, 2);
+    value.scale = std::clamp(value.scale, 0, 3);
     value.separate_synthesis = std::clamp(value.separate_synthesis, 0, 1);
     value.lower_vram = std::clamp(value.lower_vram, 0, 1);
     value.native_scale = std::clamp(value.native_scale, 25, 100);
@@ -251,7 +259,7 @@ Settings sanitize(Settings value) noexcept {
     for (std::size_t i = 0; i < value.generation_profiles.size(); ++i) {
         auto& p = value.generation_profiles[i];
         p.motion_vectors = i >= 4 ? 1 : std::clamp(p.motion_vectors, 0, 1);
-        p.preset = std::clamp(p.preset, 0, 2); p.scale = std::clamp(p.scale, 0, 2);
+        p.preset = std::clamp(p.preset, 0, 2); p.scale = std::clamp(p.scale, 0, 3);
         p.separate_synthesis = std::clamp(p.separate_synthesis, 0, 1);
         p.lower_vram = std::clamp(p.lower_vram, 0, 1);
         p.native_scale = std::clamp(p.native_scale, 25, 100);
@@ -473,11 +481,26 @@ void report_runtime(RuntimeStatus status) noexcept {
         status.process_id = GetCurrentProcessId();
         status.heartbeat_ms = GetTickCount64();
 #endif
+        status.overlay_limit_mask=overlay_limits.load(std::memory_order_relaxed);
         status.message[sizeof(status.message) - 1] = '\0';
         if (connection.data->snapshot.runtime.process_id == status.process_id)
             status.telemetry = connection.data->snapshot.runtime.telemetry;
         connection.data->snapshot.runtime = status;
     } catch (...) {}
+}
+void report_overlay_limit(OverlaySwapchain surface, bool refused) noexcept {
+    const auto bit=static_cast<unsigned>(surface);
+    if(refused) overlay_limits.fetch_or(bit,std::memory_order_relaxed);
+    else overlay_limits.fetch_and(~bit,std::memory_order_relaxed);
+    try {
+        auto& connection=channel();Lock lock(connection);
+        if(!lock.acquired)return;
+        auto& runtime=connection.data->snapshot.runtime;
+#ifdef _WIN32
+        if(runtime.process_id && runtime.process_id!=GetCurrentProcessId())return;
+#endif
+        runtime.overlay_limit_mask=overlay_limits.load(std::memory_order_relaxed);
+    } catch(...) {}
 }
 void set_interface_visible(InterfaceSurface surface, bool visible) noexcept {
     try {
@@ -532,6 +555,12 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
     }
     return r.ready ? "Real frames only" : "Waiting";
 }
+std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) noexcept {
+    if (value.fallback) return "Swapchain fallback: auxiliary allocation refused; synchronous Luke delivery is active until the game restarts.";
+    if (value.refused) return "Swapchain allocation refused: one or more game outputs could not obtain generation resources.";
+    if (value.other) return "Unclassified app swapchain: not observed in an eye or auxiliary layer. See handle and dimensions below.";
+    return {};
+}
 std::string interface_status_text(const Snapshot& s) {
     if (!s.connected) return "No active game";
     std::string result;
@@ -564,6 +593,10 @@ std::string interface_status_text(const Snapshot& s) {
         std::snprintf(code, sizeof(code), "NGX result 0x%08X", r.provider_error);
         add(code);
     }
+    if (r.swapchains.fallback) add("Swapchain fallback");
+    else if (r.swapchains.refused) add("Swapchain allocation refused");
+    if (r.swapchains.other) add("Unclassified app swapchain");
+    if (r.overlay_limit_mask) add("Overlay swapchain limit reached");
     if (r.luke_detected) add("Luke Ross detected");
     if (r.vulkan_detected) add("Vulkan detected");
     if (r.vulkan_capture_suspended) add((r.generation_mode == 0 || r.generation_mode == 3)

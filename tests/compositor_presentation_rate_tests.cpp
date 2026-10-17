@@ -1,3 +1,4 @@
+#include "xrfg/presented_output_rate.hpp"
 #include "xrfg/compositor_presentation_rate.hpp"
 #include <cmath>
 #include <iostream>
@@ -15,6 +16,23 @@ void check(const std::vector<Timing>& records, float expected) {
 }
 int main() {
     try {
+        struct Delivery {
+            std::optional<float> rate{45};unsigned calls{};
+            std::optional<float> delivered_fps(std::int64_t) noexcept {++calls;return rate;}
+        } delivery;
+        xrfg::InterfaceTelemetry telemetry;telemetry.rates_valid=true;
+        telemetry.output_fps=90;telemetry.output_source=xrfg::InterfaceSource::accepted_submissions;
+        xrfg::poll_presented_output(&delivery,1,telemetry);
+        if(delivery.calls!=1 || telemetry.output_fps!=45 || !xrfg::presented_output_valid(telemetry))
+            throw std::runtime_error("meter did not poll actual delivery independently of small overlay");
+        delivery.rate.reset();xrfg::poll_presented_output(&delivery,2,telemetry);
+        if(delivery.calls!=2 || xrfg::presented_output_valid(telemetry))
+            throw std::runtime_error("unavailable delivery became submitted FPS");
+        delivery.rate=-1;xrfg::poll_presented_output(&delivery,3,telemetry);
+        if(xrfg::presented_output_valid(telemetry))throw std::runtime_error("negative delivery accepted");
+        delivery.rate=0;xrfg::poll_presented_output(&delivery,4,telemetry);
+        if(!xrfg::presented_output_valid(telemetry) || telemetry.output_fps!=0)
+            throw std::runtime_error("zero real presentation hidden");
         std::vector<Timing> full, repeated, dropped, irregular;
         for (unsigned i = 0; i <= 90; ++i) {
             full.push_back({i, 1, i % 5 < 2 ? 1U : 0U, i / 90.0});

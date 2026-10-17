@@ -8,6 +8,7 @@
 #include <d3d12.h>
 #include <openxr/openxr.h>
 #include <filesystem>
+#include <array>
 #include <memory>
 #include <optional>
 
@@ -47,6 +48,8 @@ public:
     void close_menu() noexcept;
     void set_session_focused(bool focused) noexcept;
     [[nodiscard]] FpsSnapshot metrics() const noexcept;
+    // CPU ownership only; a busy UI returns no sample instead of stalling.
+    [[nodiscard]] std::optional<std::array<XrSwapchain,3>> swapchain_handles() const noexcept;
     // Angular counter bounds for a diagnostic burned into the S projection.
     // Available without a spare runtime quad layer; Off/suspend disables it.
     [[nodiscard]] std::optional<OverlayPlacement> marker_placement() const noexcept;

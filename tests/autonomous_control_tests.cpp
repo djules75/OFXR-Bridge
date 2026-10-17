@@ -66,6 +66,11 @@ void codec() {
         const auto restored=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(settings));
         require(restored.afw_shading_rate == std::clamp(rate,0,8), "AFW shading rate persistence and bounds");
     }
+    for(int scale=0;scale<4;++scale) {
+        auto quarter=desired;quarter.scale=scale;
+        const auto restored=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(quarter));
+        require(restored.scale==scale,"all four flow resolutions survive restart");
+    }
     desired.backend = 3;
     desired.triple_frame_gen = true;
     desired.afw_mode = 2; desired.afw_shading_rate = 8;
@@ -280,6 +285,27 @@ int wmain(int count, wchar_t** arguments) {
         require(xrfg::autonomous::request_changes(merged.desired, generation), "generation switch delta");
         require(xrfg::autonomous::snapshot().desired.motion_vectors == 1,
             "merged generation selection still enforces native guides");
+        using xrfg::autonomous::OverlaySwapchain;
+        xrfg::autonomous::report_runtime({}); // current reporter takes over the completed peer fixture
+        xrfg::autonomous::report_overlay_limit(OverlaySwapchain::menu,true);
+        xrfg::autonomous::report_overlay_limit(OverlaySwapchain::meter,true);
+        require(xrfg::autonomous::snapshot().runtime.overlay_limit_mask==6,"independent overlay refusals reach shared UI");
+        xrfg::autonomous::report_runtime({});
+        require(xrfg::autonomous::snapshot().runtime.overlay_limit_mask==6,"runtime heartbeat preserves pending warnings");
+        xrfg::autonomous::report_overlay_limit(OverlaySwapchain::menu,false);
+        require(xrfg::autonomous::snapshot().runtime.overlay_limit_mask==2,"one successful surface leaves other warnings intact");
+        xrfg::autonomous::report_overlay_limit(OverlaySwapchain::meter,false);
+        require(xrfg::autonomous::snapshot().runtime.overlay_limit_mask==0,"all successful retries clear overlay warnings");
+        xrfg::autonomous::RuntimeStatus budget_report{};
+        budget_report.sessions=budget_report.ready=1;
+        budget_report.swapchains.updated_ms=GetTickCount64();budget_report.swapchains.total=14;
+        budget_report.swapchains.fallback=true;
+        xrfg::autonomous::report_runtime(budget_report);
+        const auto shared_budget=xrfg::autonomous::snapshot();
+        require(shared_budget.runtime.swapchains.total==14 && shared_budget.runtime.swapchains.fallback,
+            "versioned IPC retains swapchain inventory and actual fallback");
+        require(xrfg::autonomous::interface_status_text(shared_budget).find("Swapchain fallback")!=std::string::npos,
+            "actual fallback reaches shared status");
         // Only delete the single file/directory this fixture created.
         std::filesystem::remove(xrfg::autonomous::configuration_path());
         std::filesystem::remove(fixture);

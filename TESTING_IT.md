@@ -1,3 +1,12 @@
+## Current shared endpoint: V557 (2026-10-17)
+
+Owner-authorized V557 publication supersedes earlier local-only entries.
+See [V557 release scope, validation and collaborator retest](docs/V557_RELEASE.md).
+PureDark AFW v1.0-beta.6 is bundled. CMake version 0.557.0; implementation V557.
+This endpoint includes live AFW quality and the current SteamVR delivery/meter
+work. V536 remains the accepted fallback; broader runtime retesting is planned.
+Earlier version sections below are historical, not the current release policy.
+
 ## V532 benchmark-label diagnostic follow-up
 
 Owner requests fixing lost labels before repeating AC Valhalla. The logger

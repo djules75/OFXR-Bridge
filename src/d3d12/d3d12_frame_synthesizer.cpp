@@ -1014,6 +1014,17 @@ struct D3D12FrameSynthesizer::Impl {
     // the submission values the rest of the pipeline tracks against that one.
     ComPtr<ID3D12Fence> acquire_fence;
     std::uint64_t next_acquire_fence_value{1};
+    [[nodiscard]] D3D12SynthesisInputs submission_inputs(const RollingSource& first,
+        const RollingSource* second=nullptr) const noexcept {
+        D3D12SynthesisInputs result;
+        result.captured=true;
+        result.dependencies[0]={first.producer_fence,first.ticket.fence_value};
+        if(second) result.dependencies[1]={second->producer_fence,second->ticket.fence_value};
+        if(next_acquire_fence_value>1)
+            result.dependencies[2]={acquire_fence,next_acquire_fence_value-1};
+        return result;
+    }
+
     ComPtr<ID3D12Fence> nvidia_fence;
     ComPtr<ID3D12QueryHeap> nvidia_timestamp_heap;
     // Maps GPU ticks onto QueryPerformanceCounter, sampled once when the
@@ -1110,6 +1121,9 @@ struct D3D12FrameSynthesizer::Impl {
     std::array<std::unique_ptr<D3D12FsrFrameGenerator>, 2>
         fsr_frame_generators;
     bool synthesis_enabled{};
+    bool flow_resources_deferred{};
+    bool copy_resources_retired{};
+    bool requested_gpu_timing{};
     bool completion_unknown{};
     std::array<bool, 2> fsr_context_reset_pending{};
     std::uint32_t active_fsr_domain{};
@@ -1133,7 +1147,7 @@ struct D3D12FrameSynthesizer::Impl {
         // last_submitted_fence_value, and nothing will ever signal it, so
         // waiting there would hang instead of draining. The acquire fence is
         // used because its values are not part of that bookkeeping.
-        if (queue != nullptr && acquire_fence != nullptr &&
+        if (!copy_resources_retired && queue != nullptr && acquire_fence != nullptr &&
             fence_event != nullptr) {
             const std::uint64_t drain = next_acquire_fence_value++;
             if (SUCCEEDED(queue->Signal(acquire_fence.Get(), drain))) {
@@ -2090,7 +2104,7 @@ struct D3D12FrameSynthesizer::Impl {
             if (FAILED(result)) {
                 return result;
             }
-            if (backend == D3D12OpticalFlowBackend::nvidia && generation_mode != D3D12FrameGenerationMode::native_dlss) {
+            if (backend == D3D12OpticalFlowBackend::nvidia && generation_mode != D3D12FrameGenerationMode::native_dlss && !flow_resources_deferred) {
                 result = device->CreateCommandAllocator(
                     D3D12_COMMAND_LIST_TYPE_DIRECT,
                     IID_PPV_ARGS(slot.synthesis_allocator.GetAddressOf()));
@@ -2360,7 +2374,8 @@ struct D3D12FrameSynthesizer::Impl {
         D3D12NvidiaOpticalFlowOptions input_nvidia_options,
         bool enable_nvidia_gpu_timing,
         D3D12FrameGenerationMode input_generation_mode,
-        bool input_allow_luke_guide_device_alias) {
+        bool input_allow_luke_guide_device_alias,
+        bool defer_flow_resources = false) {
         if (input_device == nullptr || input_queue == nullptr ||
             input_history == nullptr || !input_history->initialized() ||
             input_current_images.empty() || input_synthetic_images.empty() ||
@@ -2528,8 +2543,9 @@ struct D3D12FrameSynthesizer::Impl {
         // both backends, and FidelityFX is the one that had no measurement.
         allow_luke_guide_device_alias =
             input_allow_luke_guide_device_alias;
-        nvidia_gpu_timing_enabled =
-            enable_nvidia_gpu_timing;
+        flow_resources_deferred = defer_flow_resources && input_generation_mode == D3D12FrameGenerationMode::ofxr;
+        requested_gpu_timing = enable_nvidia_gpu_timing;
+        nvidia_gpu_timing_enabled = enable_nvidia_gpu_timing && !flow_resources_deferred;
         const UINT node_mask = queue->GetDesc().NodeMask;
 
         result = create_root_signature_and_pipelines(node_mask);
@@ -2556,7 +2572,7 @@ struct D3D12FrameSynthesizer::Impl {
             return HRESULT_FROM_WIN32(
                 error == ERROR_SUCCESS ? ERROR_NOT_ENOUGH_MEMORY : error);
         }
-        result = generation_mode == D3D12FrameGenerationMode::native_dlss ? S_OK
+        result = flow_resources_deferred || generation_mode == D3D12FrameGenerationMode::native_dlss ? S_OK
                  : backend == D3D12OpticalFlowBackend::nvidia
                      ? create_nvidia_resources(node_mask)
                      : create_fidelityfx_resources(node_mask);
@@ -5726,12 +5742,14 @@ struct D3D12FrameSynthesizer::Impl {
         const D3D12HistoryCaptureTicket& current,
         std::span<const D3D12ReprojectionView> current_source_views,
         std::uint32_t current_destination_index,
-        D3D12FrameSynthesisTicket* output_ticket) noexcept {
+        D3D12FrameSynthesisTicket* output_ticket,
+        bool preserve_temporal_anchor) noexcept {
         if (output_ticket == nullptr) {
             return E_POINTER;
         }
         *output_ticket = {};
-        if (!synthesis_enabled || previous.active() || untracked_source.active() ||
+        if (!synthesis_enabled || (previous.active() && !preserve_temporal_anchor) ||
+            (preserve_temporal_anchor && generation_mode != D3D12FrameGenerationMode::ofxr) || untracked_source.active() ||
             current.serial == 0 || current.fence_value == 0 ||
             !valid_view_layout(
                 current_source_views,
@@ -5851,6 +5869,7 @@ struct D3D12FrameSynthesizer::Impl {
             untracked_source = std::move(next);
             return result;
         }
+        output_ticket->inputs=submission_inputs(next);
         next.clear();
         fsr_stale_guide_gap = false;
 
@@ -5975,6 +5994,10 @@ struct D3D12FrameSynthesizer::Impl {
             return result;
         }
         next.last_use_fence_value = fence_value;
+        // Prime records no complete OFA stage interval. Do not expose its
+        // unresolved timestamp slots as a generated pair to the profiler.
+        slot.timing_pending = false;
+        output_ticket->inputs=submission_inputs(next);
         previous = std::move(next);
         fsr_stale_guide_gap = false;
         current_destinations[current_destination_index].fence_value = fence_value;
@@ -6432,6 +6455,7 @@ struct D3D12FrameSynthesizer::Impl {
             return result;
         }
 
+        output_ticket->inputs=submission_inputs(previous,&next);
         const std::uint64_t previous_serial = previous.ticket.serial;
         previous = std::move(next);
         fsr_stale_guide_gap = false;
@@ -6543,7 +6567,8 @@ HRESULT D3D12FrameSynthesizer::initialize(
     D3D12NvidiaOpticalFlowOptions nvidia_options,
     bool enable_nvidia_gpu_timing,
     D3D12FrameGenerationMode generation_mode,
-    bool allow_luke_guide_device_alias) noexcept {
+    bool allow_luke_guide_device_alias,
+    bool defer_flow_resources) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ != nullptr) {
@@ -6562,7 +6587,7 @@ HRESULT D3D12FrameSynthesizer::initialize(
             nvidia_options,
             enable_nvidia_gpu_timing,
             generation_mode,
-            allow_luke_guide_device_alias);
+            allow_luke_guide_device_alias, defer_flow_resources);
         if (FAILED(result)) {
             return result;
         }
@@ -6589,8 +6614,8 @@ HRESULT D3D12FrameSynthesizer::reconfigure(D3D12OpticalFlowBackend backend,
         auto candidate = std::make_unique<Impl>();
         const HRESULT result = candidate->initialize(impl_->device.Get(), impl_->queue.Get(),
             impl_->history, current, synthetic, impl_->view_format, impl_->release_state,
-            backend, options, impl_->nvidia_gpu_timing_enabled, generation_mode,
-            impl_->allow_luke_guide_device_alias);
+            backend, options, impl_->requested_gpu_timing, generation_mode,
+            impl_->allow_luke_guide_device_alias, impl_->flow_resources_deferred);
         if (FAILED(result)) return result;
         impl_ = std::move(candidate);
         return S_OK;
@@ -6598,11 +6623,48 @@ HRESULT D3D12FrameSynthesizer::reconfigure(D3D12OpticalFlowBackend backend,
       catch (...) { return E_FAIL; }
 }
 
+// Luke source transport only calls submit_copy; allocating another flow
+// engine for that role wastes provider contexts and registered images per eye.
+// Upgrade once when OFXR really primes, after old copy fences have retired.
+HRESULT D3D12FrameSynthesizer::ensure_flow_resources_locked() {
+    if(!impl_)return E_UNEXPECTED;
+    if(!impl_->flow_resources_deferred)return S_OK;
+    // Only this engine's completed copy resources are being replaced. The
+    // incoming history capture can be queued behind a publication gate: neither
+    // drain that history nor append a global-queue drain behind that gate.
+    const auto available=impl_->submission_available();if(available!=S_OK)return available;
+    if(impl_->completion_unknown || impl_->previous.active() || impl_->untracked_source.active())return E_UNEXPECTED;
+    std::vector<ID3D12Resource*> current,synthetic;
+    for(const auto& d:impl_->current_destinations)current.push_back(d.resource.Get());
+    for(const auto& d:impl_->synthetic_destinations)synthetic.push_back(d.resource.Get());
+    auto candidate=std::make_unique<Impl>();
+    // initialize only allocates/records; no command list has been submitted.
+    // An unavailable provider must not drain the caller's gated capture queue
+    // while destroying this unused candidate.
+    candidate->copy_resources_retired=true;
+    const auto result=candidate->initialize(impl_->device.Get(),impl_->queue.Get(),impl_->history,
+        current,synthetic,impl_->view_format,impl_->release_state,impl_->backend,impl_->nvidia_options,
+        impl_->requested_gpu_timing,impl_->generation_mode,impl_->allow_luke_guide_device_alias,false);
+    bridge_flight_logger().event(BridgeFlightOperation::synthesis_initialize,result,0xAF053700ULL,
+        static_cast<std::uint64_t>(impl_->backend),impl_->image_description.DepthOrArraySize);
+    if(FAILED(result))return result;
+    // Retained publication receipts can still refer to completed copy tickets.
+    // Keep their fence identity and monotonic values across the lazy upgrade.
+    candidate->copy_resources_retired=false;
+    candidate->fence=impl_->fence;
+    candidate->next_fence_value=impl_->next_fence_value;
+    candidate->last_submitted_fence_value=impl_->last_submitted_fence_value;
+    candidate->last_synthetic_fence_value=impl_->last_synthetic_fence_value;
+    impl_->copy_resources_retired=true; // own fence proved all old copies complete
+    impl_=std::move(candidate);return S_OK;
+}
+
 HRESULT D3D12FrameSynthesizer::submit_copy(
     const D3D12HistoryCaptureTicket& current,
     std::span<const D3D12ReprojectionView> current_source_views,
     std::uint32_t current_destination_index,
-    D3D12FrameSynthesisTicket* ticket) noexcept {
+    D3D12FrameSynthesisTicket* ticket,
+    bool preserve_temporal_anchor) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr) {
@@ -6612,7 +6674,7 @@ HRESULT D3D12FrameSynthesizer::submit_copy(
             return E_UNEXPECTED;
         }
         return impl_->submit_copy(current, current_source_views,
-            current_destination_index, ticket);
+            current_destination_index, ticket, preserve_temporal_anchor);
     } catch (...) {
         if (ticket != nullptr) {
             *ticket = {};
@@ -6636,6 +6698,8 @@ HRESULT D3D12FrameSynthesizer::submit_prime(
             }
             return E_UNEXPECTED;
         }
+        const auto resources=ensure_flow_resources_locked();
+        if(FAILED(resources)){if(ticket)*ticket={};return resources;}
         return impl_->submit_prime(
             current,
             current_source_views,
@@ -6700,6 +6764,9 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
             }
             return E_UNEXPECTED;
         }
+        // A deferred copy engine has no temporal anchor: only a real prime
+        // may upgrade it. Invalid pair calls must not allocate a flow engine.
+        if(impl_->flow_resources_deferred){if(ticket)*ticket={};return E_INVALIDARG;}
         return impl_->submit_pair(
             current,
             current_source_views,

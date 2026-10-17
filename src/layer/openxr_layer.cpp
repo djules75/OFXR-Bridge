@@ -564,6 +564,12 @@ struct BlackBarTiming {
     XrDuration last_shift{};
 };
 
+struct ProjectionCaptureOrder {
+    XrSwapchain swapchain{XR_NULL_HANDLE};
+    std::weak_ptr<xrfg::D3D12SwapchainHistory> history;
+    std::uint64_t serial{}, fence_value{};
+};
+
 struct ProjectionSnapshot {
     BlackBarPoseTime blackbar_pose{};
     xrfg::InterfaceFrameStamp interface_stamp{};
@@ -572,6 +578,7 @@ struct ProjectionSnapshot {
     std::vector<ProjectionLayerSnapshot> layers;
     std::optional<xrfg::LukeRenderIdentity> luke_identity;
     std::uint64_t app_release_value{};
+    std::vector<ProjectionCaptureOrder> capture_order;
 };
 
 // Immutable metadata belongs to the two released AFW images, not the next
@@ -689,6 +696,8 @@ enum class GenerationQuarantineReason : std::int64_t {
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
 
+struct CompositionImageSlot;
+
 struct SessionState {
     bool steamvr_separate_queue{true}; // immutable session preference, tray-only
     // D25 comparison policy: SteamVR's runtime gets its own binding queue.
@@ -802,7 +811,14 @@ struct SessionState {
     bool split_frame_loop{}; // D09: targeted direct-D3D11 driver workaround.
     // A proven auxiliary XR allocation ceiling selects synchronous Luke/D11
     // delivery for this SteamVR session. Never mutate either transport flag.
-    bool luke_aux_budget_inline{}; // frame_call_mutex; reset by session lifetime
+    std::atomic<bool> luke_aux_budget_inline{}; // reset by session lifetime
+    xrfg::autonomous::SwapchainBudgetStatus swapchain_budget; // frame_call_mutex
+    std::uint64_t next_swapchain_inventory_ms{};
+    // Virtual auxiliary handles exist only in retained metadata. The final
+    // physical EndFrame resolves them to one XR publication handle per source.
+    std::mutex auxiliary_registry_mutex;
+    std::unordered_map<XrSwapchain, std::weak_ptr<CompositionImageSlot>> auxiliary_registry;
+    std::mutex auxiliary_publication_mutex;
     DWORD application_wait_thread_id{};
     DWORD application_end_thread_id{};
     std::atomic<DWORD> application_end_thread{};
@@ -883,6 +899,7 @@ struct SessionState {
     // Physical separation from ONE runtime pair, not cross-time AER poses.
     std::optional<float> luke_xr_eye_baseline; // mutex
     std::optional<bool> luke_afw_previous_selected; // frame_call_mutex
+    std::optional<bool> luke_ofxr_previous_afw_input; // frame_call_mutex; actual color source
     xrfg::LukeAfwStartupRendezvous luke_afw_startup; // frame_call_mutex
     std::optional<xrfg::LukeAfwStartupKey> luke_afw_startup_drained; // frame_call_mutex
     std::optional<xrfg::LukeAfwStartupKey> luke_afw_last_delivered_startup_key; // frame_call_mutex
@@ -1524,6 +1541,19 @@ private:
         state.graphics_binding == SessionGraphicsBinding::d3d12;
 }
 
+// FSR retains its own synthesis/copy/context contract. Only its native
+// SteamVR two-ring presentation clock joins the measured Djules clock.
+[[nodiscard]] bool fsr_steamvr_phase_clock(const SessionState& state) noexcept {
+    return state.dispatch->steamvr_runtime &&
+        state.graphics_binding==SessionGraphicsBinding::d3d12 &&
+        state.frame_generation_mode==xrfg::D3D12FrameGenerationMode::fsr3 &&
+        !state.luke_afw_enabled && !state.luke_outlaws_preframe &&
+        !state.d3d11_bridge && !state.vulkan_bridge && !reduced_native_outputs(state);
+}
+[[nodiscard]] bool native_measured_phase_clock(const SessionState& state) noexcept {
+    return djules_native_scheduler(state) || fsr_steamvr_phase_clock(state);
+}
+
 // Capacity follows the selected multiplier, even during a disabled/drained control transaction.
 [[nodiscard]] bool extra_output_capacity(const SessionState& state) noexcept {
     return state.djules_triple_requested && djules_native_scheduler(state) && !direct_reduced_outputs(state);
@@ -1548,7 +1578,7 @@ private:
 // cadence once available. Absolute phase/deadline policy follows separately.
 [[nodiscard]] bool adopt_djules_display_period(SessionState& state,
     std::optional<std::chrono::nanoseconds> measured) noexcept {
-    if (!djules_native_scheduler(state) || !state.dispatch->steamvr_runtime ||
+    if (!native_measured_phase_clock(state) || !state.dispatch->steamvr_runtime ||
         !measured || measured->count() < 2'000'000 || measured->count() > 50'000'000) return false;
     std::scoped_lock lock(state.presenter_mutex);
     const auto prior = state.presenter_display_period;
@@ -1556,11 +1586,11 @@ private:
     if (prior == measured->count()) return false;
     state.presenter_display_period = measured->count();
     xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_clock_anchor,
-        26, static_cast<std::uint64_t>(prior), static_cast<std::uint64_t>(measured->count()), 1);
+        fsr_steamvr_phase_clock(state)?5570:26, static_cast<std::uint64_t>(prior), static_cast<std::uint64_t>(measured->count()), 1);
     return true;
 }
 void refresh_djules_display_period(const std::shared_ptr<SessionState>& state) noexcept {
-    if (!djules_native_scheduler(*state) || !state->dispatch->steamvr_runtime || !state->steamvr_delivery) return;
+    if (!native_measured_phase_clock(*state) || !state->dispatch->steamvr_runtime || !state->steamvr_delivery) return;
     static_cast<void>(adopt_djules_display_period(*state, state->steamvr_delivery->display_period()));
 }
 
@@ -1588,10 +1618,33 @@ void refresh_reference_display_period(const std::shared_ptr<SessionState>& state
         static_cast<void>(adopt_reference_display_period(*state, state->steamvr_delivery->display_period()));
 }
 
+// A Luke presenter restart can occur while SteamVR reports a throttled period.
+// Keep its physical clock independent of the route that happened to start it.
+[[nodiscard]] bool adopt_luke_display_period(SessionState& state,
+    std::optional<std::chrono::nanoseconds> measured) noexcept {
+    if (!state.luke_afw_enabled || !state.dispatch->steamvr_runtime ||
+        state.graphics_binding != SessionGraphicsBinding::d3d11 ||
+        !measured || measured->count() < 2'000'000 || measured->count() > 50'000'000) return false;
+    std::scoped_lock lock(state.presenter_mutex);
+    const auto prior=state.presenter_display_period;
+    // OpenXR's time conversion can round the same HMD period by a few ns.
+    if (prior>0 && std::abs(prior-measured->count())<=1000) return false;
+    state.presenter_display_period=measured->count();
+    state.history_capture_wait_period.store(measured->count(),std::memory_order_relaxed);
+    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_clock_anchor,
+        29,prior,measured->count(),1);
+    return true;
+}
+void refresh_luke_display_period(const std::shared_ptr<SessionState>& state) noexcept {
+    if (state->luke_afw_enabled && state->dispatch->steamvr_runtime &&
+        state->graphics_binding==SessionGraphicsBinding::d3d11 && state->steamvr_delivery)
+        static_cast<void>(adopt_luke_display_period(*state,state->steamvr_delivery->display_period()));
+}
+
 [[nodiscard]] std::chrono::nanoseconds sample_djules_phase_step(
     const std::shared_ptr<SessionState>& state, bool fresh_real,
     std::uint64_t sequence) noexcept {
-    if (!fresh_real || !state->menu_enabled || !djules_native_scheduler(*state) ||
+    if (!fresh_real || !state->menu_enabled || !native_measured_phase_clock(*state) ||
         !state->dispatch->steamvr_runtime || !state->steamvr_delivery) return {};
     const auto left = state->steamvr_delivery->frame_time_remaining();
     const auto period = std::chrono::nanoseconds(state->presenter_display_period);
@@ -1599,7 +1652,7 @@ void refresh_reference_display_period(const std::shared_ptr<SessionState>& state
     const auto step = acquisition.step(left, period);
     state->djules_phase_cooldown = acquisition.cooldown;
     if (left) xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_clock_anchor,
-        27, sequence, static_cast<std::uint64_t>(left->count() - 3'000'000),
+        fsr_steamvr_phase_clock(*state)?5571:27, sequence, static_cast<std::uint64_t>(left->count() - 3'000'000),
         static_cast<std::uint64_t>(step.count()));
     return step;
 }
@@ -1740,6 +1793,7 @@ struct DjulesOutputStaging {
 };
 
 struct DirectSyntheticLease {}; // descriptor ownership only; never a private color texture
+struct DirectOutputPublication;
 
 struct FrameGenerationSwapchainState {
     bool staged_outputs{};
@@ -1762,6 +1816,8 @@ struct FrameGenerationSwapchainState {
     std::array<PrivateSwapchainState, 4> synthetic{};
     bool direct_extra_outputs{};
     std::array<std::shared_ptr<DirectSyntheticLease>,2> direct_synthetic_leases;
+    std::array<std::atomic_bool,kCurrentSlotCount+1> current_publication_busy{};
+    std::array<std::atomic_bool,4> synthetic_publication_busy{};
     std::uint32_t synthetic_images_per_slot{};
     std::size_t synthetic_slot{};
     std::shared_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
@@ -1773,6 +1829,20 @@ struct FrameGenerationSwapchainState {
 };
 
 
+struct CompositionPublicOutput {
+    std::weak_ptr<SessionState> session;
+    PrivateSwapchainState image;
+    std::vector<Microsoft::WRL::ComPtr<ID3D11Texture2D>> textures;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext4> context;
+    Microsoft::WRL::ComPtr<ID3D11Fence> fence;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> pending_source;
+    std::uint64_t serial{};
+    XrSwapchain published_snapshot{};
+    std::uint64_t published_ready_value{};
+    bool unproven_copy{};
+};
+void delete_composition_public_output(CompositionPublicOutput* output) noexcept;
+
 struct CompositionImageSlot {
     PrivateSwapchainState image;
     std::vector<Microsoft::WRL::ComPtr<ID3D11Texture2D>> textures;
@@ -1781,6 +1851,11 @@ struct CompositionImageSlot {
     Microsoft::WRL::ComPtr<ID3D12Fence> fence12;
     CompositionCopy12 copy12;
     std::uint64_t ready_value{};
+    // For private auxiliary snapshots image.handle is a metadata token, NEVER
+    // a runtime handle. The source cannot be reused before its last GPU read.
+    std::shared_ptr<CompositionPublicOutput> public_output;
+    std::atomic<std::uint64_t> last_publication{};
+    bool copy_failed{};
 };
 
 struct CompositionCapture {
@@ -1797,6 +1872,7 @@ struct CompositionCapture {
     // admitted AFW packet. S/B share their endpoint lease. This is storage,
     // not another director slot: admission and physical cadence are unchanged.
     std::array<std::shared_ptr<CompositionImageSlot>, 3> outputs;
+    std::shared_ptr<CompositionPublicOutput> public_output;
 };
 
 template<class Fence>
@@ -2091,6 +2167,7 @@ struct SwapchainState {
     // call_mutex guards capture/pool mutations; gpu_mutex guards D3D11 calls.
     std::unique_ptr<CompositionCapture> composition_capture;
     bool composition_referenced{};
+    unsigned diagnostic_layer_roles{}; // observed roles only; never drives capture
     // Generation costs three runtime swapchains, and a swapchain that never
     // reaches a projection layer never spends them: an application's UI quads
     // and its stereo views are indistinguishable at enumeration time, so the
@@ -2233,11 +2310,13 @@ void refresh_luke_prediction_clock(SessionState& state,const XrFrameState& slot,
     state.luke_prediction_wall=now;
 }
 void record_rolling_runtime_output(const XrFrameEndInfo* info) noexcept;
+XrResult end_frame_with_private_auxiliary(const std::shared_ptr<SessionState>& state,
+    const XrFrameEndInfo* info);
 
 XrResult XRAPI_CALL content_end_frame(XrSession session,const XrFrameEndInfo* info) {
     const auto state=find_session(session);
     if(!state || !state->dispatch->end_frame)return XR_ERROR_HANDLE_INVALID;
-    if(!state->luke_fresh_only)return state->dispatch->end_frame(session,info);
+    if(!state->luke_fresh_only)return end_frame_with_private_auxiliary(state,info);
     if(!info || info->type!=XR_TYPE_FRAME_END_INFO)return XR_ERROR_VALIDATION_FAILURE;
     if(!state->luke_output_begun) {
         XrFrameState slot{XR_TYPE_FRAME_STATE};
@@ -2270,7 +2349,7 @@ XrResult XRAPI_CALL content_end_frame(XrSession session,const XrFrameEndInfo* in
         submitted.layers=nullptr;
     }
     record_rolling_runtime_output(&submitted);
-    const auto result=state->dispatch->end_frame(session,&submitted);
+    const auto result=end_frame_with_private_auxiliary(state,&submitted);
     if(xrfg::diagnostic_ring_enabled)xrfg::diagnostic_ring_record("{\"kind\":\"runtime_result\",\"qpc\":"+
         std::to_string(xrfg::diagnostic_ring_qpc())+",\"display_time\":"+std::to_string(submitted.displayTime)+",\"result\":"+std::to_string(result)+"}");
     state->luke_output_begun=false;
@@ -2418,6 +2497,22 @@ XrResult wait_presenter_runtime_frame(const std::shared_ptr<SessionState>& state
     return period>0?period*3:period;
 }
 
+// The presenter already runs on the physical display period. SteamVR's raw
+// prediction period may instead include missed display slots. Doubling that
+// throttled value a second time makes the game's camera horizon oscillate
+// while delivery stays on the physical clock. Called with presenter_mutex.
+[[nodiscard]] XrDuration application_prediction_period(
+    const SessionState& state, XrDuration reported_period) noexcept {
+    const bool native = state.graphics_binding == SessionGraphicsBinding::d3d12 &&
+        !state.d3d11_bridge && !state.vulkan_bridge && !state.luke_afw_enabled;
+    const bool luke = state.graphics_binding == SessionGraphicsBinding::d3d11 && state.luke_afw_enabled;
+    if (state.dispatch->steamvr_runtime && (native || luke) && !state.luke_outlaws_preframe &&
+        state.presenter_display_period >= 2'000'000 &&
+        state.presenter_display_period <= 50'000'000)
+        return state.presenter_display_period;
+    return reported_period;
+}
+
 [[nodiscard]] bool presenter_forbidden(const SessionState& state) noexcept {
     return state.luke_aux_budget_inline || state.luke_fresh_only || (state.graphics_binding == SessionGraphicsBinding::d3d11 &&
         (state.single_threaded_d3d11 || state.split_frame_loop));
@@ -2433,6 +2528,19 @@ XrResult wait_presenter_runtime_frame(const std::shared_ptr<SessionState>& state
 [[nodiscard]] bool presenter_holds_djules_prime(const SessionState& state) noexcept {
     return !(ordinary_djules_route(state) && state.dispatch->steamvr_runtime);
 }
+// V461's counted-release principle adapted to the native queued2X bridge.
+// Keep other runtime/bridge/deep/one-ring contracts at the V553 baseline.
+[[nodiscard]] bool steamvr_counted_native_release(const SessionState& state) noexcept {
+    return state.dispatch->steamvr_runtime &&
+        state.graphics_binding==SessionGraphicsBinding::d3d12 &&
+        !state.d3d11_bridge && !state.vulkan_bridge && !state.luke_afw_enabled &&
+        !state.luke_outlaws_preframe && !state.three_slot_director &&
+        (state.queued_nvidia_presenter || state.fsr_two_slot_presenter) &&
+        !djules_deep_active(state) && !djules_triple_active(state) &&
+        !reduced_native_outputs(state) &&
+        (state.nvidia_new_route || state.frame_generation_mode!=xrfg::D3D12FrameGenerationMode::ofxr);
+}
+
 [[nodiscard]] std::uint32_t history_capture_wait_limit_us(const SessionState& state) noexcept {
     if (!state.djules_history_wait_enabled.load(std::memory_order_relaxed)) return 0;
     auto period=state.history_capture_wait_period.load(std::memory_order_relaxed);
@@ -2636,6 +2744,28 @@ void drain_swapchain_gpu(const std::shared_ptr<SwapchainState>& state) noexcept 
     }
 }
 
+void delete_composition_public_output(CompositionPublicOutput* output) noexcept {
+    try {
+        if (output->unproven_copy) {
+            const auto result=output->context->Signal(output->fence.Get(),output->serial+1);
+            output->context->Flush();
+            if (FAILED(result)) return; // quarantine until process/device teardown
+            ++output->serial;
+        }
+        if (FAILED(wait_composition_fence(output->fence.Get(),output->serial,3000))) return;
+        if (const auto state=output->session.lock()) {
+            if (!release_private_image(state.get(),state->dispatch,output->image)) return;
+            if (output->image.handle && state->dispatch->destroy_swapchain) {
+                const auto result=with_runtime_entry(state,[&] {
+                    return state->dispatch->destroy_swapchain(output->image.handle);
+                });
+                if (XR_FAILED(result)) return;
+            }
+        }
+        delete output;
+    } catch (...) { /* retain an unproven GPU owner */ }
+}
+
 void destroy_composition_capture(
     const std::shared_ptr<SwapchainState>& state) noexcept {
     try {
@@ -2643,7 +2773,7 @@ void destroy_composition_capture(
             static_cast<void>(wait_composition_fence(capture->fence.Get(), capture->fence_value));
             static_cast<void>(wait_composition_fence(capture->fence12.Get(), capture->fence_value));
             for (auto& slot : capture->outputs) {
-                if (!slot) continue;
+                if (!slot || slot->public_output) continue; // metadata token, not XR
                 static_cast<void>(release_private_image(state->session.get(), state->session->dispatch, slot->image));
                 if (slot->image.handle && state->session->dispatch->destroy_swapchain) {
                     static_cast<void>(with_runtime_entry(state->session.get(), [&] {
@@ -3279,7 +3409,7 @@ create_d3d11_frame_generation_swapchains(
             session->luke_afw_enabled
                 ? xrfg::D3D12FrameGenerationMode::ofxr
                 : session->frame_generation_mode,
-            (session->graphics_binding_capabilities & 8ULL) != 0);
+            (session->graphics_binding_capabilities & 8ULL) != 0, session->luke_afw_enabled);
         xrfg::bridge_flight_logger().end(
             initialize_token,
             xrfg::BridgeFlightOperation::synthesis_initialize,
@@ -3324,7 +3454,7 @@ create_d3d11_frame_generation_swapchains(
                     D3D12_RESOURCE_STATE_COMMON, backend,
                     session->nvidia_options,
                     xrfg::bridge_flight_logger().gpu_instrumentation_enabled(),
-                    xrfg::D3D12FrameGenerationMode::ofxr, true)
+                    xrfg::D3D12FrameGenerationMode::ofxr, true, true)
                 : history_result;
             xrfg::bridge_flight_logger().event(
                 xrfg::BridgeFlightOperation::luke_afw_stage,
@@ -3365,6 +3495,13 @@ void refresh_native_generation_capacity(SessionState& state) noexcept {
         return;
     }
     state.native_dlss_generated_frames=xrfg::native_dlssg_max_generated_frames(state.d3d12_device.Get());
+}
+
+// Optical flow needs the application's XR colors, not AFW's native guides.
+// Keep native FSR/DLSS-G admission and the AFW-only startup contract unchanged.
+[[nodiscard]] bool luke_color_only_ofxr(const SessionState& state) noexcept {
+    return state.luke_afw_enabled && state.menu_enabled &&
+        state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr;
 }
 
 // Standalone has no OptiScaler State::currentCommandQueue at XR creation.
@@ -3412,8 +3549,12 @@ void initialize_late_luke_context(const std::shared_ptr<SessionState>& session) 
         std::scoped_lock gpu_lock(session->gpu_mutex);
         auto previous_queue=session->d3d12_queue;
         if(!active_history) {
-            session->d3d12_device=std::move(device);session->d3d12_queue=std::move(execution_queue);
+            session->d3d12_queue=std::move(execution_queue);
         }
+        // Active color history may retain a REAL VR device alias. The backing
+        // challenge above proves the same owner; keep its queue/resources but
+        // use the confirmed native allocation identity for strict AFW guides.
+        session->d3d12_device=std::move(device);
         session->luke_afw=std::move(afw);
         session->graphics_binding_capabilities=(session->graphics_binding_capabilities&~4ULL)|8ULL;
         refresh_native_generation_capacity(*session);
@@ -3478,7 +3619,8 @@ void release_session_generation_budget(
         }
         std::scoped_lock call_lock(state->call_mutex);
         if(state->session->luke_afw_enabled && state->session->graphics_binding==SessionGraphicsBinding::d3d11 &&
-            (state->session->graphics_binding_capabilities&8ULL)==0)return true;
+            (state->session->graphics_binding_capabilities&8ULL)==0 &&
+            !luke_color_only_ofxr(*state->session))return true;
         if (!state->generation_eligible_pending || state->generation_declined) {
             return true;
         }
@@ -5755,7 +5897,8 @@ XrResult layer_wait_frame_impl(
         }
         if (state->luke_clock_active && state->three_slot_director) {
             const auto period = std::clamp<XrDuration>(
-                state->presenter_frame_state.predictedDisplayPeriod, 2'000'000, 50'000'000);
+                application_prediction_period(*state,state->presenter_frame_state.predictedDisplayPeriod),
+                2'000'000, 50'000'000);
             if (state->luke_duplicate_cycle) {
                 const auto token = xrfg::bridge_flight_logger().begin(
                     xrfg::BridgeFlightOperation::luke_cycle_wait, period);
@@ -5784,14 +5927,17 @@ XrResult layer_wait_frame_impl(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(now - state->luke_clock_wall_origin).count();
             frame_state->predictedDisplayTime = std::max(prediction, state->last_virtual_display_time + 1);
             state->last_virtual_display_time = frame_state->predictedDisplayTime;
-            frame_state->predictedDisplayPeriod = state->presenter_frame_state.predictedDisplayPeriod;
+            frame_state->predictedDisplayPeriod = application_prediction_period(
+                *state,state->presenter_frame_state.predictedDisplayPeriod);
             frame_state->shouldRender = state->presenter_frame_state.shouldRender;
         } else {
+        const XrDuration clock_period = application_prediction_period(
+            *state, state->presenter_frame_state.predictedDisplayPeriod);
         const XrDuration virtual_period =
                     state->manual_control.stop_requested() || !state->menu_enabled
-                ? state->presenter_frame_state.predictedDisplayPeriod
+                ? clock_period
                 : djules_application_period(*state,
-                      state->presenter_frame_state.predictedDisplayPeriod);
+                      clock_period);
         // The application's timeline is anchored to the runtime's own
         // prediction, one virtual period ahead of the frame the presenter is
         // about to submit.
@@ -5860,7 +6006,7 @@ XrResult layer_wait_frame_impl(
         // Keep the prediction anchor/ceiling and all buffer pacing unchanged.
         frame_state->predictedDisplayPeriod = djules_triple_active(*state)?virtual_period:
             (state->three_slot_director || state->fsr_two_slot_presenter)
-            ? state->presenter_frame_state.predictedDisplayPeriod : virtual_period;
+            ? clock_period : virtual_period;
         frame_state->shouldRender = state->presenter_frame_state.shouldRender;
         }
     } else if (use_provisional_pipelined_wait) {
@@ -7617,8 +7763,17 @@ struct DjulesPendingOutput {
             auto& pending=outputs.front(); auto& generation=*pending.generation;
             auto& image=pending.synthetic?generation.synthetic[pending.runtime_slot]:generation.current[pending.runtime_slot];
             auto& images=pending.synthetic?generation.synthetic_runtime_images:generation.current_runtime_images;
-            if(FAILED(pending.synthesizer->synchronize_consumer_queue(runtime_queue(*session),pending.ticket)) ||
-               !acquire_and_wait_private_image(session,session->dispatch,image))
+            // Staged B is already submitted: its own copy completion, not
+            // S's earlier completion, orders the copy into the XR image.
+            HRESULT synchronized=E_FAIL;
+            if(session->dispatch->steamvr_runtime && session->graphics_binding==SessionGraphicsBinding::d3d12 &&
+                !session->d3d11_bridge && !session->vulkan_bridge && !session->luke_afw_enabled) {
+                const auto fence=pending.synthesizer->submission_fence(pending.ticket);
+                const auto value=pending.synthetic && pending.ticket.synthetic_fence_value
+                    ? pending.ticket.synthetic_fence_value : pending.ticket.fence_value;
+                if(fence && value) synchronized=runtime_queue(*session)->Wait(fence.Get(),value);
+            } else synchronized=pending.synthesizer->synchronize_consumer_queue(runtime_queue(*session),pending.ticket);
+            if(FAILED(synchronized) || !acquire_and_wait_private_image(session,session->dispatch,image))
                 return false;
             const auto per_ring = pending.synthetic ? generation.synthetic_runtime_images_per_ring : generation.current_runtime_images_per_ring;
             const auto runtime_index = pending.runtime_slot * per_ring + image.acquired_index;
@@ -7637,6 +7792,39 @@ struct DjulesPendingOutput {
     } catch(...) { return false; }
 }
 
+// One acquired direct image travels with its exact output. The normal
+// consumer publishes only inside a begun XR frame. Destruction before enqueue
+// retains the old safe GPU join/release for structural fallback and teardown.
+struct DirectOutputPublication {
+    std::weak_ptr<SessionState> session;
+    std::shared_ptr<FrameGenerationSwapchainState> generation;
+    std::shared_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
+    xrfg::D3D12FrameSynthesisTicket ticket;
+    PrivateSwapchainState* image{};
+    std::atomic_bool* busy{};
+    bool synthetic{}, published{}, active{true};
+    bool publish() noexcept {
+        if(published) return true;
+        const auto owner=session.lock();
+        if(!owner || !image) return false;
+        if(ticket.fence_value) {
+            const auto fence=synthesizer->submission_fence(ticket);
+            const auto value=synthetic && ticket.synthetic_fence_value ? ticket.synthetic_fence_value : ticket.fence_value;
+            if(!fence || FAILED(runtime_queue(*owner)->Wait(fence.Get(),value))) return false;
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_source,
+                5530,handle_value(image->handle),value,synthetic);
+        }
+        if(!release_private_image(owner.get(),owner->dispatch,*image)) return false;
+        published=true;return true;
+    }
+    void finish() noexcept {
+        if(!active || !publish()) return;
+        active=false;busy->store(false,std::memory_order_release);
+        if(const auto owner=session.lock()) owner->presenter_condition.notify_all();
+    }
+    ~DirectOutputPublication(){finish();}
+};
+
 struct GeneratedFrameEndInfo {
     BlackBarPoseTime blackbar_pose{};
     xrfg::InterfaceFrameStamp interface_stamp{};
@@ -7645,11 +7833,16 @@ struct GeneratedFrameEndInfo {
     struct Readiness {
         Microsoft::WRL::ComPtr<ID3D12Fence> fence;
         std::uint64_t value{};
+        bool require_application_release{};
+        xrfg::D3D12SynthesisInputs inputs;
     };
     std::vector<Readiness> reference_readiness;
+    std::vector<std::shared_ptr<DirectOutputPublication>> direct_publications;
+    std::array<Readiness, 8> diagnostic_handover;
     std::vector<DjulesPendingOutput> pending_outputs;
     std::vector<std::shared_ptr<DirectSyntheticLease>> direct_synthetic_leases;
     std::uint64_t app_release_value{};
+    std::uint64_t input_release_value{};
     bool synthetic{};
     bool djules_leader{};
     XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
@@ -7664,6 +7857,71 @@ struct GeneratedFrameEndInfo {
     std::vector<std::shared_ptr<xrfg::D3D12FrameSynthesizer>>
         pending_current_copies;
 };
+
+// Observer only. A pending application release does not establish whether S
+// itself is ready, and a successful EndFrame does not establish GPU completion.
+// Keep those facts distinct across the same output's XR boundary. No wait,
+// signal, query allocation, queue submission or scheduler input belongs here.
+void log_native_delivery_probe(const SessionState& state,
+    const GeneratedFrameEndInfo* frame, std::uint64_t sequence,
+    unsigned stage, XrTime display_time = 0) noexcept {
+    auto& logger = xrfg::bridge_flight_logger();
+    if (!logger.enabled() || !frame || !state.dispatch->steamvr_runtime ||
+        state.graphics_binding != SessionGraphicsBinding::d3d12 ||
+        state.luke_afw_enabled || state.luke_outlaws_preframe ||
+        frame->reference_readiness.empty()) return;
+    const auto identity = sequence * 2 + (frame->synthetic ? 1u : 0u);
+    logger.event(xrfg::BridgeFlightOperation::presenter_source, 5490 + stage,
+        identity, frame->info.displayTime, display_time);
+    if (state.app_release_fence)
+        logger.event(xrfg::BridgeFlightOperation::gpu_fence_snapshot,
+            54900 + stage * 100 + 90,
+            reinterpret_cast<std::uintptr_t>(state.app_release_fence.Get()),
+            frame->app_release_value, state.app_release_fence->GetCompletedValue());
+    for (std::size_t i = 0; i < frame->reference_readiness.size() && i < 8; ++i) {
+        const auto& receipt = frame->reference_readiness[i];
+        if (receipt.fence)
+            logger.event(xrfg::BridgeFlightOperation::gpu_fence_snapshot,
+                54900 + stage * 100 + i,
+                reinterpret_cast<std::uintptr_t>(receipt.fence.Get()),
+                receipt.value, receipt.fence->GetCompletedValue());
+        for(std::size_t j=0;j<receipt.inputs.dependencies.size();++j) {
+            const auto& input=receipt.inputs.dependencies[j];
+            if(input.fence && input.value) logger.event(xrfg::BridgeFlightOperation::gpu_fence_snapshot,
+                54900+stage*100+30+i*3+j,reinterpret_cast<std::uintptr_t>(input.fence.Get()),
+                input.value,input.fence->GetCompletedValue());
+        }
+    }
+    for (std::size_t i = 0; i < frame->composition_images.size() && i < 8; ++i) {
+        const auto& image = frame->composition_images[i];
+        if (image && image->fence12)
+            logger.event(xrfg::BridgeFlightOperation::gpu_fence_snapshot,
+                54900 + stage * 100 + 10 + i,
+                reinterpret_cast<std::uintptr_t>(image->fence12.Get()),
+                image->ready_value, image->fence12->GetCompletedValue());
+    }
+    for (std::size_t i = 0; i < frame->diagnostic_handover.size(); ++i) {
+        const auto& receipt = frame->diagnostic_handover[i];
+        if (receipt.fence)
+            logger.event(xrfg::BridgeFlightOperation::gpu_fence_snapshot,
+                54900 + stage * 100 + 20 + i,
+                reinterpret_cast<std::uintptr_t>(receipt.fence.Get()),
+                receipt.value, receipt.fence->GetCompletedValue());
+    }
+    // Record numeric positions as well as orientations: the reported movement
+    // is physical head translation, which a pose hash alone cannot describe.
+    if (stage == 2 && (sequence / 2) % 16 == 0) {
+        for (const auto& projection : frame->projections)
+            for (std::size_t eye = 0; eye < projection.views.size() && eye < 8; ++eye) {
+                logger.event(xrfg::BridgeFlightOperation::luke_inline_view,
+                    54900 + projection.layer_index * 10 + eye, identity,
+                    handle_value(projection.layer.space),
+                    handle_value(projection.views[eye].subImage.swapchain));
+                log_luke_view_bits(identity, 54900 + projection.layer_index * 10 + eye,
+                    projection.views[eye]);
+            }
+    }
+}
 
 // This describes content only. Physical slot/cadence remains unchanged.
 std::span<const std::shared_ptr<xrfg::D3D12NativeFrameResult>> native_frame_results(
@@ -7941,6 +8199,7 @@ void pace_presenter_submission(
     try {
         refresh_djules_display_period(state);
         refresh_reference_display_period(state);
+        refresh_luke_display_period(state);
         const auto entered = std::chrono::steady_clock::now();
         std::int64_t behind_us = 0;
         std::chrono::nanoseconds remaining{0};
@@ -8353,12 +8612,16 @@ void continuous_presenter_main(
                             if(image->fence12 && FAILED(runtime_queue(*state)->Wait(image->fence12.Get(),image->ready_value)))
                                 return XR_ERROR_RUNTIME_FAILURE;
                     }
+                    if(owned) for(const auto& publication:owned->direct_publications)
+                        if(!publication->publish()) return XR_ERROR_RUNTIME_FAILURE;
                     if(owned && !handover_djules_outputs(state.get(),owned->pending_outputs)) return XR_ERROR_RUNTIME_FAILURE;
                 if(request) report_native_frame_content(state.get(),owned);
                 return state->fps_overlay
                     ? state->fps_overlay->end_frame(&submitted, fresh_synthetic, request != nullptr, native_frame_results(owned),owned?owned->native_output:0, owned ? owned->interface_stamp : request ? request->interface_stamp : xrfg::InterfaceFrameStamp{})
                     : content_end_frame(state->handle, &submitted);
             });
+            if(request && request->owned_frame)
+                for(const auto& publication:request->owned_frame->direct_publications) publication->finish();
             // The synthetic has reached the runtime, so its current copy can
             // go to the queue now rather than ahead of it. It has a display
             // period before the current frame that reads it is submitted.
@@ -8918,6 +9181,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
         xrfg::TwoOutputSchedule director_schedule;
         xrfg::MidpointSchedule midpoint_schedule;
         DjulesAbsoluteSchedule djules_schedule;
+        if(fsr_steamvr_phase_clock(*state)) state->djules_phase_cooldown=0;
         std::chrono::steady_clock::time_point djules_last_returned{};
         std::shared_ptr<GeneratedFrameEndInfo> djules_last_owned;
         auto configuration_epoch=state->djules_configuration_epoch.load();
@@ -8958,14 +9222,33 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                 xrfg::BridgeFlightOperation::timing_director_wait, 0,
                 selected ? selected->source_sequence : 0,
                 selected ? selected->previous_sequence : 0);
-            // Reference must enter a fresh SteamVR frame cycle with this
-            // exact output ready. Waiting on the consumer before XR Wait keeps
-            // synthesis latency outside the runtime's presentation deadline;
-            // the producer and all other routes retain their queue contracts.
+            // Enter the SteamVR cycle with the exact queued output ready.
+            // This is a per-output receipt, not a global application/queue
+            // idle wait. The producer remains free to render the next frame.
             const auto* ready_frame = selected ? selected->frame.get()
                 : borrowed->owned_frame.get();
+            const auto probe_sequence = selected ? selected->source_sequence : borrowed->sequence;
+            log_native_delivery_probe(*state, ready_frame, probe_sequence, 0);
             bool readiness_failed = false;
             if (ready_frame) for (const auto& ready : ready_frame->reference_readiness) {
+                const auto app_completed=state->app_release_fence ? state->app_release_fence->GetCompletedValue() : 0;
+                const bool application_released=state->binding_queue && state->app_release_fence &&
+                    ready_frame->app_release_value && app_completed!=UINT64_MAX &&
+                    app_completed>=ready_frame->app_release_value;
+                const bool inputs_released=state->binding_queue && state->app_release_fence &&
+                    ready_frame->input_release_value && app_completed!=UINT64_MAX &&
+                    app_completed>=ready_frame->input_release_value && ready.inputs.ready();
+                if (ready.require_application_release && !application_released && !inputs_released) {
+                    // XR progress may be what releases the input/application
+                    // queue. Never park that cycle on an unproven dependency.
+                    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::timing_synthesis_complete,
+                        S_FALSE,548,ready_frame->app_release_value,
+                        state->app_release_fence?state->app_release_fence->GetCompletedValue():0);
+                    continue;
+                }
+                if (ready.require_application_release && !application_released && inputs_released)
+                    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::timing_synthesis_complete,
+                        S_OK,552,ready_frame->input_release_value,ready_frame->app_release_value);
                 const auto ready_token = xrfg::bridge_flight_logger().begin(
                     xrfg::BridgeFlightOperation::timing_synthesis_complete, 524, ready.value);
                 const auto ready_result = wait_composition_fence(ready.fence.Get(), ready.value,
@@ -8975,13 +9258,8 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                 if (FAILED(ready_result)) { fail(XR_ERROR_RUNTIME_FAILURE); readiness_failed = true; break; }
             }
             if (readiness_failed) break;
-            // FSR projection publication already orders the synthetic fence on
-            // the OpenXR binding queue. Owned auxiliary copies are submitted on
-            // that same queue before image release. XR may take its next frame
-            // cycle while those commands are pending; a CPU fence wait here
-            // serializes the consumer behind all preceding application GPU work.
-            // Keep the images leased through EndFrame and retain allocator-reuse
-            // waits in copy_composition12; neither dependency needs this stall.
+            // Do not also wait for auxiliary copies or application queue work.
+            // Those keep their existing GPU-side dependencies and image leases.
             XrFrameWaitInfo wait{XR_TYPE_FRAME_WAIT_INFO};
             XrFrameState prediction{XR_TYPE_FRAME_STATE};
             auto token = xrfg::bridge_flight_logger().begin(
@@ -8991,6 +9269,8 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                 result, prediction.predictedDisplayTime, prediction.predictedDisplayPeriod,
                 prediction.shouldRender);
             if (XR_FAILED(result)) { fail(result); break; }
+            log_native_delivery_probe(*state, ready_frame, probe_sequence, 1,
+                prediction.predictedDisplayTime);
             {
                 std::scoped_lock lock(state->presenter_mutex);
                 state->presenter_frame_state = prediction;
@@ -9006,6 +9286,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
             }
             refresh_djules_display_period(state);
             refresh_reference_display_period(state);
+            refresh_luke_display_period(state);
             state->presenter_condition.notify_all();
             XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
             token = xrfg::bridge_flight_logger().begin(
@@ -9026,7 +9307,8 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
             {
                 const auto period = std::chrono::nanoseconds(state->presenter_display_period);
                 const auto now = std::chrono::steady_clock::now();
-                if (djules_native_scheduler(*state) && (state->three_slot_director || state->queued_nvidia_presenter)) {
+                if ((djules_native_scheduler(*state) && (state->three_slot_director || state->queued_nvidia_presenter)) ||
+                    fsr_steamvr_phase_clock(*state)) {
                     if (state->dispatch->steamvr_runtime || state->dispatch->virtual_desktop_runtime)
                         submission_slot = djules_schedule.claim(now, period);
                     else
@@ -9038,6 +9320,9 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                     auto& schedule = state->fsr_two_slot_presenter ? fsr_schedule : director_schedule;
                     submission_slot = schedule.claim(now, period);
                 }
+                if(fsr_steamvr_phase_clock(*state))
+                    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_clock_anchor,
+                        5572,probe_sequence,std::chrono::duration_cast<std::chrono::nanoseconds>(submission_slot.time_since_epoch()).count(),period.count());
                 const auto* probe=selected?selected->frame.get():borrowed->owned_frame.get();
                 if(djules_triple_active(*state) && probe && probe->djules_leader) {
                     const auto deadline=submission_slot-std::chrono::milliseconds(4);
@@ -9133,13 +9418,24 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                         }
                     }
                     auto* owned=repeat_held?djules_last_owned.get():selected?selected->frame.get():borrowed->owned_frame.get();
+                    if (owned && xrfg::bridge_flight_logger().enabled()) {
+                        for (std::size_t i = 0; i < owned->pending_outputs.size() &&
+                            i < owned->diagnostic_handover.size(); ++i) {
+                            const auto& generation = *owned->pending_outputs[i].generation;
+                            owned->diagnostic_handover[i] = {
+                                generation.handover_fence, generation.handover_serial + 1, false};
+                        }
+                    }
                     join_runtime_queue_to_application(state.get(),owned?owned->app_release_value:borrowed->app_release_value);
                     if(owned && advanced_native_outputs(*state)) {
                         for(const auto& image:owned->composition_images)
                             if(image->fence12 && FAILED(runtime_queue(*state)->Wait(image->fence12.Get(),image->ready_value)))
                                 return XR_ERROR_RUNTIME_FAILURE;
                     }
+                    if(owned) for(const auto& publication:owned->direct_publications)
+                        if(!publication->publish()) return XR_ERROR_RUNTIME_FAILURE;
                     if(owned && !handover_djules_outputs(state.get(),owned->pending_outputs)) return XR_ERROR_RUNTIME_FAILURE;
+                    log_native_delivery_probe(*state, owned, probe_sequence, 2, end.displayTime);
                     phase_step = sample_djules_phase_step(state, !synthetic && !repeat_held && owned,
                         selected ? selected->source_sequence : borrowed->pair_sequence);
                     if(!repeat_held) report_native_frame_content(state.get(),owned);
@@ -9149,6 +9445,8 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
             }
             xrfg::bridge_flight_logger().end(token, xrfg::BridgeFlightOperation::internal_end_frame,
                 result, end.displayTime, end.layerCount, synthetic ? 1 : 0);
+            log_native_delivery_probe(*state, ready_frame, probe_sequence, 3, end.displayTime);
+            if(ready_frame) for(const auto& publication:ready_frame->direct_publications) publication->finish();
             if(XR_SUCCEEDED(result) && !synthetic && !repeat_held && end.layerCount) {
                 const auto* owned=selected?selected->frame.get():borrowed->owned_frame.get();
                 if(owned) blackbar_observe(*state,owned->blackbar_pose,end.displayTime,
@@ -9168,10 +9466,11 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                     if (FAILED(copied)) { fail(XR_ERROR_RUNTIME_FAILURE); return; }
                 }
             }
-            if (state->fsr_two_slot_presenter)
+            if (state->fsr_two_slot_presenter && !fsr_steamvr_phase_clock(*state))
                 fsr_schedule.submitted(submission_slot, std::chrono::nanoseconds(state->presenter_display_period),
                     std::chrono::steady_clock::now());
-            else if (djules_native_scheduler(*state) && (state->three_slot_director || state->queued_nvidia_presenter)) {
+            else if ((djules_native_scheduler(*state) && (state->three_slot_director || state->queued_nvidia_presenter)) ||
+                    fsr_steamvr_phase_clock(*state)) {
                 djules_last_returned = std::chrono::steady_clock::now();
                 djules_schedule.submitted(submission_slot,
                     std::chrono::nanoseconds(state->presenter_display_period), djules_last_returned,
@@ -9472,6 +9771,35 @@ void wait_for_presenter_pair(
     }
 }
 
+// This admission site cannot wait for a future dequeue: that output is
+// produced only AFTER this call. Count the existing XR prediction cycles;
+// a genuinely empty presenter must release admission so it can be fed.
+[[nodiscard]] XrResult wait_for_native_counted_admission(
+    const std::shared_ptr<SessionState>& state,bool pairable) noexcept {
+    try {
+        const auto started=std::chrono::steady_clock::now();
+        std::unique_lock lock(state->presenter_mutex);
+        const auto target=state->application_served_serial+2;
+        state->presenter_condition.wait(lock,[&] {
+            return !pairable || state->presenter_frame_serial>=target ||
+                (state->presenter_submissions.empty() && !state->presenter_inflight_submission) ||
+                state->presenter_stop_requested || XR_FAILED(state->presenter_failure);
+        });
+        if(XR_FAILED(state->presenter_failure)) return state->presenter_failure;
+        if(state->presenter_stop_requested) return XR_ERROR_SESSION_NOT_RUNNING;
+        const auto reached=state->presenter_frame_serial;
+        state->application_served_serial=reached;
+        const auto outstanding=state->outstanding_presenter_submissions;
+        lock.unlock();
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_pair_release,
+            556,reached,target,outstanding);
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+            556,static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now()-started).count()),reached,outstanding);
+        return XR_SUCCESS;
+    } catch(...) {return XR_ERROR_RUNTIME_FAILURE;}
+}
+
 [[nodiscard]] XrResult wait_for_presenter_capacity(
     const std::shared_ptr<SessionState>& state,
     std::size_t maximum_outstanding) noexcept {
@@ -9598,9 +9926,10 @@ enqueue_presenter_submission(
                 : XR_ERROR_SESSION_NOT_RUNNING;
         }
         auto first = std::make_shared<PresenterSubmission>();
-        // One in-flight/queued pair is the queue-only output budget. Admission
-        // is checked before private output acquisition and never drops S/B.
-        if ((state->fsr_two_slot_presenter || state->queued_nvidia_presenter) && state->outstanding_presenter_submissions != 0)
+        // Native counted release permits two bounded pairs in the existing
+        // two-ring pool. Other paths retain one pair; slot leases gate reuse.
+        if ((state->fsr_two_slot_presenter || state->queued_nvidia_presenter) &&
+            state->outstanding_presenter_submissions > (steamvr_counted_native_release(*state)?2U:0U))
             return XR_ERROR_RUNTIME_FAILURE;
         first->sequence = state->next_presenter_sequence++;
         first->pair_sequence = first->sequence;
@@ -10140,9 +10469,10 @@ build_reprojection_views(
 
 [[nodiscard]] bool projection_snapshots_compatible(
     const ProjectionSnapshot& previous,
-    const ProjectionSnapshot& current) noexcept {
+    const ProjectionSnapshot& current,
+    bool consecutive_captures = false) noexcept {
     if (previous.environment_blend_mode != current.environment_blend_mode ||
-        current.display_time <= previous.display_time ||
+        (!consecutive_captures && current.display_time <= previous.display_time) ||
         previous.layers.size() != current.layers.size()) {
         return false;
     }
@@ -10160,6 +10490,56 @@ build_reprojection_views(
                 return false;
             }
         }
+    }
+    return true;
+}
+
+// App predicted displayTime is not a capture identity. In MSFS it can move
+// backwards while the release-bound images advance. Use actual source order
+// for native SteamVR captures, independently of output scheduling. Original
+// display times/poses and each generator's guide/ticket checks remain intact.
+// Luke's source identity and other runtimes retain their existing contract.
+[[nodiscard]] bool capture_order_timeline(
+    const SessionState& state) noexcept {
+    return state.dispatch && state.dispatch->steamvr_runtime &&
+        state.graphics_binding == SessionGraphicsBinding::d3d12 && !state.luke_afw_enabled;
+}
+
+void record_projection_capture_order(
+    ProjectionSnapshot& snapshot,
+    std::span<const ProjectionResourceMapping> mappings) noexcept {
+    try {
+        snapshot.capture_order.clear();
+        snapshot.capture_order.reserve(mappings.size());
+        for (const auto& mapping : mappings) {
+            const auto chain = find_swapchain(mapping.application_swapchain);
+            if (!chain) { snapshot.capture_order.clear(); return; }
+            std::scoped_lock lock(chain->mutex);
+            if (!chain->d3d12_history || !chain->last_released_capture ||
+                !chain->last_released_index ||
+                chain->last_released_capture->source_index != *chain->last_released_index) {
+                snapshot.capture_order.clear(); return;
+            }
+            const auto& capture = *chain->last_released_capture;
+            snapshot.capture_order.push_back({mapping.application_swapchain,
+                chain->d3d12_history, capture.serial, capture.fence_value});
+        }
+    } catch (...) { snapshot.capture_order.clear(); }
+}
+
+[[nodiscard]] bool consecutive_projection_captures(
+    const ProjectionSnapshot& previous, const ProjectionSnapshot& current) noexcept {
+    if (!previous.interface_stamp.serial ||
+        current.interface_stamp.serial <= previous.interface_stamp.serial ||
+        previous.capture_order.empty() ||
+        previous.capture_order.size() != current.capture_order.size()) return false;
+    for (std::size_t i = 0; i < current.capture_order.size(); ++i) {
+        const auto& before = previous.capture_order[i];
+        const auto& after = current.capture_order[i];
+        const auto owner = before.history.lock();
+        if (!owner || owner != after.history.lock() || before.swapchain != after.swapchain ||
+            !before.serial || after.serial <= before.serial || after.serial - before.serial != 1 ||
+            !before.fence_value || after.fence_value <= before.fence_value) return false;
     }
     return true;
 }
@@ -10183,8 +10563,9 @@ build_reprojection_views(
 // time, which starts the next outage. Captured MSFS 2024 sessions spent 3768
 // of 3895 and 1176 of 1280 frames in structural quarantine that way,
 // re-entering it faster than the one-second duration expires. Clearing
-// continuity and priming again on this frame handles it for the cost of one
-// prime.
+// continuity and priming again remains the fallback when consecutive capture
+// identities cannot prove source order. A native SteamVR capture pair can
+// retain the pair when every released resource proves that order (see above).
 [[nodiscard]] bool projection_resource_layout_compatible(
     const ProjectionSnapshot& previous,
     const ProjectionSnapshot& current) noexcept {
@@ -10301,6 +10682,7 @@ constexpr float kMaxSyntheticCameraMoveMeters = 0.5F;
 
     output->blackbar_pose=current_snapshot.blackbar_pose;
     output->app_release_value = current_snapshot.app_release_value;
+    output->input_release_value = current_snapshot.app_release_value;
     output->interface_stamp = current_snapshot.interface_stamp;
     output->info = *source;
     output->layer_pointers.assign(
@@ -10530,6 +10912,9 @@ struct PreparedGeneration {
     xrfg::D3D12FrameSynthesisTicket staging_ticket{};
     Microsoft::WRL::ComPtr<ID3D12Fence> reference_fence;
     std::uint64_t reference_synthetic_value{}, reference_current_value{};
+    bool reference_requires_application_release{};
+    xrfg::D3D12SynthesisInputs reference_inputs;
+    std::shared_ptr<DirectOutputPublication> direct_current_publication, direct_synthetic_publication;
     std::shared_ptr<xrfg::D3D12NativeFrameResult> native_result;
     PreparedGenerationKind kind{PreparedGenerationKind::none};
     GenerationPrepareReason reason{GenerationPrepareReason::exception};
@@ -10541,6 +10926,7 @@ struct PreparedGeneration {
     std::shared_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
     bool anchor_is_current{};
     std::shared_ptr<FrameGenerationSwapchainState> worker_generation;
+    bool late_luke_publication{};
     xrfg::D3D11PublicationReceipt worker_publication;
     Microsoft::WRL::ComPtr<ID3D12Fence> worker_fence;
     std::uint64_t worker_fence_value{};
@@ -10587,9 +10973,12 @@ void attach_djules_outputs(PreparedProjectionFrame& prepared,
             if(extra) { extra->native_results.push_back(output.native_result); extra->native_output=1; }
         }
         if (output.reference_fence) {
-            real.reference_readiness.push_back({output.reference_fence, output.reference_current_value});
-            if (synthetic) synthetic->reference_readiness.push_back({output.reference_fence, output.reference_synthetic_value});
+            real.reference_readiness.push_back({output.reference_fence, output.reference_current_value, output.reference_requires_application_release,output.reference_inputs});
+            if (synthetic) synthetic->reference_readiness.push_back({output.reference_fence, output.reference_synthetic_value, output.reference_requires_application_release,output.reference_inputs});
+            if (extra) extra->reference_readiness.push_back({output.reference_fence, output.reference_synthetic_value, output.reference_requires_application_release,output.reference_inputs});
         }
+        if(output.direct_current_publication) real.direct_publications.push_back(output.direct_current_publication);
+        if(synthetic && output.direct_synthetic_publication) synthetic->direct_publications.push_back(output.direct_synthetic_publication);
         if(synthetic && output.direct_synthetic_lease)
             synthetic->direct_synthetic_leases.push_back(output.direct_synthetic_lease);
         if(extra && output.direct_extra_lease)
@@ -10698,9 +11087,12 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     bool worker,Submit&& submit,std::unique_lock<std::mutex>* call_lock=nullptr) {
     HRESULT result;
     {std::scoped_lock lock(session->gpu_mutex);result=submit();}
-    if(worker&&session->luke_afw_enabled&&!session->djules_route&&
+    const bool inline_fidelity = !worker &&
+        session->optical_flow_backend == xrfg::D3D12OpticalFlowBackend::fidelity_fx;
+    if((worker || inline_fidelity)&&session->luke_afw_enabled&&!session->djules_route&&
         generation->d3d11_interop&&session->frame_generation_mode==xrfg::D3D12FrameGenerationMode::ofxr&&
         classify_synthesis_failure(result)==GenerationPrepareReason::synthesis_busy) {
+        // Inline Luke/Fidelity shares completion-gated context resources too.
         // Backpressure on one eye is not a failed stereo transaction. Wait
         // the synthesizer's existing completion before reusing its resources;
         // keep the same capture, acquired destinations and camera packet.
@@ -10713,6 +11105,14 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         std::scoped_lock lock(session->gpu_mutex);result=submit();
     }
     return result;
+}
+
+[[nodiscard]] bool defer_native_direct_publication(const SessionState& state) noexcept {
+    return state.dispatch->steamvr_runtime && state.graphics_binding==SessionGraphicsBinding::d3d12 &&
+        !state.d3d11_bridge && !state.vulkan_bridge && !state.luke_afw_enabled && !state.luke_outlaws_preframe &&
+        (state.queued_nvidia_presenter || state.fsr_two_slot_presenter) &&
+        (state.nvidia_new_route || state.frame_generation_mode!=xrfg::D3D12FrameGenerationMode::ofxr) &&
+        !djules_deep_active(state) && !djules_triple_active(state);
 }
 
 [[nodiscard]] PreparedGeneration prepare_frame_generation(
@@ -10804,12 +11204,18 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             return output;
         }
         // AFW scratch is disjoint from both ordinary director output handles.
+        const bool late_luke_publication = state->session->luke_afw_enabled &&
+            state->session->separate_synthesis > 0 && generation->d3d11_interop &&
+            state->session->frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr &&
+            !afw_source && !defer_d3d11_publication;
         const std::size_t current_slot = defer_d3d11_publication
             ? kAfwScratchSlot : generation->current_slot;
         const std::size_t synthetic_slot = defer_d3d11_publication
             ? 0 : generation->synthetic_slot;
         const auto current_runtime_slot = defer_d3d11_publication ? current_slot : current_slot % generation->current_runtime_rings;
         const auto synthetic_runtime_slot = synthetic_slot % generation->synthetic_runtime_rings;
+        const bool late_direct_publication=!worker_submission && !generation->staged_outputs &&
+            defer_native_direct_publication(*state->session);
         PrivateSwapchainState& current_image = generation->current[current_runtime_slot];
         PrivateSwapchainState& synthetic_image = generation->synthetic[synthetic_runtime_slot];
         if (current_image.handle == XR_NULL_HANDLE ||
@@ -10820,7 +11226,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             return output;
         }
 
-        if (!request_pair) {
+        const bool preserve_ofxr_anchor = afw_source && luke_color_only_ofxr(*state->session);
+        if (!request_pair && !preserve_ofxr_anchor) {
             std::scoped_lock gpu_lock(state->session->gpu_mutex);
             const HRESULT retire_result = synthesizer->retire_previous();
             if (FAILED(retire_result)) {
@@ -10870,7 +11277,29 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                 }
             }
         }
-        if (!generation->staged_outputs && !acquire_and_wait_private_image(
+        if(late_direct_publication) {
+            std::unique_lock lock(state->session->presenter_mutex);
+            auto& current_busy=generation->current_publication_busy[current_runtime_slot];
+            auto& synthetic_busy=generation->synthetic_publication_busy[synthetic_runtime_slot];
+            state->session->presenter_condition.wait(lock,[&] {
+                return (!current_busy.load(std::memory_order_acquire) &&
+                    (!request_pair || !synthetic_busy.load(std::memory_order_acquire))) ||
+                    state->session->presenter_stop_requested || XR_FAILED(state->session->presenter_failure);
+            });
+            if(state->session->presenter_stop_requested || XR_FAILED(state->session->presenter_failure)) {
+                output.reason=GenerationPrepareReason::synthesis_busy;return output;
+            }
+            auto claim=[&](PrivateSwapchainState& image,std::atomic_bool& busy,bool synthetic) {
+                auto publication=std::make_shared<DirectOutputPublication>();
+                publication->session=state->session;publication->generation=generation;
+                publication->synthesizer=synthesizer;publication->image=&image;
+                publication->busy=&busy;publication->synthetic=synthetic;
+                busy.store(true,std::memory_order_release);return publication;
+            };
+            output.direct_current_publication=claim(current_image,current_busy,false);
+            if(request_pair) output.direct_synthetic_publication=claim(synthetic_image,synthetic_busy,true);
+        }
+        if (!generation->staged_outputs && !late_luke_publication && !acquire_and_wait_private_image(
                 state->session.get(),
                 state->session->dispatch,
                 current_image)) {
@@ -10882,7 +11311,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             return output;
         }
 
-        if (request_pair && !generation->staged_outputs &&
+        if (request_pair && !generation->staged_outputs && !late_luke_publication &&
             !acquire_and_wait_private_image(
                 state->session.get(),
                 state->session->dispatch,
@@ -10921,11 +11350,11 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         const std::uint32_t current_destination_index =
             static_cast<std::uint32_t>(generation->staged_outputs ? current_slot : current_runtime_slot) *
                 generation->current_images_per_slot +
-            (generation->staged_outputs ? 0 : current_image.acquired_index);
+            (generation->staged_outputs || late_luke_publication ? 0 : current_image.acquired_index);
         const std::uint32_t synthetic_destination_index =
             static_cast<std::uint32_t>(generation->staged_outputs ? synthetic_slot : synthetic_runtime_slot) *
                 generation->synthetic_images_per_slot +
-            (generation->staged_outputs ? 0 : synthetic_image.acquired_index);
+            (generation->staged_outputs || late_luke_publication ? 0 : synthetic_image.acquired_index);
 
         xrfg::D3D12FrameSynthesisTicket ticket{};
         const auto debug_marker = request_pair && state->session->fsr_cadence.marker_enabled() &&
@@ -10981,7 +11410,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                     // priming, not this per-frame AFW scratch-image copy.
                     submit_result = synthesizer->submit_copy(
                         *capture, current_source_views,
-                        current_destination_index, &ticket);
+                        current_destination_index, &ticket, preserve_ofxr_anchor);
                 } else if (request_pair) {
                     submit_result = synthesizer->submit_pair(
                                           *capture,
@@ -11014,7 +11443,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                 }
             }
             if (SUCCEEDED(submit_result) && generation->d3d11_interop &&
-                !worker_submission && !defer_d3d11_publication) {
+                !worker_submission && !defer_d3d11_publication && !late_luke_publication) {
                 const auto publish_token = xrfg::bridge_flight_logger().begin(
                     xrfg::BridgeFlightOperation::d3d11_publish,
                     handle_value(application_swapchain),
@@ -11052,6 +11481,27 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             ticket.current_serial,
             ticket.fence_value);
 
+        if (SUCCEEDED(submit_result) && late_luke_publication && !worker_submission) {
+            // OFA has already been dispatched into the existing private mirror.
+            // The runtime may wait here while that GPU work is progressing.
+            const bool acquired = acquire_and_wait_private_image(state->session.get(), state->session->dispatch, current_image) &&
+                (!request_pair || acquire_and_wait_private_image(state->session.get(), state->session->dispatch, synthetic_image));
+            auto fence = synthesizer->submission_fence(ticket);
+            submit_result = acquired && fence ? wait_composition_fence(fence.Get(), ticket.fence_value,
+                kFrameStartSynthesisWaitMilliseconds) : E_FAIL;
+            if (SUCCEEDED(submit_result)) {
+                const xrfg::D3D11PublicationTargets targets{
+                    static_cast<std::uint32_t>(current_runtime_slot) * generation->current_images_per_slot + current_image.acquired_index,
+                    request_pair ? std::optional<std::uint32_t>{static_cast<std::uint32_t>(synthetic_runtime_slot) *
+                        generation->synthetic_images_per_slot + synthetic_image.acquired_index} : std::nullopt};
+                submit_result = generation->d3d11_interop->publish_completed(current_destination_index,
+                    request_pair ? std::optional<std::uint32_t>{synthetic_destination_index} : std::nullopt,
+                    fence.Get(), ticket.fence_value, &inline_publication, targets);
+            }
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                submit_result, 1005, current_destination_index, current_image.acquired_index);
+        }
+
         // A successful publish only queues D3D12->D3D11 copies. The legacy
         // post-AFW consumer must not release S/B to XR until THIS receipt is
         // complete, just as the director's worker does. Wait outside gpu_mutex
@@ -11059,13 +11509,13 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         if (SUCCEEDED(submit_result) && inline_publication.fence) {
             const auto publication_token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::timing_publication_complete,
-                post_afw_input->color_identity.application_serial,
+                post_afw_input ? post_afw_input->color_identity.application_serial : 0,
                 handle_value(application_swapchain),
                 inline_publication.copy_complete_value);
             const HRESULT published = xrfg::wait_for_d3d11_publication(inline_publication);
             xrfg::bridge_flight_logger().end(publication_token,
                 xrfg::BridgeFlightOperation::timing_publication_complete, published,
-                post_afw_input->color_identity.application_serial,
+                post_afw_input ? post_afw_input->color_identity.application_serial : 0,
                 handle_value(application_swapchain),
                 inline_publication.copy_complete_value);
             if (FAILED(published)) {
@@ -11080,7 +11530,11 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         // queue the application supplied, so when synthesis ran elsewhere
         // that queue has to wait for it before the release below hands the
         // images over. GPU-side, so it costs the application thread nothing.
-        if (!worker_submission && state->session->d3d12_synthesis_queue && SUCCEEDED(submit_result)) {
+        const bool deferred_runtime_join=late_direct_publication ||
+            (generation->staged_outputs && state->session->dispatch->steamvr_runtime &&
+             state->session->graphics_binding==SessionGraphicsBinding::d3d12 &&
+             !state->session->d3d11_bridge && !state->session->vulkan_bridge && !state->session->luke_afw_enabled);
+        if (!worker_submission && !deferred_runtime_join && state->session->d3d12_synthesis_queue && SUCCEEDED(submit_result)) {
             static_cast<void>(
                 synthesizer->synchronize_consumer_queue(
                     runtime_queue(*state->session),
@@ -11091,17 +11545,25 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             output.native_result=ticket.native_result;
             output.synthetics_in_target_camera=!synthetic_views.empty() && ticket.synthetics_in_target_camera;
         }
-        if (SUCCEEDED(submit_result) && state->session->queued_nvidia_presenter &&
-            state->session->dispatch->steamvr_runtime && !state->session->nvidia_new_route &&
+        if (SUCCEEDED(submit_result) && !worker_submission &&
+            (state->session->queued_nvidia_presenter || state->session->fsr_two_slot_presenter) &&
+            state->session->dispatch->steamvr_runtime &&
             !state->session->luke_afw_enabled && !state->session->luke_outlaws_preframe &&
-            !state->session->hybrid_requested && !state->session->nvidia_options.hybrid &&
             state->session->graphics_binding == SessionGraphicsBinding::d3d12 &&
-            state->session->frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr &&
-            state->session->optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia) {
+            !djules_deep_active(*state->session) && !djules_triple_active(*state->session)) {
+            // Fresh NVIDIA/DLSS-G queued S/B outputs need ready-before-Wait
+            // contract as Reference. An early XR prediction followed by GPU
+            // work misses its own display slot even if EndFrame succeeds.
+            // Deferred B uses its own completion; S must never wait on that
+            // still-unsubmitted copy. FSR may require XR progress to release
+            // its input queue; intentional deep/3X scheduling is also separate.
             output.reference_fence = synthesizer->submission_fence(ticket);
+            output.reference_inputs=ticket.inputs;
             output.reference_current_value = ticket.fence_value;
             output.reference_synthetic_value = ticket.synthetic_fence_value
                 ? ticket.synthetic_fence_value : ticket.fence_value;
+            output.reference_requires_application_release = state->session->nvidia_new_route ||
+                state->session->frame_generation_mode != xrfg::D3D12FrameGenerationMode::ofxr;
         }
         if (generation->staged_outputs && SUCCEEDED(submit_result)) {
             output.staging_generation=generation; output.staging_ticket=ticket;
@@ -11112,6 +11574,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             // Submit both eyes before waiting. No unfinished synthesis fence
             // is placed on the application's D3D11 context here.
             output.worker_generation = generation;
+            output.late_luke_publication = late_luke_publication;
             output.worker_fence=synthesizer->submission_fence(ticket);
             output.worker_fence_value=ticket.fence_value;
             output.current_destination = current_destination_index;
@@ -11131,8 +11594,11 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
                 generation->synthetic_slot = (synthetic_slot + 1) % kSyntheticSlotCount;
             return output;
         }
+        if(output.direct_current_publication) output.direct_current_publication->ticket=ticket;
+        if(output.direct_synthetic_publication) output.direct_synthetic_publication->ticket=ticket;
+        const bool direct_deferred=late_direct_publication && SUCCEEDED(submit_result);
         bool synthetic_released = true;
-        if (request_pair && !generation->staged_outputs) {
+        if (request_pair && !generation->staged_outputs && !direct_deferred) {
             synthetic_released = release_private_image(
                 state->session.get(),
                 state->session->dispatch,
@@ -11140,7 +11606,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         }
         if (request_extra && !generation->staged_outputs)
             synthetic_released = release_private_image(state->session.get(), state->session->dispatch, extra_image) && synthetic_released;
-        const bool current_released = generation->staged_outputs || (defer_d3d11_publication && SUCCEEDED(submit_result))
+        const bool current_released = generation->staged_outputs || direct_deferred || (defer_d3d11_publication && SUCCEEDED(submit_result))
             ? true
             : release_private_image(state->session.get(),
                 state->session->dispatch, current_image);
@@ -11325,6 +11791,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     for (auto& resource : prepared.resources) {
         auto& g = resource.generation;
         if (!g.worker_generation) continue;
+        if (g.late_luke_publication) continue; // acquire below while dispatched GPU work proceeds
         if(g.staging_generation && (djules_deep_active(*state)||djules_triple_active(*state))) continue;
         const auto completion_token = xrfg::bridge_flight_logger().begin(
             xrfg::BridgeFlightOperation::timing_synthesis_complete,
@@ -11352,13 +11819,27 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         auto& g = resource.generation;
         if (!g.worker_generation) continue;
         if (success && g.worker_generation->d3d11_interop) {
+            std::optional<xrfg::D3D11PublicationTargets> targets;
+            if (g.late_luke_publication) {
+                auto& current = g.worker_generation->current[g.current_slot];
+                auto& synthetic = g.worker_generation->synthetic[g.synthetic_slot];
+                const bool acquired = acquire_and_wait_private_image(state.get(), state->dispatch, current) &&
+                    (g.kind != PreparedGenerationKind::pair || acquire_and_wait_private_image(state.get(), state->dispatch, synthetic));
+                const HRESULT ready = acquired && g.worker_fence ? wait_composition_fence(g.worker_fence.Get(),
+                    g.worker_fence_value, kFrameStartSynthesisWaitMilliseconds) : E_FAIL;
+                if (FAILED(ready)) return false; // teardown retains/drains any acquired images
+                targets = xrfg::D3D11PublicationTargets{
+                    static_cast<std::uint32_t>(g.current_slot * g.worker_generation->current_images_per_slot + current.acquired_index),
+                    g.kind == PreparedGenerationKind::pair ? std::optional<std::uint32_t>{g.synthetic_slot *
+                        g.worker_generation->synthetic_images_per_slot + synthetic.acquired_index} : std::nullopt};
+            }
             const auto token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::d3d11_publish, handle_value(resource.application_swapchain));
             const HRESULT result = g.worker_generation->d3d11_interop->publish_completed(
                 g.current_destination, g.kind == PreparedGenerationKind::pair
                     ? std::optional<std::uint32_t>{g.synthetic_destination} : std::nullopt,
                 g.worker_fence.Get(),g.worker_fence_value,
-                &g.worker_publication);
+                &g.worker_publication, targets);
             xrfg::bridge_flight_logger().end(token, xrfg::BridgeFlightOperation::d3d11_publish,
                 result, g.current_destination, g.synthetic_destination);
             success = SUCCEEDED(result) && success;
@@ -11584,6 +12065,180 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
     }, layer);
 }
 
+[[nodiscard]] std::shared_ptr<CompositionImageSlot> private_composition_slot(
+    const std::shared_ptr<SessionState>& state, XrSwapchain token) {
+    std::scoped_lock lock(state->auxiliary_registry_mutex);
+    const auto found=state->auxiliary_registry.find(token);
+    return found==state->auxiliary_registry.end() ? nullptr : found->second.lock();
+}
+
+XrResult end_frame_with_private_auxiliary(const std::shared_ptr<SessionState>& state,
+    const XrFrameEndInfo* info) {
+    if (!state->luke_afw_enabled || !state->dispatch->steamvr_runtime ||
+        state->graphics_binding!=SessionGraphicsBinding::d3d11 ||
+        !info || !info->layers || !info->layerCount)
+        return state->dispatch->end_frame(state->handle,info);
+    std::vector<OwnedCompositionLayer> copies;
+    std::vector<const XrCompositionLayerBaseHeader*> layers;
+    std::vector<std::shared_ptr<CompositionImageSlot>> snapshots;
+    copies.reserve(info->layerCount);layers.reserve(info->layerCount);
+    for (std::uint32_t i=0;i<info->layerCount;++i) {
+        const auto* header=info->layers[i];
+        auto copy=copy_composition_layer_for_presenter(header);
+        auto* handle=copy ? composition_swapchain(*copy) : nullptr;
+        auto slot=handle ? private_composition_slot(state,*handle) : nullptr;
+        if (!slot) {layers.push_back(header);continue;}
+        // One physical output cannot name two different retained snapshots of
+        // the same source. Repeated layers of the SAME snapshot share one copy.
+        const auto prior=std::find_if(snapshots.begin(),snapshots.end(),[&](const auto& other) {
+            return other->public_output==slot->public_output;
+        });
+        if (prior!=snapshots.end() && *prior!=slot) return XR_ERROR_LAYER_INVALID;
+        if (prior==snapshots.end()) snapshots.push_back(slot);
+        *handle=slot->public_output->image.handle;
+        std::visit([&](auto& value){value.next=header->next;},*copy);
+        copies.push_back(std::move(*copy));
+        layers.push_back(composition_layer_header(copies.back()));
+    }
+    if (snapshots.empty()) return state->dispatch->end_frame(state->handle,info);
+    std::scoped_lock publication_lock(state->auxiliary_publication_mutex);
+    for (const auto& slot:snapshots) {
+        auto& output=*slot->public_output;
+        if (slot->copy_failed || output.unproven_copy) return XR_ERROR_RUNTIME_FAILURE;
+        // A preceding failed/timed-out physical publication may still read its
+        // source. Retire that exact receipt before replacing pending_source.
+        if (FAILED(wait_composition_fence(output.fence.Get(),output.serial,3000)))
+            return XR_ERROR_RUNTIME_FAILURE;
+        output.pending_source.Reset();
+        // S/B may share this endpoint. If no newer publication repointed the
+        // XR handle, reuse its completed pixels without another GPU copy.
+        if (output.image.phase==PrivateOwnershipPhase::idle &&
+            output.published_snapshot==slot->image.handle && output.published_ready_value==slot->ready_value) continue;
+        if (FAILED(wait_composition_fence(slot->fence.Get(),slot->ready_value,3000)))
+            return XR_ERROR_RUNTIME_FAILURE;
+        if (!acquire_and_wait_private_image(state.get(),state->dispatch,output.image) ||
+            output.image.acquired_index>=output.textures.size()) return XR_ERROR_RUNTIME_FAILURE;
+        HRESULT result;
+        {
+            // Physical EndFrame already owns the runtime gate. The game's
+            // Release holds gpu_mutex before entering that gate: taking it
+            // here would invert their order and deadlock both threads.
+            // This copy touches only an immutable leased snapshot and this
+            // serialized publication output, never mutable capture/history.
+            // capture_composition_image requires ID3D11Multithread protection;
+            // CopyResource/Signal do not modify pipeline bindings and remain
+            // ordered on that shared immediate context without gpu_mutex.
+            output.pending_source=slot->textures.front();
+            output.context->CopyResource(output.textures[output.image.acquired_index].Get(),output.pending_source.Get());
+            result=output.context->Signal(output.fence.Get(),output.serial+1);
+            if (SUCCEEDED(result)) {
+                ++output.serial;
+                slot->last_publication.store(output.serial);
+            } else {
+                output.unproven_copy=true;
+                slot->last_publication.store(UINT64_MAX);
+            }
+            output.context->Flush();
+        }
+        // Hold only the publication mutex across this exact copy receipt.
+        // No producer GPU/call lock or next-frame fence is followed here.
+        if (FAILED(result) || FAILED(wait_composition_fence(output.fence.Get(),output.serial,3000)))
+            return XR_ERROR_RUNTIME_FAILURE;
+        output.pending_source.Reset();
+        if (!release_private_image(state.get(),state->dispatch,output.image)) return XR_ERROR_RUNTIME_FAILURE;
+        output.published_snapshot=slot->image.handle;output.published_ready_value=slot->ready_value;
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::composition_publish,
+            S_OK,handle_value(slot->image.handle),handle_value(output.image.handle),output.serial);
+    }
+    auto submitted=*info;submitted.layers=layers.data();
+    return state->dispatch->end_frame(state->handle,&submitted);
+}
+
+// Once per second, CPU-only, and never wait for a producer/presenter lock.
+// A busy owner keeps the preceding complete snapshot; partial counts are not
+// reported as an unexplained resource or as proof of runtime headroom.
+xrfg::autonomous::SwapchainBudgetStatus luke_swapchain_inventory(
+    const std::shared_ptr<SessionState>& state,const XrFrameEndInfo* frame) {
+    auto previous=state->swapchain_budget;
+    previous.fallback=state->luke_aux_budget_inline.load();
+    const auto now=GetTickCount64();
+    if (!state->luke_afw_enabled || now<state->next_swapchain_inventory_ms) return previous;
+    state->next_swapchain_inventory_ms=now+1000;
+    xrfg::autonomous::SwapchainBudgetStatus out{};out.fallback=previous.fallback;
+    std::vector<XrSwapchain> projections,auxiliary,seen;
+    if (frame && frame->layers) for (unsigned i=0;i<frame->layerCount;++i) {
+        const auto* layer=frame->layers[i];if (!layer) continue;
+        if (layer->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+            const auto* p=reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+            for (unsigned v=0;p->views && v<p->viewCount;++v) projections.push_back(p->views[v].subImage.swapchain);
+        } else {
+            auto copy=copy_composition_layer_for_presenter(layer);
+            if (auto* handle=copy ? composition_swapchain(*copy) : nullptr) auxiliary.push_back(*handle);
+        }
+    }
+    const auto count=[&](XrSwapchain handle,std::uint32_t& category) {
+        if (!handle || std::find(seen.begin(),seen.end(),handle)!=seen.end()) return;
+        seen.push_back(handle);++category;++out.total;
+    };
+    std::vector<CompositionImageSlot*> private_images;
+    const auto count_slot=[&](const std::shared_ptr<CompositionImageSlot>& slot) {
+        if (!slot) return;
+        if (slot->public_output) {
+            count(slot->public_output->image.handle,out.auxiliary_outputs);
+            if (std::find(private_images.begin(),private_images.end(),slot.get())==private_images.end()) {
+                private_images.push_back(slot.get());++out.private_snapshots;
+            }
+        } else count(slot->image.handle,out.auxiliary_outputs);
+    };
+    std::size_t detail_size{};
+    for (const auto& chain:find_swapchains(state)) {
+        std::unique_lock call_lock(chain->call_mutex,std::try_to_lock);
+        if (!call_lock.owns_lock()) return previous;
+        std::unique_lock data_lock(chain->mutex,std::try_to_lock);
+        if (!data_lock.owns_lock()) return previous;
+        count(chain->handle,out.application);
+        if (std::find(projections.begin(),projections.end(),chain->handle)!=projections.end()) chain->diagnostic_layer_roles|=1;
+        if (std::find(auxiliary.begin(),auxiliary.end(),chain->handle)!=auxiliary.end()) chain->diagnostic_layer_roles|=2;
+        const bool eye=(chain->diagnostic_layer_roles&1)!=0;
+        const bool aux=(chain->diagnostic_layer_roles&2)!=0;
+        const bool depth=(chain->create_info.usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)!=0;
+        if (eye) ++out.projection;else if(aux) ++out.auxiliary;else if(depth)++out.depth;else ++out.other;
+        const bool refused=chain->generation_refusal==SwapchainEligibilityReason::budget_exhausted;
+        if (refused) ++out.refused;
+        char text[192]{};
+        std::snprintf(text,sizeof(text),"App %s: 0x%llX, %ux%u, array %u, format %lld%s\n",
+            eye ? "eye" : aux ? "auxiliary" : depth ? "depth" : "UNCLASSIFIED",
+            static_cast<unsigned long long>(handle_value(chain->handle)),chain->create_info.width,chain->create_info.height,
+            chain->create_info.arraySize,static_cast<long long>(chain->create_info.format),refused ? " [generation allocation refused]" : "");
+        const auto bytes=std::strlen(text);
+        if (detail_size+bytes<sizeof(out.details)) {
+            std::memcpy(out.details+detail_size,text,bytes);detail_size+=bytes;
+        } else out.details_truncated=true;
+        if (chain->frame_generation) {
+            for (const auto& image:chain->frame_generation->current)count(image.handle,out.current);
+            for (const auto& image:chain->frame_generation->synthetic)count(image.handle,out.synthetic);
+        }
+        if (chain->composition_capture) {
+            if (chain->composition_capture->public_output)
+                count(chain->composition_capture->public_output->image.handle,out.auxiliary_outputs);
+            for (const auto& slot:chain->composition_capture->outputs) count_slot(slot);
+        }
+    }
+    std::vector<std::shared_ptr<CompositionImageSlot>> retained;
+    { // Also account for snapshots retained after their producer was retired.
+        std::unique_lock lock(state->auxiliary_registry_mutex,std::try_to_lock);
+        if (!lock.owns_lock()) return previous;
+        for (const auto& [token,weak]:state->auxiliary_registry) if (auto slot=weak.lock())retained.push_back(std::move(slot));
+    }
+    for (const auto& slot:retained)count_slot(slot);
+    if (state->fps_overlay) {
+        const auto ui=state->fps_overlay->swapchain_handles();if (!ui) return previous;
+        count((*ui)[0],out.fps);count((*ui)[1],out.meter);count((*ui)[2],out.menu);
+    }
+    out.updated_ms=now;state->swapchain_budget=out;
+    return out;
+}
+
 // Loading/menu quad outputs otherwise occupy SteamVR's finite XR budget until
 // session teardown, even after the game submits only its projection. Retire
 // only unreferenced, unleased, released outputs whose own copy fence completed;
@@ -11665,6 +12320,11 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
             *handle = found->second->image.handle;
             continue;
         }
+        if (auto retained=private_composition_slot(session,*handle)) {
+            leased.emplace(*handle,retained);
+            metadata.composition_images.push_back(std::move(retained));
+            continue;
+        }
         const auto chain = find_swapchain(*handle);
         if (!chain || chain->session != session) return XR_ERROR_LAYER_INVALID;
         std::scoped_lock call_lock(chain->call_mutex);
@@ -11677,39 +12337,86 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
             return XR_ERROR_RUNTIME_FAILURE;
         };
         auto& capture = *chain->composition_capture;
+        const bool private_auxiliary=session->luke_afw_enabled && session->dispatch->steamvr_runtime &&
+            session->graphics_binding==SessionGraphicsBinding::d3d11 && capture.texture;
+        if (private_auxiliary && !capture.public_output) {
+            if (!session->d3d11_device) return failed(7);
+            auto output=std::shared_ptr<CompositionPublicOutput>(new CompositionPublicOutput,
+                delete_composition_public_output);
+            output->session=session;output->context=capture.context;
+            Microsoft::WRL::ComPtr<ID3D11Device5> device;
+            HRESULT result=session->d3d11_device.As(&device);
+            if (SUCCEEDED(result)) result=device->CreateFence(0,D3D11_FENCE_FLAG_NONE,IID_PPV_ARGS(&output->fence));
+            if (FAILED(result)) return failed(7,static_cast<std::uint32_t>(result));
+            auto info=chain->create_info;info.next=nullptr;
+            info.createFlags &= ~XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT;
+            info.usageFlags |= XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+            CreatedPrivateSwapchain created;XrResult refusal=XR_SUCCESS;
+            const auto made=with_runtime_entry(session,[&] {
+                return create_private_swapchain(chain,info,&created,&refusal);
+            });
+            if (!made) {
+                if (creation_refusal) *creation_refusal=refusal;
+                return failed(1,static_cast<std::uint64_t>(static_cast<std::int64_t>(refusal)));
+            }
+            output->image=created.state;
+            for (auto* texture:created.d3d11_resources) output->textures.emplace_back(texture);
+            capture.public_output=std::move(output);
+        }
         std::shared_ptr<CompositionImageSlot> slot;
         for (auto& candidate : capture.outputs) {
+            if (candidate && candidate->public_output) {
+                if (candidate->copy_failed) continue;
+                const auto completed=candidate->public_output->fence->GetCompletedValue();
+                if (completed==UINT64_MAX || completed<candidate->last_publication.load()) continue;
+            }
             if (candidate && candidate.use_count() != 1) continue;
             if (!candidate) {
-                // Publish into a distinct XR handle per retained real. Reusing
-                // a single handle would change an older queued frame's image.
-                candidate = std::make_shared<CompositionImageSlot>();
-                auto info = chain->create_info;
-                info.next = nullptr;
-                info.createFlags &= ~XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT;
-                info.usageFlags |= XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-                CreatedPrivateSwapchain created;
-                XrResult refusal=XR_SUCCESS;
-                const XrResult created_result = with_runtime_entry(session.get(), [&] {
-                    return create_private_swapchain(chain, info, &created,&refusal)
-                        ? XR_SUCCESS : XR_ERROR_RUNTIME_FAILURE;
-                });
-                if (XR_FAILED(created_result)) {
-                    if(creation_refusal) *creation_refusal=refusal;
-                    candidate.reset(); return failed(1,
-                        static_cast<std::uint64_t>(static_cast<std::int64_t>(refusal)));
+                if (private_auxiliary) {
+                    auto retained=std::make_shared<CompositionImageSlot>();
+                    D3D11_TEXTURE2D_DESC desc{};capture.texture->GetDesc(&desc);
+                    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+                    const auto result=session->d3d11_device->CreateTexture2D(&desc,nullptr,&texture);
+                    if (FAILED(result)) return failed(7,static_cast<std::uint32_t>(result));
+                    retained->textures.push_back(std::move(texture));
+                    retained->fence=capture.fence;retained->public_output=capture.public_output;
+                    retained->image.handle=reinterpret_cast<XrSwapchain>(retained.get());
+                    {
+                        std::scoped_lock registry_lock(session->auxiliary_registry_mutex);
+                        std::erase_if(session->auxiliary_registry,[](const auto& entry){return entry.second.expired();});
+                        session->auxiliary_registry[retained->image.handle]=retained;
+                    }
+                    candidate=std::move(retained);
+                } else {
+                    // Native/other-runtime ownership keeps distinct XR handles.
+                    candidate = std::make_shared<CompositionImageSlot>();
+                    auto info = chain->create_info;
+                    info.next = nullptr;
+                    info.createFlags &= ~XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT;
+                    info.usageFlags |= XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+                    CreatedPrivateSwapchain created;
+                    XrResult refusal=XR_SUCCESS;
+                    const XrResult created_result = with_runtime_entry(session.get(), [&] {
+                        return create_private_swapchain(chain, info, &created,&refusal)
+                            ? XR_SUCCESS : XR_ERROR_RUNTIME_FAILURE;
+                    });
+                    if (XR_FAILED(created_result)) {
+                        if(creation_refusal) *creation_refusal=refusal;
+                        candidate.reset(); return failed(1,
+                            static_cast<std::uint64_t>(static_cast<std::int64_t>(refusal)));
+                    }
+                    candidate->image = created.state;
+                    for (auto* texture : created.d3d11_resources) candidate->textures.emplace_back(texture);
+                    for (auto* texture : created.d3d12_resources) candidate->textures12.emplace_back(texture);
+                    candidate->fence = capture.fence;
+                    candidate->fence12 = capture.fence12;
                 }
-                candidate->image = created.state;
-                for (auto* texture : created.d3d11_resources) candidate->textures.emplace_back(texture);
-                for (auto* texture : created.d3d12_resources) candidate->textures12.emplace_back(texture);
-                candidate->fence = capture.fence;
-                candidate->fence12 = capture.fence12;
             }
             slot = candidate;
             break;
         }
         if (!slot) return failed(2); // all auxiliary slots still leased
-        if (!acquire_and_wait_private_image(session.get(), session->dispatch, slot->image))
+        if (!slot->public_output && !acquire_and_wait_private_image(session.get(), session->dispatch, slot->image))
             return failed(3,handle_value(slot->image.handle));
         HRESULT result;
         {
@@ -11731,7 +12438,8 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         }
         // The worker waits for this fence, not the producer. No descriptor
         // becomes director-eligible before all projection + auxiliary pixels.
-        const bool released = release_private_image(session.get(), session->dispatch, slot->image);
+        const bool released = slot->public_output || release_private_image(session.get(), session->dispatch, slot->image);
+        if (FAILED(result)) slot->copy_failed=true;
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::composition_publish,
             result, handle_value(*handle), handle_value(slot->image.handle), slot->ready_value);
         if (FAILED(result)) return failed(5,static_cast<std::uint32_t>(result));
@@ -12562,6 +13270,27 @@ void clear_generation_continuity(
     }
 }
 
+// The raw XR and post-AFW colors have different temporal anchors. Reset once
+// on an actual source transition, never on every missing-guide frame.
+[[nodiscard]] bool select_luke_ofxr_input(
+    const std::shared_ptr<SessionState>& state, bool afw_input) noexcept {
+    if (!luke_color_only_ofxr(*state)) {
+        state->luke_ofxr_previous_afw_input.reset();
+        return false;
+    }
+    const bool changed = state->luke_ofxr_previous_afw_input &&
+        *state->luke_ofxr_previous_afw_input != afw_input;
+    state->luke_ofxr_previous_afw_input = afw_input;
+    if (changed) {
+        clear_generation_continuity(state);
+        if (!afw_input) {
+            std::scoped_lock lock(state->luke_guide_mutex);
+            state->luke_afw_last_pair.reset();
+        }
+    }
+    return changed;
+}
+
 void enter_generation_quarantine(
     const std::shared_ptr<SessionState>& state,
     GenerationQuarantineReason reason,
@@ -13190,7 +13919,8 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         if (!chain->frame_generation &&
             !projected_budget_control &&
             !(state->luke_outlaws_preframe && state->luke_outlaws_frame_started) &&
-            (!state->luke_afw_enabled || (state->graphics_binding_capabilities&8ULL)!=0) &&
+            (!state->luke_afw_enabled || (state->graphics_binding_capabilities&8ULL)!=0 ||
+                luke_color_only_ofxr(*state)) &&
             (control.desired.enabled || state->luke_afw_enabled) && eligible) {
             std::vector<ID3D11Texture2D*> sources;
             for (const auto& image : chain->enumerated_d3d11_images) sources.push_back(image.Get());
@@ -13679,11 +14409,14 @@ XrResult layer_end_frame_impl(
     xrfg::autonomous::apply_runtime_settings();
     struct RuntimeReportScope {
         const std::shared_ptr<SessionState>& state;
-        ~RuntimeReportScope() { xrfg::autonomous::publish_runtime_status(state->native_dlss_generated_frames,
+        xrfg::autonomous::SwapchainBudgetStatus budget{};
+        ~RuntimeReportScope() {
+            budget.fallback=state->luke_aux_budget_inline.load();
+            xrfg::autonomous::publish_runtime_status(state->native_dlss_generated_frames,
             state->generation_status.load(std::memory_order_relaxed),
             state->generation_initialization_result.load(std::memory_order_relaxed),
             state->vulkan_binding.device != VK_NULL_HANDLE,
-            state->interface_provider_error.load(std::memory_order_relaxed)); }
+            state->interface_provider_error.load(std::memory_order_relaxed),&budget); }
     } runtime_report_scope{state};
     configure_session_guide_capture(*state);
     const std::uint32_t diagnostic_capture_frame =
@@ -13707,6 +14440,7 @@ XrResult layer_end_frame_impl(
 
     // The inline second cycle releases this lock before the next app wait.
     std::unique_lock frame_call_lock(state->frame_call_mutex);
+    runtime_report_scope.budget=luke_swapchain_inventory(state,end_info);
     observe_application_frame_thread(*state, true);
     release_pending_bridge_images(state);
     if (presenter_forbidden(*state)) {
@@ -13776,7 +14510,7 @@ XrResult layer_end_frame_impl(
     };
 
     const auto afw_control = xrfg::embedded::afw_snapshot();
-    const bool afw_selected = state->luke_afw_enabled &&
+    bool afw_selected = state->luke_afw_enabled &&
         afw_control.desired.mode != 0;
     const bool ofxr_was_enabled = state->menu_enabled;
     const auto desired_control = xrfg::embedded::snapshot();
@@ -14323,14 +15057,28 @@ XrResult layer_end_frame_impl(
         }
         state->luke_f11_down = f11_down;
     }
+    const bool source_order_timeline = capture_order_timeline(*state);
+    if (source_order_timeline)
+        record_projection_capture_order(current_snapshot, projection_mappings);
     std::optional<ProjectionSnapshot> previous_snapshot;
     {
         std::scoped_lock lock(state->mutex);
         previous_snapshot = state->previous_projection;
     }
+    const bool consecutive_captures = source_order_timeline && previous_snapshot &&
+        consecutive_projection_captures(*previous_snapshot, current_snapshot);
     const bool snapshots_compatible =
         !previous_snapshot ||
-        projection_snapshots_compatible(*previous_snapshot, current_snapshot);
+        projection_snapshots_compatible(*previous_snapshot, current_snapshot, consecutive_captures);
+    if (previous_snapshot && snapshots_compatible && consecutive_captures &&
+        current_snapshot.display_time <= previous_snapshot->display_time) {
+        // 754: backwards/equal application prediction accepted by capture
+        // identity. Preserve original poses/times and output-slot ownership.
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+            754, static_cast<std::uint64_t>(previous_snapshot->display_time),
+            static_cast<std::uint64_t>(current_snapshot.display_time),
+            current_snapshot.interface_stamp.serial);
+    }
     bool metadata_pairable =
         latest_application_frame && previous_snapshot && snapshots_compatible;
     const bool use_three_slot = use_continuous_presenter && three_slot_generation_session(state);
@@ -14388,8 +15136,8 @@ XrResult layer_end_frame_impl(
     GeneratedFrameEndInfo afw_terminal_submission;
     ProjectionSnapshot afw_terminal_snapshot;
     std::shared_ptr<const CompletedAfwFrame> completed_afw;
+    std::vector<PostAfwFrameInput> inputs;
     if (afw_selected) {
-        std::vector<PostAfwFrameInput> inputs;
         // ONE producer, before selecting the consumer. In particular no OFXR
         // worker/director capacity wait precedes AFW production.
         const bool capture_temporal_input = state->menu_enabled &&
@@ -14401,8 +15149,25 @@ XrResult layer_end_frame_impl(
         if (state->fps_overlay)
             state->fps_overlay->set_afw_active(afw_produced.kind != PreparedGenerationKind::none);
         xrfg::embedded::report_afw_prepare(static_cast<std::int64_t>(afw_produced.reason));
-        if (afw_produced.kind == PreparedGenerationKind::none)
-            return bypass_generation(afw_produced.reason);
+        if (afw_produced.kind == PreparedGenerationKind::none) {
+            const bool missing_afw_input =
+                afw_produced.reason == GenerationPrepareReason::missing_generation ||
+                afw_produced.reason == GenerationPrepareReason::missing_capture ||
+                afw_produced.reason == GenerationPrepareReason::synthesis_stale_guides;
+            if (!luke_color_only_ofxr(*state) || !missing_afw_input || generation_cooling_down)
+                return bypass_generation(afw_produced.reason);
+            // AFW released its scratch acquisitions before returning. Continue
+            // through the existing raw-XR OFXR path; never invent native guides.
+            afw_selected = false;
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                static_cast<std::int64_t>(afw_produced.reason), 1004, frame_serial, 0);
+        }
+    }
+    if (select_luke_ofxr_input(state, afw_selected)) {
+        previous_snapshot.reset();
+        metadata_pairable = false;
+    }
+    if (afw_selected) {
         if (state->luke_fresh_only && afw_produced.held_afw_pair) {
             startup_observation.held = true;
             consume_application_frame(state,end_info->displayTime,
@@ -14512,8 +15277,15 @@ XrResult layer_end_frame_impl(
         return handoff;
     }
     if (use_continuous_presenter && !state->luke_afw_enabled) {
+        const bool counted=steamvr_counted_native_release(*state);
+        if(counted) {
+            const auto release=wait_for_native_counted_admission(state,metadata_pairable);
+            if(XR_FAILED(release)) return release;
+        }
+        // Capacity/slot leases remain separate safety bounds, not a demand
+        // to retire the preceding pair before starting any next preparation.
         const XrResult capacity = wait_for_presenter_capacity(state,
-            (state->fsr_two_slot_presenter || state->queued_nvidia_presenter) ? 0 : 1);
+            counted ? 2 : (state->fsr_two_slot_presenter || state->queued_nvidia_presenter) ? 0 : 1);
         if (XR_FAILED(capacity)) return capacity;
     }
     // For the remaining inline backends the synthetic is displayed one display period before the current frame,

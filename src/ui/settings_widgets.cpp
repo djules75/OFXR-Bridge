@@ -1,3 +1,4 @@
+#include "xrfg/presented_output_rate.hpp"
 #include "xrfg/settings_widgets.hpp"
 #include "xrfg/dlssg_profile.hpp"
 #include "imgui.h"
@@ -46,12 +47,10 @@ void status(const Snapshot& state) {
     };
     if (ImGui::BeginTable("Interface metrics", 4, ImGuiTableFlags_SizingStretchSame)) {
         ImGui::TableNextRow();
-        value("Output FPS", m.output_fps, current && m.rates_valid, true,
-            m.output_source == InterfaceSource::steamvr_delivery ?
-            "Presented SteamVR compositor frames per second. Late presentation is included; repeated scanouts counted once. Source scene identity is not measured. Native DLSS-G is capped by confirmed interpolation." :
-            "Accepted distinct real and generated submissions per second, not measured scanout. Repeats/native copies excluded.");
-        value("Game FPS", m.game_fps, current && m.rates_valid, true, "Distinct real frames successfully submitted per second.");
-        value("Generated FPS", m.generated_fps, current && m.rates_valid, true, "Fresh generated frames successfully submitted per second. This is not measured display delivery. Native DLSS-G requires confirmed GPU interpolation.");
+        value("Output FPS", m.output_fps, current && presented_output_valid(m), true,
+            "SteamVR compositor frames actually presented per second. Zero-present records excluded; repeated scanouts counted once. N/A without a current measurement; no submission fallback. Source pixel identity is not measured.");
+        value("Real submitted", m.game_fps, current && m.rates_valid, true, "Distinct real frames successfully submitted per second; presentation is not confirmed for each source frame.");
+        value("Gen submitted", m.generated_fps, current && m.rates_valid, true, "Fresh generated frames successfully submitted per second, not confirmed display delivery. Native DLSS-G requires GPU interpolation confirmation.");
         value("Display Hz", m.display_hz, current && m.display_hz > 0, true,
             m.display_source == InterfaceSource::steamvr_display ? "SteamVR physical display frequency." : "OpenXR shortest observed predicted display period; may reflect runtime throttling.");
         ImGui::TableNextRow();
@@ -159,7 +158,8 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
         if (draft.backend != 0 && (draft.motion_vectors == 0 ||
                 (state.runtime.luke_detected && draft.afw_mode != 0))) {
             changed |= ImGui::Combo("Flow quality", &draft.preset, "Slow\0Medium\0Fast\0");
-            changed |= ImGui::Combo("Flow resolution", &draft.scale, "100%\0" "75%\0" "50%\0");
+            changed |= ImGui::Combo("Flow resolution", &draft.scale, "100%\0" "75%\0" "50%\0" "25% (lower flow detail)\0");
+            ImGui::TextWrapped("Flow resolution changes motion estimation only; output stays at full resolution. At high eye resolutions, 25% reduces OFA work with a detail tradeoff.");
             changed |= ImGui::Checkbox("Bidirectional flow", &draft.backward);
         }
     } else if (draft.frame_generation==3) {
@@ -204,7 +204,7 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     if(lower_vram && !separate && draft.triple_frame_gen) {
         draft.triple_frame_gen=false; changed=true;
     }
-    ImGui::TextWrapped("Independent D3D12 transport controls. Direct reduced output uses 2X and may wait for image reuse. AFW interop retains its own transport.");
+    ImGui::TextWrapped("D3D12: A uses private outputs, B reduces XR swapchains. Luke: A delays XR image acquisition until publication, reusing existing private mirrors; B keeps its existing applicability.");
     changed |= ImGui::Checkbox("Reduce black bars during headset rotation###R19 synthetic camera (experimental)", &draft.r19_camera);
     ImGui::Separator();
     if (!ImGui::CollapsingHeader("Details")) return changed;
@@ -249,23 +249,23 @@ bool framewarp(Settings& draft, const Snapshot& state) {
     if (draft.afw_mode == 3) {
         constexpr int rates[]{0,4,8};
         int selected=draft.afw_shading_rate==8 ? 2 : draft.afw_shading_rate==4 ? 1 : 0;
-        if(ImGui::Combo("AFW shading rate (next launch)",&selected,
+        if(ImGui::Combo("AFW shading rate",&selected,
             "1x1 (full quality)\0" "2x2 (half per axis)\0" "4x4 (quarter per axis)\0")) {
             draft.afw_shading_rate=rates[selected];changed=true;
         }
-        ImGui::TextWrapped("Beta6: reduces Combined warping work; output resolution stays unchanged. Restart the game after changing this setting.");
+        ImGui::TextWrapped("Beta6: reduces Combined warping work; output resolution stays unchanged. A quality change rebuilds AFW history while the game stays open.");
         if(state.connected && state.runtime.afw_shading_rate>=0 &&
             state.runtime.afw_shading_rate!=draft.afw_shading_rate)
-            ImGui::TextWrapped("Shading change saved for next launch. Current index: %d",state.runtime.afw_shading_rate);
+            ImGui::TextWrapped("Quality change pending the next successful AFW evaluation. Current index: %d",state.runtime.afw_shading_rate);
     }
     changed |= ImGui::Checkbox("Debug framewarp", &draft.afw_debug);
     ImGui::TextWrapped("Requires Luke Ross and RealVR.ini. Camera and stereo motion correction is always applied; same-eye history reconstructs the missing camera interval.");
     changed |= ImGui::Checkbox("Clear before framewarp", &draft.afw_clear_before_warping);
     changed |= ImGui::SliderFloat("Ignore motion", &draft.afw_ignore_motion_threshold, 0, 16, "%.2f");
-    ImGui::TextWrapped("(reduce flicker, increase artefacts)");
+    ImGui::TextWrapped("Threshold for ignoring per-object motion vectors.");
     changed |= ImGui::Combo("Depth dilation", &draft.afw_depth_dilate_mode,
         "Off\0Horizontal\0Square\0");
-    ImGui::TextWrapped("(reduce ghosting around main char)");
+    ImGui::TextWrapped("Reduces ghosting and flicker, with less precise object silhouettes.");
     if (state.connected) ImGui::TextDisabled("Ready frames: %llu / projections: %llu",
         static_cast<unsigned long long>(state.runtime.afw_ready_frames),
         static_cast<unsigned long long>(state.runtime.afw_projection_frames));
@@ -362,6 +362,44 @@ void finish_settings_widget_edits(SettingsWidgetState& ui) noexcept {
     static_cast<void>(publish_settings_widgets(ui));
 }
 
+static void luke_swapchain_budget(const Snapshot& state) {
+    const auto& b=state.runtime.swapchains;
+    ImGui::SeparatorText("OpenXR swapchains");
+    if (!state.connected || !b.updated_ms || GetTickCount64()-b.updated_ms>3000) {
+        ImGui::TextDisabled("Waiting for a current Luke session inventory.");return;
+    }
+    ImGui::Text("Known XR handles: %u",b.total);
+    ImGui::TextWrapped("Application: %u (eyes %u, auxiliary %u, depth %u, unclassified %u)",
+        b.application,b.projection,b.auxiliary,b.depth,b.other);
+    ImGui::TextWrapped("OFXR: current / AFW scratch %u, synthetic %u, auxiliary outputs %u",
+        b.current,b.synthetic,b.auxiliary_outputs);
+    ImGui::TextWrapped("UI: FPS %u, meter %u, F10 %u. Retained private auxiliary images: %u (no XR handles).",
+        b.fps,b.meter,b.menu,b.private_snapshots);
+    if (const auto warning=swapchain_budget_warning(b);!warning.empty()) {
+        ImGui::TextColored(ImVec4(1.F,.75F,.25F,1.F),"Warning");
+        ImGui::TextWrapped("%.*s",static_cast<int>(warning.size()),warning.data());
+    }
+    // Draw actual lines only. Empty/padded rows must not reserve a large
+    // blank block before the ownership limitation text in the headset menu.
+    std::string_view details(b.details,std::find(std::begin(b.details),std::end(b.details),'\0')-std::begin(b.details));
+    while (!details.empty()) {
+        const auto newline=details.find('\n');
+        auto line=details.substr(0,newline);
+        const auto begin=line.find_first_not_of(" \t\r");
+        if (begin!=std::string_view::npos) {
+            line.remove_prefix(begin);
+            line=line.substr(0,line.find_last_not_of(" \t\r")+1);
+            ImGui::PushTextWrapPos();
+            ImGui::TextUnformatted(line.data(),line.data()+line.size());
+            ImGui::PopTextWrapPos();
+        }
+        if (newline==std::string_view::npos) break;
+        details.remove_prefix(newline+1);
+    }
+    if (b.details_truncated) ImGui::TextDisabled("Additional app handles omitted from this panel.");
+    ImGui::TextWrapped("Counts cover this session's handles visible to OFXR. OpenXR cannot enumerate hidden allocations inside other layers or the runtime, or identify their module owner.");
+}
+
 bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& state,
     SettingsWidgetOptions options) {
     set_interface_visible(options.compact ? InterfaceSurface::headset : InterfaceSurface::desktop, true);
@@ -370,6 +408,11 @@ bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& state,
     ImGui::PushID("OFXRAutonomousSettings");
     if (options.compact) ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 7));
     status(state);
+    if(const auto warning=overlay_limit_text(state.runtime.overlay_limit_mask);!warning.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(1.F,.75F,.25F,1.F));
+        ImGui::TextWrapped("%.*s",static_cast<int>(warning.size()),warning.data());
+        ImGui::PopStyleColor();
+    }
     if (ui.save_failed)
         ImGui::TextColored(ImVec4(1, .5F, .4F, 1), "Could not save settings. Check access to the local profile.");
     bool changed{};
@@ -386,6 +429,8 @@ bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& state,
             ImGui::BeginChild("Framewarp", ImVec2(0, 0));
             ImGui::PushItemWidth(std::clamp(ImGui::GetContentRegionAvail().x * .56F, 180.F, 580.F));
             changed |= framewarp(ui.draft, state);
+            ImGui::Separator();
+            if (ImGui::CollapsingHeader("Details",ImGuiTreeNodeFlags_NoAutoOpenOnLog)) luke_swapchain_budget(state);
             ImGui::PopItemWidth();
             ImGui::EndChild();
             ImGui::EndTabItem();

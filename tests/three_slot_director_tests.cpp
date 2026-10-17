@@ -774,14 +774,18 @@ void inline_afw_publication_gpu_test(const std::shared_ptr<SessionState>& state,
             false,nullptr,false,&probe_input);
         finished.store(true);
     });
+    const bool private_output=state->luke_afw_enabled && state->separate_synthesis>0;
     bool queued=false;
     for(unsigned i=0;i<500;++i) {
         if(gen->d3d11_interop->publication_snapshot().copy_complete_value>before){queued=true;break;}
         if(finished.load())break;
+        if(private_output && i>=30)break;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    const bool blocked=queued && !finished.load() && !inline_early_release.load();
+    // A waits for exact synthesis completion before queuing the D11 copy;
+    // the old path already queues that copy with a GPU-side producer wait.
+    const bool blocked=(queued || private_output) && !finished.load() && !inline_early_release.load();
     const bool outside_gpu_lock=state->gpu_mutex.try_lock();
     if(outside_gpu_lock)state->gpu_mutex.unlock();
     static_cast<void>(gate->Signal(1));consumer.join();
@@ -906,13 +910,16 @@ void held_afw_pair_gpu_test(const std::shared_ptr<SessionState>& state,
     std::cout << "Held AFW: actual preparation + terminal submission, four moved camera/FOV intervals, reversed mappings, both GPU eyes; ownership transitions rejected\n";
 }
 
+#include "luke_private_publication_tests.inc"
+#include "luke_fidelity_busy_fixture.inc"
 void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = false, bool luke = false, bool gap = false,
-                  bool afw_slot_probe = false, bool post_afw_packet = false) {
+                  bool afw_slot_probe = false, bool post_afw_packet = false, bool missing_afw_guides = false, int private_mode = 0) {
     terminal_optical_test = post_afw_packet;
     terminal_real_reads = terminal_synthetic_reads = 0;
     three_layer_test = with_layers;
     auto state = session();
     auto generation = std::make_shared<FrameGenerationSwapchainState>();
+    if(private_mode==5)state->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::fidelity_fx;
     try {
         check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
             D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
@@ -982,7 +989,8 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
         check(SUCCEEDED(generation->synthesizer->initialize(state->d3d12_device.Get(),
             state->d3d12_queue.Get(), history, interop->current_destination_images(),
             interop->synthetic_destination_images(), desc.Format, D3D12_RESOURCE_STATE_COMMON,
-            xrfg::D3D12OpticalFlowBackend::nvidia)), "NVIDIA synthesis");
+            state->optical_flow_backend,{},private_mode>0,
+            xrfg::D3D12FrameGenerationMode::ofxr,false,post_afw_packet)), "NVIDIA synthesis");
         generation->current_images_per_slot = generation->synthetic_images_per_slot = 1;
         generation->current[kAfwScratchSlot].handle = reinterpret_cast<XrSwapchain>(std::uintptr_t(base+kAfwScratchSlot));
         gpu_outputs[generation->current[kAfwScratchSlot].handle] = reals[kAfwScratchSlot];
@@ -994,7 +1002,8 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
             check(SUCCEEDED(generation->afw_temporal_synthesizer->initialize(state->d3d12_device.Get(),
                 state->d3d12_queue.Get(), generation->afw_final_history, interop->current_destination_images(),
                 interop->synthetic_destination_images(), desc.Format, D3D12_RESOURCE_STATE_COMMON,
-                xrfg::D3D12OpticalFlowBackend::nvidia, {}, true)), "post AFW OFA");
+                xrfg::D3D12OpticalFlowBackend::nvidia, {}, true,
+                xrfg::D3D12FrameGenerationMode::ofxr,false,true)), "post AFW OFA");
         }
         for (unsigned i = 0; i != 2; ++i) {
             generation->current[i].handle = reinterpret_cast<XrSwapchain>(std::uintptr_t(base+i));
@@ -1054,10 +1063,30 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
             }
         }
         state->control_revision = xrfg::embedded::snapshot().revision;
+        if (missing_afw_guides) {
+            check(xrfg::embedded::afw_snapshot().desired.mode != 0, "AFW must remain requested");
+            state->luke_afw_enabled = true;
+            state->graphics_binding_capabilities |= 8ULL;
+            state->luke_afw = std::make_shared<xrfg::LukeAfwSynthesizer>();
+            state->luke_xr_eye_baseline = .064F;
+            state->luke_ofxr_previous_afw_input = true; // exercise loss->raw anchor transition
+        }
         { std::scoped_lock lock(g_state_mutex);
           g_swapchains[chain->handle] = chain; g_sessions[state->handle] = state;
           if (with_layers) g_swapchains[right_chain->handle] = right_chain;
           for (const auto& a : auxiliary) if (a) g_swapchains[a->handle] = a; }
+        if(private_mode==1 || private_mode==2 || private_mode==5) {
+            if(private_mode==5)luke_fidelity_busy_probe(state,chain);
+            else luke_private_inline_probe(state,{chain,right_chain},private_mode==1);
+            for(auto c:{chain,right_chain}) {
+                if(!c || !c->frame_generation || !c->frame_generation->synthesizer)continue;
+                check(SUCCEEDED(c->frame_generation->synthesizer->retire_previous()),"inline probe retire");
+                check(SUCCEEDED(c->frame_generation->d3d11_interop->wait_for_idle()),"inline probe drain");
+            }
+            {std::scoped_lock lock(g_state_mutex);g_swapchains.clear();g_sessions.clear();}
+            gpu_outputs.clear();readback.Reset();auxiliary_readback.Reset();readback_context.Reset();return;
+        }
+        if(private_mode==3) {state->luke_afw_enabled=true;state->separate_synthesis=1;}
         if(post_afw_packet) {
             // Model the actual one-second menu stall: game queue waits for
             // CPU/XR progress while an OFXR scratch submission is pending.
@@ -1098,7 +1127,9 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
                 check(XR_SUCCEEDED(layer_begin_frame_impl(state->handle,nullptr)), "GPU Luke Begin");
             }
             // This is the producer handoff, not a frame-start pacing gate.
-            check(XR_SUCCEEDED(wait_for_synthesis_handoff(state)), "GPU worker rendezvous");
+            const auto handoff_result = wait_for_synthesis_handoff(state);
+            if (XR_FAILED(handoff_result)) std::cerr << "frame " << n << " handoff " << handoff_result << '\n';
+            check(XR_SUCCEEDED(handoff_result), "GPU worker rendezvous");
             std::vector<std::uint32_t> pixels(256 * 128);
             for (unsigned eye = 0; eye != 2; ++eye) {
                 if (post_afw_packet) {
@@ -1266,6 +1297,7 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
                 std::cout << "AFW GPU source/publication/release: frozen admission color despite late metadata change, both eyes/four cursor states; fresh pixels verified\n";
             }
             if (!luke) { std::scoped_lock lock(state->mutex); state->pending_frames.push_back({end.displayTime, 2000000}); }
+            if (missing_afw_guides) state->luke_afw_released_eye = 0;
             if (post_afw_packet) {
                 PreparedProjectionFrame terminal_prepared;
                 terminal_prepared.kind = PreparedGenerationKind::prime;
@@ -1465,6 +1497,7 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
                 for (auto& v : views) v.pose.position.y = 99.0f;
                 snapshot.layers.front().views.front().pose.position.y = 88.0f;
                 end.displayTime += 900000000;
+                if(private_mode==4) {state->luke_afw_enabled=true;state->separate_synthesis=1;}
                 check(XR_SUCCEEDED(handoff_three_slot_frame(state, &end, snapshot,
                     mappings.mappings, n > 1, completed)), "post AFW immutable handoff");
                 check(completed->submission->info.displayTime == exact_time &&
@@ -1502,6 +1535,12 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
             } else check(continuous_presenter_active(state), "EndFrame demoted owned composition");
         }
         check(XR_SUCCEEDED(wait_for_presenter_idle(state)), "GPU pipeline drain");
+        if (missing_afw_guides) {
+            const auto afw = xrfg::embedded::afw_snapshot();
+            check(afw.missing_capture_frames == 8 && afw.evaluations == 0 &&
+                state->luke_ofxr_previous_afw_input == false,
+                "missing AFW guides must select raw OFXR without faking AFW output");
+        }
         stop_continuous_presenter(state);
         if (post_afw_packet) {
             for (const auto& gen : {generation, right_generation}) {
@@ -2070,6 +2109,8 @@ void refused_frame_recovery_test() {
 #include "vulkan_bridge_contract_tests.inc"
 #include "djules_binding_queue_tests.inc"
 #include "djules_clock_tests.inc"
+#include "native_prediction_clock_tests.inc"
+#include "luke_route_prediction_clock_tests.inc"
 #include "native_dx11_guide_session_tests.inc"
 #include "fsr_release_identity_tests.inc"
 #include "interface_cycle_layer_tests.inc"
@@ -2077,14 +2118,21 @@ void refused_frame_recovery_test() {
 #include "blackbar_timing_layer_tests.inc"
 #include "djules_v474_layer_tests.inc"
 
+#include "d3d12_reported_device_alias.hpp"
 #include "v477_luke_context.inc"
 #include "../src/layer/outlaws_startup_test.inc"
 
 #include "luke_fresh_pacing_fixture.inc"
 #include "luke_clock_continuity_fixture.inc"
 #include "luke_aux_budget_fixture.inc"
+#include "luke_aux_private_fixture.inc"
 #include "luke_ngx_startup_fixture.inc"
 int main(int argc, char** argv) {
+    if(argc>1 && std::string_view(argv[1]).starts_with("luke-aux-private")) {
+        try {luke_aux_private_test(std::string_view(argv[1])!="luke-aux-private-vdxr",
+            std::string_view(argv[1])!="luke-aux-private-afw-off");return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
+    }
     if(argc>1 && std::string_view(argv[1])=="luke-ngx-startup") {
         try {luke_ngx_startup_test();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
@@ -2119,6 +2167,10 @@ int main(int argc, char** argv) {
     }
     if(argc>1 && std::string_view(argv[1])=="luke-standalone-context") {
         try {luke_standalone_context_test();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
+    }
+    if(argc>1 && std::string_view(argv[1])=="luke-late-alias-context") {
+        try {luke_standalone_context_test(true);return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
     }
     if(argc>1 && std::string_view(argv[1])=="v474-vd") {
@@ -2291,6 +2343,8 @@ int main(int argc, char** argv) {
         if (argc > 1) {
             const auto mode = std::string_view(argv[1]);
             if (mode == "native-dx11-guides") { native_dx11_guide_session_test(); return 0; }
+            if (mode == "native-prediction-clock") { native_prediction_clock_test(); return 0; }
+            if (mode == "luke-route-prediction-clock") { luke_route_prediction_clock_test(); return 0; }
             if (mode == "route-handoff") { pipelined_route_handoff_test(); return 0; }
             if (mode == "route-handoff-steamvr") { pipelined_route_handoff_test(true); return 0; }
             if (mode == "pipeline-preference") { djules_pipeline_preference_test(); return 0; }
@@ -2309,6 +2363,12 @@ int main(int argc, char** argv) {
             if(mode == "depth-history") { depth_history_test(); return 0; }
             if(mode == "luke-afw-slot") { gpu_pipeline(true, false, false, false, false, true); return 0; }
             if(mode == "post-afw-packet") { gpu_pipeline(true, false, false, false, false, false, true); return 0; }
+            if(mode == "luke-missing-afw-guides") { gpu_pipeline(true, false, false, false, false, false, false, true); return 0; }
+            if(mode == "luke-private-inline-on") {gpu_pipeline(true,false,false,false,false,false,false,false,1);return 0;}
+            if(mode == "luke-fidelity-inline-busy") {gpu_pipeline(false,false,false,false,false,false,false,false,5);return 0;}
+            if(mode == "luke-private-inline-off") {gpu_pipeline(true,false,false,false,false,false,false,false,2);return 0;}
+            if(mode == "luke-private-worker") {gpu_pipeline(true,false,false,false,false,false,false,false,3);return 0;}
+            if(mode == "luke-private-post-afw") {gpu_pipeline(true,false,false,false,false,false,true,false,4);return 0;}
             if(mode == "luke-inline-diagnostic") { luke_inline_diagnostic_test(); return 0; }
             if(mode == "luke-unit") { luke_admission_test(); luke_same_time_baseline_test(); return 0; }
             if(mode == "luke-clock") { luke_cycle_clock_test(); return 0; }

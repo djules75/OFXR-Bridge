@@ -22,9 +22,9 @@ template<UINT Points> class D3D12RamTiming {
     }
 public:
     void initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
-                    BridgeFlightOperation operation) noexcept {
+                    BridgeFlightOperation operation, bool disk_diagnostics = false) noexcept {
         operation_=operation;
-        if (!bridge_flight_logger().ram_enabled()) return;
+        if (!bridge_flight_logger().ram_enabled() && !disk_diagnostics) return;
         LARGE_INTEGER hz{};
         if (!QueryPerformanceFrequency(&hz) || hz.QuadPart<=0) { error(E_FAIL); return; }
         cpu_hz_=static_cast<UINT64>(hz.QuadPart);

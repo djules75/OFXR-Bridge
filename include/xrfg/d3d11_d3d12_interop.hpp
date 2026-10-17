@@ -59,6 +59,12 @@ struct D3D11PublicationReceipt {
     Microsoft::WRL::ComPtr<ID3D12Fence> fence;
     std::uint64_t copy_complete_value{};
     std::uint32_t current_destination_index{UINT32_MAX};
+    std::uint32_t private_current_index{UINT32_MAX};
+};
+
+struct D3D11PublicationTargets {
+    std::uint32_t current_index{};
+    std::optional<std::uint32_t> synthetic_index;
 };
 
 [[nodiscard]] HRESULT wait_for_d3d11_publication(
@@ -131,7 +137,8 @@ public:
     [[nodiscard]] HRESULT publish(
         std::uint32_t current_destination_index,
         std::optional<std::uint32_t> synthetic_destination_index,
-        D3D11PublicationReceipt* receipt = nullptr) noexcept;
+        D3D11PublicationReceipt* receipt = nullptr,
+        std::optional<D3D11PublicationTargets> targets = {}) noexcept;
 
     // Output already completed on its retained synthesis fence. Reject an
     // incomplete proof; never append a ready signal behind newer native work.
@@ -139,7 +146,8 @@ public:
         std::uint32_t current_destination_index,
         std::optional<std::uint32_t> synthetic_destination_index,
         ID3D12Fence* producer_fence, std::uint64_t producer_value,
-        D3D11PublicationReceipt* receipt = nullptr) noexcept;
+        D3D11PublicationReceipt* receipt = nullptr,
+        std::optional<D3D11PublicationTargets> targets = {}) noexcept;
 
 
     [[nodiscard]] HRESULT wait_for_idle() noexcept;

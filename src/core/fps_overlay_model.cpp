@@ -118,6 +118,7 @@ std::array<unsigned, 7> glyph(char c) noexcept {
     case '7': return {31,1,2,4,8,8,8};
     case '8': return {14,17,17,14,17,17,14};
     case '9': return {14,17,17,15,1,1,14};
+    case '-': return {0,0,0,31,0,0,0};
     default: return {};
     }
 }
@@ -136,11 +137,12 @@ std::vector<std::uint32_t> rasterize_fps_overlay(
         : snapshot.afw_active ? color(50, 140, 255)
                               : color(64, 235, 112);
     const unsigned scale = std::min(width / 24, height / 12);
-    const float measured = snapshot.delivered_valid ? snapshot.delivered_fps : snapshot.submitted_fps;
+    const float measured = snapshot.delivered_fps;
     const float rate = std::isfinite(measured) ? measured : 0.0f;
     char text[4]{};
-    const auto length = static_cast<unsigned>(std::snprintf(text, sizeof(text), "%d",
-        static_cast<int>(std::clamp(rate, 0.0f, 999.0f) + 0.5f)));
+    const auto length = static_cast<unsigned>(snapshot.delivered_valid && std::isfinite(measured)
+        ? std::snprintf(text, sizeof(text), "%d", static_cast<int>(std::clamp(rate, 0.0f, 999.0f) + 0.5f))
+        : std::snprintf(text, sizeof(text), "--"));
     unsigned x = (width - (length * 6 - 1) * scale) / 2;
     const unsigned top = (height - 7 * scale) / 2;
     for (const char* p = text; *p; ++p, x += 6 * scale) {

@@ -136,7 +136,7 @@ int main() {
     // Every value away from its default, so the round trip proves parsing.
     settings.backend = FlowBackend::fidelity_fx;
     settings.nvidia_preset = NvidiaPerformancePreset::slow;
-    settings.nvidia_input_scale = NvidiaInputScale::half;
+    settings.nvidia_input_scale = NvidiaInputScale::quarter;
     settings.nvidia_bidirectional = true;
     settings.deep_pipeline = false;
     settings.triple_frame_gen = true;
@@ -152,7 +152,7 @@ int main() {
     const LauncherSettings parsed = parse_settings(serialized);
     if (parsed.backend != FlowBackend::fidelity_fx ||
         parsed.nvidia_preset != NvidiaPerformancePreset::slow ||
-        parsed.nvidia_input_scale != NvidiaInputScale::half ||
+        parsed.nvidia_input_scale != NvidiaInputScale::quarter ||
         !parsed.nvidia_bidirectional || parsed.deep_pipeline ||
         !parsed.triple_frame_gen ||
         parsed.excluded_processes != "Home.exe; Other-Shipping.exe" ||
@@ -238,7 +238,7 @@ int main() {
     const std::string runtime_ini = build_runtime_ini(settings);
     if (!contains(runtime_ini, "[ofxr]\r\nbackend=fidelityfx") ||
         !contains(runtime_ini, "nvidia_preset=slow") ||
-        !contains(runtime_ini, "nvidia_input_scale=50") ||
+        !contains(runtime_ini, "nvidia_input_scale=25") ||
         !contains(runtime_ini, "nvidia_bidirectional=1") ||
         !contains(runtime_ini, "deep_pipeline=0") ||
         !contains(runtime_ini, "triple_frame_gen=1") ||

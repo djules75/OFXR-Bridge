@@ -41,15 +41,17 @@ std::array<std::size_t, 2> marker_pixels(
 int main(int argc, char** argv) {
     if (argc != 3 && argc != 4) return 1;
     const std::string mode = argv[2];
-    const bool luke_no_guides=mode=="luke-no-guides";
-    g_luke_scratch_mode=luke_no_guides;
+    const bool luke_no_guides=mode=="luke-no-guides" || mode=="luke-fsr-no-guides" || mode=="luke-dlssg-no-guides";
+    const bool luke_color=mode=="luke-color-only" || mode=="luke-color-afw-off" || mode=="luke-color-private";
+    const bool luke_fixture_mode=luke_no_guides || luke_color;
+    g_luke_scratch_mode=luke_fixture_mode;
     const bool control_mode = argc == 4 && std::string_view(argv[3]) == "controls";
-    const std::string marker_mode = argc == 4 && !control_mode && !luke_no_guides ? argv[3] : "";
+    const std::string marker_mode = argc == 4 && !control_mode && !luke_fixture_mode ? argv[3] : "";
     if (!marker_mode.empty() && (mode != "d3d11" ||
         (marker_mode != "on" && marker_mode != "off" && marker_mode != "hidden"))) return 1;
     g_flight_simulator_mode = mode == "flight";
     g_steamvr_runtime_mode = g_steamvr_presenter_mode = mode == "steamvr";
-    g_d3d11_interop_mode = mode == "d3d11" || luke_no_guides;
+    g_d3d11_interop_mode = mode == "d3d11" || luke_fixture_mode;
     g_test_application_thread_id = GetCurrentThreadId();
     const auto root = std::filesystem::temp_directory_path() /
         (L"ofxr-disarm-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
@@ -92,11 +94,14 @@ int main(int argc, char** argv) {
                 << "\n[overlay]\nposition=" << (!marker_mode.empty() && marker_mode != "hidden" ? "upper_right" : "off") << '\n';
         }
         control_profile = std::make_unique<xrfg_fixture::ExternalControlProfile>(root / L"ofxr_bridge.ini");
-        if(luke_no_guides) {
+        if(luke_fixture_mode) {
             require(argc==4,"Luke runtime fixture path");
             luke_fixture=LoadLibraryA(argv[3]);require(luke_fixture!=nullptr,"load Luke marker");
             auto desired=xrfg::autonomous::snapshot().desired;
-            desired.afw_mode=3;desired.motion_vectors=0;
+            desired.afw_mode=mode=="luke-color-afw-off" ? 0 : 3;desired.motion_vectors=0;
+            desired.enabled=mode!="luke-no-guides";
+            desired.frame_generation=mode=="luke-fsr-no-guides" ? 1 : mode=="luke-dlssg-no-guides" ? 2 : 0;
+            desired.separate_synthesis=mode=="luke-color-private" ? 1 : 0;
             require(xrfg::autonomous::request(desired),"request native-vector Luke route");
         }
         require(g_d3d11_interop_mode ? initialize_d3d11() : initialize_d3d12(), "initialize GPU fixture");
@@ -254,6 +259,12 @@ int main(int argc, char** argv) {
             std::error_code ignored;std::filesystem::remove_all(root,ignored);
             std::cout<<"Missing native producer: real frames progress, no generation or private swapchains PASS\n";
             return 0;
+        }
+        if(luke_color) {
+            require(xrfg::autonomous::snapshot().runtime.afw_running==0,
+                "no AFW output may be reported without native guides");
+            require(g_application_release_calls.load()==9 && g_create_swapchain_calls.load()==6,
+                "color-only Luke captures and private outputs not initialized");
         }
         require(g_synthetic_release_calls.load() > 0, "generation active before Disarm");
         if (g_steamvr_presenter_mode || g_flight_simulator_mode)

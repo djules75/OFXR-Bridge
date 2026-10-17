@@ -21,7 +21,7 @@ int main(int argc, char** argv) {
             counter.submitted(t, true);
             counter.submitted(t + 10'000'000, false);
         }
-        const auto snapshot = counter.snapshot(999'999'999);
+        auto snapshot = counter.snapshot(999'999'999);
         require(std::abs(snapshot.submitted_fps - 90) < 0.1f && snapshot.active,
                 "output must count both originals and synthetics");
         counter.submitted(1'100'000'000, false);
@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
         unique.submitted(2'000'000'000, true, false);
         require(!unique.snapshot(2'000'000'000).active, "repeated synthetic must not extend green status");
         require(rasterize_fps_overlay(24, 12, {144, true, false, 78, true}, false) ==
-            rasterize_fps_overlay(24, 12, {78, true}, false), "fresh delivered count must override submissions");
+            rasterize_fps_overlay(24, 12, {0,true,false,78,true}, false), "fresh delivered count must override submissions");
         for (auto position : {FpsOverlayPosition::off, FpsOverlayPosition::upper_left,
             FpsOverlayPosition::upper_right, FpsOverlayPosition::lower_left, FpsOverlayPosition::lower_right}) {
             require(parse_overlay_position(overlay_position_name(position)) == position, "position round trip");
@@ -79,7 +79,10 @@ int main(int argc, char** argv) {
         }
         require(overlay_texture_width(4000) > overlay_texture_width(1600), "resolution adaptation");
         require(overlay_texture_width(1) == 96 && overlay_texture_width(UINT32_MAX) == 336, "texture bounds");
+        const auto unavailable = rasterize_fps_overlay(240,120,snapshot,false);
+        snapshot.delivered_valid=true;snapshot.delivered_fps=90;
         const auto green = rasterize_fps_overlay(240, 120, snapshot, false);
+        require(green!=unavailable,"unknown delivery must not fall back to submissions");
         auto afw = snapshot; afw.afw_active = true;
         const auto blue = rasterize_fps_overlay(240, 120, afw, false);
         auto inactive = snapshot; inactive.active = false;
@@ -108,14 +111,14 @@ int main(int argc, char** argv) {
             }
             require(minimal[y * 24 + x] == (stroke ? 0xff70eb40u : 0u), "must render only output FPS number");
         }
-        require(rasterize_fps_overlay(24, 12, {90.49f, true}, false) == minimal, "FPS rounding down");
-        require(rasterize_fps_overlay(24, 12, {90.6f, true}, false) ==
-                rasterize_fps_overlay(24, 12, {91, true}, false), "FPS rounding up");
+        require(rasterize_fps_overlay(24, 12, {0,true,false,90.49f,true}, false) == minimal, "FPS rounding down");
+        require(rasterize_fps_overlay(24, 12, {0,true,false,90.6f,true}, false) ==
+                rasterize_fps_overlay(24, 12, {0,true,false,91,true}, false), "FPS rounding up");
         for (float value : {-1.0f, std::numeric_limits<float>::quiet_NaN()})
             require(rasterize_fps_overlay(24, 12, {value, false}, false) ==
                     rasterize_fps_overlay(24, 12, {0, false}, false), "invalid FPS clamp");
-        require(rasterize_fps_overlay(24, 12, {1000, true}, false) ==
-                rasterize_fps_overlay(24, 12, {999, true}, false), "three-digit FPS clamp");
+        require(rasterize_fps_overlay(24, 12, {0,true,false,1000,true}, false) ==
+                rasterize_fps_overlay(24, 12, {0,true,false,999,true}, false), "three-digit FPS clamp");
         // Optional visual artifact, not a live image or runtime dependency.
         if (argc > 1) {
             std::ofstream file(argv[1], std::ios::binary);

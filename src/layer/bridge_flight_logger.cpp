@@ -159,6 +159,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::luke_pose_contract: return "luke_pose_contract";
     case BridgeFlightOperation::luke_afw_stage: return "luke_afw_stage";
     case BridgeFlightOperation::gpu_fence_snapshot: return "gpu_fence_snapshot";
+    case BridgeFlightOperation::luke_inline_view: return "luke_inline_view";
+    case BridgeFlightOperation::luke_inline_pose_bits: return "luke_inline_pose_bits";
     case BridgeFlightOperation::gpu_device_status: return "gpu_device_status";
     case BridgeFlightOperation::history_capture_wait: return "history_capture_wait";
     case BridgeFlightOperation::menu_status: return "menu_status";
@@ -170,6 +172,7 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     if (operation == BridgeFlightOperation::benchmark_configuration) return "benchmark_configuration";
     if (operation == BridgeFlightOperation::benchmark_rates) return "benchmark_rates";
     if (operation == BridgeFlightOperation::benchmark_cycles) return "benchmark_cycles";
+    if (operation == BridgeFlightOperation::gpu_afw) return "gpu_afw";
     return "unknown";
 }
 

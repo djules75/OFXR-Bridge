@@ -11,8 +11,12 @@ FARPROC WINAPI quality_get_proc_address(HMODULE module,LPCSTR name);
 #include <bit>
 #include <d3d12sdklayers.h>
 #include <iostream>
+#include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <vector>
+#include <map>
+#include <sstream>
 
 namespace quality {
 using Microsoft::WRL::ComPtr;
@@ -35,6 +39,12 @@ struct ProviderReceipt {
     float expected_gain_x{},expected_gain_y{},gain_x{},gain_y{};
     bool valid{true};
 } provider;
+std::vector<std::filesystem::path> private_modules;
+std::filesystem::path original_provider_file;
+std::vector<char> bytes(const std::filesystem::path& path) {
+    std::ifstream file(path,std::ios::binary);
+    return {std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
+}
 void __stdcall observe_evaluate(xrfg::FrameWarpEvaluateParams& params) {
     ++provider.calls;
     provider.gain_x=params.motion_scale[0];provider.gain_y=params.motion_scale[1];
@@ -123,6 +133,12 @@ Camera peer(const Camera& source,unsigned n) {
 FARPROC WINAPI quality_get_proc_address(HMODULE module,LPCSTR name) {
     const auto actual=::GetProcAddress(module,name);
     if(actual&&name&&!std::strcmp(name,"EvaluateFrameWarp")) {
+        wchar_t path[32768]{};
+        if(GetModuleFileNameW(module,path,32768) && std::filesystem::path(path).extension()==L".tmp") {
+            quality::require(quality::bytes(path)==quality::bytes(quality::original_provider_file),
+                "isolated provider is not byte-identical to the selected bundled SDK");
+            quality::private_modules.emplace_back(path);
+        }
         quality::provider.original=reinterpret_cast<xrfg::EvaluateFrameWarpFn>(actual);
         return reinterpret_cast<FARPROC>(&quality::observe_evaluate);
     }
@@ -132,7 +148,15 @@ FARPROC WINAPI quality_get_proc_address(HMODULE module,LPCSTR name) {
 int main(int argc,char** argv) {try {
     using namespace quality;
     require(argc==2 || argc==3,"provider path argument missing");
+    original_provider_file=argv[1];
     const int shading=argc==3 ? std::stoi(argv[2]) : 0;
+    const auto diagnostic_root=std::filesystem::temp_directory_path()/
+        ("ofxr-afw-timing-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(GetTickCount64()));
+    if(shading==9) {
+        std::filesystem::create_directories(diagnostic_root);
+        {std::ofstream ini(diagnostic_root/"ofxr_bridge.ini");ini<<"[diagnostics]\nlogging_enabled=1\nmax_file_mb=32\n";}
+        xrfg::bridge_flight_logger().initialize(diagnostic_root);
+    }
     constexpr unsigned upstream_rates[]{9,10,12,17,18,20,33,34,36};
     for(int i=0;i<9;++i)require(xrfg::embedded::afw_shading_rate(i)==upstream_rates[i],"beta6 non-D3D12 shading encoding");
     require(shading>=0&&shading<=9,"shading index outside ABI contract");
@@ -246,8 +270,8 @@ int main(int argc,char** argv) {try {
                 1,float(baseline),1,origin,config.axes,sdk_camera),"actual shipping camera builder");
             for(unsigned i=0;i<16;++i)basis_error=std::max(basis_error,double(std::abs(sdk_camera.source_view_to_world.values[i]-current.inverse_view[i])));
             basis_bits_match&=!std::memcmp(sdk_camera.source_view_to_world.values,current.inverse_view.data(),sizeof(current.inverse_view));
-            xrfg::embedded::AfwSettings settings{};settings.mode=mode;settings.depth_dilate_mode=0;settings.shading_rate=shading==9 ? std::array{0,4,8}[((n-3)/4)%3] : shading;
-            provider.expected_shading_rate=upstream_rates[mode==3 && shading!=9 ? settings.shading_rate : 0];
+            xrfg::embedded::AfwSettings settings{};settings.mode=mode;settings.depth_dilate_mode=0;settings.shading_rate=shading==9 ? (mode==3 ? std::array{0,4,8,0}[(n-3)/4%4] : 0) : shading;
+            provider.expected_shading_rate=upstream_rates[mode==3 ? settings.shading_rate : 0];
             provider.calls=0;provider.valid=true;
             provider.expected_width=(scene.guide_width*scene.color_width+width-1)/width;
             provider.expected_height=(scene.guide_height*scene.color_height+height-1)/height;
@@ -257,6 +281,8 @@ int main(int argc,char** argv) {try {
             provider.expected_gain_y=scene.scale_y*float(height)/float(scene.guide_height);
             check(synth.synthesize(source.Get(),destination.Get(),*frame,source_view,destination_view,eye,float(baseline),settings),"actual full rotated AFW synthesis");
             wait();
+            require(xrfg::embedded::active_afw_shading_rate.load(std::memory_order_relaxed)==settings.shading_rate,
+                "active shading status does not follow the selected AFW quality");
             ComPtr<ID3D12InfoQueue> stage_info;
             if(SUCCEEDED(device.As(&stage_info)))for(UINT64 k=0;k<stage_info->GetNumStoredMessages();++k) {
                 SIZE_T bytes{};stage_info->GetMessage(k,nullptr,&bytes);std::vector<char> storage(bytes);
@@ -300,6 +326,41 @@ int main(int argc,char** argv) {try {
         require(message->Severity!=D3D12_MESSAGE_SEVERITY_ERROR&&message->Severity!=D3D12_MESSAGE_SEVERITY_CORRUPTION,"full KCD AFW GPU validation error");
     }
     CloseHandle(event);
+    if(shading==9) {
+        require(private_modules.size()==12,"live quality transitions did not create fresh isolated provider state");
+        for(const auto& file:private_modules)require(!std::filesystem::exists(file),
+            "retired isolated AFW provider left its private file loaded or on disk");
+        const auto log=xrfg::bridge_flight_logger().log_path();
+        xrfg::bridge_flight_logger().shutdown();
+        std::ifstream input(log);std::string line;
+        using Key=std::pair<std::uint64_t,std::uint64_t>;
+        std::map<Key,std::array<std::uint64_t,5>> stamps;
+        std::map<std::uint64_t,unsigned> rates;
+        bool clock_frequency=false;
+        while(std::getline(input,line)) {
+            require(line.find("op=gpu_timing_error")==std::string::npos,"AFW timestamp validation error");
+            std::map<std::string,std::string> fields;std::istringstream tokens(line);std::string token;
+            while(tokens>>token){const auto at=token.find('=');if(at!=std::string::npos)fields[token.substr(0,at)]=token.substr(at+1);}
+            if(fields["op"]=="gpu_afw") {
+                const auto point=std::stoul(fields["result"]);require(point<5,"AFW GPU point outside ABI");
+                stamps[{std::stoull(fields["a"]),std::stoull(fields["b"])}][point]=std::stoull(fields["c"]);
+            } else if(fields["op"]=="luke_afw_stage" && fields["a"]=="1100")
+                rates[std::stoull(fields["b"])]=std::stoul(fields["result"]);
+            else if(fields["op"]=="luke_afw_stage" && fields["a"]=="1102")
+                clock_frequency|=std::stoull(fields["b"])>0;
+        }
+        std::array<unsigned,9> measured{};
+        for(const auto& [key,v]:stamps) {
+            if(!v[0] || !v[1] || !v[2] || !v[3] || !v[4])continue; // last pending submission needs no extra drain
+            require(v[0]<=v[1] && v[1]<=v[2] && v[2]<=v[3],"AFW GPU stages out of order");
+            require(rates.contains(key.second),"AFW GPU sample lost quality metadata");
+            ++measured.at(rates.at(key.second));
+        }
+        require(clock_frequency && measured[0] && measured[4] && measured[8],"missing measured Full/Half/Quarter GPU stages or QPC frequency");
+        std::cout<<"Actual AFW GPU timestamps: Full="<<measured[0]<<" Half="<<measured[4]<<" Quarter="<<measured[8]
+            <<" ordered conversion/warp/output stages; live provider replacement preserves retired receipts PASS\n";
+        std::error_code error;std::filesystem::remove_all(diagnostic_root,error);
+    }
     require(all_camera_bits_match,"KCD plugin camera reflects decoded inverseView instead of preserving its actual view basis");
     require(all_mode_pixels_match,"full PDAFW rotated static-world reconstruction diverges from independent same-time peer oracle");
     std::cout<<(indiana?"Indiana full quality:":"KCD full quality:")<<" actual decoded camera, depth/Normal-motion shaders and PDAFW three modes match independent rotated-plane peer PASS\n";return 0;

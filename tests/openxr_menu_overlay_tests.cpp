@@ -21,6 +21,7 @@ namespace {
 unsigned checks{}, made{}, destroyed{}, max_layers{3}, count_seen{}, menu_seen{}, fps_seen{};
 bool d11{};
 bool refuse_menu_create{};
+unsigned chain_limit=~0u,menu_releases{};
 void check(bool pass,const char* message) { ++checks; if (!pass) throw std::runtime_error(message); }
 template<class T> T handle(std::uintptr_t v) { return reinterpret_cast<T>(v); }
 ComPtr<ID3D12Device> device; ComPtr<ID3D12CommandQueue> queue; ComPtr<ID3D11Device> device11;
@@ -47,7 +48,7 @@ XrResult XRAPI_CALL formats(XrSession,std::uint32_t capacity,std::uint32_t* coun
     *count=1;if(capacity)out[0]=DXGI_FORMAT_R8G8B8A8_UNORM;return XR_SUCCESS;
 }
 XrResult XRAPI_CALL create_chain(XrSession,const XrSwapchainCreateInfo* i,XrSwapchain* out) {
-    if(i->width==1024 && refuse_menu_create) {
+    if(chains.size()>=chain_limit || (i->width==1024 && i->height==768 && refuse_menu_create)) {
         refuse_menu_create=false;*out=XR_NULL_HANDLE;return XR_ERROR_LIMIT_REACHED;
     }
     *out=handle<XrSwapchain>(++made+10); auto& c=chains[*out]; c.width=i->width;c.height=i->height;
@@ -81,7 +82,7 @@ XrResult XRAPI_CALL wait(XrSwapchain s,const XrSwapchainImageWaitInfo* i) {
     check(i->timeout==0,"menu wait remains nonblocking");auto& c=chains.at(s);++c.waits;
     if(c.timeout){c.timeout=false;return XR_TIMEOUT_EXPIRED;}return XR_SUCCESS;
 }
-XrResult XRAPI_CALL release(XrSwapchain s,const XrSwapchainImageReleaseInfo*) {++chains.at(s).releases;return XR_SUCCESS;}
+XrResult XRAPI_CALL release(XrSwapchain s,const XrSwapchainImageReleaseInfo*) {++chains.at(s).releases;if(chains.at(s).height==768)++menu_releases;return XR_SUCCESS;}
 XrResult XRAPI_CALL end(XrSession,const XrFrameEndInfo* i) {
     check(i->next==next,"preserve endframe next chain");count_seen=i->layerCount;menu_seen=fps_seen=0;
     for(unsigned n=0;n<i->layerCount;++n) {
@@ -89,7 +90,7 @@ XrResult XRAPI_CALL end(XrSession,const XrFrameEndInfo* i) {
         auto* q=reinterpret_cast<const XrCompositionLayerQuad*>(i->layers[n]);auto& c=chains.at(q->subImage.swapchain);
         check(c.releases!=0,"only released XR images composed");
         check(q->eyeVisibility==XR_EYE_VISIBILITY_BOTH&&q->space==handle<XrSpace>(99),"both eyes in shared VIEW space");
-        if(c.width==1024) {
+        if(c.width==1024 && c.height==768) {
             ++menu_seen;check(c.height==768,"menu canvas 4:3");menu_pose=q->pose;menu_size=q->size;
             check(q->layerFlags==XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,"premultiplied menu alpha");
         }else ++fps_seen;
@@ -187,15 +188,18 @@ int main(int argc,char** argv) {
             input.open=input.focused=input.mouse_valid=true;input.mouse_x=300;input.mouse_y=240;
             refuse_menu_create=true;
             overlay.application_frame(&frame);overlay.end_frame(&frame,false);
-            check(made==1&&menu_seen==0,"refused menu must release capture and preserve application frame");
+            check(made==0&&menu_seen==0,"refused menu must release capture and preserve application frame");
             // A second explicit F10 request after budget recovery retries the
             // creation; refusal must not latch menu_attempted for this session.
             overlay.application_frame(&frame);overlay.end_frame(&frame,false);
-            check(made==2&&menu_seen==0,"positive wait timeout cannot publish menu");
+            check(made==1&&menu_seen==0,"positive wait timeout cannot publish menu");
             overlay.application_frame(&frame);overlay.end_frame(&frame,false);
             check(menu_seen==1&&fps_seen==0&&count_seen==2,"menu works with FPS off");
-            auto& menu=chains.at(handle<XrSwapchain>(12));
-            check(menu.acquires==1&&menu.waits==2&&menu.releases==1,"retry same acquired menu image after timeout");
+            const auto menu=[&]() -> Chain& {
+                for(auto& [handle,chain]:chains)if(chain.height==768)return chain;
+                throw std::runtime_error("live menu chain missing");
+            };
+            check(menu().acquires==1&&menu().waits==2&&menu().releases==1,"retry same acquired menu image after timeout");
             if(argc>=3) {
                 auto settings=xrfg::autonomous::snapshot().desired;
                 xrfg::autonomous::select_generation(settings,1,settings.backend);
@@ -214,7 +218,7 @@ int main(int argc,char** argv) {
                 m.display_source=xrfg::InterfaceSource::steamvr_display;
                 xrfg::autonomous::report_interface_telemetry(m);
                 overlay.application_frame(&frame);overlay.end_frame(&frame,false);
-                if(d11)preview11(menu,std::filesystem::path(argv[2]));else preview12(menu,std::filesystem::path(argv[2]));
+                if(d11)preview11(menu(),std::filesystem::path(argv[2]));else preview12(menu(),std::filesystem::path(argv[2]));
             }
             check(menu_size.width>0&&std::abs(menu_size.height/menu_size.width-.75F)<1e-6F,"quad matches hit-test canvas ratio");
             auto pose=menu_pose;
@@ -228,15 +232,16 @@ int main(int argc,char** argv) {
             overlay.set_session_focused(false);overlay.application_frame(&frame);overlay.end_frame(&frame,false);
             check(menu_seen==0&&fps_seen==1,"focus loss removes menu even if input source still asks open");
             overlay.set_session_focused(true);overlay.application_frame(&frame);overlay.end_frame(&frame,false);
+            for(unsigned n=0;n<40 && !menu_seen;++n){overlay.application_frame(&frame);overlay.end_frame(&frame,false);std::this_thread::sleep_for(std::chrono::milliseconds(1));}
             check(menu_seen==1,"refocused menu can reopen");
             const auto submit_menu = [&] {
-                const auto before = menu.releases;
-                for (unsigned attempt = 0; attempt != 40 && menu.releases == before; ++attempt) {
+                const auto before = menu_releases;
+                for (unsigned attempt = 0; attempt != 40 && menu_releases == before; ++attempt) {
                     overlay.application_frame(&frame);
                     overlay.end_frame(&frame, false);
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
-                check(menu.releases > before && menu_seen == 1, "real menu draw completes after nonblocking retries");
+                check(menu_releases > before && menu_seen == 1, "real menu draw completes after nonblocking retries");
                 input.events.clear();
             };
             for (float scale : {.5F, .75F, 1.F, 1.25F}) {
@@ -255,7 +260,7 @@ int main(int argc,char** argv) {
                     std::abs(menu_pose.position.x - expected.x) < 1e-5F &&
                     std::abs(menu_pose.position.y - expected.y) < 1e-5F,
                     "changed size and clamped position survive the production close/reopen path");
-                check(made == 2, "moving/resizing never recreates XR swapchains");
+                check(chains.size()<=2 && made-destroyed==chains.size(), "reopening releases unused panels and keeps one live menu");
             }
             auto settings = xrfg::autonomous::snapshot().desired;
             settings.menu_scale = .5F; settings.menu_offset_x = settings.menu_offset_y = 0;
@@ -288,13 +293,13 @@ int main(int argc,char** argv) {
             if(argc>=3) {
                 const auto benchmark=[&](bool open) {
                     input.open=open;overlay.application_frame(&frame);
-                    std::int64_t total{};const auto before=menu.releases;
+                    std::int64_t total{};const auto before=menu_releases;
                     for(unsigned n=0;n<100;++n) {
                         const auto start=std::chrono::steady_clock::now();overlay.application_frame(&frame);
                         total+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
                         static_cast<void>(overlay.end_frame(&frame,false));std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     }
-                    std::cout<<"UI "<<(open?"open":"closed, counter on")<<" application_frame CPU us/frame="<<total/100000.0<<"; menu draws="<<menu.releases-before<<'\n';
+                    std::cout<<"UI "<<(open?"open":"closed, counter on")<<" application_frame CPU us/frame="<<total/100000.0<<"; menu draws="<<menu_releases-before<<'\n';
                 };
                 benchmark(false);benchmark(true);input.open=false;overlay.application_frame(&frame);
                 check(!xrfg::autonomous::interface_telemetry_requested(),"benchmark close clears visibility");

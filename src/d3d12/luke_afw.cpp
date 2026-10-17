@@ -12,6 +12,7 @@
 #include "xrfg/luke_world_scale_config.hpp"
 #include "xrfg/luke_host_config.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
+#include "xrfg/d3d12_ram_timing.hpp"
 #include "xrfg/two_frame_capture.hpp"
 #include "luke_depth_convert_shader.hpp"
 #include "luke_depth_calibrate_shader.hpp"
@@ -429,6 +430,8 @@ bool copy_compatible_color(const D3D12_RESOURCE_DESC& left,
 
 struct LukeAfwSynthesizer::Impl {
     HMODULE module{};
+    std::filesystem::path provider_path;
+    std::filesystem::path private_provider_file;
     InitDeviceFn init_device{};
     InitFrameWarpFn init_frame_warp{};
     EvaluateFrameWarpFn evaluate{};
@@ -441,8 +444,10 @@ struct LukeAfwSynthesizer::Impl {
     HANDLE submission_event{};
     std::uint64_t last_submission_fence{};
     std::uint64_t next_submission_fence{1};
+    D3D12RamTiming<4> gpu_timing;
+    bool gpu_timing_initialized{};
     EyeFrameBuffers eye_buffers{};
-    int active_shading_rate{-1}; // beta6 resource-state changes are session-bound
+    int active_shading_rate{-1}; // changes replace retired provider state, never mutate it
     std::array<CameraData, 2> previous_source_camera{};
     std::uint64_t last_evaluated_publication{};
     unsigned last_evaluated_eye{2};
@@ -495,6 +500,7 @@ struct LukeAfwSynthesizer::Impl {
     ~Impl() {
         if (submission_event != nullptr) CloseHandle(submission_event);
         if (module != nullptr) FreeLibrary(module);
+        if (!private_provider_file.empty()) DeleteFileW(private_provider_file.c_str());
     }
 
     template <typename Function>
@@ -1136,8 +1142,17 @@ LukeAfwSynthesizer::~LukeAfwSynthesizer() = default;
 HRESULT LukeAfwSynthesizer::initialize(ID3D12Device* device,
     ID3D12CommandQueue* queue, const std::filesystem::path& plugin_path) noexcept {
     try {
-        if (device == nullptr || queue == nullptr || plugin_path.empty()) return E_INVALIDARG;
         std::scoped_lock lock(mutex_);
+        return initialize_locked(device,queue,plugin_path,false);
+    } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+      catch (...) { return E_FAIL; }
+}
+
+HRESULT LukeAfwSynthesizer::initialize_locked(ID3D12Device* device,
+    ID3D12CommandQueue* queue, const std::filesystem::path& plugin_path,
+    bool isolated_provider) noexcept {
+    try {
+        if (device == nullptr || queue == nullptr || plugin_path.empty()) return E_INVALIDARG;
         auto candidate = std::make_unique<Impl>();
         wchar_t executable[32768]{};
         if (!GetModuleFileNameW(nullptr, executable, 32768)) return HRESULT_FROM_WIN32(GetLastError());
@@ -1147,7 +1162,22 @@ HRESULT LukeAfwSynthesizer::initialize(ID3D12Device* device,
         candidate->world_scale = camera_config.world_scale;
         candidate->camera_axes = camera_config.axes;
         const auto selected_provider = luke_host_provider(std::filesystem::path(executable).parent_path(), plugin_path);
-        candidate->module = LoadLibraryExW(selected_provider.c_str(), nullptr,
+        candidate->provider_path=selected_provider;
+        auto load_path=selected_provider;
+        if (isolated_provider) {
+            // beta6 has module-global renderer state. InitDevice/InitFrameWarp
+            // on that same loaded module cannot reset every lookup state.
+            // A private byte-identical module gets fresh globals; only one new
+            // context is kept, and the old context has already retired on GPU.
+            wchar_t directory[MAX_PATH+1]{},file[MAX_PATH+1]{};
+            const auto length=GetTempPathW(MAX_PATH+1,directory);
+            if (!length || length>MAX_PATH) return HRESULT_FROM_WIN32(ERROR_BAD_PATHNAME);
+            if (!GetTempFileNameW(directory,L"OFX",0,file)) return HRESULT_FROM_WIN32(GetLastError());
+            candidate->private_provider_file=file; // exact owned file, removed after unload
+            if (!CopyFileW(selected_provider.c_str(),file,FALSE)) return HRESULT_FROM_WIN32(GetLastError());
+            load_path=file;
+        }
+        candidate->module = LoadLibraryExW(load_path.c_str(), nullptr,
             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
         if (candidate->module == nullptr) return HRESULT_FROM_WIN32(GetLastError());
         candidate->init_device = reinterpret_cast<InitDeviceFn>(
@@ -1363,11 +1393,30 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             if (FAILED(completion)) return completion;
         }
 
+        // The existing allocator fence is the sole completion proof. Harvest
+        // before a quality change can retire this context; never add a wait.
+        impl_->gpu_timing.harvest();
         if (!std::isfinite(xr_eye_baseline) || xr_eye_baseline < .01F || xr_eye_baseline > .20F)
             return E_INVALIDARG;
         if (impl_->unit_epoch != guide.epoch) {
             impl_->unit_epoch = guide.epoch;
             impl_->calibrated_units_per_metre = 0;
+        }
+        if (settings.mode==3 && impl_->active_shading_rate>=0 &&
+            settings.shading_rate!=impl_->active_shading_rate) {
+            // Previous provider submission is proven complete above. Create
+            // isolated renderer state before replacing the active context;
+            // a failed replacement leaves the old one intact for recovery.
+            const auto provider=impl_->provider_path;
+            const auto camera_origin=impl_->camera_origin;
+            const auto calibrated_units=impl_->calibrated_units_per_metre;
+            const auto unit_epoch=impl_->unit_epoch;
+            const auto result=initialize_locked(impl_->device.Get(),impl_->queue.Get(),provider,true);
+            report_stage(AfwStage::frame_warp_init_begin,result,1044,settings.shading_rate);
+            if (FAILED(result)) return result;
+            impl_->camera_origin=camera_origin;
+            impl_->calibrated_units_per_metre=calibrated_units;
+            impl_->unit_epoch=unit_epoch;
         }
         if (impl_->calibrated_units_per_metre == 0 && guide.calibrated_game_eye_baseline > 0)
             impl_->calibrated_units_per_metre = guide.calibrated_game_eye_baseline * impl_->world_scale / xr_eye_baseline;
@@ -1516,6 +1565,16 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage, aborted_close, 103, source_eye, guide.publication);
         });
         ID3D12GraphicsCommandList* command_list = impl_->command_list.Get();
+        if (!impl_->gpu_timing_initialized &&
+            (bridge_flight_logger().enabled() || bridge_flight_logger().ram_enabled())) {
+            impl_->gpu_timing.initialize(impl_->device.Get(),impl_->queue.Get(),
+                BridgeFlightOperation::gpu_afw,bridge_flight_logger().enabled());
+            impl_->gpu_timing_initialized=true;
+            LARGE_INTEGER frequency{};QueryPerformanceFrequency(&frequency);
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                S_OK,1102,frequency.QuadPart,reinterpret_cast<std::uintptr_t>(impl_.get()));
+        }
+        impl_->gpu_timing.mark(command_list,0);
         report_stage(AfwStage::command_list_reset, S_OK, source_eye,
             guide.publication);
         if (two_frame_capture_active()) {
@@ -1803,7 +1862,6 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             source_eye, impl_->last_evaluated_eye);
         params.mode = static_cast<FrameWarpMode>(effective_mode);
         if(impl_->active_shading_rate<0)impl_->active_shading_rate=settings.shading_rate;
-        embedded::report_afw_shading_rate(impl_->active_shading_rate);
         params.shading_rate = embedded::afw_shading_rate(
             effective_mode == 3 ? impl_->active_shading_rate : 0);
         bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
@@ -1963,6 +2021,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             guide.publication);
         report_stage(AfwStage::evaluate_begin, S_OK, source_eye,
             guide.publication);
+        impl_->gpu_timing.mark(command_list,1);
         {
         AfwProviderCopyScope provider_copy_scope(impl_->renderer);
         impl_->evaluate(params);
@@ -1980,6 +2039,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         }
         report_stage(AfwStage::evaluate_end, S_OK, source_eye,
             guide.publication);
+        impl_->gpu_timing.mark(command_list,2);
         result = S_OK;
         if (params.output_eye_frame_buffer == nullptr ||
             params.output_eye_frame_buffer->color.texture == nullptr) {
@@ -2022,6 +2082,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 }
             }
         }
+        impl_->gpu_timing.mark(command_list,3);
+        impl_->gpu_timing.resolve(command_list);
         const HRESULT close_result = recording.close();
         report_stage(AfwStage::command_list_closed, close_result, source_eye,
             guide.publication);
@@ -2034,6 +2096,13 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         ID3D12CommandList* lists[] = {command_list};
         guide.motion_retention->begin_gpu_read();
         if (guide.depth_retention) guide.depth_retention->begin_gpu_read();
+        if (impl_->gpu_timing_initialized) {
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                settings.shading_rate,1100,guide.publication,(color_desc.Width<<32)|color_desc.Height);
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                settings.mode,1101,guide.publication,source_eye);
+        }
+        impl_->gpu_timing.submitted(reinterpret_cast<std::uintptr_t>(impl_.get()),guide.publication);
         impl_->queue->ExecuteCommandLists(1, lists);
         impl_->depth_calibration_reset_pending = false;
         if (two_frame_capture_active())
@@ -2054,6 +2123,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 result, 87, guide.publication, fence_value);
         }
         if (SUCCEEDED(result)) {
+            embedded::report_afw_shading_rate(impl_->active_shading_rate);
             impl_->last_submission_fence = fence_value;
             impl_->last_evaluated_publication = guide.publication;
             impl_->last_evaluated_eye = source_eye;

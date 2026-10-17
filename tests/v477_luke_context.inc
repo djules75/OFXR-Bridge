@@ -1,5 +1,5 @@
 // Real original D12 Execute hook, COM ownership, and production layer bootstrap.
-void luke_standalone_context_test() {
+void luke_standalone_context_test(bool active_alias_history=false) {
     using Microsoft::WRL::ComPtr;
     ComPtr<ID3D11Device> d11;ComPtr<ID3D11DeviceContext> c11;
     check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,
@@ -22,9 +22,11 @@ void luke_standalone_context_test() {
     check(!state->luke_afw && state->d3d12_queue==private_queue,"cold bootstrap stays bypass");
     auto pending=std::make_shared<SwapchainState>(state,XrSwapchainCreateInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO});
     pending->generation_eligible_pending=true;
+    state->menu_enabled=false; // AFW-only still waits for the exact native producer.
     check(ensure_frame_generation(pending) && pending->generation_eligible_pending &&
         !pending->generation_declined && !pending->frame_generation,
         "cold native handoff preserves projection eligibility without unrelated GPU allocations");
+    state->menu_enabled=true;
     ComPtr<ID3D12CommandAllocator> allocator;ComPtr<ID3D12GraphicsCommandList> list;
     check(SUCCEEDED(d12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&allocator))),"allocator");
     check(SUCCEEDED(d12->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),nullptr,IID_PPV_ARGS(&list))),"list");
@@ -43,13 +45,69 @@ void luke_standalone_context_test() {
     original_queue->ExecuteCommandLists(1,lists);
     check(query_luke_ross_d3d12_context(&queried,&q),"actual queue context export resolves");
     check(q==original_queue && queried==d12 && q!=private_queue,"original exact native owner, not bridge queue");
+    ComPtr<ReportedDeviceAlias> alias;
+    ComPtr<ID3D12Resource> color;
+    struct RegisteredHistory {
+        XrSwapchain handle{};
+        ~RegisteredHistory(){if(handle){std::scoped_lock lock(g_state_mutex);g_swapchains.erase(handle);}}
+    } registered;
+    if(active_alias_history) {
+        alias.Attach(new ReportedDeviceAlias(d12.Get(),false,true));
+        state->d3d12_device=alias;
+        D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC texture{};texture.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        texture.Width=texture.Height=16;texture.DepthOrArraySize=texture.MipLevels=1;
+        texture.Format=DXGI_FORMAT_R8G8B8A8_UNORM;texture.SampleDesc.Count=1;
+        check(SUCCEEDED(d12->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&texture,
+            D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&color))),"active alias history source");
+        pending->d3d12_history=std::make_shared<xrfg::D3D12SwapchainHistory>();
+        ID3D12Resource* sources[]{color.Get()};
+        check(SUCCEEDED(pending->d3d12_history->initialize(d12.Get(),private_queue.Get(),sources,
+            D3D12_RESOURCE_STATE_COMMON)),"active color history before native context");
+        pending->handle=reinterpret_cast<XrSwapchain>(0x540);
+        {std::scoped_lock lock(g_state_mutex);g_swapchains[pending->handle]=pending;}
+        registered.handle=pending->handle;
+        check(d3d_owner::same(alias.Get(),d12.Get()),"alias does not share verified backing");
+    }
     state->application_frame_in_progress=true;initialize_late_luke_context(state);
     check(!state->luke_afw && state->d3d12_queue==private_queue,"in-flight frame defers binding");
     state->application_frame_in_progress=false;initialize_late_luke_context(state);
     check(state->luke_afw && (state->graphics_binding_capabilities&8) &&
         !(state->graphics_binding_capabilities&4) && state->d3d12_queue &&
-        state->d3d12_queue!=original_queue && state->d3d12_queue!=private_queue &&
-        state->d3d12_device==d12,"late AFW uses separate queue on exact native device");
+        state->d3d12_queue!=original_queue &&
+        (active_alias_history ? state->d3d12_queue==private_queue : state->d3d12_queue!=private_queue),
+        "late AFW must retain active history queue, or select a private queue before history");
+    if(active_alias_history) {
+        xrfg::configure_dlss_motion_vector_tracking(true);
+        std::shared_ptr<const xrfg::DlssMotionVectorFrame> frame;
+        for(unsigned n=0;n<2;++n) {
+            ComPtr<ID3D12CommandAllocator> capture_allocator;ComPtr<ID3D12GraphicsCommandList> capture_list;
+            check(SUCCEEDED(d12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&capture_allocator))) &&
+                SUCCEEDED(d12->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,capture_allocator.Get(),nullptr,
+                    IID_PPV_ARGS(&capture_list))),"alias guide command list");
+            xrfg::DlssMotionVectorPublication publication;
+            publication.stream=0x540;publication.output=publication.motion_vectors=color.Get();
+            publication.output_width=publication.output_height=publication.motion_width=publication.motion_height=16;
+            publication.producer_queue=original_queue.Get();publication.producer_command_list=capture_list.Get();
+            publication.verified_producer_device=d12.Get();publication.resource_state=D3D12_RESOURCE_STATE_COMMON;
+            publication.protect_snapshot_lifetime=true;publication.camera_data_valid=true;
+            frame=xrfg::publish_dlss_motion_vectors(publication);check(frame!=nullptr,"native guide snapshot");
+            check(SUCCEEDED(capture_list->Close()),"alias guide close");
+            ID3D12CommandList* capture_lists[]{capture_list.Get()};original_queue->ExecuteCommandLists(1,capture_lists);
+            xrfg::report_dlss_motion_vector_submission(original_queue.Get(),1,capture_lists);
+            check(SUCCEEDED(original_queue->Signal(fence.Get(),n+2)) &&
+                SUCCEEDED(wait_composition_fence(fence.Get(),n+2,3000)),"native guide snapshots retired");
+        }
+        const auto canonical=xrfg::resolve_luke_guide_token(frame->color_origin_token,private_queue.Get(),d12.Get());
+        const auto stale=xrfg::resolve_luke_guide_token(frame->color_origin_token,private_queue.Get(),alias.Get());
+        const auto actual=xrfg::resolve_luke_guide_token(frame->color_origin_token,state->d3d12_queue.Get(),state->d3d12_device.Get());
+        check(canonical && !stale && actual && state->d3d12_device==d12 && pending->d3d12_history->initialized(),
+            "active color-history alias prevented exact native AFW guide admission");
+        check(SUCCEEDED(private_queue->Signal(fence.Get(),4)) && SUCCEEDED(wait_composition_fence(fence.Get(),4,3000)),
+            "consumer joins retired");
+        xrfg::retire_dlss_motion_vector_stream(0x540);
+        std::cout<<"Late native alias: original wrong alias refuses guides; actual session admits exact native pair, active history and queue retained PASS\n";
+    } else check(state->d3d12_device==d12,"late AFW canonical device");
     queried.Reset();q.Reset();
     check(query_luke_ross_d3d12_context(&queried,&q)&&q==original_queue&&queried==d12,
         "private execution queue replaced original SR/RR provenance");

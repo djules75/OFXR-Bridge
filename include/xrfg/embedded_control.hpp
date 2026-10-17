@@ -11,7 +11,7 @@ struct Settings {
     bool enabled{true};
     int backend{}; // 0 FidelityFX, 1 NVIDIA legacy, 2 NVIDIA new, 3 NVIDIA djules
     int preset{1}; // 0 slow, 1 medium, 2 fast
-    int scale{2}; // 0 full, 1 three-quarter, 2 half
+    int scale{2}; // 0 full, 1 three-quarter, 2 half, 3 quarter
     bool backward{};
     int separate_synthesis{}; // private output textures, independent of XR ring count
     int lower_vram{}; // checkbox: 0 off (default), 1 on

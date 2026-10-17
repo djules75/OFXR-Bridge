@@ -110,7 +110,7 @@ XrResult XRAPI_CALL create_chain(XrSession, const XrSwapchainCreateInfo* info, X
     ++created; *output = handle<XrSwapchain>(5+created-1); return XR_SUCCESS;
 }
 XrResult XRAPI_CALL destroy_chain(XrSwapchain chain) {
-    check((chain == overlay_chain || chain==handle<XrSwapchain>(6)), "destroyed app swapchain"); ++destroyed; return XR_SUCCESS;
+    check((reinterpret_cast<std::uintptr_t>(chain)>=5 && reinterpret_cast<std::uintptr_t>(chain)<5+created), "destroyed app swapchain"); ++destroyed; return XR_SUCCESS;
 }
 XrResult XRAPI_CALL enumerate(XrSwapchain, std::uint32_t capacity, std::uint32_t* count, XrSwapchainImageBaseHeader* output) {
     *count = 3;
@@ -285,7 +285,7 @@ int main(int argc, char** argv) {
             check(overlay.end_frame(&info,false)==XR_SUCCESS&&observed_count==1,"timed out meter stays hidden");
             std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&info);
             check(overlay.end_frame(&info,false)==XR_SUCCESS&&observed_count==2,"bottom meter uploaded");
-            check(width==1024&&height==512&&last_pose.position.y==-.30F&&last_pose.position.z==-1.F,"upstream bottom placement");
+            check(created==1 && width==1024&&height==512&&last_pose.position.y==-.30F&&last_pose.position.z==-1.F,"upstream bottom placement");
             check(pixel_count(0)>1024*100,"meter cropped lower rows transparent on GPU");
             check(!overlay.marker_placement(),"panel is not corner diagnostic marker");
             xrfg::InterfaceFrameStamp meter_stamp{471,xrfg::interface_clock_ns(),0};
@@ -305,6 +305,7 @@ int main(int argc, char** argv) {
             overlay.set_session_focused(false);check(overlay.end_frame(&info,false)==XR_SUCCESS,"unfocused submission");
             check(observed_count==1,"unfocused meter hidden");overlay.set_session_focused(true);
             write_position(ini,L"upper_right");
+            std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&info);
             std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&info);
             check(overlay.end_frame(&info,false)==XR_SUCCESS&&observed_count==2&&last_quad_space==overlay_space&&last_pose.position.x>0,"switch back to original corner");
             write_position(ini,L"off");std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&info);

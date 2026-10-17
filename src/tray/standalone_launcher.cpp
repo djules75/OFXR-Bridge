@@ -157,6 +157,8 @@ std::string nvidia_input_scale_ini_value(NvidiaInputScale scale) {
         return "75";
     case NvidiaInputScale::half:
         return "50";
+    case NvidiaInputScale::quarter:
+        return "25";
     case NvidiaInputScale::full:
     default:
         return "100";
@@ -207,6 +209,7 @@ LauncherSettings parse_settings(std::string_view text) {
                         ? NvidiaInputScale::three_quarter
                         : value == "50"
                             ? NvidiaInputScale::half
+                            : value == "25" ? NvidiaInputScale::quarter
                             : NvidiaInputScale::full;
                 } else if (key == "nvidia_bidirectional") {
                     settings.nvidia_bidirectional = value == "1" ||
@@ -544,7 +547,8 @@ std::string build_runtime_ini(
     settings.nvidia_preset = desired.preset == 0 ? NvidiaPerformancePreset::slow
         : desired.preset == 2 ? NvidiaPerformancePreset::fast : NvidiaPerformancePreset::medium;
     settings.nvidia_input_scale = desired.scale == 0 ? NvidiaInputScale::full
-        : desired.scale == 1 ? NvidiaInputScale::three_quarter : NvidiaInputScale::half;
+        : desired.scale == 1 ? NvidiaInputScale::three_quarter
+        : desired.scale == 3 ? NvidiaInputScale::quarter : NvidiaInputScale::half;
     settings.nvidia_bidirectional = desired.backward;
     settings.deep_pipeline = desired.prefer_fps;
     settings.triple_frame_gen = desired.triple_frame_gen;

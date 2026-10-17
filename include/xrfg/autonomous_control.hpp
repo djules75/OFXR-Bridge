@@ -34,7 +34,7 @@ struct Settings {
     int frame_generation{}; // 0 OFXR, 1 FSR 3, 2 native DLSS Frame Generation, 3 Hybrid
     int hybrid_backend{}; // legacy profile key; Hybrid fallback is always FidelityFX
     int preset{1}; // 0 slow, 1 medium, 2 fast
-    int scale{2}; // 0 full, 1 three-quarter, 2 half
+    int scale{2}; // 0 full, 1 three-quarter, 2 half, 3 quarter
     bool backward{};
     int separate_synthesis{}; // private output textures, independent of XR ring count
     int lower_vram{}; // checkbox: 0 off (default), 1 on
@@ -87,9 +87,19 @@ enum class GenerationState : std::uint32_t {
 // control fixtures. State describes actual generation, not just applied settings.
 std::string_view generation_status_text(int mode, int motion_source, GenerationState state) noexcept;
 
+struct SwapchainBudgetStatus {
+    std::uint64_t updated_ms{};
+    std::uint32_t application{}, projection{}, auxiliary{}, other{}, depth{};
+    std::uint32_t current{}, synthetic{}, auxiliary_outputs{}, private_snapshots{};
+    std::uint32_t fps{}, meter{}, menu{}, refused{}, total{};
+    bool fallback{}, details_truncated{};
+    char details[1024]{}; // observed app handles/roles/dimensions; no stack walk
+};
+std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) noexcept;
+
 struct RuntimeStatus {
     std::uint32_t process_id{};
-    int afw_shading_rate{-1}; // pinned current session; desired can be pending
+    int afw_shading_rate{-1}; // active after successful evaluation; desired can be pending
     std::uint64_t heartbeat_ms{};
     std::uint64_t applied_revision{};
     std::uint32_t sessions{};
@@ -105,6 +115,7 @@ struct RuntimeStatus {
     bool luke_detected{}, vulkan_detected{};
     bool afw_running{}; // actual recent AFW output; IPC V487 rejects older reporters
     std::uint32_t provider_error{};
+    std::uint32_t overlay_limit_mask{}; // 1 FPS, 2 meter, 4 headset menu; last refusal until successful retry
     InterfaceTelemetry telemetry{};
     int generation_mode{}, motion_source{};
     GenerationState generation_state{GenerationState::waiting};
@@ -112,6 +123,7 @@ struct RuntimeStatus {
     bool upscaler_motion{}, upscaler_depth{};
     std::uint64_t guide_publications{}, guide_matches{}, guide_uses{};
     char message[192]{};
+    SwapchainBudgetStatus swapchains{};
 };
 struct Snapshot {
     Settings desired{};
@@ -130,6 +142,9 @@ bool request(Settings desired) noexcept;
 bool request_changes(const Settings& base, const Settings& desired) noexcept;
 Settings merge_changes(Settings current, const Settings& base, const Settings& desired) noexcept;
 void report_runtime(RuntimeStatus status) noexcept;
+enum class OverlaySwapchain : unsigned { fps=1, meter=2, menu=4 };
+void report_overlay_limit(OverlaySwapchain surface, bool refused) noexcept;
+std::string_view overlay_limit_text(std::uint32_t mask) noexcept;
 // Visibility leases are independent of settings revisions and persistence.
 enum class InterfaceSurface : unsigned { desktop, headset, meter };
 void set_interface_visible(InterfaceSurface surface, bool visible) noexcept;

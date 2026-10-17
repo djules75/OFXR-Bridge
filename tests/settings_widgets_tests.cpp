@@ -21,6 +21,7 @@ struct Context {
     SettingsWidgetState widgets{};
     ImVec2 size{};
     bool compact{};
+    std::string rendered_text;
     explicit Context(ImVec2 dimensions, bool small) : size(dimensions), compact(small) {
         context = ImGui::CreateContext();
         ImGui::SetCurrentContext(context);
@@ -40,14 +41,16 @@ struct Context {
         }
         ImGui::DestroyContext(context);
     }
-    void draw() {
+    void draw(bool capture_text=false) {
         ImGui::SetCurrentContext(context);
         ImGui::NewFrame();
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(size);
         ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_NoDecoration |
             ImGuiWindowFlags_NoSavedSettings);
+        if(capture_text)ImGui::LogToBuffer();
         render_settings_widgets(widgets, snapshot(), {.compact = compact});
+        if(capture_text){rendered_text=GImGui->LogBuffer.c_str();ImGui::LogFinish();}
         ImGui::End();
         ImGui::Render();
         // This fixture exercises CPU widgets/navigation, not GPU rendering.
@@ -289,6 +292,67 @@ void actual_widgets() {
     tray.draw();
     headset.draw();
     require(snapshot().revision == revision, "applied-status updates are display-only");
+    report_overlay_limit(OverlaySwapchain::menu,true);
+    tray.draw(true);headset.draw(true);
+    require(tray.rendered_text.find("OpenXR swapchain limit reached")!=std::string::npos &&
+        headset.rendered_text.find("OpenXR swapchain limit reached")!=std::string::npos,
+        "actual desktop and F10 widgets both render the persistent runtime limit warning");
+    report_overlay_limit(OverlaySwapchain::menu,false);
+    tray.draw(true);headset.draw(true);
+    require(tray.rendered_text.find("OpenXR swapchain limit reached")==std::string::npos &&
+        headset.rendered_text.find("OpenXR swapchain limit reached")==std::string::npos,
+        "actual settings surfaces clear the warning after a successful retry");
+    status=snapshot().runtime;status.swapchains.updated_ms=GetTickCount64();
+    status.swapchains.fallback=true;status.swapchains.application=3;status.swapchains.total=14;
+    status.swapchains.auxiliary_outputs=1;status.swapchains.private_snapshots=3;
+    std::strcpy(status.swapchains.details,"App UNCLASSIFIED: 0x823, 16x16, array 1, format 28");
+    report_runtime(status);
+    tray.select_tab("Luke Ross");headset.select_tab("Luke Ross");
+    tray.draw(true);headset.draw(true);
+    for(const auto* view:{&tray,&headset}) {
+        require(view->rendered_text.find("Framewarp mode")!=std::string::npos &&
+            view->rendered_text.find("Known XR handles:")==std::string::npos,
+            "Luke controls remain above collapsed swapchain Details");
+        require(view->rendered_text.find("Swapchain fallback")!=std::string::npos,
+            "status warns even with ownership Details collapsed");
+    }
+    tray.activate("/Framewarp_","Details");headset.activate("/Framewarp_","Details");
+    tray.draw(true);headset.draw(true);
+    for(const auto* view:{&tray,&headset}) {
+        require(view->rendered_text.find("Framewarp mode")<view->rendered_text.find("Known XR handles:"),
+            "expanded swapchain details follow the Luke controls");
+        require(view->rendered_text.find("Swapchain fallback")!=std::string::npos,
+            "desktop/headset status and warning expose actual fallback");
+        require(view->rendered_text.find("Known XR handles: 14")!=std::string::npos &&
+            view->rendered_text.find("0x823")!=std::string::npos,
+            "Luke tab exposes handle count and unknown app identity");
+    }
+    auto quality_settings=snapshot().desired;quality_settings.afw_mode=3;
+    require(request(quality_settings),"select Combined for live quality control");
+    tray.draw();tray.draw();status.afw_shading_rate=0;report_runtime(status);
+    tray.choose("AFW shading rate",1,"2x2 (half per axis)","/Framewarp_");
+    require(snapshot().desired.afw_shading_rate==4,"live quality dropdown publishes beta6 2x2 index");
+    tray.draw(true);
+    require(tray.rendered_text.find("Quality change pending")!=std::string::npos &&
+        tray.rendered_text.find("next launch")==std::string::npos,"AFW UI exposes active versus pending without claiming a restart");
+    status.afw_shading_rate=4;report_runtime(status);tray.draw(true);
+    require(tray.rendered_text.find("Quality change pending")==std::string::npos,
+        "successful active quality update clears pending explanation");
+    const auto content_height=[&](Context& view) {
+        for(auto* window:view.context->Windows)
+            if(window->Active && std::strstr(window->Name,"/Framewarp_"))return window->ContentSize.y;
+        throw std::runtime_error("missing Luke child window");
+    };
+    tray.draw();tray.draw(); // settle ContentSize after the pending line disappears
+    const auto unpadded=content_height(tray);
+    std::strcpy(status.swapchains.details,"\n\n  \nApp UNCLASSIFIED: 0x823, 16x16, array 1, format 28\n\n\n");
+    report_runtime(status);tray.draw();tray.draw();
+    require(std::abs(content_height(tray)-unpadded)<1.F,
+        "empty/padded ownership rows do not add a blank block before the final explanation");
+    status.swapchains.fallback=false;status.swapchains.other=0;status.swapchains.details[0]=0;
+    report_runtime(status);tray.draw(true);
+    require(tray.rendered_text.find("Swapchain fallback")==std::string::npos,"fallback warning does not stick after a fresh healthy session");
+
 }
 } // namespace
 

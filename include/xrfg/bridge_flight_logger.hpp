@@ -214,6 +214,7 @@ enum class BridgeFlightOperation : std::uint32_t {
     benchmark_configuration, // a=revision,b=selected/effective route bits,c=quality options
     benchmark_rates, // a=output/game milliFPS,b=generated milliFPS/display milliHz,c=revision
     benchmark_cycles, // a=OFXR/cycle microseconds,b=estimated microseconds,c=revision; result validity bits
+    gpu_afw, // a=provider context,b=guide publication,c=calibrated GPU QPC; result0..3 GPU stages,4 CPU submit
 };
 
 struct BridgeFlightToken {

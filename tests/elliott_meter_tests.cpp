@@ -25,7 +25,7 @@ int main(int argc,char** argv){try{
     autonomous::Snapshot s;s.connected=true;s.desired.enabled=true;s.runtime.sessions=1;s.runtime.ready=1;
     s.runtime.generation_state=autonomous::GenerationState::ready;
     auto& m=s.runtime.telemetry;m.updated_ms=1000;m.rates_valid=true;
-    m.output_fps=90;m.game_fps=45;m.generated_fps=45;m.display_hz=90;
+    m.output_source=InterfaceSource::steamvr_delivery;m.output_fps=90;m.game_fps=45;m.generated_fps=45;m.display_hz=90;
     m.ofxr_time_ms=9;m.cycle_length_ms=17;m.cycle_estimated_ms=28.1F;
     m.ofxr_time_valid=m.cycle_valid=m.cycle_estimated_valid=true;
     unsigned rows{};auto pixels=rasterize_elliott_meter(s,1000,false,false,&rows);

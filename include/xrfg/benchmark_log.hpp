@@ -1,3 +1,4 @@
+#include "xrfg/presented_output_rate.hpp"
 #pragma once
 #include "xrfg/autonomous_control.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
@@ -17,7 +18,7 @@ inline void log_benchmark_telemetry(const InterfaceTelemetry& value) noexcept {
     const auto control = autonomous::snapshot();
     if (control.runtime.applied_revision != control.revision) return;
     logger.event(BridgeFlightOperation::benchmark_rates,
-        (value.rates_valid ? 1 : 0) | (static_cast<int>(value.output_source) << 8),
+        (presented_output_valid(value) ? 1 : 0) | (static_cast<int>(value.output_source) << 8),
         (std::uint64_t(benchmark_milli(value.output_fps)) << 32) | benchmark_milli(value.game_fps),
         (std::uint64_t(benchmark_milli(value.generated_fps)) << 32) | benchmark_milli(value.display_hz), control.revision);
     logger.event(BridgeFlightOperation::benchmark_cycles,

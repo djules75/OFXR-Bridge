@@ -29,6 +29,7 @@ enum class NvidiaInputScale {
     full,
     three_quarter,
     half,
+    quarter,
 };
 
 struct LauncherSettings {

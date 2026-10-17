@@ -46,6 +46,8 @@ public:
 
 private:
     struct Impl;
+    HRESULT initialize_locked(ID3D12Device* device, ID3D12CommandQueue* queue,
+        const std::filesystem::path& plugin_path, bool isolated_provider) noexcept;
     mutable std::mutex mutex_;
     std::unique_ptr<Impl> impl_;
 };

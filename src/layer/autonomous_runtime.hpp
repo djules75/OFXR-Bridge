@@ -66,11 +66,13 @@ inline void apply_runtime_settings() {
 }
 inline void publish_runtime_status(unsigned native_generated_frames=0,
     GenerationState generation=GenerationState::waiting, HRESULT initialization_result=S_OK,
-    bool vulkan_detected=false, std::uint32_t provider_error=0) {
+    bool vulkan_detected=false, std::uint32_t provider_error=0,
+    const SwapchainBudgetStatus* swapchains=nullptr) {
     const auto control=embedded::snapshot();
     const auto afw=embedded::afw_snapshot();
     const auto nr=neural_rendering::status();
     RuntimeStatus out{};
+    if (swapchains) out.swapchains=*swapchains;
     out.process_id=GetCurrentProcessId();
     out.afw_shading_rate=afw.active_shading_rate;
     out.applied_revision=applied_runtime_revision.load(std::memory_order_acquire);

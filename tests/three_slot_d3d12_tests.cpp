@@ -35,9 +35,15 @@ std::mutex guard_journal_mutex;
 bool guard_runtime_waited{}, guard_runtime_begun{};
 bool legacy_queue{};
 bool transport_test{}, transport_inline{};
+bool msfs_time_test{};
+XrTime msfs_previous_time{};
 std::unordered_map<unsigned,unsigned> triple_synthetic_ordinals;
 bool legacy_early_current{};
 bool midpoint_cadence{};
+bool publication_test{};
+std::atomic_bool publication_frame_open{};
+std::atomic<DWORD> publication_consumer_thread{};
+std::atomic<unsigned> publication_releases{};
 bool deep_readiness{};
 bool triple_core{};
 bool triple_inline{};
@@ -56,6 +62,7 @@ ComPtr<ID3D12Fence> fsr_gpu_gate;
 std::jthread fsr_gpu_watchdog;
 std::atomic<bool> fsr_wait_before_gpu_complete{};
 bool reference_readiness_test{};
+bool shared_present_queue_test{};
 bool reference_capture_overlap_test{};
 std::atomic<bool> reference_wait_before_gpu_complete{};
 std::vector<std::chrono::steady_clock::time_point> output_times;
@@ -66,6 +73,7 @@ std::jthread promotion_unblock;
 std::atomic<bool> promotion_gate_released{};
 unsigned promotion_gate_count{};
 void require(bool b, const char* s) { if (!b) throw std::runtime_error(s); }
+#include "msfs_capture_order_fixture.hpp"
 void hr(HRESULT r, const char* s) { require(SUCCEEDED(r), s); }
 
 ComPtr<ID3D12Resource> resource(unsigned slices, bool buffer = false,
@@ -139,7 +147,7 @@ unsigned pixel(ID3D12Resource* r, unsigned slice,
     // Read as the downstream runtime would: Reference overlap also uses a
     // distinct binding queue. Reading its output on the application queue
     // ignores that queue's readiness dependency and can observe the initial0.
-    },(deep_readiness||triple_core||reference_capture_overlap_test)?runtime_queue(*session_state):nullptr);
+    },(deep_readiness||triple_core||reference_capture_overlap_test||shared_present_queue_test)?runtime_queue(*session_state):nullptr);
     void* mapped=nullptr; hr(readback->Map(0,nullptr,&mapped),"readback");
     const unsigned value=*reinterpret_cast<unsigned*>(static_cast<unsigned char*>(mapped)+layout.Offset+64*layout.Footprint.RowPitch+sample_x*4);
     readback->Unmap(0,nullptr); return value;
@@ -190,6 +198,7 @@ XrResult XRAPI_CALL fake_begin(XrSession,const XrFrameBeginInfo*) {
         require(guard_runtime_waited && !guard_runtime_begun,"guard unmatched physical Begin");
         guard_runtime_waited=false;guard_runtime_begun=true;
     }
+    publication_consumer_thread=GetCurrentThreadId();publication_frame_open=true;
     ++begins; return XR_SUCCESS;
 }
 ComPtr<ID3D12Resource> submitted_image(XrSwapchain handle) {
@@ -324,6 +333,7 @@ XrResult XRAPI_CALL fake_end_impl(XrSession,const XrFrameEndInfo* end) {
     return XR_SUCCESS;
 }
 XrResult XRAPI_CALL fake_end(XrSession session,const XrFrameEndInfo* end) {
+    struct Close {~Close(){publication_frame_open=false;}} close;
     try{return fake_end_impl(session,end);}
     catch(const std::exception& error){std::cerr<<"runtime fixture: "<<error.what()<<'\n';throw;}
 }
@@ -355,6 +365,11 @@ void release(const std::shared_ptr<SwapchainState>& c, bool poison = true) {
     if(!fsr_test && poison) fill(c->enumerated_d3d12_images[0].Get(),239,238); // queued director must own a private capture
 }
 }
+
+#include "native_input_readiness_tests.inc"
+
+#include "native_counted_release_tests.inc"
+#include "fsr_phase_clock_tests.inc"
 
 int main(int argc,char** argv) {
     xrfg_fixture::ControlProfile autonomous_profile;
@@ -423,7 +438,7 @@ int main(int argc,char** argv) {
             std::cout<<"Actual benchmark logger preserves independent revisions and rejects pending pipeline/transport PASS\n";
             return 0;
         }
-        if(mode=="steamvr-djules-restart" && argc>2) {
+        if((mode=="steamvr-djules-restart" || mode.starts_with("transport-ready-")) && argc>2) {
             std::filesystem::path log_root=argv[2];std::filesystem::create_directories(log_root);
             {std::ofstream ini(log_root/L"ofxr_bridge.ini");ini<<"[diagnostics]\nlogging_enabled=1\n";}
             xrfg::bridge_flight_logger().initialize(log_root);
@@ -438,7 +453,11 @@ int main(int argc,char** argv) {
         }
         if(mode=="steamvr-output-retire")dispatch->steamvr_runtime=true;
         reference_stall_test=mode=="legacy-queue-stall-exposure";
-        reference_readiness_test=mode=="legacy-queue-readiness";
+        const bool shared_readiness=mode.starts_with("transport-ready-");
+        const bool shared_progress=mode.starts_with("transport-progress-");
+        shared_present_queue_test=shared_readiness || shared_progress || mode.starts_with("transport-publication-");
+        publication_test=mode.starts_with("transport-publication-");
+        reference_readiness_test=mode=="legacy-queue-readiness" || shared_readiness || publication_test;
         reference_capture_overlap_test=mode=="legacy-queue-capture-overlap";
         capture_busy_test=mode=="capture-busy";
         guide_bypass_switch=mode=="guide-bypass-switch";
@@ -482,11 +501,12 @@ int main(int argc,char** argv) {
             s->frame_generation_mode={};
             dispatch->steamvr_runtime=std::string_view(argv[1]) != "legacy-queue-vdxr";
         }
-        transport_test=mode.starts_with("transport-") || mode.starts_with("transport3-");
+        msfs_time_test=mode.starts_with("msfs-time-") || mode.starts_with("msfs-control-");
+        transport_test=mode.starts_with("transport-") || mode.starts_with("transport3-") || msfs_time_test;
         if(transport_test) {
             const bool reference=mode.find("-ref-")!=std::string_view::npos;
             s->nvidia_new_route=!reference;
-            s->djules_route=mode.find("-djules-")!=std::string_view::npos;
+            s->djules_route=mode.find("-djules-")!=std::string_view::npos || mode.find("-djules3-")!=std::string_view::npos;
             s->separate_synthesis=mode[mode.size()-2]=='1';
             s->lower_vram=mode.back()=='1';
             dispatch->steamvr_runtime=mode.find("-steam-")!=std::string_view::npos;
@@ -495,26 +515,123 @@ int main(int argc,char** argv) {
             transport_inline=s->djules_route && dispatch->virtual_desktop_runtime;
             // VDXR's split-thread shape retains its existing synchronous owner.
             if(transport_inline) {s->application_wait_thread_id=1;s->application_end_thread_id=2;s->split_frame_loop=true;}
-            if(mode.starts_with("transport3-")) {
+            if(mode.starts_with("transport3-") || mode.find("-djules3-")!=std::string_view::npos) {
                 s->djules_triple_requested=true;
                 triple_core=!transport_inline;triple_inline=transport_inline;
             }
             if(dispatch->steamvr_runtime) private_budget_limit=8; // actual log ceiling: eight outputs fit, twelve refuse
             legacy_queue=reference || (s->lower_vram && !s->separate_synthesis && !transport_inline);
+            if(mode.find("-fidelity-")!=std::string_view::npos) {
+                s->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::fidelity_fx;
+                s->nvidia_new_route=false;
+            }
         }
-        fsr_queue=argc>1 && std::string_view(argv[1]).starts_with("fsr-queue");
+        const bool fsr_clock_probe=mode.starts_with("transport-clock-fsr-");
+        std::filesystem::path fsr_clock_log_directory;
+        if(fsr_clock_probe) {
+            fsr_test=true;fsr_queue=true;legacy_queue=false;s->nvidia_new_route=false;
+            fsr_clock_log_directory=std::filesystem::temp_directory_path()/
+                ("ofxr-fsr-clock-"+std::to_string(GetCurrentProcessId()));
+            std::filesystem::create_directories(fsr_clock_log_directory);
+            {std::ofstream ini(fsr_clock_log_directory/"ofxr_bridge.ini");ini<<"[diagnostics]\nlogging_enabled=1\n";}
+            xrfg::bridge_flight_logger().initialize(fsr_clock_log_directory);
+        }
+        if(shared_readiness || shared_progress || publication_test) {
+            // MSFS's split loop uses the fresh queued consumer, not the
+            // three-slot worker. Keep that actual session shape in the probe.
+            legacy_queue=true;
+            if(mode.find("-fsr-")!=std::string_view::npos) {
+                fsr_test=true;fsr_queue=true;legacy_queue=false;s->nvidia_new_route=false;
+            }
+        }
+        fsr_queue=fsr_queue || (argc>1 && std::string_view(argv[1]).starts_with("fsr-queue"));
         fsr_queue_slow=argc>1 && std::string_view(argv[1]) == "fsr-queue-slow";
         fsr_queue_slow=fsr_queue_slow || (argc>1 && std::string_view(argv[1]) == "legacy-queue-slow");
         fsr_queue_switch=argc>1 && std::string_view(argv[1]) == "fsr-queue-switch";
-        fsr_queue_gpu_pending=argc>1 && std::string_view(argv[1]) == "fsr-queue-gpu-pending";
+        fsr_queue_gpu_pending=shared_progress || (argc>1 && std::string_view(argv[1]) == "fsr-queue-gpu-pending");
         fsr_stereo_guard=argc>1 && std::string_view(argv[1]).ends_with("stereo-guard");
         fsr_missing=argc>1 && std::string_view(argv[1])=="fsr-inline-wait";
+        if(msfs_time_test && mode.find("-fsr-")!=std::string_view::npos) {
+            fsr_test=true; fsr_queue=true; s->nvidia_new_route=false;
+        }
         if(fsr_test) {
             s->frame_generation_mode=xrfg::D3D12FrameGenerationMode::fsr3;
             dispatch->steamvr_runtime=fsr_queue;
         }
         s->control_revision=xrfg::embedded::snapshot().revision;
+        if(mode=="msfs-order-guards") { test_msfs_capture_order(*s); session_state.reset(); return 0; }
         hr(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&s->d3d12_device)),"device");
+        if(mode=="native-counted-scope") {native_counted_scope_test();session_state.reset();return 0;}
+        if(mode=="native-counted-starved") {native_counted_starvation_test();session_state.reset();return 0;}
+        if(mode=="native-counted-progress") {native_counted_progress_test();session_state.reset();return 0;}
+        if(mode=="native-counted-old-control") {native_counted_progress_test(true);session_state.reset();return 0;}
+        if(mode=="fsr-phase-scope") {fsr_phase_scope_clock_test();session_state.reset();return 0;}
+
+        if(mode.starts_with("input-")) { native_input_readiness_test(mode);session_state.reset();return 0; }
+        if(mode=="delivery-observer") {
+            const auto directory=std::filesystem::temp_directory_path()/
+                ("ofxr-delivery-observer-"+std::to_string(GetCurrentProcessId()));
+            std::filesystem::create_directories(directory);
+            {std::ofstream ini(directory/"ofxr_bridge.ini");ini<<"[diagnostics]\nlogging_enabled=1\n";}
+            auto& logger=xrfg::bridge_flight_logger();logger.initialize(directory);
+            dispatch->steamvr_runtime=true;
+            ComPtr<ID3D12Fence> output;
+            hr(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&output)),"observer output fence");
+            hr(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&s->app_release_fence)),"observer app fence");
+            GeneratedFrameEndInfo frame;frame.synthetic=true;frame.info.displayTime=123;
+            frame.app_release_value=7;frame.reference_readiness.push_back({output,3,true});
+            frame.diagnostic_handover[0]={output,3,false};
+            ProjectionLayerCopy projection;projection.views.resize(2);
+            projection.views[0].pose.position={.125F,-.25F,1.25F};
+            projection.views[0].pose.orientation.w=1;
+            frame.projections.push_back(std::move(projection));
+            const auto observed_at=std::chrono::steady_clock::now();
+            log_native_delivery_probe(*s,&frame,32,0);
+            require(std::chrono::steady_clock::now()-observed_at<std::chrono::milliseconds(100),
+                "observer waited for pending GPU work");
+            require(output->GetCompletedValue()==0 && s->app_release_fence->GetCompletedValue()==0,
+                "observer advanced a pending GPU fence");
+            hr(output->Signal(3),"complete output independently of app tail marker");
+            log_native_delivery_probe(*s,&frame,32,1,456);
+            hr(s->app_release_fence->Signal(7),"complete app marker");
+            log_native_delivery_probe(*s,&frame,32,2,456);
+            log_native_delivery_probe(*s,&frame,32,3,456);
+            require(waits==0 && begins==0 && ends==0,"observer entered XR");
+            require(output->GetCompletedValue()==3 && s->app_release_fence->GetCompletedValue()==7,
+                "observer changed a completed GPU fence");
+            logger.flush();
+            std::ifstream file(logger.log_path());
+            const std::string text{std::istreambuf_iterator<char>(file),{}};
+            for(unsigned stage=0;stage<4;++stage) {
+                require(text.find("op=presenter_source result="+std::to_string(5490+stage)+
+                    " dur_us=0 a=65 b=123 c="+std::to_string(stage?456:0))!=std::string::npos,
+                    "observer lost output identity or source/physical time");
+                require(text.find("op=gpu_fence_snapshot result="+std::to_string(54900+stage*100)+
+                    " dur_us=0 a="+std::to_string(reinterpret_cast<std::uintptr_t>(output.Get()))+
+                    " b=3 c="+std::to_string(stage?3:0))!=std::string::npos,
+                    "observer confused output readiness with app release");
+            }
+            require(text.find("op=gpu_fence_snapshot result=55090 dur_us=0 a="+
+                std::to_string(reinterpret_cast<std::uintptr_t>(s->app_release_fence.Get()))+" b=7 c=0")!=std::string::npos,
+                "observer lost independently pending app marker");
+            require(text.find("op=luke_inline_pose_bits result=549000 dur_us=0 a=65 ")!=std::string::npos,
+                "observer lost numeric head translation");
+            require(text.find("op=luke_inline_pose_bits result=549000 dur_us=0 a=65 b=4467570833547591680 c=4584664420663164928")!=std::string::npos,
+                "observer changed physical position components");
+            require(text.find("op=gpu_fence_snapshot result=55120 dur_us=0 a="+
+                std::to_string(reinterpret_cast<std::uintptr_t>(output.Get()))+" b=3 c=3")!=std::string::npos,
+                "observer lost staged handover completion");
+            const auto count=text.size();
+            s->luke_afw_enabled=true;log_native_delivery_probe(*s,&frame,32,2,456);
+            s->luke_afw_enabled=false;dispatch->steamvr_runtime=false;
+            log_native_delivery_probe(*s,&frame,32,2,456);logger.flush();
+            std::ifstream excluded(logger.log_path());
+            require(std::string(std::istreambuf_iterator<char>(excluded),{}).size()==count,
+                "native SteamVR observer entered an excluded transport");
+            logger.shutdown();session_state.reset();
+            std::cout<<"Nonblocking native delivery observer distinguishes output/app fences, four boundaries and numeric pose PASS\n";
+            return 0;
+        }
         D3D12_COMMAND_QUEUE_DESC q{};q.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
         hr(s->d3d12_device->CreateCommandQueue(&q,IID_PPV_ARGS(&s->d3d12_queue)),"application queue");
         hr(s->d3d12_device->CreateCommandQueue(&q,IID_PPV_ARGS(&s->d3d12_synthesis_queue)),"synthesis queue");
@@ -562,7 +679,7 @@ int main(int argc,char** argv) {
             session_state.reset(); // Retire the GPU device before process-static layer globals.
             return 0;
         }
-        if(reference_capture_overlap_test) {
+        if(reference_capture_overlap_test || shared_readiness || shared_progress || publication_test) {
             hr(s->d3d12_device->CreateCommandQueue(&q,IID_PPV_ARGS(&s->binding_queue)),"Reference XR binding queue");
             hr(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&s->app_release_fence)),"Reference release fence");
             hr(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&s->reacquire_fence)),"Reference reacquire fence");
@@ -576,7 +693,23 @@ int main(int argc,char** argv) {
         dispatch->create_swapchain=fake_create;dispatch->enumerate_swapchain_images=fake_enumerate;dispatch->destroy_swapchain=fake_destroy;
         dispatch->acquire_swapchain_image=[](XrSwapchain,const XrSwapchainImageAcquireInfo*,uint32_t* index)->XrResult{*index=0;return XR_SUCCESS;};
         dispatch->wait_swapchain_image=[](XrSwapchain,const XrSwapchainImageWaitInfo*)->XrResult{return XR_SUCCESS;};
-        dispatch->release_swapchain_image=[](XrSwapchain,const XrSwapchainImageReleaseInfo*)->XrResult{return XR_SUCCESS;};
+        dispatch->release_swapchain_image=[](XrSwapchain handle,const XrSwapchainImageReleaseInfo*)->XrResult{
+            if(publication_test && defer_native_direct_publication(*session_state)) {
+                bool projection=false;
+                for(const auto& chain:find_swapchains(session_state)) if(chain->frame_generation) {
+                    for(const auto& image:chain->frame_generation->current) projection|=image.handle==handle;
+                    for(const auto& image:chain->frame_generation->synthetic) projection|=image.handle==handle;
+                }
+                if(projection) {
+                    if(!publication_frame_open || publication_consumer_thread!=GetCurrentThreadId()) {
+                        std::cerr<<"projection image released outside the consumer's begun XR frame\n";
+                        return XR_ERROR_RUNTIME_FAILURE;
+                    }
+                    ++publication_releases;
+                }
+            }
+            return XR_SUCCESS;
+        };
         dispatch->wait_frame=fake_wait;dispatch->begin_frame=fake_begin;dispatch->end_frame=fake_end;
         {std::scoped_lock lock(g_state_mutex);g_sessions[s->handle]=s;}
         promotion_test=argc>1 && std::string_view(argv[1]).starts_with("promotion");
@@ -629,7 +762,7 @@ int main(int argc,char** argv) {
         if(transport_test) {
             const unsigned current=s->lower_vram?1:2;
             const unsigned synthetic=s->lower_vram?1:2;
-            require(images.size()==2*(current+synthetic),"transport flags did not select exact XR budget");
+            require(images.size()==(array?1:2)*(current+synthetic),"transport flags did not select exact XR budget");
             for(const auto& chain:{left,right}) {
                 const auto g=chain->frame_generation;
                 require(g && g->staged_outputs==bool(s->separate_synthesis),"separation still coupled to reduction");
@@ -1142,9 +1275,14 @@ int main(int argc,char** argv) {
             XrFrameState prediction{XR_TYPE_FRAME_STATE};
             if(guard_next) {prediction=*guard_next;guard_next.reset();}
             else require(XR_SUCCEEDED(layer_wait_frame_impl(s->handle,nullptr,&prediction)),"producer wait");
-            if(!fsr_stereo_guard)
+            // Fidelity's inline/pipelined promotion has its own advertised
+            // period. The MSFS regression checks source continuity/output
+            // pixels, not NVIDIA's route-specific virtual Wait contract.
+            if(!fsr_stereo_guard && !(msfs_time_test && s->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::fidelity_fx))
                 require(prediction.predictedDisplayPeriod==(triple_switch && (n==5 || n==6)?8333333 : (triple_core||triple_inline)?24999999 : legacy_queue && n>1 ? 16666666 : 8333333),"advertised period");
+            require(prediction.predictedDisplayPeriod>0,"nonpositive advertised period");
             require(XR_SUCCEEDED(layer_begin_frame_impl(s->handle,nullptr)),"producer begin");
+            if((shared_readiness || shared_progress || publication_test) && n==1)s->pipelined_presenter_mode=true;
             if((reference_readiness_test || reference_capture_overlap_test) && n==3) {
                 require(XR_SUCCEEDED(wait_for_presenter_idle(s)),"Reference readiness drain");
                 hr(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fsr_gpu_gate)),"Reference GPU gate");
@@ -1183,7 +1321,16 @@ int main(int argc,char** argv) {
             const XrCompositionLayerBaseHeader* layers[]={reinterpret_cast<XrCompositionLayerBaseHeader*>(&projection),
                 reinterpret_cast<XrCompositionLayerBaseHeader*>(&quads[0]),reinterpret_cast<XrCompositionLayerBaseHeader*>(&quads[1])};
             XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=prediction.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-            end.layerCount=promotion_test && !s->three_slot_director ? 1 : 3;end.layers=layers;
+            // The new Fidelity fixture isolates projection continuity through
+            // its inline->pipelined promotion. Retained quad ownership remains
+            // covered by the existing NVIDIA/FSR transport fixtures.
+            const bool msfs_fidelity=msfs_time_test && s->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::fidelity_fx;
+            end.layerCount=(promotion_test && !s->three_slot_director) || msfs_fidelity ? 1 : 3;end.layers=layers;
+            if(msfs_time_test && !mode.starts_with("msfs-control-") && n%3==0)
+                end.displayTime-=4*8333333; // fresh captures, backward app prediction as in MSFS
+            if(msfs_time_test && !mode.starts_with("msfs-control-") && n>1 && n%3==1) end.displayTime=msfs_previous_time;
+            msfs_previous_time=end.displayTime;
+
             if(fsr_stereo_guard && n==1) {
                 ProjectionSnapshot audit;
                 require(capture_projection_snapshot(&end,&audit),"guard audit projection");
@@ -1243,9 +1390,28 @@ int main(int argc,char** argv) {
             const auto ended=layer_end_frame_impl(s->handle,&end);
             if(XR_FAILED(ended))std::cerr<<"actual EndFrame result="<<ended<<" frame="<<n<<'\n';
             require(XR_SUCCEEDED(ended),"actual EndFrame");
+            if(msfs_time_test && n>=3) {
+                require(XR_SUCCEEDED(wait_for_synthesis_handoff(s)),"MSFS synthesis completion");
+                if(s->generation_status!=xrfg::autonomous::GenerationState::ready) {
+                    std::cerr<<"MSFS frame="<<n<<" status="<<static_cast<unsigned>(s->generation_status.load())
+                        <<" pending="<<s->pending_frames.size()<<" captures="
+                        <<(s->previous_projection?s->previous_projection->capture_order.size():0)<<'\n';
+                }
+                require(s->generation_status==xrfg::autonomous::GenerationState::ready,
+                    "fresh ordered captures re-primed only because MSFS displayTime went backward");
+            }
+
             if(reference_capture_overlap_test && n==3)
                 require(fsr_gpu_gate->GetCompletedValue()==0,"overlap Reference producer blocked on output");
-            if(reference_readiness_test && n==3) {
+            if(publication_test && n==3) {
+                ComPtr<ID3D12Fence> marker;
+                hr(s->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&marker)),"publication binding marker");
+                hr(runtime_queue(*s)->Signal(marker.Get(),1),"marker before consumer publication");
+                const auto independent=wait_composition_fence(marker.Get(),1,100);
+                hr(fsr_gpu_gate->Signal(1),"release publication output");
+                require(SUCCEEDED(independent),"unpublished generation blocked the XR binding queue before Begin");
+            }
+            if(reference_readiness_test && !publication_test && n==3) {
                 require(fsr_gpu_gate->GetCompletedValue()==0,"Reference GPU wait blocked producer End");
                 std::this_thread::sleep_for(std::chrono::milliseconds(30));
                 require(!reference_wait_before_gpu_complete,"Reference opened XR cycle before exact GPU output was ready");
@@ -1285,7 +1451,7 @@ int main(int argc,char** argv) {
                     "legacy NVIDIA did not use fresh-output consumer");
                 {
                     std::scoped_lock lock(s->presenter_mutex);
-                    require(s->outstanding_presenter_submissions<=2, "legacy backlog exceeds pair");
+                    require(s->outstanding_presenter_submissions<=(steamvr_counted_native_release(*s)?4U:2U), "legacy backlog exceeds bounded pairs");
                 }
                 if(n==4) {
                     require(XR_SUCCEEDED(wait_for_presenter_idle(s)), "legacy starvation drain");
@@ -1302,7 +1468,7 @@ int main(int argc,char** argv) {
                 require(continuous_presenter_active(s) == (fsr_queue && !fsr_missing), "FSR runtime route");
                 if(fsr_queue && !fsr_missing) {
                     std::scoped_lock lock(s->presenter_mutex);
-                    require(s->outstanding_presenter_submissions <= 2, "FSR output backlog exceeds two");
+                    require(s->outstanding_presenter_submissions <= (steamvr_counted_native_release(*s)?4U:2U), "FSR output backlog exceeds bounded pairs");
                 }
             }
             if(fsr_queue_switch && n==8) {
@@ -1378,7 +1544,8 @@ int main(int argc,char** argv) {
             for (const auto& receipt : fsr_receipt_trace) std::cerr << receipt << '\n';
         }
         require(submissions.size()==expected_count && waits==expected_cycles && begins==expected_cycles && ends==expected_cycles,"unique output/cycle count");
-        require(empty_submissions == (fsr_queue_switch ? 1U : 0U), "unexpected empty physical submission");
+        const bool msfs_fidelity=msfs_time_test && s->optical_flow_backend==xrfg::D3D12OpticalFlowBackend::fidelity_fx;
+        require(empty_submissions == (fsr_queue_switch || msfs_fidelity ? 1U : 0U), "unexpected empty physical submission");
         if(capture_busy_test) {
             std::vector<std::pair<unsigned,bool>> expected;
             for(unsigned n=1;n<=8;++n) {
@@ -1468,8 +1635,15 @@ int main(int argc,char** argv) {
                     require(output_times[i]-output_times[i-1] >= std::chrono::milliseconds(6), "FSR bunched output slots");
             }
         }
+        if(fsr_clock_probe) {
+            auto& logger=xrfg::bridge_flight_logger();logger.flush();
+            std::ifstream in(logger.log_path());const std::string trace{std::istreambuf_iterator<char>(in),{}};
+            require(trace.find("op=presenter_clock_anchor result=5572 ")!=std::string::npos,
+                "actual FSR consumer bypassed measured phase clock");
+        }
         if(fsr_test) {const auto stats=xrfg::fsr_frame_generation_statistics();
             require(fsr_missing ? stats.attempts==0 : stats.used==(fsr_stereo_guard?3:7) && stats.failures==0,"FSR dispatch count/failed");}
+        if(publication_test) require(publication_releases>0,"no consumer publication was exercised");
         if(reference_readiness_test)
             require(!reference_wait_before_gpu_complete,"Reference opened XR cycle before exact GPU output was ready");
         if(mode=="steamvr-output-retire") {

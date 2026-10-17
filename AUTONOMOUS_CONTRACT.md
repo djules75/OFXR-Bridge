@@ -1,3 +1,13 @@
+## V552 measurement clarification
+
+Output FPS means observed compositor presentations, counting a repeated
+scanout once. No available presentation observer => N/A, not submitted FPS.
+Real submitted / Gen submitted remain separately labelled submission rates;
+their sum is not evidence of display delivery. Future benchmark rate validity
+requires measured output. Historical source7 records used accepted submissions
+and must not be described as independently measured headset delivery. VDXR has
+no presentation observer in this build. See docs/V557_RELEASE.md and docs/V557_VALIDATION.json.
+
 ## V531 compatibility update on V530
 
 Selective Elliott R19 private D12 factory/serializer, R26 original deferred-D11

@@ -15,6 +15,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <wrl/client.h>
 
 namespace xrfg {
 
@@ -59,7 +60,30 @@ struct D3D12PresentationTransform {
     std::array<std::array<float, 16>, 2> clip_positions{};
 };
 
+// Immutable upstream GPU receipts for this submission. Completion of these
+// permits a CPU output wait without requiring the application's later tail,
+// which can itself be queued behind this output's runtime handover.
+struct D3D12SynthesisInputs {
+    struct Dependency {
+        Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+        std::uint64_t value{};
+    };
+    std::array<Dependency,3> dependencies{}; // A, B (pairs only), XR acquire
+    bool captured{};
+    [[nodiscard]] bool ready() const noexcept {
+        if (!captured || !dependencies[0].fence || !dependencies[0].value) return false;
+        for (const auto& dependency : dependencies) {
+            if (!dependency.value) continue;
+            if (!dependency.fence) return false;
+            const auto completed=dependency.fence->GetCompletedValue();
+            if (completed==UINT64_MAX || completed<dependency.value) return false;
+        }
+        return true;
+    }
+};
+
 struct D3D12FrameSynthesisTicket {
+    D3D12SynthesisInputs inputs;
     std::shared_ptr<D3D12NativeFrameResult> native_result;
     std::uint64_t previous_serial{};
     std::uint64_t current_serial{};
@@ -133,7 +157,7 @@ enum class D3D12OpticalFlowInputScale {
     full,
     three_quarter,
     half,
-    quarter, // private Hybrid quarter flow
+    quarter, // optional quarter flow; also used by Hybrid
 };
 
 // The name the NVIDIA options and the tray settings already use.
@@ -211,16 +235,20 @@ public:
         bool enable_nvidia_gpu_timing = false,
         D3D12FrameGenerationMode generation_mode =
             D3D12FrameGenerationMode::ofxr,
-        bool allow_luke_guide_device_alias = false) noexcept;
+        bool allow_luke_guide_device_alias = false,
+        bool defer_flow_resources = false) noexcept;
 
     // Bit-exact transport of one immutable history capture. This does not
     // seed or dispatch any temporal/optical-flow backend. The history lease is
     // retired against this copy's completion fence, preserving the rolling anchor.
+    // Luke's disjoint AFW scratch may preserve an existing raw-OFXR anchor
+    // while checking guides. The default rejects a copy with an active anchor.
     [[nodiscard]] HRESULT submit_copy(
         const D3D12HistoryCaptureTicket& current,
         std::span<const D3D12ReprojectionView> current_source_views,
         std::uint32_t current_destination_index,
-        D3D12FrameSynthesisTicket* ticket) noexcept;
+        D3D12FrameSynthesisTicket* ticket,
+        bool preserve_temporal_anchor = false) noexcept;
 
     [[nodiscard]] HRESULT submit_prime(
         const D3D12HistoryCaptureTicket& current,
@@ -353,6 +381,7 @@ public:
     void report_pending_submission() const noexcept;
 
 private:
+    HRESULT ensure_flow_resources_locked();
     struct Impl;
 
     mutable std::mutex mutex_;

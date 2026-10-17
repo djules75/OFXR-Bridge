@@ -422,7 +422,7 @@ int main(int argc, char** argv) {
             check(overlay.end_frame(&info, false) == XR_SUCCESS && observed_count == 1 && releases == uploads_before_stop,
                   "stopped overlay never uploads/reappears after refresh or metric reset");
         }
-        check(created == 1 && destroyed == 1 && space_created == 1 && space_destroyed == 1, "overlay lifetime leak");
+        check(created >= 2 && created == destroyed && space_created == 1 && space_destroyed == 1, "overlay Off/reopen lifetime leak");
         unsupported = true;
         info.layerCount = expected_count = 2;
         {

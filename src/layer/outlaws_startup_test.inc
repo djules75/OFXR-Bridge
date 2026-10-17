@@ -149,7 +149,9 @@ void outlaws_startup_test(const wchar_t* marker_path,const wchar_t* provider_pat
             runtime.private_creates==runtime.private_destroys&&runtime.images.size()==3,
             "budget fallback failed to preserve all app chains or retire only private rings");
         if(missing) {
-            check(!s->luke_afw&&runtime.private_creates==0,"missing producer context allocated unrelated resources");
+            check(!s->luke_afw && runtime.private_creates>0 &&
+                find_swapchain(app[0])->frame_generation && find_swapchain(app[1])->frame_generation,
+                "color-only OFXR did not arm in the existing startup window without an AFW producer");
             XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
             check(layer_begin_frame_impl(s->handle,&begin)==XR_ERROR_CALL_ORDER_INVALID&&s->luke_outlaws_frame_started,
                 "first original Begin did not seal cold startup");

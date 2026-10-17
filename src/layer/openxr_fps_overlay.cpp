@@ -2,6 +2,7 @@
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/benchmark_log.hpp"
 #include "xrfg/elliott_meter.hpp"
+#include "xrfg/presented_output_rate.hpp"
 #include "xrfg/steamvr_delivery.hpp"
 #include "xrfg/overlay_menu_renderer.hpp"
 #include "xrfg/settings_widgets.hpp"
@@ -89,7 +90,7 @@ struct OpenXrFpsOverlay::Impl {
     }
     FpsOverlayPosition position{FpsOverlayPosition::upper_right};
     std::int64_t next_refresh{};
-    bool attempted{}, initialized{}, image_valid{}, acquired{}, waited{}, disabled{};
+    bool attempted{}, initialized{}, fps_attempted{}, fps_initialized{}, image_valid{}, acquired{}, waited{}, disabled{};
     XrSpace space{};
     XrSwapchain swapchain{};
     std::uint32_t index{}, width{}, height{}, max_layers{};
@@ -208,6 +209,8 @@ struct OpenXrFpsOverlay::Impl {
         info.width = menu_width; info.height = menu_height;
         const auto created = create_swapchain(session, &info, &menu_swapchain);
         menu_event(1, created);
+        if(XR_SUCCEEDED(created) || created==XR_ERROR_LIMIT_REACHED)
+            autonomous::report_overlay_limit(autonomous::OverlaySwapchain::menu,created==XR_ERROR_LIMIT_REACHED);
         if (XR_FAILED(created)) {
             // A temporary runtime budget refusal must not permanently latch
             // F10 off. Closing releases input; the next explicit opening can
@@ -324,6 +327,54 @@ struct OpenXrFpsOverlay::Impl {
         return true;
     }
 
+    // Frame-thread cleanup polls receipts; never wait for the GPU or for a
+    // runtime image that is still unavailable. Retry on the next app frame.
+    bool release_unused(XrSwapchain chain,std::vector<Image>& owned,bool& held,bool& ready) {
+        if(!chain)return true;
+        if(menu_unfenced_submission || fps_unfenced_submission)return false;
+        const auto completed=fence12 ? fence12->GetCompletedValue() : fence11->GetCompletedValue();
+        if(completed==UINT64_MAX)return false;
+        for(const auto& image:owned)if(image.fence_value>completed)return false;
+        if(held) {
+            if(!ready) {
+                XrSwapchainImageWaitInfo info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};info.timeout=0;
+                if(wait(chain,&info)!=XR_SUCCESS)return false;
+                ready=true;
+            }
+            XrSwapchainImageReleaseInfo info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            if(XR_FAILED(release(chain,&info)))return false;
+            held=ready=false;
+        }
+        return true;
+    }
+    void release_unused_surfaces() {
+        if((position==FpsOverlayPosition::off || elliott_mode()) && !swapchain)fps_attempted=false;
+        if((position==FpsOverlayPosition::off || elliott_mode()) && swapchain) {
+            image_valid=false;
+            if(release_unused(swapchain,images,acquired,waited) && XR_SUCCEEDED(destroy_swapchain(swapchain))) {
+                bridge_flight_logger().event(BridgeFlightOperation::menu_status,0,10,reinterpret_cast<std::uintptr_t>(swapchain),0);
+                images.clear();swapchain={};quad.subImage.swapchain={};fps_attempted=fps_initialized=false;
+            }
+        }
+        if(!elliott_mode()) {
+            meter.image_valid=false;meter_paint.reset();
+            if(!meter.swapchain)meter=MeterSurface{};
+            if(meter.swapchain && release_unused(meter.swapchain,meter.images,meter.acquired,meter.waited) &&
+                XR_SUCCEEDED(destroy_swapchain(meter.swapchain))) {
+                bridge_flight_logger().event(BridgeFlightOperation::menu_status,0,11,reinterpret_cast<std::uintptr_t>(meter.swapchain),0);
+                meter=MeterSurface{};
+            }
+        }
+        if(!menu_open && menu_swapchain && release_unused(menu_swapchain,menu_images,menu_acquired,menu_waited) &&
+            SUCCEEDED(menu_renderer.shutdown())) {
+            menu_initialized=false;
+            if(XR_SUCCEEDED(destroy_swapchain(menu_swapchain))) {
+                menu_event(9,0);menu_images.clear();menu_swapchain={};menu_quad.subImage.swapchain={};
+                menu_attempted=menu_valid=false;
+            }
+        }
+    }
+
     bool retire() noexcept {
         close_menu();
         if ((last_fence || menu_unfenced_submission || fps_unfenced_submission) && event) {
@@ -365,7 +416,7 @@ struct OpenXrFpsOverlay::Impl {
         if (event) CloseHandle(event);
     }
 
-    bool initialize(std::uint32_t eye_width) {
+    bool initialize() {
         if (attempted) return initialized;
         attempted = true;
         if ((!device11 && (!device12 || !queue12)) || !system) return false;
@@ -392,14 +443,34 @@ struct OpenXrFpsOverlay::Impl {
             if (std::find(formats.begin(), formats.end(), candidate) != formats.end()) { format = candidate; break; }
         }
         if (format == DXGI_FORMAT_UNKNOWN) return false;
-        width = overlay_texture_width(eye_width);
-        height = width / 2;
-        if (width > properties.graphicsProperties.maxSwapchainImageWidth ||
-            height > properties.graphicsProperties.maxSwapchainImageHeight) return false;
         XrReferenceSpaceCreateInfo space_info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
         space_info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
         space_info.poseInReferenceSpace.orientation.w = 1;
         if (XR_FAILED(create_space(session, &space_info, &space))) return false;
+        event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (!event) return false;
+        if(device11) {
+            ComPtr<ID3D11DeviceContext> immediate;device11->GetImmediateContext(&immediate);
+            if(!immediate || FAILED(immediate.As(&context11)))return false;
+            immediate.As(&multithread11);
+            ComPtr<ID3D11Device5> device5;
+            if(FAILED(device11.As(&device5)) || FAILED(device5->CreateFence(
+                0,D3D11_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence11))))return false;
+        } else if(FAILED(device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence12))))return false;
+        initialized=true;return true;
+    }
+
+    bool initialize_fps(std::uint32_t eye_width) {
+        if(swapchain)return fps_initialized;
+        if(fps_attempted)return false;
+        fps_attempted=true;
+        XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES};
+        std::uint32_t count{};
+        if(XR_FAILED(system_properties(instance,system,&properties)))return false;
+        width = overlay_texture_width(eye_width);
+        height = width / 2;
+        if (width > properties.graphicsProperties.maxSwapchainImageWidth ||
+            height > properties.graphicsProperties.maxSwapchainImageHeight) return false;
         XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
         info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
             XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
@@ -407,11 +478,12 @@ struct OpenXrFpsOverlay::Impl {
         info.sampleCount = info.faceCount = info.arraySize = info.mipCount = 1;
         info.width = width;
         info.height = height;
-        if (XR_FAILED(create_swapchain(session, &info, &swapchain))) return false;
+        const auto created=create_swapchain(session,&info,&swapchain);
+        if(XR_SUCCEEDED(created) || created==XR_ERROR_LIMIT_REACHED)
+            autonomous::report_overlay_limit(autonomous::OverlaySwapchain::fps,created==XR_ERROR_LIMIT_REACHED);
+        if(XR_FAILED(created)){fps_attempted=created!=XR_ERROR_LIMIT_REACHED;return false;}
         if (XR_FAILED(enumerate_images(swapchain, 0, &count, nullptr)) || !count || count > 64) return false;
         images.resize(count);
-        event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!event) return false;
         if (device11) {
             std::vector<XrSwapchainImageD3D11KHR> buffers(count, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
             if (XR_FAILED(enumerate_images(swapchain, count, &count,
@@ -420,18 +492,10 @@ struct OpenXrFpsOverlay::Impl {
                 images[i].texture11 = buffers[i].texture;
                 if (!images[i].texture11) return false;
             }
-            ComPtr<ID3D11DeviceContext> immediate;
-            device11->GetImmediateContext(&immediate);
-            if (!immediate || FAILED(immediate.As(&context11))) return false;
-            immediate.As(&multithread11);
-            ComPtr<ID3D11Device5> device5;
-            if (FAILED(device11.As(&device5)) || FAILED(device5->CreateFence(
-                0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence11)))) return false;
         } else {
             std::vector<XrSwapchainImageD3D12KHR> buffers(count, {XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
             if (XR_FAILED(enumerate_images(swapchain, count, &count,
                 reinterpret_cast<XrSwapchainImageBaseHeader*>(buffers.data())))) return false;
-            if (FAILED(device12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence12)))) return false;
             for (std::size_t i = 0; i < images.size(); ++i) {
                 auto& image = images[i];
                 image.texture12 = buffers[i].texture;
@@ -460,7 +524,7 @@ struct OpenXrFpsOverlay::Impl {
         quad.subImage.swapchain = swapchain;
         quad.subImage.imageRect.extent = {static_cast<std::int32_t>(width), static_cast<std::int32_t>(height)};
         quad.pose.orientation.w = 1;
-        initialized = true;
+        fps_initialized=true;image_valid = false;
         return true;
     }
 
@@ -559,7 +623,10 @@ struct OpenXrFpsOverlay::Impl {
         info.sampleCount = info.faceCount = info.arraySize = info.mipCount = 1;
         info.width = meter.width;
         info.height = meter.height;
-        if (XR_FAILED(create_swapchain(session, &info, &meter.swapchain))) return false;
+        const auto created=create_swapchain(session,&info,&meter.swapchain);
+        if(XR_SUCCEEDED(created) || created==XR_ERROR_LIMIT_REACHED)
+            autonomous::report_overlay_limit(autonomous::OverlaySwapchain::meter,created==XR_ERROR_LIMIT_REACHED);
+        if(XR_FAILED(created)){meter.attempted=created!=XR_ERROR_LIMIT_REACHED;return false;}
         if (XR_FAILED(enumerate_images(meter.swapchain, 0, &count, nullptr)) || !count || count > 64) return false;
         meter.images.resize(count);
         if (device11) {
@@ -735,7 +802,7 @@ struct OpenXrFpsOverlay::Impl {
         const bool wanted=position==FpsOverlayPosition::elliott_bottom || shown || gesture.pending();
         autonomous::set_interface_visible(autonomous::InterfaceSurface::meter,wanted);
         if(!wanted || !refresh)return;
-        if(!initialize_meter()){meter.failed=true;return;}
+        if(!initialize_meter()){meter.failed=meter.attempted;return;}
         const bool bgra=format==DXGI_FORMAT_B8G8R8A8_UNORM || format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
         const bool linear=format!=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB && format!=DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
         meter_paint=MeterPaint{autonomous::snapshot(),GetTickCount64(),bgra,linear};
@@ -750,8 +817,7 @@ struct OpenXrFpsOverlay::Impl {
         poll_native_counts(now);
         const auto fps = counter.snapshot(now);
         InterfaceTelemetry out{};
-        out.output_fps = fps.submitted_fps;
-        out.output_source = InterfaceSource::accepted_submissions;
+        poll_presented_output(delivery, now, out);
         out.game_fps = fps.real_fps;
         out.generated_fps = fps.generated_fps;
         out.rates_valid = fps.sample_valid;
@@ -761,10 +827,6 @@ struct OpenXrFpsOverlay::Impl {
         if (delivery) {
             if (const auto gpu = delivery->gpu_render_timing(now)) {
                 if (gpu->display_period) { period = gpu->display_period->count(); physical_display_period_ns=period; out.display_source = InterfaceSource::steamvr_display; }
-                if (gpu->delivered_fps) {
-                    out.output_fps = native_content_counter ? std::min(*gpu->delivered_fps, fps.submitted_fps) : *gpu->delivered_fps;
-                    out.output_source = InterfaceSource::steamvr_delivery;
-                }
             }
         }
         out.display_hz = period > 0 ? 1.0e9F / float(period) : 0;
@@ -776,7 +838,19 @@ struct OpenXrFpsOverlay::Impl {
     void application_frame(const XrFrameEndInfo* info) {
         const auto now = now_ns();
         if (!info || info->type != XR_TYPE_FRAME_END_INFO) return;
-        if (disabled || !info->layerCount || !info->layers) { close_menu(); return; }
+        const bool refresh_fps = now >= next_refresh;
+        if (refresh_fps) {
+            next_refresh = now + 250'000'000;
+            std::array<wchar_t, 32> setting{};
+            GetPrivateProfileStringW(L"overlay", L"position", L"upper_right",
+                setting.data(), static_cast<DWORD>(setting.size()), ini.c_str());
+            std::string value;
+            for (wchar_t c : setting) { if (!c) break; value += c < 128 ? static_cast<char>(c) : '?'; }
+            const auto next=parse_overlay_position(value);
+            if(next!=position)gesture.reset();
+            position = next;
+        }
+        if (disabled || !info->layerCount || !info->layers) { close_menu();release_unused_surfaces();return; }
         if (menu_enabled && menu_focused) {
             auto input = menu_input_source ? menu_input_source(menu_input_user) : menu_input->poll(menu_width, menu_height);
             menu_open = input.open && input.focused;
@@ -794,21 +868,10 @@ struct OpenXrFpsOverlay::Impl {
                 if (pending_menu_input.events.size() > 2048) { close_menu(); }
             }
         }
-        const bool refresh_fps = now >= next_refresh;
         if (menu_open) autonomous::set_interface_visible(autonomous::InterfaceSurface::headset, true);
-        if (refresh_fps) {
-            next_refresh = now + 250'000'000;
-            std::array<wchar_t, 32> setting{};
-            GetPrivateProfileStringW(L"overlay", L"position", L"upper_right",
-                setting.data(), static_cast<DWORD>(setting.size()), ini.c_str());
-            std::string value;
-            for (wchar_t c : setting) { if (!c) break; value += c < 128 ? static_cast<char>(c) : '?'; }
-            const auto next=parse_overlay_position(value);
-            if(next!=position)gesture.reset();
-            position = next;
-        }
         if(!elliott_mode())autonomous::set_interface_visible(autonomous::InterfaceSurface::meter,false);
         refresh_telemetry();
+        release_unused_surfaces();
         if ((!refresh_fps || position == FpsOverlayPosition::off) && !menu_open && !elliott_mode()) return;
         float left = -1, right = 1, down = -1, up = 1;
         std::uint32_t eye_width = 0;
@@ -841,7 +904,7 @@ struct OpenXrFpsOverlay::Impl {
         if (!eye_width) return;
         placement = overlay_placement(position, left, right, down, up);
         placement_valid = true;
-        if (!initialize(eye_width)) { close_menu(); return; }
+        if (!initialize()) { close_menu(); return; }
         if (info->layerCount >= max_layers) close_menu();
         if (menu_open) {
             if (!initialize_menu()) { close_menu(); }
@@ -870,17 +933,15 @@ struct OpenXrFpsOverlay::Impl {
             if (const auto measured = delivery->delivered_fps(now)) {
                 // A compositor also counts copied B slots. Its delivery rate
                 // can cap confirmed unique native content, never inflate it.
-                snapshot.delivered_fps = native_content_counter
-                    ? std::min(*measured,snapshot.submitted_fps) : *measured;
+                snapshot.delivered_fps = *measured;
                 snapshot.delivered_valid = true;
             }
         }
         if (const auto period = display_period_ns.load(std::memory_order_relaxed); period > 0) {
             const auto hz = 1.0e9f / static_cast<float>(period);
             snapshot.submitted_fps = displayed_rate(snapshot.submitted_fps, hz);
-            if (snapshot.delivered_valid) snapshot.delivered_fps = displayed_rate(snapshot.delivered_fps, hz);
         }
-        upload(snapshot);
+        if(initialize_fps(eye_width))upload(snapshot);
     }
 };
 
@@ -978,6 +1039,12 @@ void OpenXrFpsOverlay::set_session_focused(bool focused) noexcept {
     std::scoped_lock lock(impl_->mutex);
     impl_->menu_focused = focused;
     if (!focused) {impl_->close_menu();impl_->gesture.reset();autonomous::set_interface_visible(autonomous::InterfaceSurface::meter,false);}
+}
+
+std::optional<std::array<XrSwapchain,3>> OpenXrFpsOverlay::swapchain_handles() const noexcept {
+    std::unique_lock lock(impl_->mutex,std::try_to_lock);
+    if (!lock.owns_lock()) return std::nullopt;
+    return std::array<XrSwapchain,3>{impl_->swapchain,impl_->meter.swapchain,impl_->menu_swapchain};
 }
 
 FpsSnapshot OpenXrFpsOverlay::metrics() const noexcept {

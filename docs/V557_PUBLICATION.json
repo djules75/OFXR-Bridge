@@ -1,0 +1,18 @@
+{
+  "version": "V557",
+  "implementation_version": 557,
+  "cmake_version": "0.557.0",
+  "status": "owner-authorized-private-release",
+  "base_main": "3c95046137c5a013a2f769c01dbaf47dcb2d6f77",
+  "sealed_local_source": "1ce02a27050a43230d585459489d9c31c20c787f",
+  "original_local_zip_sha256": "44b2b329000efe08d0541d0c358110c533ed9c6121ceaebc9a3827b5bf33162e",
+  "release_tag": "ofxr-autonomous-v557-shared",
+  "runtime_and_tests_identical_to_sealed_checkpoint": true,
+  "provider": "PureDark AFW v1.0-beta.6",
+  "provider_sha256": "5f3cfc38903ac438241a3c47cb4bc3ac329cb39b056e33a63c20045fe15336f9",
+  "excluded_trials": [
+    "V554",
+    "V555"
+  ],
+  "runtime_retest": "broader UEVR/MUTAR/Luke retest planned; no universal performance claim"
+}
