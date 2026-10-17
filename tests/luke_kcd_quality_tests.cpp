@@ -161,6 +161,9 @@ int main(int argc,char** argv) {try {
     require(argc>=2 && argc<=4,"provider path argument missing");
     const bool geometry_transition=GetEnvironmentVariableW(L"XRFG_TEST_AFW_GEOMETRY_TRANSITION",nullptr,0)!=0;
     const bool epoch_transition=GetEnvironmentVariableW(L"XRFG_TEST_AFW_EPOCH_TRANSITION",nullptr,0)!=0;
+    wchar_t gap_text[16]{};
+    GetEnvironmentVariableW(L"XRFG_TEST_AFW_PUBLICATION_GAP",gap_text,16);
+    const unsigned publication_gap=static_cast<unsigned>(_wtoi(gap_text));
     const bool interleaved=argc==4 && std::string_view(argv[3])=="interleaved";
     consumer_probe=GetEnvironmentVariableW(L"XRFG_TEST_AFW_CONSUMER_PROBE",nullptr,0)!=0;
     if(GetEnvironmentVariableW(L"XRFG_TEST_AFW_CONSUMER_HALF",nullptr,0))consumer_probe_gain=.5F;
@@ -276,6 +279,9 @@ int main(int argc,char** argv) {try {
             if(n>=3){frame->previous_same_guide=frames[n-3];frame->previous_same_native_camera=xrfg::dlss_native_camera_history(*frames[n-3]);}
             frames.push_back(frame);colors.push_back(source);
             if(n<(interleaved?4u:3u) || ((epoch_transition || geometry_transition) && (n==10 || n==11)))continue;
+            // Backend reconfiguration can consume a Release without evaluating
+            // AFW. Keep original producer/cameras/geometry; omit only that color.
+            if(publication_gap && n>=10 && n<10+publication_gap)continue;
             const unsigned eye=n&1?0:1;
             xrfg::D3D12ReprojectionView source_view{},destination_view{};
             // The first odd-raster beta5 Combined probe had MAE6.7346 and
@@ -353,6 +359,16 @@ int main(int argc,char** argv) {try {
         require(message->Severity!=D3D12_MESSAGE_SEVERITY_ERROR&&message->Severity!=D3D12_MESSAGE_SEVERITY_CORRUPTION,"full KCD AFW GPU validation error");
     }
     CloseHandle(event);
+    if(publication_gap) {
+        const unsigned expected_replacements=shading>0 ? 4 : 0;
+        require(private_modules.size()==expected_replacements,
+            "each reduced Combined sequence must retire warm state exactly once at the omitted color");
+        for(const auto& file:private_modules)require(!std::filesystem::exists(file),
+            "gap recovery left a retired isolated AFW provider loaded or on disk");
+        std::cout<<"AFW publication gap="<<publication_gap
+            <<" isolated replacements="<<expected_replacements
+            <<"; GPU states and pixels PASS\n";
+    }
     if(shading==9) {
         require(private_modules.size()==12,"live quality transitions did not create fresh isolated provider state");
         for(const auto& file:private_modules)require(!std::filesystem::exists(file),

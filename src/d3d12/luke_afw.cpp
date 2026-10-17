@@ -1453,7 +1453,17 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         // this lifetime/geometry boundary, exactly as for a quality change.
         const bool provider_geometry_changed=impl_->frame_buffers_ready &&
             !compatible_color(impl_->color_description,color_desc);
-        if(impl_->frame_buffers_ready && (*origin_changed || provider_geometry_changed)) {
+        // A backend switch may skip an AFW color without changing the producer
+        // epoch or geometry. Combined must then fall back to Alternate. Beta6
+        // changes to full-rate work there but retains its reduced lookup state;
+        // re-entering Combined otherwise clears a shader-read lookup as an RTV.
+        // Retire that warm state at the discontinuity, after the existing fence.
+        const bool reduced_continuity_lost=settings.mode==3 &&
+            impl_->active_shading_rate>0 && impl_->last_evaluated_publication &&
+            luke_afw_effective_mode(settings.mode,guide.publication,
+                impl_->last_evaluated_publication,source_eye,impl_->last_evaluated_eye)!=3;
+        if(impl_->frame_buffers_ready &&
+            (*origin_changed || provider_geometry_changed || reduced_continuity_lost)) {
             const auto provider=impl_->provider_path;
             const auto camera_origin=impl_->camera_origin;
             const auto calibrated_units=impl_->calibrated_units_per_metre;
@@ -1461,7 +1471,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             const auto paired_unit_identity=impl_->paired_unit_identity;
             const auto result=initialize_locked(impl_->device.Get(),impl_->queue.Get(),provider,true);
             report_stage(AfwStage::frame_warp_init_begin,result,
-                *origin_changed ? 1045 : 1046,guide.publication);
+                *origin_changed ? 1045 : provider_geometry_changed ? 1046 : 1047,
+                guide.publication);
             if(FAILED(result))return result;
             impl_->camera_origin=camera_origin;
             impl_->calibrated_units_per_metre=calibrated_units;
