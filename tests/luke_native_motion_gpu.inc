@@ -80,7 +80,7 @@
         const auto axes=native_view_rows?xrfg::LukeProducerCameraAxes::native_view_rows:
             doom_pitch?xrfg::LukeProducerCameraAxes::right_down_forward:xrfg::LukeProducerCameraAxes::view;
         expect(xrfg::luke_native_motion_constants(g,2,2,constants,failure,axes) && failure==0);
-        if(native_span==1) {
+        {
             const auto single_stream_constants=constants;
             // Same three physical cameras, two native feature histories:
             // A2 / B2 / A3. Feature identities must remain distinct while
@@ -169,7 +169,7 @@
             }
         }
         readback->Unmap(0,nullptr);++scenarios;
-        if(native_span==1) {
+        {
             g.luke_interleaved_history=false;g.serial=5;g.previous_serial=3;
             middle->stream=10;middle->epoch=3;middle->serial=4;
             old.serial=3;g.previous_same_native_camera=xrfg::dlss_native_camera_history(old);

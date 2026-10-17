@@ -189,7 +189,6 @@ int main(int argc,char** argv) {try {
             nullptr,IID_PPV_ARGS(&result)),"fixture buffer");return result;};
     bool all_camera_bits_match=true,all_mode_pixels_match=true;
     for(const auto& scene:scenes) for(unsigned span:{1u,2u}) for(int mode:{1,2,3}) {
-        if(interleaved && span!=1)continue;
         xrfg::LukeAfwSynthesizer synth;check(synth.initialize(device.Get(),queue.Get(),std::filesystem::path(argv[1])),"full AFW provider initialization");
         std::vector<std::shared_ptr<DlssMotionVectorFrame>> frames;
         std::vector<ComPtr<ID3D12Resource>> colors;

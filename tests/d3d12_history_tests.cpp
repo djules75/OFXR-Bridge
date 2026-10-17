@@ -2208,7 +2208,7 @@ void test_luke_multi_handle_origins(D3D12WarpFixture& fixture) {
     std::cout<<"Multi-handle native color: actual CRC transport, exact own N-1/N-2, old/current pixels, crossqueue/device/interval/reset/retirement/eviction guards PASS\n";
 }
 
-void test_luke_interleaved_origins(D3D12WarpFixture& fixture) {
+void test_luke_interleaved_origins(D3D12WarpFixture& fixture, unsigned native_span=1) {
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_disabled_dlss_motion_vector_resources();
     xrfg::configure_dlss_motion_vector_tracking(true);
@@ -2220,6 +2220,7 @@ void test_luke_interleaved_origins(D3D12WarpFixture& fixture) {
         std::shared_ptr<const xrfg::DlssMotionVectorFrame> frame;
         fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
             xrfg::DlssMotionVectorPublication p;
+            p.raw_motion_native_span=native_span;
             p.stream=91000+(n&1);p.output=color.Get();p.motion_vectors=motion.Get();p.depth=depth.Get();
             p.producer_queue=fixture.queue();p.producer_command_list=list;
             p.output_width=p.motion_width=p.depth_width=kWidth;
@@ -5374,7 +5375,8 @@ int main(int argc, char** argv) {
             test_public_video_allocation_owner(fixture);
             test_protected_guide_snapshots(fixture);
             test_luke_multi_handle_origins(fixture);
-            test_luke_interleaved_origins(fixture);
+            test_luke_interleaved_origins(fixture,1);
+            test_luke_interleaved_origins(fixture,2);
             test_luke_production_camera_units(fixture);
             fixture.require_no_debug_errors();
             return 0;

@@ -1013,6 +1013,9 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             constants.depthInverted=static_cast<decltype(constants.depthInverted)>(1);
             require(set_constants(constants,n,0)&&evaluate_sl(reinterpret_cast<sl1::CommandBuffer*>(list.Get()),sl1::eFeatureDLSS,n,0),
                 "actual capture original Streamline results");
+            if(context.frame && !scene_camera)require(
+                context.frame->raw_motion_native_span==(test_crimson_native_motion?2u:1u),
+                "actual generic/Crimson capture used the wrong native motion interval");
             const unsigned successful=n>=recycle_production?n-recycle_production+1:
                 n-(logical_family&&n>=12?1:0);
             if(logical_family&&n!=12&&n>=2&&n<recycle_production)
@@ -1442,6 +1445,10 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }
 int run_actual_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline) {
+    return run_actual_ngx_capture_pipeline(realvr,streamline,false);
+}
+int run_crimson_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline) {
+    test_crimson_native_motion=true;
     return run_actual_ngx_capture_pipeline(realvr,streamline,false);
 }
 int run_kcd_logical_capture_test(const wchar_t* realvr,const wchar_t* streamline) {

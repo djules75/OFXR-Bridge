@@ -23,8 +23,9 @@ inline bool luke_interleaved_history_matches(const DlssNativeCameraHistory& curr
     const auto next = [](std::uint32_t token) { ++token; return token ? token : 1; };
     if (!current.token || !middle.token || !older.token ||
         next(older.token) != middle.token || next(middle.token) != current.token) return false;
+    if(current.raw_motion_native_span!=1 && current.raw_motion_native_span!=2)return false;
     for (const auto* frame : {&current, &middle, &older}) {
-        if (!frame->valid || frame->reset || frame->jittered || frame->raw_motion_native_span != 1 ||
+        if (!frame->valid || frame->reset || frame->jittered || frame->raw_motion_native_span != current.raw_motion_native_span ||
             !frame->motion_width || !frame->motion_height || !frame->output_width || !frame->output_height ||
             frame->motion_width != current.motion_width || frame->motion_height != current.motion_height ||
             frame->output_width != current.output_width || frame->output_height != current.output_height)

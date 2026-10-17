@@ -117,6 +117,7 @@ template<class T> T get(const NVSDK_NGX_Parameter* p,const char* name,T fallback
 bool test_kcd_production_identity{};
 bool test_kcd_scene_camera{};
 bool test_outlaws_production_identity{};
+bool test_crimson_native_motion{};
 #endif
 bool kingdom_come_process() {
     static const bool selected=[] {
@@ -150,6 +151,18 @@ bool outlaws_process() {
     }();
 #ifdef XRFG_NATIVE_INGRESS_TESTS
     return selected || test_outlaws_production_identity;
+#else
+    return selected;
+#endif
+}
+bool crimson_desert_process() {
+    static const bool selected=[] {
+        wchar_t process[MAX_PATH]{};GetModuleFileNameW(nullptr,process,MAX_PATH);
+        const auto* basename=wcsrchr(process,L'\\');basename=basename?basename+1:process;
+        return !_wcsicmp(basename,L"CrimsonDesert.exe");
+    }();
+#ifdef XRFG_NATIVE_INGRESS_TESTS
+    return selected || test_crimson_native_motion;
 #else
     return selected;
 #endif
@@ -780,6 +793,10 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     const auto od=output->GetDesc(), mv=motion->GetDesc(), dz=depth->GetDesc();
     DlssMotionVectorPublication g{};
     if(final_caller_output&&invocation_camera)g.raw_motion_native_span=invocation_camera->raw_motion_native_span(motion.Get());
+    // Crimson V561 F8: both retained native fields fit N-2 (same eye), not
+    // the adjacent opposite camera advertised by Streamline's clip matrix.
+    // Keep the measured field contract separate from camera receipt order.
+    if(luke && !invocation_camera && crimson_desert_process())g.raw_motion_native_span=2;
     // Scoped camera values replace apply_camera's camera read, while its Luke
     // snapshot-lifetime contract must still protect all queued GPU consumers.
     g.protect_snapshot_lifetime=luke;
