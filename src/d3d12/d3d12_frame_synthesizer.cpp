@@ -1,5 +1,6 @@
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
+#include "xrfg/live_tuning.hpp"
 
 #include <windows.h>
 #include <wrl/client.h>
@@ -21,10 +22,12 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <new>
 #include <utility>
 #include <vector>
@@ -322,6 +325,98 @@ constexpr UINT kEncodeSrgbFlowInputFlag = 2U;
         packed = 1U;
     }
     return packed << 8U;
+}
+
+// The tray's live tuning window (xrfg::live_tuning) for edge ghosting
+// reduction, carried in the game-motion constants, which only the
+// game-motion branch reads; frame_synthesis.hlsl decodes them (see
+// live_tuning_present). Called once per pair. The block is opened lazily and
+// a failed open is not retried for a second, so a session without the window
+// costs one clock read per pair; with it, one read of mapped memory. Each new
+// set of values is recorded once, as embedded_configuration result=811:
+//   a: bit 0 on, bits 4-7 rings, 8-11 survivors, 16-23 survivor margin,
+//      24-31 endpoint error trigger (255ths)
+//   b: spread trigger (centipixels) << 32 | lands-on-itself tolerance
+//      (centipixels) << 16 | tolerance per pixel of speed (permille)
+// (810 was V475's record, which also carried the background fill.)
+void apply_live_composition_tuning(SynthesisParameters& parameters) noexcept {
+    static std::mutex mutex;
+    static HANDLE mapping = nullptr;
+    static const xrfg::live_tuning::Block* block = nullptr;
+    static std::chrono::steady_clock::time_point next_attempt{};
+    static std::uint32_t recorded_sequence = 0;
+    static bool recorded_any = false;
+    if (parameters.use_game_motion != 0U) {
+        return;
+    }
+    std::scoped_lock lock(mutex);
+    if (block == nullptr) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_attempt) {
+            return;
+        }
+        next_attempt = now + std::chrono::seconds(1);
+        mapping = OpenFileMappingW(
+            FILE_MAP_READ, FALSE, xrfg::live_tuning::kMappingName);
+        if (mapping == nullptr) {
+            return;
+        }
+        block = static_cast<const xrfg::live_tuning::Block*>(MapViewOfFile(
+            mapping, FILE_MAP_READ, 0, 0, sizeof(xrfg::live_tuning::Block)));
+        if (block == nullptr) {
+            CloseHandle(mapping);
+            mapping = nullptr;
+            return;
+        }
+    }
+    const volatile xrfg::live_tuning::Block* live = block;
+    if (live->magic != xrfg::live_tuning::kMagic ||
+        live->version != xrfg::live_tuning::kVersion) {
+        return;
+    }
+    // One copy of the whole block, so the values used and recorded belong
+    // together even if the tray writes in the middle.
+    xrfg::live_tuning::Block values{};
+    std::memcpy(&values, block, sizeof(values));
+    const std::uint32_t sequence = values.sequence;
+    const bool enabled = values.edge_ghosting_reduction != 0U;
+    const std::uint32_t rings = std::clamp<std::uint32_t>(values.search_rings, 1U, 5U);
+    const std::uint32_t survivors =
+        std::clamp<std::uint32_t>(values.survivor_limit, 1U, 3U);
+    const std::uint32_t spread = std::min<std::uint32_t>(values.spread_trigger_centipixels, 0xFFFFU);
+    const std::uint32_t error = std::min<std::uint32_t>(values.error_trigger_255ths, 255U);
+    const std::uint32_t margin = std::min<std::uint32_t>(values.survivor_margin_255ths, 255U);
+    const std::uint32_t fixed_base =
+        std::min<std::uint32_t>(values.fixed_point_base_centipixels, 0xFFFFU);
+    const std::uint32_t fixed_speed =
+        std::min<std::uint32_t>(values.fixed_point_speed_permille, 0xFFFFU);
+
+    parameters.game_motion_padding =
+        1U | (enabled ? 2U : 0U) | (rings << 4U) | (survivors << 8U);
+    parameters.game_motion_rect = {
+        static_cast<float>(spread) / 100.0F,
+        static_cast<float>(error) / 255.0F,
+        static_cast<float>(margin) / 255.0F,
+        static_cast<float>(fixed_base) / 100.0F,
+    };
+    parameters.game_motion_scale = {
+        static_cast<float>(fixed_speed) / 1000.0F,
+        0.0F,
+    };
+    if (!recorded_any || sequence != recorded_sequence) {
+        recorded_any = true;
+        recorded_sequence = sequence;
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::embedded_configuration,
+            811,
+            static_cast<std::uint64_t>(
+                (enabled ? 1U : 0U) | (rings << 4U) | (survivors << 8U)) |
+                (static_cast<std::uint64_t>(margin) << 16U) |
+                (static_cast<std::uint64_t>(error) << 24U),
+            (static_cast<std::uint64_t>(spread) << 32U) |
+                (static_cast<std::uint64_t>(fixed_base) << 16U) | fixed_speed,
+            0);
+    }
 }
 
 constexpr UINT kSynthesisConstantCount =
@@ -954,8 +1049,24 @@ struct D3D12FrameSynthesizer::Impl {
         D3D12_ROOT_SIGNATURE_DESC root_description{};
         root_description.NumParameters = static_cast<UINT>(parameters.size());
         root_description.pParameters = parameters.data();
-        root_description.NumStaticSamplers = 0;
-        root_description.pStaticSamplers = nullptr;
+        // The bilinear taps on the two source frames are filtered in hardware
+        // (V458). A static sampler costs none of the 64-DWORD budget the
+        // constants already fill.
+        D3D12_STATIC_SAMPLER_DESC linear_clamp{};
+        linear_clamp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        linear_clamp.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        linear_clamp.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        linear_clamp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        linear_clamp.MaxAnisotropy = 1;
+        linear_clamp.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+        linear_clamp.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK;
+        linear_clamp.MinLOD = 0.0F;
+        linear_clamp.MaxLOD = 0.0F;
+        linear_clamp.ShaderRegister = 0;
+        linear_clamp.RegisterSpace = 0;
+        linear_clamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        root_description.NumStaticSamplers = 1;
+        root_description.pStaticSamplers = &linear_clamp;
         root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
         ComPtr<ID3DBlob> serialized;
@@ -2179,8 +2290,184 @@ struct D3D12FrameSynthesizer::Impl {
         if (FAILED(result)) {
             return result;
         }
+        warm_up_composition(node_mask);
         synthesis_enabled = true;
         return S_OK;
+    }
+
+    // One draw of the composition pipeline this session will use, into a
+    // scratch 8x8 target with null descriptors, waited for here. A driver
+    // that compiles a pipeline on its first draw rather than at creation -
+    // WARP does - otherwise pays it inside the first pair: 45-56 ms with the
+    // composition that added edge ghosting reduction and the background fill
+    // (V475) against 5.7 ms before them, long enough that the
+    // second pair found the slot busy, continuity reset and one synthetic was
+    // lost after every (re)initialization (the 3X presenter tests). Hardware
+    // drivers compile at creation, so there this costs one tiny draw. Nothing
+    // here touches the synthesizer's own resources, fence or slots, and any
+    // failure only skips the warm-up.
+    void warm_up_composition(UINT node_mask) noexcept {
+        try {
+            ID3D12PipelineState* pipeline =
+                backend == D3D12OpticalFlowBackend::nvidia
+                    ? (nvidia_options.bidirectional
+                           ? nvidia_bidirectional_graphics_pipeline.Get()
+                           : nvidia_graphics_pipeline.Get())
+                    : graphics_pipeline.Get();
+            if (pipeline == nullptr) {
+                return;
+            }
+            constexpr UINT kSize = 8;
+            D3D12_HEAP_PROPERTIES heap_properties{};
+            heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+            heap_properties.CreationNodeMask = node_mask;
+            heap_properties.VisibleNodeMask = node_mask;
+            D3D12_RESOURCE_DESC target_description = image_description;
+            target_description.Width = kSize;
+            target_description.Height = kSize;
+            target_description.DepthOrArraySize = 1;
+            target_description.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            target_description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+            target_description.Alignment = 0;
+            ComPtr<ID3D12Resource> target;
+            if (FAILED(device->CreateCommittedResource(
+                    &heap_properties, D3D12_HEAP_FLAG_NONE, &target_description,
+                    D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                    IID_PPV_ARGS(target.GetAddressOf())))) {
+                return;
+            }
+
+            D3D12_DESCRIPTOR_HEAP_DESC rtv_description{};
+            rtv_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+            rtv_description.NumDescriptors = 1;
+            rtv_description.NodeMask = node_mask;
+            ComPtr<ID3D12DescriptorHeap> rtv_descriptors;
+            if (FAILED(device->CreateDescriptorHeap(
+                    &rtv_description, IID_PPV_ARGS(rtv_descriptors.GetAddressOf())))) {
+                return;
+            }
+            D3D12_RENDER_TARGET_VIEW_DESC rtv_view{};
+            rtv_view.Format = view_format;
+            rtv_view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+            const D3D12_CPU_DESCRIPTOR_HANDLE rtv =
+                rtv_descriptors->GetCPUDescriptorHandleForHeapStart();
+            device->CreateRenderTargetView(target.Get(), &rtv_view, rtv);
+
+            // Null views of the shapes the shader declares (t0-t6, u0-u2):
+            // every read returns zero, which is all a warm-up needs.
+            D3D12_DESCRIPTOR_HEAP_DESC shader_description{};
+            shader_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            shader_description.NumDescriptors = kSrvDescriptorCount + kUavDescriptorCount;
+            shader_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+            shader_description.NodeMask = node_mask;
+            ComPtr<ID3D12DescriptorHeap> shader_descriptors;
+            if (FAILED(device->CreateDescriptorHeap(
+                    &shader_description,
+                    IID_PPV_ARGS(shader_descriptors.GetAddressOf())))) {
+                return;
+            }
+            const UINT increment = device->GetDescriptorHandleIncrementSize(
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            const D3D12_CPU_DESCRIPTOR_HANDLE cpu_start =
+                shader_descriptors->GetCPUDescriptorHandleForHeapStart();
+            constexpr std::array<DXGI_FORMAT, kSrvDescriptorCount> kSrvFormats{
+                DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+                DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R32_UINT,
+                DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R32_UINT,
+                DXGI_FORMAT_R16G16_FLOAT,
+            };
+            for (UINT index = 0; index < kSrvDescriptorCount; ++index) {
+                const bool array = index == 0 || index == 1 || index == 6;
+                D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+                srv.Format = kSrvFormats[index];
+                srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                if (array) {
+                    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+                    srv.Texture2DArray.MipLevels = 1;
+                    srv.Texture2DArray.ArraySize = 1;
+                } else {
+                    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                    srv.Texture2D.MipLevels = 1;
+                }
+                device->CreateShaderResourceView(
+                    nullptr, &srv, offset_cpu_handle(cpu_start, index, increment));
+            }
+            for (UINT index = 0; index < kUavDescriptorCount; ++index) {
+                D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+                uav.Format = index == 0 ? DXGI_FORMAT_B8G8R8A8_UNORM : DXGI_FORMAT_R8_UNORM;
+                uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+                device->CreateUnorderedAccessView(
+                    nullptr, nullptr, &uav,
+                    offset_cpu_handle(cpu_start, kSrvDescriptorCount + index, increment));
+            }
+
+            ComPtr<ID3D12CommandAllocator> allocator;
+            ComPtr<ID3D12GraphicsCommandList> list;
+            ComPtr<ID3D12Fence> warm_fence;
+            if (FAILED(device->CreateCommandAllocator(
+                    D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    IID_PPV_ARGS(allocator.GetAddressOf()))) ||
+                FAILED(device->CreateCommandList(
+                    node_mask, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(),
+                    pipeline, IID_PPV_ARGS(list.GetAddressOf()))) ||
+                FAILED(device->CreateFence(
+                    0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(warm_fence.GetAddressOf())))) {
+                return;
+            }
+            ID3D12DescriptorHeap* heaps[] = {shader_descriptors.Get()};
+            list->SetDescriptorHeaps(1, heaps);
+            list->SetGraphicsRootSignature(root_signature.Get());
+            const D3D12_GPU_DESCRIPTOR_HANDLE gpu_start =
+                shader_descriptors->GetGPUDescriptorHandleForHeapStart();
+            list->SetGraphicsRootDescriptorTable(0, gpu_start);
+            list->SetGraphicsRootDescriptorTable(
+                1, offset_gpu_handle(gpu_start, kSrvDescriptorCount, increment));
+            SynthesisParameters parameters{};
+            parameters.synthesis_flags = packed_synthesis_fraction(0.5F);
+            parameters.width = kSize;
+            parameters.height = kSize;
+            parameters.array_size = 1;
+            parameters.packed_width = kSize;
+            parameters.packed_height = kSize;
+            parameters.flow_width = 2;
+            parameters.flow_height = 2;
+            parameters.flow_block_size = flow_block_size;
+            list->SetGraphicsRoot32BitConstants(
+                2, kSynthesisConstantCount, &parameters, 0);
+            list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+            const D3D12_VIEWPORT viewport{
+                0.0F, 0.0F, static_cast<float>(kSize), static_cast<float>(kSize), 0.0F, 1.0F};
+            const D3D12_RECT scissor{0, 0, static_cast<LONG>(kSize), static_cast<LONG>(kSize)};
+            list->RSSetViewports(1, &viewport);
+            list->RSSetScissorRects(1, &scissor);
+            list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            list->DrawInstanced(3, 1, 0, 0);
+            if (FAILED(list->Close())) {
+                return;
+            }
+            ID3D12CommandList* lists[] = {list.Get()};
+            queue->ExecuteCommandLists(1, lists);
+            HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (done == nullptr) {
+                return;
+            }
+            if (SUCCEEDED(queue->Signal(warm_fence.Get(), 1)) &&
+                SUCCEEDED(warm_fence->SetEventOnCompletion(1, done))) {
+                // Bounded: a hung queue must not hang initialization. The
+                // resources stay alive until the wait ends or times out.
+                if (WaitForSingleObject(done, 2000) != WAIT_OBJECT_0) {
+                    // Keep them referenced past a timeout rather than free
+                    // what the GPU may still use.
+                    target.Detach();
+                    shader_descriptors.Detach();
+                    rtv_descriptors.Detach();
+                    list.Detach();
+                    allocator.Detach();
+                }
+            }
+            CloseHandle(done);
+        } catch (...) {
+        }
     }
 
     [[nodiscard]] static HRESULT fence_status(
@@ -3162,6 +3449,7 @@ struct D3D12FrameSynthesizer::Impl {
         SynthesisParameters parameters{};
         parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
             pack_input_flags(view_format);
+        apply_live_composition_tuning(parameters);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;
@@ -3580,6 +3868,7 @@ struct D3D12FrameSynthesizer::Impl {
         SynthesisParameters parameters{};
         parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
             pack_input_flags(view_format);
+        apply_live_composition_tuning(parameters);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;
@@ -3861,6 +4150,7 @@ struct D3D12FrameSynthesizer::Impl {
 
         SynthesisParameters parameters{};
         parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
+        apply_live_composition_tuning(parameters);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;

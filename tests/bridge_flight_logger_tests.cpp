@@ -179,6 +179,45 @@ int main(int argc, char** argv) {
                     std::string::npos,
             "bridge log is missing V049 NVIDIA GPU timing fields");
 
+        // Past the cap the full file is kept as <name>.1 and recording goes on
+        // in a fresh file under the same name, which starts with the session
+        // records: a wrap must not take what was recorded just before it.
+        const fs::path rotation_directory = temporary.path / "rotation";
+        fs::create_directories(rotation_directory);
+        write(
+            rotation_directory / "ofxr_bridge.ini",
+            "[diagnostics]\r\n"
+            "logging_enabled=1\r\n"
+            "max_file_mb=1\r\n"
+            "flush_each_event=0\r\n");
+        xrfg::BridgeFlightLogger rotating;
+        rotating.initialize(rotation_directory);
+        require(rotating.enabled(), "rotation logger did not start");
+        const fs::path rotating_path = rotating.log_path();
+        rotating.event(xrfg::BridgeFlightOperation::runtime_identity, 5, 6, 7, 8);
+        // About 100 bytes a record: 15,000 is past one megabyte once, not twice.
+        for (std::uint64_t index = 0; index < 15000; ++index) {
+            rotating.event(
+                xrfg::BridgeFlightOperation::synthesis_pair, 0, index, 1, 2);
+        }
+        rotating.event(
+            xrfg::BridgeFlightOperation::synthesis_pair, 0, 424242, 1, 2);
+        rotating.shutdown();
+        fs::path previous_path = rotating_path;
+        previous_path += ".1";
+        require(fs::exists(previous_path), "a full log was not kept as .1");
+        const std::string previous = read(previous_path);
+        const std::string current = read(rotating_path);
+        require(previous.size() <= 1024U * 1024U && current.size() <= 1024U * 1024U,
+            "a rotated log is over its cap");
+        require(previous.find("op=synthesis_pair result=0 dur_us=0 a=0 b=1 c=2") !=
+                std::string::npos,
+            "the kept log lost the records from before the cap");
+        require(current.find("op=runtime_identity result=5") != std::string::npos,
+            "the fresh log does not start with the session records");
+        require(current.find("a=424242 b=1 c=2") != std::string::npos,
+            "the fresh log lost the records after the cap");
+
         std::cout << "Bridge flight logger tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

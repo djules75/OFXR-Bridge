@@ -5,6 +5,11 @@ Texture2D<uint> FlowAuxiliary : register(t3);
 Texture2D<int2> ForwardFlow : register(t4);
 Texture2D<uint> ForwardAuxiliary : register(t5);
 Texture2DArray<float2> GameMotionVectors : register(t6);
+// Linear filtering with clamped addressing, a static sampler in the root
+// signature: one fetch per bilinear tap where four loads and three lerps used
+// to be written by hand (V458; measured 0.10 ms per eye less composition on
+// an RTX 5090, same image).
+SamplerState LinearClamp : register(s0);
 RWTexture2D<float4> PackedColor : register(u0);
 // The NVIDIA pack is compiled twice: once for BGRA8 inputs, and once with
 // XRFG_NVIDIA_LUMA_INPUT for R8 inputs, which the engine takes as grayscale
@@ -56,6 +61,48 @@ cbuffer SynthesisParameters : register(b0) {
 
 uint repeated_capture_flag() {
     return SynthesisFlags & 1u;
+}
+
+// The tray's live tuning window for edge ghosting reduction
+// (xrfg::live_tuning), carried in the game-motion constants, which only the
+// game-motion branch reads. Bit 0 of GameMotionPadding says the values are
+// there; without it - no window, or a game-motion pair, whose padding is the
+// guide's output height - every accessor returns its built-in value, the set
+// chosen in the headset on V475 (2026-10-17).
+//   GameMotionPadding: bit 1 edge ghosting reduction on, bits 4-7 search
+//     rings, bits 8-11 survivors.
+//   GameMotionRect: spread trigger (px), endpoint error trigger, survivor
+//     margin, lands-on-itself tolerance (px).
+//   GameMotionScale.x: lands-on-itself tolerance per pixel of speed.
+bool live_tuning_present() {
+    return UseGameMotion == 0u && (GameMotionPadding & 1u) != 0u;
+}
+
+bool live_flag(uint bit, bool built_in) {
+    return live_tuning_present() ? (GameMotionPadding & bit) != 0u : built_in;
+}
+
+uint live_field(uint shift, uint built_in) {
+    return live_tuning_present() ? (GameMotionPadding >> shift) & 0xfu : built_in;
+}
+
+bool edge_ghosting_reduction_enabled() { return live_flag(2u, true); }
+uint midpoint_search_rings() { return clamp(live_field(4u, 3u), 1u, 5u); }
+uint midpoint_survivor_limit() { return clamp(live_field(8u, 1u), 1u, 3u); }
+float midpoint_spread_trigger() {
+    return live_tuning_present() ? GameMotionRect.x : 8.0;
+}
+float midpoint_error_trigger() {
+    return live_tuning_present() ? GameMotionRect.y : 24.0 / 255.0;
+}
+float midpoint_survivor_margin() {
+    return live_tuning_present() ? GameMotionRect.z : 2.0 / 255.0;
+}
+float fixed_point_tolerance() {
+    return live_tuning_present() ? GameMotionRect.w : 1.0;
+}
+float fixed_point_speed_tolerance() {
+    return live_tuning_present() ? GameMotionScale.x : 0.1;
 }
 
 // The source views are the swapchain's own format. On an sRGB swapchain a
@@ -219,46 +266,18 @@ MappedCoordinate map_source_to_target(
     return output;
 }
 
+// Coordinates are pixel indices, texel centres on integers. Clamped
+// addressing returns the edge texel past the border, as the coordinate clamp
+// of the hand-written version did, and on sRGB views the hardware filters
+// after decoding, as its loads did.
 float4 bilinear_previous_source(float2 coordinate, uint slice) {
-    float2 bounded = clamp(
-        coordinate,
-        float2(0.0, 0.0),
-        float2(float(Width - 1), float(Height - 1)));
-    int2 top_left = int2(floor(bounded));
-    int2 bottom_right = min(
-        top_left + int2(1, 1),
-        int2(int(Width) - 1, int(Height) - 1));
-    float2 fraction = bounded - float2(top_left);
-    float4 top = lerp(
-        PreviousFrame.Load(int4(top_left, int(slice), 0)),
-        PreviousFrame.Load(int4(bottom_right.x, top_left.y, int(slice), 0)),
-        fraction.x);
-    float4 bottom = lerp(
-        PreviousFrame.Load(int4(top_left.x, bottom_right.y, int(slice), 0)),
-        PreviousFrame.Load(int4(bottom_right, int(slice), 0)),
-        fraction.x);
-    return lerp(top, bottom, fraction.y);
+    float2 uv = (coordinate + 0.5) / float2(float(Width), float(Height));
+    return PreviousFrame.SampleLevel(LinearClamp, float3(uv, float(slice)), 0.0);
 }
 
 float4 bilinear_current_source(float2 coordinate, uint slice) {
-    float2 bounded = clamp(
-        coordinate,
-        float2(0.0, 0.0),
-        float2(float(Width - 1), float(Height - 1)));
-    int2 top_left = int2(floor(bounded));
-    int2 bottom_right = min(
-        top_left + int2(1, 1),
-        int2(int(Width) - 1, int(Height) - 1));
-    float2 fraction = bounded - float2(top_left);
-    float4 top = lerp(
-        CurrentFrame.Load(int4(top_left, int(slice), 0)),
-        CurrentFrame.Load(int4(bottom_right.x, top_left.y, int(slice), 0)),
-        fraction.x);
-    float4 bottom = lerp(
-        CurrentFrame.Load(int4(top_left.x, bottom_right.y, int(slice), 0)),
-        CurrentFrame.Load(int4(bottom_right, int(slice), 0)),
-        fraction.x);
-    return lerp(top, bottom, fraction.y);
+    float2 uv = (coordinate + 0.5) / float2(float(Width), float(Height));
+    return CurrentFrame.SampleLevel(LinearClamp, float3(uv, float(slice)), 0.0);
 }
 
 // The ratio the flow input was packed at, relative to the source image.
@@ -713,6 +732,251 @@ bool fast_stationary_patch(float2 pixel, uint slice, float4 current) {
     return stationary;
 }
 
+// The flow cell a full-resolution pixel of this view reads, and the pixel at a
+// cell's centre: inverses of each other through the input scale, the stacked
+// eye offset and the block size.
+int2 flow_cell_for_pixel(float2 pixel, uint slice) {
+    float2 scaled = flow_input_coordinate(pixel);
+    float2 packed = float2(scaled.x, scaled.y + float(slice * PackedEyeStride));
+    return int2(floor((packed + 0.5) / float(FlowBlockSize)));
+}
+
+float2 pixel_for_flow_cell(int2 cell, uint slice) {
+    float2 packed = (float2(cell) + 0.5) * float(FlowBlockSize) - 0.5;
+    float2 scaled = float2(packed.x, packed.y - float(slice * PackedEyeStride));
+    return (scaled + 0.5) / max(flow_input_scale(), float2(1.0e-6, 1.0e-6)) - 0.5;
+}
+
+// The scene's own motion at a current-frame pixel: the flow there, less the
+// head's part where the flow input still carries it (FidelityFX).
+bool residual_from_raw(
+    float2 current_pixel,
+    float2 raw,
+    bool input_pose_compensated,
+    out float2 residual) {
+    residual = raw;
+    if (input_pose_compensated) {
+        return true;
+    }
+    MappedCoordinate mapped = map_target_to_source(
+        current_pixel,
+        PreviousMappings[ViewIndex]);
+    residual = raw - (mapped.coordinate - current_pixel);
+    return mapped.valid >= 0.5;
+}
+
+bool residual_flow_at(
+    float2 current_pixel,
+    float value_scale,
+    bool input_pose_compensated,
+    out float2 residual) {
+    float2 raw = flow_for_pixel(
+        current_pixel, Slice, ViewIndex, value_scale, false);
+    return residual_from_raw(
+        current_pixel, raw, input_pose_compensated, residual);
+}
+
+bool residual_flow_of_cell(
+    int2 cell,
+    FlowGridBounds bounds,
+    float value_scale,
+    bool input_pose_compensated,
+    out float2 residual) {
+    bool inside = all(cell >= bounds.minimum) && all(cell <= bounds.maximum);
+    float2 raw = float2(BackwardFlow.Load(int3(
+        clamp(cell, bounds.minimum, bounds.maximum), 0))) * value_scale /
+        max(flow_input_scale(), float2(1.0e-6, 1.0e-6));
+    float magnitude = length(raw);
+    raw = magnitude > 512.0 ? raw * (512.0 / magnitude) : raw;
+    bool mapped = residual_from_raw(
+        pixel_for_flow_cell(cell, Slice), raw, input_pose_compensated, residual);
+    return inside && mapped;
+}
+
+// Whether a vector belongs at an in-between pixel: the current-frame pixel
+// it would come from, p - (1 - t) c, carries it itself. The cell under that
+// origin, not a bilinear blend: one load, and a blend across the boundary is
+// exactly what the test must not average away.
+bool vector_lands_on_itself(
+    float2 pixel,
+    float2 candidate,
+    FlowGridBounds bounds,
+    float value_scale,
+    bool input_pose_compensated) {
+    float2 at_origin = float2(0.0, 0.0);
+    bool known = residual_flow_of_cell(
+        flow_cell_for_pixel(pixel - candidate * (1.0 - synthesis_fraction()), Slice),
+        bounds,
+        value_scale,
+        input_pose_compensated,
+        at_origin);
+    return known &&
+        length(at_origin - candidate) <=
+            fixed_point_tolerance() + fixed_point_speed_tolerance() * length(candidate);
+}
+
+// Cells whose vectors are tried for an in-between pixel beside a motion
+// boundary: the eight neighbours, then rings further out in the eight
+// directions. By default three rings are searched, so a moving object up to
+// about four cells away (32 screen pixels at the default half-scale NVIDIA
+// input) can lend its vector; the live window can stop after the first ring
+// or reach on to six and eight cells.
+static const int2 kMidpointCandidateCells[40] = {
+    int2(-1, -1), int2(0, -1), int2(1, -1),
+    int2(-1, 0), int2(1, 0),
+    int2(-1, 1), int2(0, 1), int2(1, 1),
+    int2(-2, -2), int2(0, -2), int2(2, -2),
+    int2(-2, 0), int2(2, 0),
+    int2(-2, 2), int2(0, 2), int2(2, 2),
+    int2(-4, -4), int2(0, -4), int2(4, -4),
+    int2(-4, 0), int2(4, 0),
+    int2(-4, 4), int2(0, 4), int2(4, 4),
+    int2(-6, -6), int2(0, -6), int2(6, -6),
+    int2(-6, 0), int2(6, 0),
+    int2(-6, 6), int2(0, 6), int2(6, 6),
+    int2(-8, -8), int2(0, -8), int2(8, -8),
+    int2(-8, 0), int2(8, 0),
+    int2(-8, 8), int2(0, 8), int2(8, 8)
+};
+
+// How far apart the vectors of the four cells the bilinear flow at this pixel
+// blends are: near zero inside one moving surface, the difference of the two
+// motions beside a boundary between them.
+float flow_cell_spread(int2 centre_cell, float2 pixel, FlowGridBounds bounds, float value_scale) {
+    float2 scaled = flow_input_coordinate(pixel);
+    float2 packed = float2(scaled.x, scaled.y + float(Slice * PackedEyeStride));
+    float2 flow_coordinate = (packed + 0.5) / float(FlowBlockSize) - 0.5;
+    int2 top_left = int2(floor(clamp(
+        flow_coordinate, float2(bounds.minimum), float2(bounds.maximum))));
+    int2 bottom_right = min(top_left + int2(1, 1), bounds.maximum);
+    float2 a = load_backward_flow_clamped(top_left, bounds.minimum, bounds.maximum);
+    float2 b = load_backward_flow_clamped(
+        int2(bottom_right.x, top_left.y), bounds.minimum, bounds.maximum);
+    float2 c = load_backward_flow_clamped(
+        int2(top_left.x, bottom_right.y), bounds.minimum, bounds.maximum);
+    float2 d = load_backward_flow_clamped(bottom_right, bounds.minimum, bounds.maximum);
+    float2 low = min(min(a, b), min(c, d));
+    float2 high = max(max(a, b), max(c, d));
+    return length(high - low) * value_scale /
+        max(flow_input_scale().x, 1.0e-6);
+}
+
+struct MidpointMotion {
+    float2 residual;
+    // The current-frame pixel the vector belongs to: the in-between pixel
+    // itself for the vector read there, p - (1 - t) c for a candidate c.
+    float2 origin;
+    CameraSample previous_sample;
+    CameraSample current_sample;
+};
+
+void sample_midpoint_endpoints(
+    float2 pixel,
+    float2 residual,
+    inout MidpointMotion motion) {
+    float t = synthesis_fraction();
+    motion.residual = residual;
+    motion.previous_sample = sample_previous_target(
+        pixel + residual * t, Slice, ViewIndex);
+    motion.current_sample = sample_current_target(
+        pixel - residual * (1.0 - t), Slice, ViewIndex);
+}
+
+float midpoint_endpoint_error(MidpointMotion motion) {
+    return motion.previous_sample.valid >= 0.5 &&
+            motion.current_sample.valid >= 0.5
+        ? rgb_error(motion.previous_sample.color, motion.current_sample.color)
+        : 1.0e6;
+}
+
+// Edge ghosting reduction: the vector that carries the in-between pixel.
+// The flow belongs to the
+// current frame's pixels, so the vector read at the in-between pixel itself
+// is the motion of whatever the current frame shows there: beside a moving
+// edge that is the background where the object has already moved on - the
+// object's trailing half then lands as a half-transparent ghost. A vector c
+// is right for the in-between pixel when the current-frame pixel it comes
+// from, p - (1 - t) c, carries c itself. Started from the vector at p,
+// iterating that relation (as the DLSS-vector path does) stays on the
+// background at a trailing edge, so the object's own vector is looked for in
+// the cells around p instead: each candidate that passes the test is kept if
+// its two endpoints agree clearly better than the vector read at p. Pixels
+// where the cells around p agree and the endpoints already match skip the
+// search, so only motion boundaries and mismatches pay for it.
+MidpointMotion choose_midpoint_motion(
+    float2 pixel,
+    float2 anchored_residual,
+    float value_scale,
+    bool input_pose_compensated) {
+    float t = synthesis_fraction();
+    MidpointMotion best = (MidpointMotion)0;
+    best.origin = pixel;
+    sample_midpoint_endpoints(pixel, anchored_residual, best);
+    float best_error = midpoint_endpoint_error(best);
+
+    int2 centre = flow_cell_for_pixel(pixel, Slice);
+    FlowGridBounds bounds = flow_grid_bounds(
+        PreviousMappings[ViewIndex].TargetRect,
+        Slice);
+    float spread = flow_cell_spread(centre, pixel, bounds, value_scale);
+    bool search = repeated_capture_flag() == 0 &&
+        edge_ghosting_reduction_enabled() &&
+        (spread > midpoint_spread_trigger() || best_error > midpoint_error_trigger());
+
+    // Candidates are first held to the fixed-point test, which reads only the
+    // small flow texture; the endpoints of at most two survivors are then
+    // compared on the full-resolution frames. A wave of pixels runs as long
+    // as its slowest pixel, so the expensive part is kept short.
+    float2 survivors[3] = {float2(0.0, 0.0), float2(0.0, 0.0), float2(0.0, 0.0)};
+    uint survivor_limit = midpoint_survivor_limit();
+    uint candidate_limit = 1u + 8u * midpoint_search_rings();
+    uint survivor_count = 0;
+    float2 last_tried = anchored_residual;
+    [loop] for (uint i = 0; search && i < candidate_limit && survivor_count < survivor_limit; ++i) {
+        float2 candidate = float2(0.0, 0.0);
+        bool available = false;
+        if (i == 0) {
+            // One step of the fixed-point iteration from the vector at p.
+            available = residual_flow_at(
+                pixel - anchored_residual * (1.0 - t),
+                value_scale,
+                input_pose_compensated,
+                candidate);
+        } else {
+            available = residual_flow_of_cell(
+                centre + kMidpointCandidateCells[i - 1],
+                bounds,
+                value_scale,
+                input_pose_compensated,
+                candidate);
+        }
+        bool fresh = available &&
+            length(candidate - anchored_residual) >= 0.5 &&
+            length(candidate - last_tried) >= 0.5 &&
+            (survivor_count == 0 || length(candidate - survivors[0]) >= 0.5) &&
+            (survivor_count < 2 || length(candidate - survivors[1]) >= 0.5);
+        [branch] if (fresh) {
+            last_tried = candidate;
+            if (vector_lands_on_itself(
+                    pixel, candidate, bounds, value_scale, input_pose_compensated)) {
+                survivors[survivor_count] = candidate;
+                ++survivor_count;
+            }
+        }
+    }
+    [loop] for (uint k = 0; k < survivor_count; ++k) {
+        MidpointMotion trial = best;
+        trial.origin = pixel - survivors[k] * (1.0 - t);
+        sample_midpoint_endpoints(pixel, survivors[k], trial);
+        float error = midpoint_endpoint_error(trial);
+        if (error + midpoint_survivor_margin() < best_error) {
+            best = trial;
+            best_error = error;
+        }
+    }
+    return best;
+}
+
 struct FullscreenVertex {
     float4 position : SV_Position;
 };
@@ -766,6 +1030,10 @@ float4 synthesize_midpoint(
                     synthesis_fraction()));
             } else {
                 float2 raw_backward = float2(0.0, 0.0);
+                // The current-frame pixel the flow vector was read at: the
+                // cost, the bidirectional check and the endpoint validation
+                // all describe that vector.
+                float2 flow_origin = pixel;
                 CameraSample previous_sample = (CameraSample)0;
                 CameraSample current_sample = (CameraSample)0;
                 bool endpoints_valid = true;
@@ -822,12 +1090,17 @@ float4 synthesize_midpoint(
                     float2 residual_backward = input_pose_compensated
                         ? raw_backward
                         : raw_backward - (previous_coverage.coordinate - pixel);
-                    previous_sample = sample_previous_target(
-                        pixel + residual_backward * synthesis_fraction(), Slice, ViewIndex);
-                    current_sample = sample_current_target(
-                        pixel - residual_backward * (1.0 - synthesis_fraction()),
-                        Slice,
-                        ViewIndex);
+                    MidpointMotion motion = choose_midpoint_motion(
+                        pixel,
+                        residual_backward,
+                        flow_value_scale,
+                        input_pose_compensated);
+                    previous_sample = motion.previous_sample;
+                    current_sample = motion.current_sample;
+                    flow_origin = motion.origin;
+                    if (input_pose_compensated) {
+                        raw_backward = motion.residual;
+                    }
                 }
                 if (endpoints_valid) {
                     if (previous_sample.valid >= 0.5 && current_sample.valid >= 0.5) {
@@ -849,10 +1122,10 @@ float4 synthesize_midpoint(
                         if (repeated_capture_flag() == 0) {
                             if (validate_fast) {
                                 confidence *= fast_endpoint_confidence(
-                                    pixel, raw_backward, Slice, input_pose_compensated);
+                                    flow_origin, raw_backward, Slice, input_pose_compensated);
                             }
                             if (use_nvidia_bidirectional) {
-                                float2 previous_coordinate = pixel + raw_backward;
+                                float2 previous_coordinate = flow_origin + raw_backward;
                                 if (coordinate_inside_rect(
                                         previous_coordinate,
                                         input_pose_compensated
@@ -870,7 +1143,7 @@ float4 synthesize_midpoint(
                                         1.0 - smoothstep(2.0, 6.0, cycle_error);
                                     float maximum_cost = max(
                                         nvidia_cost_for_pixel(
-                                            pixel,
+                                            flow_origin,
                                             Slice,
                                             ViewIndex),
                                         nvidia_forward_cost_for_pixel(
@@ -887,7 +1160,7 @@ float4 synthesize_midpoint(
                             } else {
                                 cost_confidence = saturate(
                                     1.0 - nvidia_cost_for_pixel(
-                                        pixel,
+                                        flow_origin,
                                         Slice,
                                         ViewIndex) / 255.0);
                             }

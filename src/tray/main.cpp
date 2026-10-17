@@ -1,4 +1,5 @@
 #include "xrfg/implicit_layer.hpp"
+#include "xrfg/live_tuning.hpp"
 #include "xrfg/standalone_launcher.hpp"
 #include "resource.h"
 
@@ -9,6 +10,8 @@
 
 #include <array>
 #include <algorithm>
+#include <cstdint>
+#include <cwchar>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -32,6 +35,9 @@ constexpr wchar_t kCleanupArgument[] = L"--cleanup-manual-arm";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kTrayId = 1;
 constexpr int kPauseHotkeyId = 1;
+// Temporary, for A/B in the headset: Ctrl+Alt+F8 toggles edge ghosting
+// reduction through the live tuning block. See toggle_edge_ghosting_reduction.
+constexpr int kEdgeGhostingHotkeyId = 2;
 constexpr UINT kArmPollMilliseconds = 250;
 constexpr std::uint32_t kImplementationVersion = XRFG_IMPLEMENTATION_VERSION;
 // One Donate entry each, creator first, as in the About box and the README.
@@ -51,6 +57,7 @@ enum MenuCommand : UINT {
     backend_nvidia_medium = 112,
     backend_nvidia_fast = 113,
     toggle_nvidia_bidirectional = 114,
+    show_live_tuning = 128,
     nvidia_scale_full = 115,
     nvidia_scale_three_quarter = 116,
     nvidia_scale_half = 117,
@@ -97,7 +104,19 @@ struct AppState {
     HICON disarmed_icon{};
     UINT taskbar_created_message{};
     bool armed{};
+    // The live tuning window for edge ghosting reduction: hidden rather
+    // than destroyed on close so it keeps its position, and the shared block
+    // it writes (xrfg::live_tuning). The block lives as long as the tray, so
+    // values set once hold for every game started after them.
+    HWND tuning_window{};
+    std::array<HWND, 1> tuning_switches{};
+    std::array<HWND, 7> tuning_sliders{};
+    std::array<HWND, 7> tuning_labels{};
+    HANDLE tuning_mapping{};
+    xrfg::live_tuning::Block* tuning_block{};
 };
+
+constexpr wchar_t kTuningWindowClass[] = L"OFXRBridgeLiveTuning";
 
 [[nodiscard]] std::wstring last_error_message(std::wstring_view action) {
     const DWORD code = GetLastError();
@@ -925,6 +944,277 @@ void change_pause_hotkey(AppState& state) {
     }
 }
 
+// The live tuning window. Each slider maps its integer position to one field
+// of xrfg::live_tuning::Block; the layer picks the values up on its next pair.
+// It opens on the composition's built-in values (live_tuning::kDefaults), so
+// nothing changes until a control moves.
+struct TuningSlider {
+    const wchar_t* name;
+    int minimum;
+    int maximum;
+    std::uint32_t xrfg::live_tuning::Block::*field;
+    std::uint32_t per_step;  // block units per slider step
+    double display_scale;    // shown value per slider step
+    const wchar_t* unit;
+    const wchar_t* hint;
+};
+
+constexpr std::array<TuningSlider, 7> kTuningSliders{{
+    {L"Search reach", 1, 5, &xrfg::live_tuning::Block::search_rings, 1U, 1.0,
+     L"", L"farther finds faster objects (wings)"},
+    {L"Search survivors", 1, 3, &xrfg::live_tuning::Block::survivor_limit, 1U, 1.0,
+     L"", L"candidates compared at full resolution: the costly step"},
+    {L"Search trigger: flow spread", 0, 40,
+     &xrfg::live_tuning::Block::spread_trigger_centipixels, 25U, 0.25, L" px",
+     L"lower = more edge pixels search (cost)"},
+    {L"Search trigger: endpoint error", 0, 64,
+     &xrfg::live_tuning::Block::error_trigger_255ths, 1U, 1.0, L"/255",
+     L"lower = more mismatching pixels search (cost)"},
+    {L"Survivor margin", 0, 16, &xrfg::live_tuning::Block::survivor_margin_255ths,
+     1U, 1.0, L"/255", L"how much better a found vector must match to win"},
+    {L"Lands-on-itself tolerance", 0, 40,
+     &xrfg::live_tuning::Block::fixed_point_base_centipixels, 25U, 0.25, L" px",
+     L"higher = more candidates accepted, more risk"},
+    {L"Lands-on-itself, per px of speed", 0, 50,
+     &xrfg::live_tuning::Block::fixed_point_speed_permille, 10U, 0.01, L"",
+     L"extra allowance for fast motion"},
+}};
+
+// Unticked, edge ghosting reduction is off: the composition V476 ran, for an
+// A/B in the same scene.
+struct TuningSwitch {
+    const wchar_t* label;
+    std::uint32_t xrfg::live_tuning::Block::*field;
+};
+
+constexpr std::array<TuningSwitch, 1> kTuningSwitches{{
+    {L"Edge ghosting reduction - untick to compare without it",
+     &xrfg::live_tuning::Block::edge_ghosting_reduction},
+}};
+
+constexpr int kTuningSwitchBaseId = 2101;
+constexpr int kTuningResetId = 2120;
+
+[[nodiscard]] std::wstring tuning_slider_text(const TuningSlider& slider, int position) {
+    wchar_t text[240]{};
+    if (slider.field == &xrfg::live_tuning::Block::search_rings) {
+        // Ring n of the shader's candidate table lies this many cells out.
+        constexpr std::array<int, 6> kRingCells{0, 1, 2, 4, 6, 8};
+        swprintf_s(text, L"%s: %d cells  -  %s", slider.name,
+            kRingCells[static_cast<std::size_t>(std::clamp(position, 1, 5))], slider.hint);
+    } else {
+        swprintf_s(text, L"%s: %.2f%s  -  %s", slider.name,
+            static_cast<double>(position) * slider.display_scale, slider.unit,
+            slider.hint);
+    }
+    return text;
+}
+
+void write_tuning(AppState& state) {
+    xrfg::live_tuning::Block* block = state.tuning_block;
+    if (block == nullptr) {
+        return;
+    }
+    for (std::size_t index = 0; index < kTuningSliders.size(); ++index) {
+        const int position = static_cast<int>(
+            SendMessageW(state.tuning_sliders[index], TBM_GETPOS, 0, 0));
+        block->*kTuningSliders[index].field =
+            static_cast<std::uint32_t>(position) * kTuningSliders[index].per_step;
+        SetWindowTextW(state.tuning_labels[index],
+            tuning_slider_text(kTuningSliders[index], position).c_str());
+    }
+    for (std::size_t index = 0; index < kTuningSwitches.size(); ++index) {
+        block->*kTuningSwitches[index].field =
+            SendMessageW(state.tuning_switches[index], BM_GETCHECK, 0, 0) == BST_CHECKED
+                ? 1U
+                : 0U;
+    }
+    MemoryBarrier();
+    InterlockedIncrement(reinterpret_cast<volatile LONG*>(&block->sequence));
+}
+
+void reset_tuning_controls(AppState& state) {
+    constexpr xrfg::live_tuning::Block defaults = xrfg::live_tuning::kDefaults;
+    for (std::size_t index = 0; index < kTuningSliders.size(); ++index) {
+        const TuningSlider& slider = kTuningSliders[index];
+        SendMessageW(state.tuning_sliders[index], TBM_SETPOS, TRUE,
+            static_cast<LPARAM>(defaults.*slider.field / slider.per_step));
+    }
+    for (std::size_t index = 0; index < kTuningSwitches.size(); ++index) {
+        SendMessageW(state.tuning_switches[index], BM_SETCHECK,
+            defaults.*kTuningSwitches[index].field != 0U ? BST_CHECKED : BST_UNCHECKED,
+            0);
+    }
+}
+
+LRESULT CALLBACK tuning_procedure(
+    HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto* state = reinterpret_cast<AppState*>(
+        GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lparam);
+        SetWindowLongPtrW(
+            window, GWLP_USERDATA,
+            reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+    }
+    switch (message) {
+    case WM_HSCROLL:
+        if (state != nullptr) write_tuning(*state);
+        return 0;
+    case WM_COMMAND:
+        if (state != nullptr && HIWORD(wparam) == BN_CLICKED) {
+            if (LOWORD(wparam) == kTuningResetId) {
+                reset_tuning_controls(*state);
+            }
+            write_tuning(*state);
+        }
+        return 0;
+    case WM_CLOSE:
+        ShowWindow(window, SW_HIDE);
+        return 0;
+    default:
+        return DefWindowProcW(window, message, wparam, lparam);
+    }
+}
+
+// Creates the shared block on the built-in values the first time either the
+// window or the hotkey needs it.
+[[nodiscard]] bool ensure_tuning_block(AppState& state) {
+    if (state.tuning_block != nullptr) {
+        return true;
+    }
+    state.tuning_mapping = CreateFileMappingW(
+        INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+        sizeof(xrfg::live_tuning::Block), xrfg::live_tuning::kMappingName);
+    if (state.tuning_mapping != nullptr) {
+        state.tuning_block = static_cast<xrfg::live_tuning::Block*>(
+            MapViewOfFile(state.tuning_mapping, FILE_MAP_WRITE, 0, 0,
+                sizeof(xrfg::live_tuning::Block)));
+    }
+    if (state.tuning_block == nullptr) {
+        return false;
+    }
+    // Values first, then the header that makes the block valid.
+    xrfg::live_tuning::Block values = xrfg::live_tuning::kDefaults;
+    values.magic = 0;
+    *state.tuning_block = values;
+    MemoryBarrier();
+    state.tuning_block->magic = xrfg::live_tuning::kMagic;
+    return true;
+}
+
+// Temporary: Ctrl+Alt+F8 flips edge ghosting reduction in the block, and in
+// the window's checkbox when it is open, with a different beep for on and off
+// so the state can be told apart in the headset.
+void toggle_edge_ghosting_reduction(AppState& state) {
+    if (!ensure_tuning_block(state)) {
+        return;
+    }
+    const bool enabled = state.tuning_block->edge_ghosting_reduction == 0U;
+    if (state.tuning_window != nullptr) {
+        SendMessageW(state.tuning_switches[0], BM_SETCHECK,
+            enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+        write_tuning(state);
+    } else {
+        state.tuning_block->edge_ghosting_reduction = enabled ? 1U : 0U;
+        MemoryBarrier();
+        InterlockedIncrement(
+            reinterpret_cast<volatile LONG*>(&state.tuning_block->sequence));
+    }
+    static_cast<void>(MessageBeep(enabled ? MB_ICONASTERISK : MB_ICONHAND));
+}
+
+void show_tuning_window(AppState& state) {
+    if (!ensure_tuning_block(state)) {
+        show_error(state.window, last_error_message(L"Creating the live tuning block"));
+        return;
+    }
+    if (state.tuning_window == nullptr) {
+        const HINSTANCE instance = GetModuleHandleW(nullptr);
+        WNDCLASSEXW tuning_class{};
+        tuning_class.cbSize = sizeof(tuning_class);
+        tuning_class.lpfnWndProc = tuning_procedure;
+        tuning_class.hInstance = instance;
+        tuning_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        tuning_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        tuning_class.lpszClassName = kTuningWindowClass;
+        static_cast<void>(RegisterClassExW(&tuning_class));
+        INITCOMMONCONTROLSEX controls{};
+        controls.dwSize = sizeof(controls);
+        controls.dwICC = ICC_BAR_CLASSES;
+        static_cast<void>(InitCommonControlsEx(&controls));
+        constexpr int kSwitchHeight = 26;
+        constexpr int kRowHeight = 52;
+        const int sliders_top =
+            12 + static_cast<int>(kTuningSwitches.size()) * kSwitchHeight + 8;
+        const int client_height = sliders_top +
+            static_cast<int>(kTuningSliders.size()) * kRowHeight + 44;
+        RECT frame{0, 0, 600, client_height};
+        AdjustWindowRectEx(&frame, WS_CAPTION | WS_SYSMENU, FALSE,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW);
+        state.tuning_window = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kTuningWindowClass,
+            L"OFXR edge ghosting reduction (live)",
+            WS_CAPTION | WS_SYSMENU,
+            CW_USEDEFAULT, CW_USEDEFAULT,
+            frame.right - frame.left, frame.bottom - frame.top,
+            nullptr, nullptr, instance, &state);
+        if (state.tuning_window == nullptr) {
+            show_error(state.window, last_error_message(L"Creating the tuning window"));
+            return;
+        }
+        const HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        for (std::size_t index = 0; index < kTuningSwitches.size(); ++index) {
+            state.tuning_switches[index] = CreateWindowExW(
+                0, L"BUTTON", kTuningSwitches[index].label,
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                14, 12 + static_cast<int>(index) * kSwitchHeight, 570, 22,
+                state.tuning_window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(
+                    kTuningSwitchBaseId + static_cast<int>(index))),
+                instance, nullptr);
+            SendMessageW(state.tuning_switches[index], WM_SETFONT,
+                reinterpret_cast<WPARAM>(font), TRUE);
+        }
+        for (std::size_t index = 0; index < kTuningSliders.size(); ++index) {
+            const int top = sliders_top + static_cast<int>(index) * kRowHeight;
+            state.tuning_labels[index] = CreateWindowExW(
+                0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+                14, top, 570, 18,
+                state.tuning_window, nullptr, instance, nullptr);
+            SendMessageW(state.tuning_labels[index], WM_SETFONT,
+                reinterpret_cast<WPARAM>(font), TRUE);
+            state.tuning_sliders[index] = CreateWindowExW(
+                0, TRACKBAR_CLASSW, L"",
+                WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_AUTOTICKS,
+                8, top + 18, 580, 30,
+                state.tuning_window, nullptr, instance, nullptr);
+            const TuningSlider& slider = kTuningSliders[index];
+            const bool fine = slider.maximum - slider.minimum > 16;
+            SendMessageW(state.tuning_sliders[index], TBM_SETRANGE, TRUE,
+                MAKELPARAM(slider.minimum, slider.maximum));
+            SendMessageW(state.tuning_sliders[index], TBM_SETTICFREQ, fine ? 4 : 1, 0);
+            SendMessageW(state.tuning_sliders[index], TBM_SETPAGESIZE, 0, fine ? 4 : 1);
+        }
+        reset_tuning_controls(state);
+        SendMessageW(state.tuning_switches[0], BM_SETCHECK,
+            state.tuning_block->edge_ghosting_reduction != 0U ? BST_CHECKED
+                                                             : BST_UNCHECKED,
+            0);
+        const HWND reset = CreateWindowExW(
+            0, L"BUTTON", L"Reset to defaults",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            14, client_height - 36, 170, 26,
+            state.tuning_window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kTuningResetId)),
+            instance, nullptr);
+        SendMessageW(reset, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        write_tuning(state);
+    }
+    ShowWindow(state.tuning_window, SW_SHOWNORMAL);
+    SetForegroundWindow(state.tuning_window);
+}
+
 void show_context_menu(AppState& state) {
     HMENU menu = CreatePopupMenu();
     HMENU backend_menu = CreatePopupMenu();
@@ -1014,6 +1304,11 @@ void show_context_menu(AppState& state) {
             (state.settings.nvidia_bidirectional ? MF_CHECKED : MF_UNCHECKED),
         toggle_nvidia_bidirectional,
         L"NVIDIA bidirectional consistency");
+    AppendMenuW(
+        backend_menu,
+        MF_STRING,
+        show_live_tuning,
+        L"Edge ghosting reduction tuning (live)...");
     AppendMenuW(
         menu,
         MF_POPUP,
@@ -1318,6 +1613,9 @@ void handle_command(AppState& state, UINT command) {
                 : L"Recording stops within a moment, with one hitch, and the "
                   L"log file is closed.");
         break;
+    case show_live_tuning:
+        show_tuning_window(state);
+        break;
     case open_logs: {
         const auto directory = runtime_directory(state.local_directory);
         std::error_code ignored;
@@ -1432,6 +1730,7 @@ LRESULT CALLBACK window_procedure(
         return 0;
     case WM_HOTKEY:
         if (wparam == kPauseHotkeyId) handle_command(*state, toggle_pause);
+        if (wparam == kEdgeGhostingHotkeyId) toggle_edge_ghosting_reduction(*state);
         return 0;
     case WM_CLOSE: {
         std::wstring error;
@@ -1466,6 +1765,7 @@ LRESULT CALLBACK window_procedure(
         std::wstring error;
         if (!disarm_bridge(*state, &error))
             log_lifecycle(state->local_directory, L"destroy-cleanup", error);
+        UnregisterHotKey(window, kEdgeGhostingHotkeyId);
         Shell_NotifyIconW(NIM_DELETE, &state->icon);
         PostQuitMessage(0);
         return 0;
@@ -1656,6 +1956,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (window) DestroyWindow(window);
         CloseHandle(single_instance);
         return EXIT_FAILURE;
+    }
+    // Temporary A/B key; held for as long as the tray runs. A key another
+    // program already holds is left to it.
+    if (!RegisterHotKey(window, kEdgeGhostingHotkeyId,
+            MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_F8)) {
+        log_lifecycle(state.local_directory, L"edge-ghosting-hotkey",
+            last_error_message(L"Registering Ctrl+Alt+F8"));
     }
 
     // Arm straight away: launching the tray is the user asking for the

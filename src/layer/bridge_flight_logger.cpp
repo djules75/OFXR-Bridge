@@ -452,13 +452,7 @@ struct BridgeFlightLogger::Impl {
                 if (active.load(std::memory_order_acquire) &&
                     file != INVALID_HANDLE_VALUE &&
                     write_offset.load(std::memory_order_relaxed) > maximum_bytes) {
-                    LARGE_INTEGER beginning{};
-                    if (SetFilePointerEx(file, beginning, nullptr, FILE_BEGIN) &&
-                        SetEndOfFile(file)) {
-                        // The file starts over with what the session is, so
-                        // the tail of a long session can still be read.
-                        static_cast<void>(write_kept(nullptr));
-                    }
+                    rotate_file();
                 }
                 at = write_offset.fetch_add(span, std::memory_order_relaxed);
                 ReleaseSRWLockExclusive(&wrap_lock);
@@ -496,6 +490,47 @@ struct BridgeFlightLogger::Impl {
                 keep(line.data(), static_cast<std::size_t>(length));
             } catch (...) {
             }
+        }
+    }
+
+    // Past the cap, wrap_lock held exclusive. The full file becomes
+    // `<name>.1`, replacing the one before it, and recording carries on in a
+    // fresh file under the original name, which starts with what the session
+    // is. A truncate in place threw away everything recorded so far the
+    // moment the cap was reached, so a comparison made a few seconds earlier
+    // was lost with it. Where the rename is refused - a reader holding the
+    // file without delete sharing - the file is truncated in place as before.
+    void rotate_file() noexcept {
+        try {
+            std::filesystem::path previous = path;
+            previous += L".1";
+            static_cast<void>(FlushFileBuffers(file));
+            CloseHandle(file);
+            file = INVALID_HANDLE_VALUE;
+            const bool moved = MoveFileExW(
+                path.c_str(), previous.c_str(), MOVEFILE_REPLACE_EXISTING) != FALSE;
+            // The same sharing and flags as create_log_file, whose comment
+            // says why FILE_FLAG_OVERLAPPED matters.
+            file = CreateFileW(
+                path.c_str(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr,
+                moved ? CREATE_ALWAYS : OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+                nullptr);
+            if (file == INVALID_HANDLE_VALUE) {
+                return;
+            }
+            if (!moved) {
+                LARGE_INTEGER beginning{};
+                if (!SetFilePointerEx(file, beginning, nullptr, FILE_BEGIN) ||
+                    !SetEndOfFile(file)) {
+                    return;
+                }
+            }
+            static_cast<void>(write_kept(nullptr));
+        } catch (...) {
         }
     }
 
