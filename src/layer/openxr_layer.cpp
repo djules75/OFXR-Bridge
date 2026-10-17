@@ -1171,6 +1171,10 @@ struct SessionState {
     // cadence. Chaining each wait off the last submission added about 4.6 ms
     // of per-cycle overhead to a 10 ms pace and held the runtime to 64/s.
     std::chrono::steady_clock::time_point presenter_next_submit{};
+    // Set by the pace when its band pushed the grid later this cycle, read
+    // and cleared by the phase-lead correction after the submission; see
+    // there. presenter_mutex.
+    bool presenter_band_raised{};
     // The best phase this presenter has managed lately: predictedDisplayTime
     // minus the moment the frame aimed at it was actually submitted, reduced
     // modulo the display period. The two clocks have different epochs, so the
@@ -8212,6 +8216,7 @@ void pace_presenter_submission(
                 } else if (remaining < period / 4) {
                     state->presenter_next_submit += period / 16;
                     pace_band_correction = 1;
+                    state->presenter_band_raised = true;
                 }
             }
         }
@@ -9575,7 +9580,29 @@ void continuous_presenter_main(
                     // clamp for sixty-eight seconds while this dragged the grid
                     // back every fourth sample, a perfect sawtooth that never
                     // converged. The lock knows the phase; this infers it.
-                    if (state->presenter_on_grid_streak >=
+                    //
+                    // Not on a cycle where the pace's band has just pushed the
+                    // grid later. The band raises it by period/16 when the
+                    // hold falls under a quarter period; this lowers it by up
+                    // to period/16 when the submission trails its reference.
+                    // After one presenter stall both can fire every cycle and
+                    // cancel exactly, parking the grid where the hold is zero:
+                    // the presenter then calls xrWaitFrame straight after each
+                    // submission and spends the whole period in it. Measured
+                    // in the paced harness (SteamVR, deep, D3D11, 100 Hz): a
+                    // 70-80 ms stall at the delivery probe's attach parked it
+                    // in 4 runs of 14, behind a constant 6.9 ms with the band
+                    // firing on every frame, and since the D3D11 wait holds
+                    // the runtime entry gate, the application's acquire and
+                    // release each waited a period - 24-33 frames/s instead of
+                    // 49, for good. Skipping this on a band cycle: 24 of 24
+                    // recovered. The band only fires at its floor, so this
+                    // still runs whenever the hold is in the working range,
+                    // which is the case it exists for.
+                    const bool band_raised = state->presenter_band_raised;
+                    state->presenter_band_raised = false;
+                    if (!band_raised &&
+                        state->presenter_on_grid_streak >=
                             kPhaseCorrectionGridStreak &&
                         !state->presenter_vsync_offset_valid) {
                         const std::int64_t deficit = phase_deficit(
