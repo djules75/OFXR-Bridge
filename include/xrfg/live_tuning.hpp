@@ -52,10 +52,11 @@ struct Block {
 
 // The composition's built-in values (frame_synthesis.hlsl), so the window
 // opens on exactly what runs without it: the search values chosen in the
-// headset on V475 and the pattern lock margin chosen on V478 (2026-10-17).
+// headset on V475 and the pattern lock margin chosen on V478 (2026-10-17);
+// edge ghosting reduction off by default since V488 for its cost.
 inline constexpr Block kDefaults{
     kMagic, kVersion, 0U,
-    1U,
+    0U,
     3U, 1U,
     800U, 24U, 2U,
     100U, 100U,

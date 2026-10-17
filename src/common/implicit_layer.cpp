@@ -286,13 +286,13 @@ bool read_edge_ghosting_reduction(
     const std::filesystem::path& module_directory) noexcept {
     try {
         if (module_directory.empty()) {
-            return true;
+            return false;
         }
         const auto ini_path = module_directory / L"ofxr_bridge.ini";
         return GetPrivateProfileIntW(
-                   L"ofxr", L"edge_ghosting_reduction", 1, ini_path.c_str()) != 0;
+                   L"ofxr", L"edge_ghosting_reduction", 0, ini_path.c_str()) != 0;
     } catch (...) {
-        return true;
+        return false;
     }
 }
 

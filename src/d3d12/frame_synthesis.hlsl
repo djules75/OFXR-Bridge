@@ -87,7 +87,7 @@ uint live_field(uint shift, uint built_in) {
     return live_tuning_present() ? (GameMotionPadding >> shift) & 0xfu : built_in;
 }
 
-bool edge_ghosting_reduction_enabled() { return live_flag(2u, true); }
+bool edge_ghosting_reduction_enabled() { return live_flag(2u, false); }
 bool pattern_lock_enabled() { return live_flag(4u, true); }
 float pattern_lock_margin() {
     return live_tuning_present() ? GameMotionScale.y : 1.0 / 255.0;

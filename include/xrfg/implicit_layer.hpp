@@ -106,8 +106,8 @@ struct ConfiguredNvidiaOptions {
     const std::filesystem::path& module_directory) noexcept;
 
 // `[ofxr] edge_ghosting_reduction` and `[ofxr] repeating_pattern_lock`: the
-// composition's two refinements. On unless set to 0; followed while the
-// session runs.
+// composition's two refinements. Edge ghosting reduction is off unless set
+// to 1, the lock on unless set to 0; followed while the session runs.
 [[nodiscard]] bool read_edge_ghosting_reduction(
     const std::filesystem::path& module_directory) noexcept;
 [[nodiscard]] bool read_repeating_pattern_lock(

@@ -49,7 +49,7 @@ A game running in 3X:
     "flow_resolution": 50,
     "bidirectional": false,
     "deep_pipeline": true,
-    "edge_ghosting_reduction": true,
+    "edge_ghosting_reduction": false,
     "repeating_pattern_lock": true
   }
 }

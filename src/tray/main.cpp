@@ -1611,7 +1611,7 @@ void handle_command(AppState& state, UINT command) {
                 L"consistency off. Prefer FPS over latency: on. 3X Frame "
                 L"Gen: off. Lower VRAM: on. FPS overlay: upper right. Bridge "
                 L"flight recorder: off. Pause key: Ctrl + Alt + F7. Edge "
-                L"ghosting reduction and repeating-pattern lock: on. Settings "
+                L"ghosting reduction: off. Repeating-pattern lock: on. Settings "
                 L"only reachable in tray.ini go back to their defaults too.\n\n"
                 L"The FPS overlay, the flight recorder and 3X Frame Gen change "
                 L"in running games at once; the rest applies the next time the "

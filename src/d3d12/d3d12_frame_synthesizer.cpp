@@ -330,11 +330,12 @@ constexpr UINT kEncodeSrgbFlowInputFlag = 2U;
 
 // The ini's switches (set_composition_switches): bit 0 edge ghosting
 // reduction, bit 1 repeating-pattern lock.
-std::atomic<std::uint32_t> g_composition_switches{3U};
+std::atomic<std::uint32_t> g_composition_switches{2U};
 
 // Where the live window is not open: the built-in values with the ini's two
-// switches, in the same constants. Both on leaves the constants alone, which
-// is what the shader's built-in values already are. Each change of the
+// switches, in the same constants. Edge ghosting reduction off and the lock
+// on leaves the constants alone, which is what the shader's built-in values
+// already are. Each change of the
 // switches is recorded once, as embedded_configuration result=812 with a the
 // two bits.
 void apply_composition_switches(SynthesisParameters& parameters) noexcept {
@@ -346,7 +347,7 @@ void apply_composition_switches(SynthesisParameters& parameters) noexcept {
             812,
             switches);
     }
-    if (switches == 3U) {
+    if (switches == 2U) {
         return;
     }
     parameters.game_motion_padding = 1U | ((switches & 1U) != 0U ? 2U : 0U) |
