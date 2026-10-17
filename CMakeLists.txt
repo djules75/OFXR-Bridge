@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.568.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.569.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1404,6 +1404,12 @@ if(TARGET xrfg_three_slot_director_tests AND TARGET xrfg_sl_fixture_legacy)
         luke-ngx-actual-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
         "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
     set_tests_properties(xrfg_luke_ngx_actual_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+    foreach(ghost_runtime steamvr vdxr)
+      add_test(NAME xrfg_ghost_${ghost_runtime}_capture COMMAND xrfg_three_slot_director_tests
+          ghost-${ghost_runtime}-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
+          "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
+      set_tests_properties(xrfg_ghost_${ghost_runtime}_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+    endforeach()
     add_test(NAME xrfg_crimson_ngx_actual_capture COMMAND xrfg_three_slot_director_tests
         crimson-ngx-actual-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
         "$<TARGET_FILE:xrfg_sl_fixture_legacy>")

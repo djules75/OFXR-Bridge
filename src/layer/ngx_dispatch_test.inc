@@ -1034,8 +1034,8 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             require(set_constants(constants,n,0)&&evaluate_sl(reinterpret_cast<sl1::CommandBuffer*>(list.Get()),sl1::eFeatureDLSS,n,0),
                 "actual capture original Streamline results");
             if(context.frame && !scene_camera)require(
-                context.frame->raw_motion_native_span==1,
-                "actual generic/Crimson capture used the wrong native motion interval");
+                context.frame->raw_motion_native_span==(ghost_steamvr_native_motion()?2u:1u),
+                "actual title/runtime capture used the wrong native motion interval");
             const unsigned successful=n>=recycle_production?n-recycle_production+1:
                 n-(logical_family&&n>=12?1:0);
             if(logical_family&&n!=12&&n>=2&&n<recycle_production)
@@ -1469,6 +1469,11 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }
 int run_actual_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline) {
+    return run_actual_ngx_capture_pipeline(realvr,streamline,false);
+}
+int run_ghost_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline,bool steamvr) {
+    test_ghost_native_motion=true;
+    set_ngx_capture_steamvr_runtime(steamvr);
     return run_actual_ngx_capture_pipeline(realvr,streamline,false);
 }
 int run_crimson_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline) {

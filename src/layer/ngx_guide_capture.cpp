@@ -118,6 +118,7 @@ bool test_kcd_production_identity{};
 bool test_kcd_scene_camera{};
 bool test_outlaws_production_identity{};
 bool test_crimson_native_motion{};
+bool test_ghost_native_motion{};
 #endif
 bool kingdom_come_process() {
     static const bool selected=[] {
@@ -166,6 +167,20 @@ bool crimson_desert_process() {
 #else
     return selected;
 #endif
+}
+std::atomic_bool capture_steamvr_runtime{};
+bool ghost_steamvr_native_motion() noexcept {
+    static const bool selected=[] {
+        wchar_t process[MAX_PATH]{};GetModuleFileNameW(nullptr,process,MAX_PATH);
+        const auto* basename=wcsrchr(process,L'\\');basename=basename?basename+1:process;
+        return !_wcsicmp(basename,L"GhostOfTsushima.exe");
+    }();
+#ifdef XRFG_NATIVE_INGRESS_TESTS
+    const bool ghost=selected||test_ghost_native_motion;
+#else
+    const bool ghost=selected;
+#endif
+    return ghost && capture_steamvr_runtime.load(std::memory_order_relaxed);
 }
 bool outlaws_public_process() {
     return outlaws_process()&&native_ingress::luke_detected();
@@ -796,7 +811,10 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     // Crimson V561 F8: both retained native fields fit N-2 (same eye), not
     // the adjacent opposite camera advertised by Streamline's clip matrix.
     // Keep the measured field contract separate from camera receipt order.
-    if(luke && !invocation_camera && crimson_desert_process())g.raw_motion_native_span=2;
+    // V568 Ghost SteamVR F8: native motion matches same-eye N-2 at .1px,
+    // opposite-eye N-1 misses by5.9px. Preserve the accepted VDXR contract.
+    if(luke && !invocation_camera && (crimson_desert_process()||ghost_steamvr_native_motion()))
+        g.raw_motion_native_span=2;
     if(observed_motion_span)g.raw_motion_native_span=observed_motion_span;
     // Scoped camera values replace apply_camera's camera read, while its Luke
     // snapshot-lifetime contract must still protect all queued GPU consumers.
@@ -1590,6 +1608,9 @@ void configure_ngx_guide_capture(ID3D12CommandQueue* queue,bool enabled) noexcep
         start_hook_monitor();log("enabled");
     } catch(...) {}
 }
+void set_ngx_capture_steamvr_runtime(bool steamvr) noexcept {
+    capture_steamvr_runtime.store(steamvr,std::memory_order_relaxed);
+}
 void stop_ngx_guide_capture(ID3D12CommandQueue* queue) noexcept {
     native_ingress::stop_queue(queue);
     auto& s=state(); std::scoped_lock lock(s.mutex);
@@ -1612,6 +1633,7 @@ void update_ngx_guide_depth(float near_z,float far_z,float min_depth,float max_d
 #else
 namespace xrfg {
 void configure_ngx_guide_capture(ID3D12CommandQueue*,bool) noexcept {}
+void set_ngx_capture_steamvr_runtime(bool) noexcept {}
 void stop_ngx_guide_capture(ID3D12CommandQueue*) noexcept {}
 void update_ngx_guide_depth(float,float,float,float) noexcept {}
 void prepare_ngx_feature_discovery(const wchar_t*) noexcept {}

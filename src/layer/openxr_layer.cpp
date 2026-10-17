@@ -5122,6 +5122,7 @@ XrResult layer_create_api_layer_instance_impl(
                 std::string_view::npos;
         }
     }
+    xrfg::set_ngx_capture_steamvr_runtime(dispatch->steamvr_runtime);
     xrfg::bridge_flight_logger().event(
         xrfg::BridgeFlightOperation::runtime_identity,
         dispatch->steamvr_runtime ? 1 : 0,

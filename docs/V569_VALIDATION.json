@@ -1,0 +1,16 @@
+{
+  "version": "V569",
+  "base": "67980d3da4ca46cc0f425e1c05acb4c8b376e777",
+  "status": "runtime-pending",
+  "passed": 12,
+  "failed": 0,
+  "ctest_seconds": 16.89,
+  "ctest_log": "v569-focused-tests.log",
+  "headset_validation": "Pending Ghost SteamVR owner trial. Same captured second AFW frame reproduced with baseline MAE0.00306442, green60.6868%; corrected existing span2 inputs green0.350499%. VDXR declaration unchanged; no universal headset claim.",
+  "ipc_abi": 55801,
+  "provider_abi": 45601,
+  "luke_suite_trials": 18,
+  "presentation_pacing_changed": false,
+  "afw_shader_changed": false,
+  "swapchain_counts_changed": false
+}

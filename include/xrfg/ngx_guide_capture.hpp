@@ -2,6 +2,8 @@
 #include <d3d12.h>
 
 namespace xrfg {
+// Runtime identity observed from successful xrGetInstanceProperties, not a user flag.
+void set_ngx_capture_steamvr_runtime(bool steamvr) noexcept;
 // Capture the game's NGX upscaler guides without replacing its upscaler.
 // Called outside the loader lock. Disabling preserves submitted snapshots
 // until the layer drains its queues and retires the guide registry.

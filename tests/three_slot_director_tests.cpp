@@ -8,6 +8,7 @@
 #include "autonomous_layer_fixture.hpp"
 #include "xrfg/native_vulkan_transport_test.hpp"
 namespace xrfg {int run_luke_ngx_dispatch_test(const wchar_t*,bool);}
+namespace xrfg {int run_ghost_ngx_capture_test(const wchar_t*,const wchar_t*,bool);}
 namespace xrfg {int run_actual_ngx_capture_test(const wchar_t*,const wchar_t*); int run_crimson_ngx_capture_test(const wchar_t*,const wchar_t*);}
 namespace xrfg {int run_kcd_logical_capture_test(const wchar_t*,const wchar_t*);}
 namespace xrfg {int run_kcd_scene_capture_test(const wchar_t*,const wchar_t*,
@@ -2268,6 +2269,11 @@ int main(int argc, char** argv) {
         b.layers[0].views[1].pose.position.x=.1F;
         b.layers[0].views[1].pose.orientation={0,std::sin(.6F),0,std::cos(.6F)};
         check(!synthetic_camera_snapshot(a,b,.5F),"R19 recentre rejects entire stereo camera");
+    }
+    if(argc>3 && (std::string_view(argv[1])=="ghost-steamvr-capture"||std::string_view(argv[1])=="ghost-vdxr-capture")) {
+        const std::string realvr=argv[2],streamline=argv[3];
+        const std::wstring wr(realvr.begin(),realvr.end()),ws(streamline.begin(),streamline.end());
+        return xrfg::run_ghost_ngx_capture_test(wr.c_str(),ws.c_str(),std::string_view(argv[1])=="ghost-steamvr-capture");
     }
     if(argc>3 && (std::string_view(argv[1])=="luke-ngx-actual-capture" || std::string_view(argv[1])=="crimson-ngx-actual-capture")) {
         const std::string realvr=argv[2],streamline=argv[3];
