@@ -1445,6 +1445,29 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             ? impl_->camera_origin.update_producers(paired_key,guide.camera_position,guide.reset)
             : impl_->camera_origin.update(guide.stream, guide.epoch, guide.camera_position, guide.reset);
         if (!origin_changed) return E_INVALIDARG;
+        // InitFrameWarp on a warmed beta6 renderer does not retire all reduced-
+        // rate lookup resources. Reusing it after a producer reset can leave
+        // m_otherEyeLookupDesc in shader-read state when the next Combined
+        // dispatch clears it as a render target. The existing fence above has
+        // already retired the old provider; use a fresh isolated renderer at
+        // this lifetime/geometry boundary, exactly as for a quality change.
+        const bool provider_geometry_changed=impl_->frame_buffers_ready &&
+            !compatible_color(impl_->color_description,color_desc);
+        if(impl_->frame_buffers_ready && (*origin_changed || provider_geometry_changed)) {
+            const auto provider=impl_->provider_path;
+            const auto camera_origin=impl_->camera_origin;
+            const auto calibrated_units=impl_->calibrated_units_per_metre;
+            const auto unit_epoch=impl_->unit_epoch;
+            const auto paired_unit_identity=impl_->paired_unit_identity;
+            const auto result=initialize_locked(impl_->device.Get(),impl_->queue.Get(),provider,true);
+            report_stage(AfwStage::frame_warp_init_begin,result,
+                *origin_changed ? 1045 : 1046,guide.publication);
+            if(FAILED(result))return result;
+            impl_->camera_origin=camera_origin;
+            impl_->calibrated_units_per_metre=calibrated_units;
+            impl_->unit_epoch=unit_epoch;
+            impl_->paired_unit_identity=paired_unit_identity;
+        }
         if (*origin_changed) {
             // AFW's private history and ours must never span two origins.
             // Reinitialize both eyes only at a producer lifetime/reset boundary.

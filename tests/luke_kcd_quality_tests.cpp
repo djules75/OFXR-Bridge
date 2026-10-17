@@ -159,6 +159,8 @@ int main(int argc,char** argv) {try {
     if(argc==4 && std::filesystem::is_directory(argv[2]))return replay::run(argv[1],argv[2],argv[3]);
     using namespace quality;
     require(argc>=2 && argc<=4,"provider path argument missing");
+    const bool geometry_transition=GetEnvironmentVariableW(L"XRFG_TEST_AFW_GEOMETRY_TRANSITION",nullptr,0)!=0;
+    const bool epoch_transition=GetEnvironmentVariableW(L"XRFG_TEST_AFW_EPOCH_TRANSITION",nullptr,0)!=0;
     const bool interleaved=argc==4 && std::string_view(argv[3])=="interleaved";
     consumer_probe=GetEnvironmentVariableW(L"XRFG_TEST_AFW_CONSUMER_PROBE",nullptr,0)!=0;
     if(GetEnvironmentVariableW(L"XRFG_TEST_AFW_CONSUMER_HALF",nullptr,0))consumer_probe_gain=.5F;
@@ -201,16 +203,17 @@ int main(int argc,char** argv) {try {
             kind==D3D12_HEAP_TYPE_UPLOAD?D3D12_RESOURCE_STATE_GENERIC_READ:D3D12_RESOURCE_STATE_COPY_DEST,
             nullptr,IID_PPV_ARGS(&result)),"fixture buffer");return result;};
     bool all_camera_bits_match=true,all_mode_pixels_match=true;
-    for(const auto& scene:scenes) for(unsigned span:{1u,2u}) for(int mode:{1,2,3}) {
-        if(consumer_probe && (std::string_view(scene.name)!="full" || span!=2 || mode!=3))continue;
+    for(const auto& initial_scene:scenes) for(unsigned span:{1u,2u}) for(int mode:{1,2,3}) {
+        if(consumer_probe && (std::string_view(initial_scene.name)!="full" || span!=2 || mode!=3))continue;
         xrfg::LukeAfwSynthesizer synth;check(synth.initialize(device.Get(),queue.Get(),std::filesystem::path(argv[1])),"full AFW provider initialization");
         std::vector<std::shared_ptr<DlssMotionVectorFrame>> frames;
         std::vector<ComPtr<ID3D12Resource>> colors;
         xrfg::LukeCameraOrigin origin;require(origin.update(1,1,{0,0,0}).has_value(),"oracle camera origin");
         double error_sum{};std::uint64_t samples{},green{},pixels{};double basis_error{};bool basis_bits_match=true;
         for(unsigned n=1;n<=18;++n) {
+            const auto& scene=geometry_transition && n>=10 ? scenes[1] : initial_scene;
             const auto current=camera(n,scene),previous=camera(n>=span?n-span:0,scene);
-            auto frame=std::make_shared<DlssMotionVectorFrame>();frame->stream=1;frame->epoch=1;
+            auto frame=std::make_shared<DlssMotionVectorFrame>();frame->stream=1;frame->epoch=epoch_transition && n>=10 ? 2 : 1;
             frame->raw_motion_native_span=span;
             frame->serial=frame->publication=frame->camera_frame_token=frame->native_production_sequence=n;
             frame->previous_serial=n>=3?n-2:0;
@@ -272,7 +275,7 @@ int main(int argc,char** argv) {try {
             if(n>=2)frame->previous_opposite_guide=frames[n-2];
             if(n>=3){frame->previous_same_guide=frames[n-3];frame->previous_same_native_camera=xrfg::dlss_native_camera_history(*frames[n-3]);}
             frames.push_back(frame);colors.push_back(source);
-            if(n<(interleaved?4u:3u))continue;
+            if(n<(interleaved?4u:3u) || ((epoch_transition || geometry_transition) && (n==10 || n==11)))continue;
             const unsigned eye=n&1?0:1;
             xrfg::D3D12ReprojectionView source_view{},destination_view{};
             // The first odd-raster beta5 Combined probe had MAE6.7346 and
@@ -331,6 +334,7 @@ int main(int argc,char** argv) {try {
             readback->Unmap(0,nullptr);
         }
         const double mae=error_sum/double(samples);
+        const auto& scene=initial_scene;
         std::cout<<"KCD rotated plane scene="<<scene.name<<" native_span="<<span<<" mode="<<mode<<" RGB_MAE="<<mae
             <<" inverseView_max_error="<<basis_error<<" bit_exact="<<basis_bits_match
             <<" actual_provider_gain="<<provider.gain_x<<','<<provider.gain_y

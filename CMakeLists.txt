@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.567.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.568.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1496,6 +1496,22 @@ if(WIN32 AND XRFG_BUILD_TESTS)
         "-DSHADING_RATE=${shading_index}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
     set_tests_properties(xrfg_luke_beta6_shading_${shading_index} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+  endforeach()
+  foreach(shading_index 0 4 8)
+    add_test(NAME xrfg_luke_epoch_recovery_${shading_index} COMMAND "${CMAKE_COMMAND}"
+        "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+        "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/luke-epoch-recovery-${shading_index}"
+        "-DSHADING_RATE=${shading_index}" -DEPOCH_TRANSITION=ON
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+    set_tests_properties(xrfg_luke_epoch_recovery_${shading_index} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+  endforeach()
+  foreach(shading_index 0 4 8)
+    add_test(NAME xrfg_luke_geometry_recovery_${shading_index} COMMAND "${CMAKE_COMMAND}"
+        "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+        "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/luke-geometry-recovery-${shading_index}"
+        "-DSHADING_RATE=${shading_index}" -DGEOMETRY_TRANSITION=ON
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+    set_tests_properties(xrfg_luke_geometry_recovery_${shading_index} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
   endforeach()
   add_test(NAME xrfg_luke_indiana_live_shading COMMAND "${CMAKE_COMMAND}"
       "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
