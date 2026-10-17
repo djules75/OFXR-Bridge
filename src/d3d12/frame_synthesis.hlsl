@@ -90,7 +90,7 @@ uint live_field(uint shift, uint built_in) {
 bool edge_ghosting_reduction_enabled() { return live_flag(2u, true); }
 bool pattern_lock_enabled() { return live_flag(4u, true); }
 float pattern_lock_margin() {
-    return live_tuning_present() ? GameMotionScale.y : 4.0 / 255.0;
+    return live_tuning_present() ? GameMotionScale.y : 1.0 / 255.0;
 }
 uint midpoint_search_rings() { return clamp(live_field(4u, 3u), 1u, 5u); }
 uint midpoint_survivor_limit() { return clamp(live_field(8u, 1u), 1u, 3u); }
@@ -1123,19 +1123,32 @@ float4 synthesize_midpoint(
                     // the head" matches about as well as the flow's motion, the
                     // pose wins and the pixel is the stable blend. A moving
                     // object's pose-only samples disagree, and its flow stands.
-                    // Both pose-only samples are read anyway, for the fallback.
+                    //
+                    // Judged on the current-frame pixel against where each
+                    // answer says it came from - the flow's previous endpoint
+                    // at the whole vector, the pose's at the pixel itself -
+                    // so the verdict does not depend on the synthetic's
+                    // position. Judged on the in-between endpoints instead,
+                    // V478 could lock a pixel in the 3X synthetic at a third
+                    // and not in the one at two thirds, and a pattern then
+                    // alternated within the pair. Only where the search kept
+                    // the pixel's own vector, so an edge it corrected is left
+                    // as it chose.
                     [branch] if (pattern_lock_enabled() &&
                                  repeated_capture_flag() == 0 &&
-                                 length(motion.residual) >= 1.0 &&
+                                 length(residual_backward) >= 1.0 &&
+                                 length(motion.residual - residual_backward) < 0.5 &&
                                  previous_at_pixel.valid >= 0.5 &&
-                                 current_fallback.valid >= 0.5 &&
-                                 previous_sample.valid >= 0.5 &&
-                                 current_sample.valid >= 0.5 &&
-                                 rgb_error(previous_at_pixel.color, current_fallback.color) <=
-                                     rgb_error(previous_sample.color, current_sample.color) +
-                                         pattern_lock_margin()) {
-                        previous_sample = previous_at_pixel;
-                        current_sample = current_fallback;
+                                 current_fallback.valid >= 0.5) {
+                        CameraSample previous_along_flow = sample_previous_target(
+                            pixel + residual_backward, Slice, ViewIndex);
+                        if (previous_along_flow.valid >= 0.5 &&
+                            rgb_error(previous_at_pixel.color, current_fallback.color) <=
+                                rgb_error(previous_along_flow.color, current_fallback.color) +
+                                    pattern_lock_margin()) {
+                            previous_sample = previous_at_pixel;
+                            current_sample = current_fallback;
+                        }
                     }
                 }
                 if (endpoints_valid) {
