@@ -1,3 +1,11 @@
+## V567 local: OptiScaler bootstrap restored
+
+Based on sealed V566. A loaded compatible OFXR-aware OptiScaler owns the XR
+chain through the existing embedded renderer. Its SR/NR/OFXR controls stay in
+the OptiScaler in-game menu. Without that host, Autonomous keeps its V566 route
+and counters. No second global layer registration is needed. Headset validation
+pending; see [scope and checks](docs/V567_OPTISCALER_BOOTSTRAP.md).
+
 ## V558 local: automatic benchmark suites
 
 Display now has optical-only, complete C-only, and Luke Ross benchmark buttons.

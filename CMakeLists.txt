@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.566.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.567.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1043,6 +1043,35 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             xrfg_three_slot_d3d12_promotion_array PROPERTIES TIMEOUT 60)
 
         add_executable(xrfg_layer_smoke tests/layer_smoke.cpp)
+        add_library(xrfg_optiscaler_bootstrap_stub SHARED tests/optiscaler_bootstrap_stub.cpp)
+        add_executable(xrfg_optiscaler_bootstrap_tests tests/optiscaler_bootstrap_tests.cpp)
+        add_executable(xrfg_autonomous_provider_api_tests tests/provider_api_tests.cpp)
+        target_include_directories(xrfg_autonomous_provider_api_tests PRIVATE include)
+        target_compile_features(xrfg_autonomous_provider_api_tests PRIVATE cxx_std_20)
+        target_compile_definitions(xrfg_autonomous_provider_api_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        add_test(NAME xrfg_autonomous_provider_api_tests
+            COMMAND xrfg_autonomous_provider_api_tests ${XRFG_TEST_LAYER_DLL})
+        foreach(target xrfg_optiscaler_bootstrap_stub xrfg_optiscaler_bootstrap_tests)
+            target_include_directories(${target} PRIVATE "${XRFG_OPENXR_SDK_ROOT}/include")
+            target_compile_features(${target} PRIVATE cxx_std_20)
+            target_compile_definitions(${target} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+            if(MSVC)
+                target_compile_options(${target} PRIVATE /W4 /permissive- /EHsc)
+            endif()
+        endforeach()
+        target_link_libraries(xrfg_optiscaler_bootstrap_stub PRIVATE psapi)
+        foreach(mode success incompatible no-capability bad-size bad-version identity-seh
+                activation-failure activation-seh failure seh bad-interface missing-callback foreign-callback)
+            add_test(NAME xrfg_optiscaler_bootstrap_${mode}
+                COMMAND xrfg_optiscaler_bootstrap_tests ${XRFG_TEST_LAYER_DLL}
+                    $<TARGET_FILE:xrfg_optiscaler_bootstrap_stub> ${mode})
+            set_tests_properties(xrfg_optiscaler_bootstrap_${mode} PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+        endforeach()
+        add_test(NAME xrfg_optiscaler_bootstrap_process_exclusion COMMAND "${CMAKE_COMMAND}"
+            "-DTEST=$<TARGET_FILE:xrfg_optiscaler_bootstrap_tests>" "-DLAYER=${XRFG_TEST_LAYER_DLL}"
+            "-DHOST=$<TARGET_FILE:xrfg_optiscaler_bootstrap_stub>"
+            "-DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/bootstrap-process-exclusion"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/bootstrap_process_exclusion.cmake")
         target_include_directories(xrfg_layer_smoke PRIVATE
             "${XRFG_OPENXR_SDK_ROOT}/include")
         target_compile_features(xrfg_layer_smoke PRIVATE cxx_std_20)

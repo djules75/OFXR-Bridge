@@ -1,3 +1,13 @@
+## V567 OptiScaler bootstrap trial
+
+V567 selects an already loaded OFXR-aware OptiScaler as embedded XR owner.
+Restart tray and game after selecting this build. In Assetto, use OptiScaler's
+in-game controls to check real SR resolution changes, then NR and embedded OFXR
+separately. Autonomous tray/F10/benchmark settings are not forwarded to that
+owner. Without a compatible OptiScaler, the V566 Autonomous route remains.
+No new F8 capture is required before the first verdict. This package does not
+automatically install or activate the layer. See docs/V567_OPTISCALER_BOOTSTRAP.md.
+
 ## V558 local: automatic benchmark suites
 
 Display now has optical-only, complete C-only, and Luke Ross benchmark buttons.

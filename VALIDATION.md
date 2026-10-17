@@ -1,3 +1,13 @@
+## V567 bootstrap validation
+
+Shipping optimized DLL: compatible fake host and sealed real OptiScaler V33036
+reach downstream instance creation through the layer-name adapter, with one
+chain advancement and unchanged input entries. Identity, capability, activation,
+SEH, callback ownership, concurrency and process exclusion guards are covered.
+Native loader/call-chain/provider API and V566 meter/benchmark regressions pass.
+Exact results: docs/V567_VALIDATION.json. Assetto/headset SR, NR and embedded
+OFXR remain owner-pending. No live install, registration, push or publication.
+
 ## V558 local: automatic benchmark suites
 
 Display now has optical-only, complete C-only, and Luke Ross benchmark buttons.

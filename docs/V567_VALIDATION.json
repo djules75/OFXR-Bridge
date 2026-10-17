@@ -1,0 +1,32 @@
+{
+  "version": "V567",
+  "base": "25935d1767298e9453e56b397c5c530de7e9c6f6",
+  "status": "runtime-pending",
+  "passed": 27,
+  "failed": 0,
+  "ctest_passed": 26,
+  "ctest_seconds": 16.36,
+  "bootstrap_ctests": 14,
+  "native_regression_ctests": 11,
+  "native_provider_api_ctests": 1,
+  "actual_optiscaler_fixture": "PASS: sealed V33036 SHA256 7a9c82c70ca443d38a56b8178e4c1786d2f1af2b39d4e297a0672810e57aa09a; activation, concurrent negotiation, adapted instance create reaches downstream exactly once, unchanged caller chain, malformed inputs refused, retained host dispatch callable",
+  "logs": [
+    "v567-bootstrap-tests-final.log",
+    "v567-native-regression-tests.log",
+    "v567-provider-api-tests.log",
+    "v567-actual-optiscaler/result.log"
+  ],
+  "initial_fixture_correction": "Initial harness incorrectly required an Autonomous GetEmbeddedLayerActive export; that export is intentionally absent. Corrected harness checks the actual dispatch owner. Runtime DLL unchanged by this harness correction.",
+  "headset_validation": "Pending owner Assetto/MeganeX trial of startup, actual SR render/output resolution, NR and embedded OFXR. Loader fixtures do not establish rendering, DLSS5/NR, pacing or headset success.",
+  "delegated_controls": "OptiScaler in-game controls; Autonomous UI, benchmark settings and telemetry are not forwarded to the embedded owner.",
+  "ipc_abi": 55801,
+  "provider_abi": 45601,
+  "luke_suite_trials": 18,
+  "v566_meter_preserved": true,
+  "presentation_pacing_changed": false,
+  "afw_math_changed": false,
+  "swapchain_counts_changed": false,
+  "live_installation": false,
+  "registry_changed": false,
+  "pushed": false
+}

@@ -35,6 +35,7 @@
 #include "xrfg/native_ingress.hpp"
 #include "xrfg/vulkan_native_ingress.hpp"
 #include "autonomous_runtime.hpp"
+#include "optiscaler_bootstrap.hpp"
 #include "xrfg/presentation_transform.h"
 #include "xrfg/fsr_frame_generation.hpp"
 #include "xrfg/provider_api.hpp"
@@ -16383,7 +16384,6 @@ extern "C" __declspec(dllexport) XRAPI_ATTR XrResult XRAPI_CALL xrNegotiateLoade
     const char* layer_name,
     XrNegotiateApiLayerRequest* layer_request) {
 
-    static_cast<void>(xrfg::standalone::process_dlssg_preset());
     xrfg::initialize_bridge_flight_logger();
     const auto token = xrfg::bridge_flight_logger().begin(
         xrfg::BridgeFlightOperation::negotiation,
@@ -16428,6 +16428,13 @@ extern "C" __declspec(dllexport) XRAPI_ATTR XrResult XRAPI_CALL xrNegotiateLoade
             return XR_ERROR_INITIALIZATION_FAILED;
         }
 
+        if (xrfg::optiscaler_bootstrap::negotiate(loader_info, layer_request)) {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::negotiation, 5670, 1, 0, 0);
+            return XR_SUCCESS;
+        }
+
+        static_cast<void>(xrfg::standalone::process_dlssg_preset());
         layer_request->layerInterfaceVersion = XR_CURRENT_LOADER_API_LAYER_VERSION;
         layer_request->layerApiVersion = kLayerApiVersion;
         layer_request->getInstanceProcAddr = layer_get_instance_proc_addr;

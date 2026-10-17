@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
         if (!GetModuleHandleExW(
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                reinterpret_cast<LPCWSTR>(request.createApiLayerInstance),
+                reinterpret_cast<LPCWSTR>(request.getInstanceProcAddr),
                 &owner) ||
             owner != delegated_module) {
             std::cerr << "layer negotiation did not delegate to the requested module\n";
