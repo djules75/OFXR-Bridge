@@ -1063,6 +1063,20 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
             }
         }
         state->control_revision = xrfg::embedded::snapshot().revision;
+        if (private_mode == 6) {
+            auto settings = xrfg::autonomous::snapshot().desired;
+            settings.afw_mode = 0;
+            check(xrfg::autonomous::request(settings), "markerless AFW off");
+            xrfg::autonomous::apply_runtime_settings();
+            state->control_revision = xrfg::embedded::snapshot().revision;
+            state->luke_afw_enabled = true;
+            state->graphics_binding_capabilities |= 8ULL;
+            state->dlss_motion_vectors = true; // legacy Luke capability bit
+            xrfg::configure_dlss_motion_vector_tracking(true);
+            configure_session_guide_capture(*state);
+            check(xrfg::dlss_motion_vector_statistics().status == xrfg::DlssMotionVectorStatus::disabled,
+                "plain Luke OFXR still captures native guides/markers with AFW off");
+        }
         if (missing_afw_guides) {
             check(xrfg::embedded::afw_snapshot().desired.mode != 0, "AFW must remain requested");
             state->luke_afw_enabled = true;
@@ -1535,6 +1549,13 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
             } else check(continuous_presenter_active(state), "EndFrame demoted owned composition");
         }
         check(XR_SUCCEEDED(wait_for_presenter_idle(state)), "GPU pipeline drain");
+        if (private_mode == 6) {
+            const auto guides = xrfg::dlss_motion_vector_statistics();
+            check(guides.status == xrfg::DlssMotionVectorStatus::disabled && guides.published == 0 &&
+                guides.snapshot_copies == 0 && !chain->last_released_motion_vectors &&
+                !right_chain->last_released_motion_vectors,
+                "markerless OFXR published native guides or depended on their ownership");
+        }
         if (missing_afw_guides) {
             const auto afw = xrfg::embedded::afw_snapshot();
             check(afw.missing_capture_frames == 8 && afw.evaluations == 0 &&
@@ -2364,6 +2385,7 @@ int main(int argc, char** argv) {
             if(mode == "luke-afw-slot") { gpu_pipeline(true, false, false, false, false, true); return 0; }
             if(mode == "post-afw-packet") { gpu_pipeline(true, false, false, false, false, false, true); return 0; }
             if(mode == "luke-missing-afw-guides") { gpu_pipeline(true, false, false, false, false, false, false, true); return 0; }
+            if(mode == "luke-markerless-ofxr") { gpu_pipeline(true,false,false,false,false,false,false,false,6); return 0; }
             if(mode == "luke-private-inline-on") {gpu_pipeline(true,false,false,false,false,false,false,false,1);return 0;}
             if(mode == "luke-fidelity-inline-busy") {gpu_pipeline(false,false,false,false,false,false,false,false,5);return 0;}
             if(mode == "luke-private-inline-off") {gpu_pipeline(true,false,false,false,false,false,false,false,2);return 0;}

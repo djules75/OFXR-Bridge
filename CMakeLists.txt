@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.558.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.560.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -936,6 +936,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_luke_afw_output_slot COMMAND xrfg_three_slot_director_tests luke-afw-slot)
         add_test(NAME xrfg_luke_post_afw_director_packet COMMAND xrfg_three_slot_director_tests post-afw-packet)
         add_test(NAME xrfg_luke_missing_afw_guides_gpu COMMAND xrfg_three_slot_director_tests luke-missing-afw-guides)
+        add_test(NAME xrfg_luke_markerless_ofxr_gpu COMMAND xrfg_three_slot_director_tests luke-markerless-ofxr)
+        set_tests_properties(xrfg_luke_markerless_ofxr_gpu PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
         set_tests_properties(xrfg_luke_missing_afw_guides_gpu PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
         foreach(private_mode IN ITEMS luke-private-inline-on luke-private-inline-off luke-private-worker luke-private-post-afw)
             add_test(NAME xrfg_${private_mode} COMMAND xrfg_three_slot_director_tests ${private_mode})

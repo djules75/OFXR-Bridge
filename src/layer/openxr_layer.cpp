@@ -2293,10 +2293,18 @@ template <typename Function>
 
 // HFW has more application XR cycles than original AER source productions.
 void configure_session_guide_capture(const SessionState& state) {
+    // Plain Luke OFXR consumes the released XR colour. With AFW off it must
+    // not depend on a successful SR capture, colour barcode or native camera.
+    // Keep the observation hooks installed for late context discovery and for
+    // turning AFW back on, but do not record native snapshots/markers here.
+    const bool raw_luke_ofxr = state.luke_afw_enabled &&
+        state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr &&
+        !state.hybrid_requested && xrfg::embedded::afw_snapshot().desired.mode == 0;
     const bool enabled=xrfg::neural_rendering::status().enabled ||
-        (state.dlss_motion_vectors && (!state.luke_fresh_only ||
+        (!raw_luke_ofxr && state.dlss_motion_vectors && (!state.luke_fresh_only ||
             xrfg::embedded::snapshot().desired.enabled || xrfg::embedded::afw_snapshot().desired.mode!=0));
-    if(state.luke_fresh_only && !enabled) xrfg::configure_dlss_motion_vector_tracking(false);
+    if((state.luke_fresh_only || raw_luke_ofxr) && !enabled)
+        xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::configure_ngx_guide_capture(state.d3d12_queue.Get(),enabled);
 }
 // Physical Wait/Begin/End belong to actual outputs only. Virtual app polling
@@ -10861,7 +10869,20 @@ enum class GenerationPrepareReason : std::int64_t {
     fsr_stereo_unavailable = 25,
     fsr_stereo_recovering = 26,
     native_stereo_unavailable = 27,
+    afw_input_unavailable = 28,
 };
+
+// A refused native projection/history is local to AFW. It says nothing about
+// the already captured XR colours used by ordinary optical-flow OFXR. Never
+// turn device removal, failed publication or GPU backpressure into this case.
+[[nodiscard]] constexpr bool afw_input_unavailable(HRESULT result) noexcept {
+    return result == DXGI_ERROR_UNSUPPORTED ||
+        result == HRESULT_FROM_WIN32(ERROR_NOT_READY);
+}
+static_assert(afw_input_unavailable(DXGI_ERROR_UNSUPPORTED));
+static_assert(afw_input_unavailable(HRESULT_FROM_WIN32(ERROR_NOT_READY)));
+static_assert(!afw_input_unavailable(DXGI_ERROR_DEVICE_REMOVED));
+static_assert(!afw_input_unavailable(DXGI_ERROR_WAS_STILL_DRAWING));
 
 [[nodiscard]] constexpr GenerationPrepareReason classify_synthesis_failure(
     HRESULT result) noexcept {
@@ -13115,7 +13136,8 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_input_camera,
             source.logical_eye, frame_serial, source.guide->publication, dlss_guide_camera_hash(*source.guide));
         if (FAILED(afw_result) || !released) {
-            output.reason = FAILED(afw_result)
+            output.reason = released && !afw_evaluated && afw_input_unavailable(afw_result)
+                ? GenerationPrepareReason::afw_input_unavailable : FAILED(afw_result)
                 ? GenerationPrepareReason::synthesis_failed
                 : GenerationPrepareReason::private_release_failed;
             return output;
@@ -15160,6 +15182,7 @@ XrResult layer_end_frame_impl(
             const bool missing_afw_input =
                 afw_produced.reason == GenerationPrepareReason::missing_generation ||
                 afw_produced.reason == GenerationPrepareReason::missing_capture ||
+                afw_produced.reason == GenerationPrepareReason::afw_input_unavailable ||
                 afw_produced.reason == GenerationPrepareReason::synthesis_stale_guides;
             if (!luke_color_only_ofxr(*state) || !missing_afw_input || generation_cooling_down)
                 return bypass_generation(afw_produced.reason);

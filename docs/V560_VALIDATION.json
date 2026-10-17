@@ -1,0 +1,17 @@
+{
+  "version": "V560",
+  "base": "cf7d31960abf020b9f15bde7211aee32609c9fd6",
+  "status": "runtime-pending",
+  "passed": 7,
+  "failed": 0,
+  "ctest_seconds": 4.43,
+  "ipc_abi": 55801,
+  "provider_abi": 45601,
+  "change": "Luke plain OFXR disables native snapshot/marker work with AFW off; recoverable AFW input refusal no longer blocks colour-only OFXR",
+  "afw_math_changed": false,
+  "afw_crimson_fixed": false,
+  "presentation_pacing_changed": false,
+  "swapchain_counts_changed": false,
+  "v558_csv_preserved": true,
+  "headset_validation": "Pending. Crimson F8 requested to inspect mismatched projection and interleaved native SR history."
+}
