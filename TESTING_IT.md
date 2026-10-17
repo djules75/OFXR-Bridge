@@ -1,3 +1,7 @@
+## V571: prima prova SteamVR
+
+Riavvia tray e gioco. Prima Ghostwire nello stesso punto, A/B spenti,2X,Neural invariato e F9: Fidelity -> Djules -> Hybrid -> FSR -> DLSS-G,circa15s ciascuno. Verifica movimento visibile e meter del compositor. Non rifare ancora tutto il benchmark. Su SteamVR la privatizzazione e sempre presente; A non aggiunge staging. B mantiene il controllo degli anelli. Poi MSFS strafe. Nessuna installazione automatica. V570 conservata.
+
 ## V567 OptiScaler bootstrap trial
 
 V567 selects an already loaded OFXR-aware OptiScaler as embedded XR owner.

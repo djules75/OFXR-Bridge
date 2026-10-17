@@ -1,3 +1,7 @@
+## V571 engineering validation
+
+34 focused checks pass, including actual GPU private endpoint/generators and unchanged VDXR/AFW controls. Exact evidence and fixture reruns: [V571_VALIDATION.json](docs/V571_VALIDATION.json). The downstream runtime is mocked; actual SteamVR visibility, cadence and performance remain owner-pending.
+
 ## V567 bootstrap validation
 
 Shipping optimized DLL: compatible fake host and sealed real OptiScaler V33036

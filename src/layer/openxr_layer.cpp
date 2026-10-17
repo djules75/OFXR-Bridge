@@ -44,6 +44,7 @@
 #include <atomic>
 #include "xrfg/openxr_fps_overlay.hpp"
 #include "xrfg/steamvr_delivery.hpp"
+#include "xrfg/private_openxr_runtime.hpp"
 
 #include <windows.h>
 #include <psapi.h>
@@ -742,6 +743,7 @@ struct SessionState {
           fsr_cadence(current_layer_directory()) {}
 
     ~SessionState() {
+        if(private_runtime)private_runtime->stop();
         xrfg::unregister_d3d11_guide_owner(reinterpret_cast<std::uintptr_t>(this));
         xrfg::embedded::detach(control_id);
         if (presenter_pace_timer != nullptr) {
@@ -753,6 +755,7 @@ struct SessionState {
     SessionState& operator=(const SessionState&) = delete;
 
     std::shared_ptr<Dispatch> dispatch;
+    std::shared_ptr<xrfg::PrivateOpenXrRuntime> private_runtime;
     xrfg::implicit_layer::ManualArmControl manual_control;
     xrfg::FsrCadenceProbe fsr_cadence;
     FsrStereoAdmission fsr_stereo_admission; // frame_call_mutex; never persisted
@@ -1334,6 +1337,10 @@ void mark_application_release(SessionState* state) noexcept {
 // The runtime has made one of the application's images safe to write, on the
 // binding queue. Carry that to the queue the application will write it on.
 void carry_reacquire_to_application(SessionState* state) noexcept {
+    // The private endpoint returns only images with no readers. Their GPU copy
+    // is already retired, so joining the app to the REAL binding queue would
+    // reintroduce the compositor dependency this endpoint removes.
+    if(state && state->private_runtime)return;
     if (state == nullptr || !state->binding_queue || !state->reacquire_fence ||
         !state->d3d12_queue) {
         return;
@@ -1525,7 +1532,7 @@ private:
     return S_OK;
 }
 [[nodiscard]] bool staged_native_outputs(const SessionState& state) noexcept {
-    return configurable_native_outputs(state) && state.separate_synthesis > 0;
+    return !state.private_runtime && configurable_native_outputs(state) && state.separate_synthesis > 0;
 }
 [[nodiscard]] bool reduced_native_outputs(const SessionState& state) noexcept {
     return configurable_native_outputs(state) && state.lower_vram > 0;
@@ -1646,6 +1653,7 @@ void refresh_luke_display_period(const std::shared_ptr<SessionState>& state) noe
 [[nodiscard]] std::chrono::nanoseconds sample_djules_phase_step(
     const std::shared_ptr<SessionState>& state, bool fresh_real,
     std::uint64_t sequence) noexcept {
+    if(state->private_runtime)return {};
     if (!fresh_real || !state->menu_enabled || !native_measured_phase_clock(*state) ||
         !state->dispatch->steamvr_runtime || !state->steamvr_delivery) return {};
     const auto left = state->steamvr_delivery->frame_time_remaining();
@@ -2292,6 +2300,8 @@ template <typename Function>
     return iterator == g_sessions.end() ? nullptr : iterator->second;
 }
 
+#include "private_runtime_endpoint.inc"
+
 // HFW has more application XR cycles than original AER source productions.
 void configure_session_guide_capture(const SessionState& state) {
     // Plain Luke OFXR consumes the released XR colour. With AFW off it must
@@ -2397,7 +2407,7 @@ XrResult XRAPI_CALL content_end_frame(XrSession session,const XrFrameEndInfo* in
     std::scoped_lock lock(g_state_mutex);
     for (const auto& [handle, state] : g_swapchains) {
         (void)handle;
-        if (state->session->dispatch == dispatch) {
+        if (state->session->dispatch->instance == dispatch->instance) {
             matches.push_back(state);
         }
     }
@@ -2474,7 +2484,7 @@ XrResult XRAPI_CALL content_end_frame(XrSession session,const XrFrameEndInfo* in
     std::scoped_lock lock(g_state_mutex);
     for (const auto& [handle, state] : g_sessions) {
         (void)handle;
-        if (state->dispatch == dispatch) {
+        if (state->dispatch->instance == dispatch->instance) {
             matches.push_back(state);
         }
     }
@@ -2871,7 +2881,8 @@ struct CreatedPrivateSwapchain {
     const std::shared_ptr<SwapchainState>& state,
     const XrSwapchainCreateInfo& create_info,
     CreatedPrivateSwapchain* output,
-    XrResult* refusal = nullptr) {
+    XrResult* refusal = nullptr,
+    D3D12_RESOURCE_STATES image_state=D3D12_RESOURCE_STATE_COMMON) {
     if (refusal != nullptr) {
         *refusal = XR_SUCCESS;
     }
@@ -2880,10 +2891,9 @@ struct CreatedPrivateSwapchain {
     }
     const auto& dispatch = state->session->dispatch;
     XrSwapchain handle = XR_NULL_HANDLE;
-    XrResult result = dispatch->create_swapchain(
-        state->session->handle,
-        &create_info,
-        &handle);
+    XrResult result = state->session->private_runtime
+        ? state->session->private_runtime->create_swapchain(&create_info,&handle,image_state,1)
+        : dispatch->create_swapchain(state->session->handle,&create_info,&handle);
     if (XR_FAILED(result) || handle == XR_NULL_HANDLE) {
         // Which error the runtime gave separates a budget it will not exceed
         // from a create info it rejects outright, and only the first is worth
@@ -2995,7 +3005,8 @@ void destroy_current_ring(
     if (slot_count == 0 || slot_count > output->slots.size()) return false;
     for (std::size_t slot = 0; slot < slot_count; ++slot) {
         if (!create_private_swapchain(
-                state, create_info, &output->slots[slot], refusal)) {
+                state, create_info, &output->slots[slot], refusal,
+                state->session->d3d12_synthesis_queue?D3D12_RESOURCE_STATE_COMMON:D3D12_RESOURCE_STATE_RENDER_TARGET)) {
             return false;
         }
         const CreatedPrivateSwapchain& created = output->slots[slot];
@@ -5491,6 +5502,8 @@ XrResult layer_create_session_impl(
             9,handle_value(created_session),0,0);
 
     state->steamvr_delivery = std::make_unique<xrfg::SteamVrDelivery>(dispatch->steamvr_runtime);
+    const auto private_result=install_private_runtime(state);
+    if(FAILED(private_result)){dispatch->destroy_session(created_session);return XR_ERROR_INITIALIZATION_FAILED;}
     log_video_memory(*state, VideoMemoryStage::session, 0);
     log_view_configuration(*dispatch, instance, create_info ? create_info->systemId : XR_NULL_SYSTEM_ID);
 
@@ -5498,7 +5511,7 @@ XrResult layer_create_session_impl(
     try {
         state->fps_overlay = std::make_unique<xrfg::OpenXrFpsOverlay>(
             instance, created_session, create_info ? create_info->systemId : 0,
-            dispatch->get_instance_proc_addr, content_end_frame,
+            state->dispatch->get_instance_proc_addr, content_end_frame,
             state->d3d12_device.Get(), runtime_queue(*state),
             state->d3d11_device.Get(), current_layer_directory() / L"ofxr_bridge.ini", true, nullptr, nullptr,
             [](void* user, XrTime time, std::int64_t& ns) {
@@ -5632,6 +5645,7 @@ XrResult layer_destroy_session_impl(XrSession session) {
 
     xrfg::stop_ngx_guide_capture(state->d3d12_queue.Get());
     stop_continuous_presenter(state);
+    if(state->private_runtime)state->private_runtime->stop();
     drain_binding_queue(state.get());
     state->fps_overlay.reset();
     for(auto& grip:state->panel_grip_spaces){if(grip && state->dispatch->destroy_space)state->dispatch->destroy_space(grip);grip=XR_NULL_HANDLE;}
@@ -5770,6 +5784,7 @@ XrResult layer_begin_session_impl(
     if (XR_SUCCEEDED(result)) {
         reset_frame_bookkeeping(state);
         reset_swapchain_bookkeeping(state);
+        if(state->private_runtime)return state->private_runtime->start();
     }
     return result;
 }
@@ -5782,6 +5797,7 @@ XrResult layer_end_session_impl(XrSession session) {
 
     stop_continuous_presenter(state);
     if (state->fps_overlay) state->fps_overlay->set_session_focused(false);
+    if(state->private_runtime){state->private_runtime->drain();state->private_runtime->stop();}
     const XrResult result = state->dispatch->end_session(session);
     if (XR_SUCCEEDED(result)) {
         reset_frame_bookkeeping(state);
@@ -5869,7 +5885,17 @@ XrResult layer_wait_frame_impl(
             use_provisional_pipelined_wait = true;
         }
     }
-    if (state->luke_fresh_only && state->last_inline_frame_state_valid) {
+    if(state->private_runtime) {
+        if(!valid_optional_frame_info(wait_info,XR_TYPE_FRAME_WAIT_INFO))return XR_ERROR_VALIDATION_FAILURE;
+        const bool virtual_only=use_continuous_presenter || state->luke_fresh_only;
+        result=virtual_only ? state->private_runtime->predict_frame(frame_state)
+            : state->dispatch->wait_frame(session,wait_info,frame_state);
+        if(XR_SUCCEEDED(result)) {
+            state->last_inline_frame_state=*frame_state;state->last_inline_frame_state.next=nullptr;
+            state->last_inline_frame_state_valid=true;forwarded_application_wait=!virtual_only;
+            state->runtime_frame_waited_unbegun=!virtual_only;
+        }
+    } else if (state->luke_fresh_only && state->last_inline_frame_state_valid) {
         if(!valid_optional_frame_info(wait_info,XR_TYPE_FRAME_WAIT_INFO) || !frame_state ||
             frame_state->type!=XR_TYPE_FRAME_STATE)return XR_ERROR_VALIDATION_FAILURE;
         const auto period=std::clamp<XrDuration>(state->last_inline_frame_state.predictedDisplayPeriod,2'000'000,50'000'000);
@@ -8214,6 +8240,7 @@ void fail_pending_presenter_submissions_locked(
 // holding that lock has deadlocked this layer twice.
 void pace_presenter_submission(
     const std::shared_ptr<SessionState>& state) noexcept {
+    if(state->private_runtime)return; // only the common consumer paces SteamVR
     try {
         refresh_djules_display_period(state);
         refresh_reference_display_period(state);
@@ -8521,7 +8548,7 @@ void continuous_presenter_main(
             state->presenter_condition.wait(lock, [&] {
                 return state->presenter_stop_requested ||
                        XR_FAILED(state->presenter_failure) ||
-                       state->presenter_last_frame != nullptr ||
+                       (!state->private_runtime && state->presenter_last_frame != nullptr) ||
                        !state->presenter_submissions.empty();
             });
         }
@@ -9322,7 +9349,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
             const auto pace_token = xrfg::bridge_flight_logger().begin(
                 xrfg::BridgeFlightOperation::presenter_pace);
             std::chrono::steady_clock::time_point submission_slot{};
-            {
+            if(!state->private_runtime) {
                 const auto period = std::chrono::nanoseconds(state->presenter_display_period);
                 const auto now = std::chrono::steady_clock::now();
                 if ((djules_native_scheduler(*state) && (state->three_slot_director || state->queued_nvidia_presenter)) ||
@@ -9390,7 +9417,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
             bool repeat_held=false;
             bool drain_requested=false;
             { std::scoped_lock lock(state->presenter_mutex); drain_requested=state->director_draining; }
-            if(selected && synthetic && djules_deep_active(*state) &&
+            if(!state->private_runtime && selected && synthetic && djules_deep_active(*state) &&
                 !drain_requested) {
                 bool ready=true, output_failed=false;
                 for(const auto& output:selected->frame->pending_outputs) {
@@ -9727,6 +9754,7 @@ void stop_continuous_presenter(
 }
 
 void delay_djules_application_release(const std::shared_ptr<SessionState>& state) {
+    if(state->private_runtime)return;
     std::chrono::nanoseconds delay{};
     { std::scoped_lock lock(state->presenter_mutex);
       if(djules_triple_active(*state)) delay=state->djules_triple_release.delay; }
@@ -16223,6 +16251,7 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_destroy_space(XrSpace space) {
         guards.reserve(sessions.size());
         for (const auto& session : sessions) {
             guards.emplace_back(session);
+            if(session->private_runtime)session->private_runtime->drain();
         }
         const auto result = dispatch->destroy_space(space);
         if (XR_SUCCEEDED(result)) {

@@ -1,3 +1,7 @@
+## V571 local: private SteamVR delivery
+
+Common private-image delivery across existing generators; bounded FIFO and one physical refresh between runtime handoffs. VDXR retains its path. Runtime/headset verdict pending. See [architecture and trial](docs/V571_STEAMVR_PRIVATE_RUNTIME.md).
+
 ## V567 local: OptiScaler bootstrap restored
 
 Based on sealed V566. A loaded compatible OFXR-aware OptiScaler owns the XR
