@@ -1,3 +1,12 @@
+## V573 engineering validation
+
+35 focused checks pass in25.31seconds. A real GPU fixture distinguishes
+shared-queue blocking from independent final delivery when future producer
+work is held. A production xrCreateSession fixture verifies the actual runtime
+binding queue. Existing routes, FIFO, ownership, VDXR and AFW controls pass.
+The downstream runtime is mocked; headset recovery remains pending. See
+[V573_VALIDATION.json](docs/V573_VALIDATION.json).
+
 ## V572 engineering validation
 
 34 focused checks pass in 23.56 seconds. The common SteamVR consumer paces

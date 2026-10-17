@@ -36,6 +36,7 @@ public:
         PrivateRuntimeDispatch real;
         ID3D12Device* device12{};
         ID3D12CommandQueue* queue12{}; // the actual runtime binding queue
+        ID3D12CommandQueue* producer_queue12{}; // private writes, never future work on queue12
         ID3D11Device* device11{};
         ID3D11DeviceContext* context11{};
         std::size_t capacity{3};

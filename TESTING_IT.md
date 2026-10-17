@@ -1,3 +1,11 @@
+## V573: separazione GPU della consegna
+
+Riavvia tray e gioco. Stesso punto Ghostwire, Neural invariato,2X,F9:
+circa15secondi 0.2.1 e15Fidelity. La copia verso SteamVR ora ha una coda
+D3D12 distinta dalle attese del produttore privato. Il menu tray indica
+"SteamVR preparation queue": quella scelta riguarda la preparazione privata;
+la consegna finale rimane separata. Risultato nel visore ancora da verificare.
+
 ## V572: consegna OpenXR
 
 Riavvia tray e gioco con V572. Stesso punto Ghostwire, Neural invariato, 2X,

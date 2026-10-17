@@ -869,7 +869,7 @@ void show_context_menu(AppState& state) {
             steamvr_queue_separate, L"Separate from game");
         AppendMenuW(queue_menu, MF_STRING | (state.settings.steamvr_separate_queue ? MF_UNCHECKED : MF_CHECKED),
             steamvr_queue_shared, L"Shared with game");
-        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(queue_menu), L"SteamVR queue (restart game)");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(queue_menu), L"SteamVR preparation queue (restart game)");
     }
     HBITMAP pause_bitmap = state.paused ? create_pause_bitmap() : nullptr;
     if (pause_bitmap) {

@@ -33,6 +33,7 @@ struct Fixture {
     bool native12;
     ComPtr<ID3D12Device> device12;
     ComPtr<ID3D12CommandQueue> queue;
+    ComPtr<ID3D12CommandQueue> delivery_queue;
     ComPtr<ID3D12Fence> fence,gate;
     std::uint64_t serial{};
     HANDLE event{CreateEventW(nullptr,FALSE,FALSE,nullptr)};
@@ -51,6 +52,7 @@ struct Fixture {
     std::atomic_uint missed_intake{},empty_ends{};
     unsigned expected_views{1};
     std::function<XrResult(XrSwapchain,unsigned)> release_callback;
+    std::function<void()> after_head_ready;
     std::function<D3D12_RESOURCE_STATES()> create_state;
     std::vector<unsigned> pixels;
     std::vector<float> positions;
@@ -58,12 +60,13 @@ struct Fixture {
     std::vector<XrTime> targets;
     XrTime raw_prediction{};
     std::shared_ptr<xrfg::PrivateOpenXrRuntime> transport;
-    explicit Fixture(bool d12):native12(d12) {
+    explicit Fixture(bool d12,bool split=true):native12(d12) {
         current=this;
         if(d12) {
             ok(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device12)),"actual D3D12 device");
             D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
             ok(device12->CreateCommandQueue(&desc,IID_PPV_ARGS(&queue)),"queue");
+            if(split)ok(device12->CreateCommandQueue(&desc,IID_PPV_ARGS(&delivery_queue)),"independent delivery queue");
             ok(device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence)),"test fence");
             ok(device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate)),"GPU gate");
         } else {
@@ -72,18 +75,20 @@ struct Fixture {
         }
         xrfg::PrivateOpenXrRuntime::Options options;
         options.real={reinterpret_cast<XrInstance>(1),reinterpret_cast<XrSession>(2),wait,begin,end,create,destroy,enumerate,acquire,wait_image,release,to_qpc};
-        options.device12=device12.Get();options.queue12=queue.Get();options.device11=device11.Get();options.context11=context.Get();
+        options.device12=device12.Get();options.queue12=delivery_queue?delivery_queue.Get():queue.Get();options.producer_queue12=queue.Get();options.device11=device11.Get();options.context11=context.Get();
         options.physical_period=[]{return period;};options.capacity=3;
+        options.trace=[this](int stage,std::uint64_t,std::int64_t,std::int64_t){if(stage==4 && after_head_ready)after_head_ready();};
         transport=std::make_shared<xrfg::PrivateOpenXrRuntime>(std::move(options));
         ok(transport->initialize(),"initialize actual private endpoint");xr_ok(transport->start(),"start endpoint");
     }
     ~Fixture(){block_end=false;changed.notify_all();if(gate)gate->Signal(1);transport->stop();transport.reset();CloseHandle(event);current=nullptr;}
-    void gpu_wait(){ok(queue->Signal(fence.Get(),++serial),"test signal");ok(fence->SetEventOnCompletion(serial,event),"test event");check(WaitForSingleObject(event,5000)==WAIT_OBJECT_0,"test GPU complete");}
-    template<class Record> void commands(Record record) {
+    void gpu_wait(ID3D12CommandQueue* target=nullptr){if(!target)target=queue.Get();ok(target->Signal(fence.Get(),++serial),"test signal");ok(fence->SetEventOnCompletion(serial,event),"test event");check(WaitForSingleObject(event,5000)==WAIT_OBJECT_0,"test GPU complete");}
+    template<class Record> void commands(Record record,ID3D12CommandQueue* target=nullptr) {
+        if(!target)target=queue.Get();
         ComPtr<ID3D12CommandAllocator> allocator;ComPtr<ID3D12GraphicsCommandList> list;
         ok(device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&allocator)),"test allocator");
         ok(device12->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),nullptr,IID_PPV_ARGS(&list)),"test list");
-        record(list.Get());ok(list->Close(),"test close");ID3D12CommandList* lists[]={list.Get()};queue->ExecuteCommandLists(1,lists);gpu_wait();
+        record(list.Get());ok(list->Close(),"test close");ID3D12CommandList* lists[]={list.Get()};target->ExecuteCommandLists(1,lists);gpu_wait(target);
     }
     static XrResult XRAPI_CALL wait(XrSession,const XrFrameWaitInfo*,XrFrameState* output) {
         auto& f=*current;const auto n=++f.real_waits;
@@ -118,7 +123,7 @@ struct Fixture {
                     D3D12_TEXTURE_COPY_LOCATION from{};from.pResource=source.Get();from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
                     D3D12_TEXTURE_COPY_LOCATION to{};to.pResource=readback.Get();to.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;to.PlacedFootprint.Footprint={DXGI_FORMAT_R8G8B8A8_UNORM,1,1,1,256};D3D12_BOX box{0,0,0,1,1,1};list->CopyTextureRegion(&to,0,0,0,&from,&box);
                     std::swap(b.Transition.StateBefore,b.Transition.StateAfter);list->ResourceBarrier(1,&b);
-                });
+                },f.delivery_queue.Get());
                 void* data{};ok(readback->Map(0,nullptr,&data),"map readback");color=*static_cast<unsigned char*>(data);readback->Unmap(0,nullptr);
             } else {
                 auto source=chain.d11[chain.released];D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);desc.BindFlags=desc.MiscFlags=0;desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Texture2D> readback;
@@ -229,5 +234,18 @@ void intake_window(bool d12) {
     for(unsigned i=1;i<f.handoffs.size();++i)check(f.handoffs[i]-f.handoffs[i-1]>=period,"fresh prediction keeps physical refresh minimum");
     std::printf("%s fresh Wait, Begin-before-copy, exact runtime time and pre-Wait pacing PASS\n",d12?"D3D12":"D3D11");
 }
+void future_work_dependency(bool split) {
+    Fixture f(true,split);f.unblock();auto chain=f.make_chain();f.write(chain,77);
+    std::promise<void> queued;auto observed=queued.get_future();
+    f.after_head_ready=[&]{ok(f.queue->Wait(f.gate.Get(),1),"later unrelated producer work");queued.set_value();};
+    f.begin_virtual();xr_ok(f.submit(chain,1),"accept completed head before later producer dependency");
+    check(observed.wait_for(3s)==std::future_status::ready,"consumer observed exact head completion");
+    {std::unique_lock lock(f.mutex);f.changed.wait_for(lock,50ms,[&]{return f.real_ends.load()>0;});}
+    const bool independent=f.real_ends.load()>0;
+    ok(f.gate->Signal(1),"release later work for safe fixture cleanup");f.wait_count(1);xr_ok(f.transport->drain(),"future dependency drain");
+    check(independent==split,"only the split queue must deliver the ready head while later producer work is blocked");
+    check(f.pixels==std::vector<unsigned>{77},"independent delivery preserves the exact completed image");
+    std::printf("Ready-head future dependency: split=%d independent=%d PASS\n",split,independent);
 }
-int main(int argc,char** argv){if(argc>1){intake_window(true);intake_window(false);return 0;}ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();intake_window(true);intake_window(false);return 0;}
+}
+int main(int argc,char** argv){if(argc>1){future_work_dependency(false);future_work_dependency(true);return 0;}ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();intake_window(true);intake_window(false);future_work_dependency(false);future_work_dependency(true);return 0;}

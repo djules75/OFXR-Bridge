@@ -705,6 +705,9 @@ struct SessionState {
     // D25 comparison policy: SteamVR's runtime gets its own binding queue.
     // Shared non-pacing support for both advanced NVIDIA routes.
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> binding_queue;
+    // Private-output preparation still uses binding_queue (or the app queue).
+    // Only the common consumer and real runtime may use this final queue.
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> private_delivery_queue;
     Microsoft::WRL::ComPtr<ID3D12Fence> app_release_fence;
     Microsoft::WRL::ComPtr<ID3D12Fence> reacquire_fence;
     std::mutex binding_join_mutex;
@@ -5485,6 +5488,27 @@ XrResult layer_create_session_impl(
     }
 
 
+    // Bind SteamVR to a queue which no producer can contaminate with future
+    // app/synthesis waits. The old optional binding queue now prepares PRIVATE
+    // outputs; it cannot also be the final consumer's graphics binding.
+    XrGraphicsBindingD3D12KHR delivery_binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
+    if(dispatch->steamvr_runtime && state->graphics_binding==SessionGraphicsBinding::d3d12 &&
+       forwarded_info && forwarded_info->next) {
+        const auto* binding=static_cast<const XrBaseInStructure*>(forwarded_info->next);
+        if(binding->type==XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
+            delivery_binding=*reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(binding);
+            auto description=delivery_binding.queue->GetDesc();
+            const auto made=state->d3d12_device->CreateCommandQueue(&description,
+                IID_PPV_ARGS(&state->private_delivery_queue));
+            if(FAILED(made))return XR_ERROR_INITIALIZATION_FAILED;
+            state->private_delivery_queue->SetName(L"OFXR real OpenXR delivery only");
+            delivery_binding.queue=state->private_delivery_queue.Get();
+            // forwarded_info may already refer to substituted_info.
+            XrSessionCreateInfo with_delivery=*forwarded_info;
+            with_delivery.next=&delivery_binding;substituted_info=with_delivery;
+            forwarded_info=&substituted_info;
+        }
+    }
     XrSession created_session = XR_NULL_HANDLE;
     const XrResult result = dispatch->create_session(instance, forwarded_info, &created_session);
     if (XR_FAILED(result)) {
@@ -5493,7 +5517,8 @@ XrResult layer_create_session_impl(
     state->handle = created_session;
     xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::steamvr_queue_configuration,
         binding_queue_result, handle_value(created_session),
-        (state->steamvr_separate_queue ? 1ULL : 0ULL) | (state->binding_queue ? 2ULL : 0ULL),
+        (state->steamvr_separate_queue ? 1ULL : 0ULL) | (state->binding_queue ? 2ULL : 0ULL) |
+            (state->private_delivery_queue ? 4ULL : 0ULL),
         static_cast<std::uint64_t>(initial_control.desired.backend) |
         (static_cast<std::uint64_t>(state->frame_generation_mode) << 8) |
         (state->hybrid_requested ? 1ULL << 16 : 0ULL) | (state->menu_enabled ? 1ULL << 17 : 0ULL));

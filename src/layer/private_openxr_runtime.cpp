@@ -85,6 +85,7 @@ struct PrivateOpenXrRuntime::Impl {
     std::size_t pending{};
     ComPtr<ID3D12Device> device12;
     ComPtr<ID3D12CommandQueue> queue12;
+    ComPtr<ID3D12CommandQueue> producer_queue12;
     ComPtr<ID3D12Fence> ready12,copy12;
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> list;
@@ -334,6 +335,7 @@ HRESULT PrivateOpenXrRuntime::initialize() {
     HRESULT result=S_OK;
     if(s.options.device12 && s.options.queue12) {
         s.device12=s.options.device12;s.queue12=s.options.queue12;
+        s.producer_queue12=s.options.producer_queue12?s.options.producer_queue12:s.options.queue12;
         result=s.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&s.ready12));
         if(SUCCEEDED(result))result=s.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&s.copy12));
         if(SUCCEEDED(result))result=s.device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&s.allocator));
@@ -414,7 +416,7 @@ XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info) {
     {std::scoped_lock lock(s.mutex);result=s.own(*packet,*info);
      if(XR_FAILED(result))return result;
      packet->sequence=++s.sequence;packet->ready=s.ready_serial+1;}
-    const auto ready=s.d12()?s.queue12->Signal(s.ready12.Get(),packet->ready):s.context11->Signal(s.ready11.Get(),packet->ready);
+    const auto ready=s.d12()?s.producer_queue12->Signal(s.ready12.Get(),packet->ready):s.context11->Signal(s.ready11.Get(),packet->ready);
     if(!s.d12())s.context11->Flush();
     if(FAILED(ready)) {s.fail(XR_ERROR_RUNTIME_FAILURE);return XR_ERROR_RUNTIME_FAILURE;}
     s.ready_serial=packet->ready;

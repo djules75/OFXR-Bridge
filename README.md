@@ -1,3 +1,10 @@
+## V573 local: isolate final SteamVR GPU delivery
+
+The D3D12 private producer and real OpenXR consumer now use different queues,
+so later producer waits cannot hold an already-ready output's final copy.
+OpenXR call order and raw runtime prediction remain. Actual headset recovery
+is pending. See [GPU delivery details](docs/V573_PRIVATE_GPU_DELIVERY.md).
+
 ## V572 local: OpenXR handoff after distributor pacing
 
 The common SteamVR consumer now waits before real Wait, keeps Begin before its

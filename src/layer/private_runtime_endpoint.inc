@@ -65,7 +65,8 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
         original->convert_time_to_qpc};
     if(state->graphics_binding==SessionGraphicsBinding::d3d12 || state->d3d11_bridge || state->vulkan_bridge) {
         options.device12=state->d3d12_device.Get();
-        options.queue12=state->binding_queue?state->binding_queue.Get():state->d3d12_queue.Get();
+        options.producer_queue12=runtime_queue(*state);
+        options.queue12=state->private_delivery_queue?state->private_delivery_queue.Get():options.producer_queue12;
     } else {options.device11=state->d3d11_device.Get();options.context11=state->d3d11_context.Get();}
     const std::weak_ptr<SessionState> weak=state;
     options.physical_period=[weak]() -> std::int64_t {
