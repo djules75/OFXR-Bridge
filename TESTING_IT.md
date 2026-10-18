@@ -1,3 +1,10 @@
+## V574: preparazione dentro il periodo di refresh
+
+Riavvia tray e gioco. Stesso punto e risoluzione Ghostwire, Neural spento,2X,F9:
+circa15secondi 0.2.1 e15Fidelity. La preparazione ora avviene durante il periodo
+fra due consegne: si aspetta solo il residuo. Coda GPU separata mantenuta.
+Confronta produzione e meter compositor. Il guadagno nel gioco e da verificare.
+
 ## V573: separazione GPU della consegna
 
 Riavvia tray e gioco. Stesso punto Ghostwire, Neural invariato,2X,F9:

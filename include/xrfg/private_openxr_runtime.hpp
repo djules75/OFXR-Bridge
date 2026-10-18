@@ -45,7 +45,8 @@ public:
         // QPC ns and accumulated phase displacement (not a latency meter).
         // Stage3 instead carries submitted and raw predicted XR displayTime.
         // Stages4/5: head GPU ready / real image copy complete. Stages7/6:
-        // real Wait entry/return, AFTER pacing, BEFORE Begin/copy. QPC ns, c=0.
+        // real Wait entry/return, BEFORE Begin/copy. Stage8: residual cadence
+        // wait finished, after copy. QPC ns, c=0.
         std::function<void(int,std::uint64_t,std::int64_t,std::int64_t)> trace;
     };
     explicit PrivateOpenXrRuntime(Options);

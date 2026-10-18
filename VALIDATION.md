@@ -1,3 +1,12 @@
+## V574 engineering validation
+
+35 focused checks pass in25.33seconds. A precise4ms preparation fixture fails
+against sealedV573 at16.768ms mean spacing and passesV574 at11.556msD3D12 /
+11.726msD3D11. FIFO ownership, raw prediction, Begin-before-GPU, physical minimum,
+dedicated-queue independence, route switches and VDXR/AFW controls pass.
+DownstreamXR is mocked; actual game recovery remains pending. See
+[V574_VALIDATION.json](docs/V574_VALIDATION.json).
+
 ## V573 engineering validation
 
 35 focused checks pass in25.31seconds. A real GPU fixture distinguishes

@@ -281,24 +281,28 @@ struct PrivateOpenXrRuntime::Impl {
                 HRESULT ready=d12()?await(ready12.Get(),packet->ready):await(ready11.Get(),packet->ready);
                 if(FAILED(ready)){retire(packet);fifo->retire();if(!stopping)fail(XR_ERROR_RUNTIME_FAILURE);break;}
                 trace(4,packet->sequence);
-                // Pace before selecting the runtime cycle. Begin still precedes
-                // the real image copy, as recommended by the OpenXR frame loop.
-                // Never insert our pacing sleep after the runtime prediction.
+                // Prepare the next output DURING the refresh interval. Waiting
+                // the whole period first would add Wait/Begin/copy cost to every
+                // interval and cap even an always-ready producer below refresh.
                 const auto physical=period(prediction.predictedDisplayPeriod);
-                schedule.period(physical);schedule.ready(clock_ns());
-                if(XR_SUCCEEDED(result) && sleep_until(schedule.deadline())) {
-                    trace(7,packet->sequence);
-                    result=real_wait(prediction);
-                    if(XR_SUCCEEDED(result)) {
-                        waited=true;trace(6,packet->sequence);
-                        XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
-                        result=options.real.begin(options.real.session,&begin);
-                        if(XR_SUCCEEDED(result)){waited=false;begun=true;}
-                    }
-                    if(XR_FAILED(result)){retire(packet);fifo->retire();fail(result);break;}
-                    result=publish(*packet);
-                    if(XR_FAILED(result)){retire(packet);fifo->retire();fail(result);break;}
-                    trace(5,packet->sequence);
+                schedule.period(physical);
+                trace(7,packet->sequence);
+                result=real_wait(prediction);
+                if(XR_SUCCEEDED(result)) {
+                    waited=true;trace(6,packet->sequence);
+                    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+                    result=options.real.begin(options.real.session,&begin);
+                    if(XR_SUCCEEDED(result)){waited=false;begun=true;}
+                }
+                if(XR_FAILED(result)){retire(packet);fifo->retire();fail(result);break;}
+                result=publish(*packet);
+                if(XR_FAILED(result)){retire(packet);fifo->retire();fail(result);break;}
+                trace(5,packet->sequence);
+                schedule.ready(clock_ns());
+                // Only the residual time remains. A late completed copy moves
+                // the phase by its exact overrun; it never causes a catch-up burst.
+                if(sleep_until(schedule.deadline())) {
+                    trace(8,packet->sequence);
                     auto end=packet->info;
                     // Let the runtime select the display time. CPU cadence is
                     // not a reason to invent a different XR prediction.

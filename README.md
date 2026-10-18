@@ -1,3 +1,10 @@
+## V574 local: prepare during the refresh interval
+
+The common SteamVR consumer now prepares the next output before the deadline
+and waits only the residual interval. This removes the full-period-plus-copy
+ceiling while retaining V573's isolated GPU queue and the raw OpenXR prediction.
+Headset performance is pending. See [delivery budget](docs/V574_OVERLAP_DELIVERY_PREPARATION.md).
+
 ## V573 local: isolate final SteamVR GPU delivery
 
 The D3D12 private producer and real OpenXR consumer now use different queues,
