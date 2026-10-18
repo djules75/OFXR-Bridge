@@ -92,6 +92,10 @@ bool pattern_lock_enabled() { return live_flag(4u, true); }
 float pattern_lock_margin() {
     return live_tuning_present() ? GameMotionScale.y : 1.0 / 255.0;
 }
+// The pose's error the lock accepts, both as its mean over the 3x3 patch and
+// at the pixel itself: a static surface under the pose differs from frame to
+// frame by little more than the game's temporal antialiasing noise.
+float pattern_lock_static_tolerance() { return 6.0 / 255.0; }
 uint midpoint_search_rings() { return clamp(live_field(4u, 3u), 1u, 5u); }
 uint midpoint_survivor_limit() { return clamp(live_field(8u, 1u), 1u, 3u); }
 float midpoint_spread_trigger() {
@@ -1134,18 +1138,61 @@ float4 synthesize_midpoint(
                     // alternated within the pair. Only where the search kept
                     // the pixel's own vector, so an edge it corrected is left
                     // as it chose.
+                    //
+                    // Judged on the 3x3 patch around the pixel, and the pose
+                    // must also match it almost exactly, not just as well as
+                    // the flow. One sample a side could not tell a static
+                    // pattern from a moving surface of low contrast - MSFS 2024
+                    // terrain and distant buildings seen from a flying aircraft,
+                    // which move with the aircraft, not the head - where both
+                    // answers match about as well: the lock took the pose
+                    // there, turning moving pixels into a cross-fade, and the
+                    // game's TAA noise decided it afresh per pixel and per frame,
+                    // which showed as sparkle and flicker, worst in 3X. A
+                    // static pattern under the pose matches across the whole
+                    // patch; a moving surface's pose answer misses its detail.
+                    // The tolerance also bounds what a wrong lock can cost: the
+                    // cross-fade it picks differs from the frames by about that.
                     [branch] if (pattern_lock_enabled() &&
                                  repeated_capture_flag() == 0 &&
                                  length(residual_backward) >= 1.0 &&
                                  length(motion.residual - residual_backward) < 0.5 &&
                                  previous_at_pixel.valid >= 0.5 &&
                                  current_fallback.valid >= 0.5) {
-                        CameraSample previous_along_flow = sample_previous_target(
-                            pixel + residual_backward, Slice, ViewIndex);
-                        if (previous_along_flow.valid >= 0.5 &&
+                        float pose_error = 0.0;
+                        float flow_error = 0.0;
+                        bool patch_valid = true;
+                        [unroll] for (int dy = -1; dy <= 1; ++dy) {
+                            [unroll] for (int dx = -1; dx <= 1; ++dx) {
+                                const float2 offset = float2(dx, dy);
+                                CameraSample current_tap = current_fallback;
+                                CameraSample pose_tap = previous_at_pixel;
+                                if (dx != 0 || dy != 0) {
+                                    current_tap = sample_current_target(
+                                        pixel + offset, Slice, ViewIndex);
+                                    pose_tap = sample_previous_target(
+                                        pixel + offset, Slice, ViewIndex);
+                                }
+                                CameraSample flow_tap = sample_previous_target(
+                                    pixel + offset + residual_backward, Slice, ViewIndex);
+                                patch_valid = patch_valid && current_tap.valid >= 0.5 &&
+                                    pose_tap.valid >= 0.5 && flow_tap.valid >= 0.5;
+                                pose_error += rgb_error(pose_tap.color, current_tap.color);
+                                flow_error += rgb_error(flow_tap.color, current_tap.color);
+                            }
+                        }
+                        // The patch's mean, and the pixel's own: a locked
+                        // pixel's output depends only on its own pose sample,
+                        // so that is where the tolerance bounds the cost. A
+                        // lit window or a bright edge on a plain wall passed
+                        // the mean alone, up to 54/255 off, and sparkled on
+                        // distant MSFS 2024 buildings in 3X, where they move
+                        // past the pixel this lock needs and in 2X do not.
+                        if (patch_valid &&
+                            pose_error <= flow_error + 9.0 * pattern_lock_margin() &&
+                            pose_error <= 9.0 * pattern_lock_static_tolerance() &&
                             rgb_error(previous_at_pixel.color, current_fallback.color) <=
-                                rgb_error(previous_along_flow.color, current_fallback.color) +
-                                    pattern_lock_margin()) {
+                                pattern_lock_static_tolerance()) {
                             previous_sample = previous_at_pixel;
                             current_sample = current_fallback;
                         }
