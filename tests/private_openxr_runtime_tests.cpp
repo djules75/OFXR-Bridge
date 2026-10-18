@@ -86,7 +86,7 @@ struct Fixture {
     std::int64_t physical_origin{};
     std::atomic_bool physical_clock_enabled{true};
     std::shared_ptr<xrfg::PrivateOpenXrRuntime> transport;
-    explicit Fixture(bool d12,bool split=true,std::function<int(unsigned)> variable_wait={},bool physical_clock=false):native12(d12),frame_wait_us(std::move(variable_wait)) {
+    explicit Fixture(bool d12,bool split=true,std::function<int(unsigned)> variable_wait={},bool physical_clock=false,bool diagnostics=true):native12(d12),frame_wait_us(std::move(variable_wait)) {
         current=this;
         if(d12) {
             ok(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device12)),"actual D3D12 device");
@@ -116,6 +116,7 @@ struct Fixture {
             };
         }
         options.trace=[this](int stage,std::uint64_t seq,std::int64_t,std::int64_t margin){if(stage==11)refill_margins.push_back(margin);if(stage==17)native_margins.push_back(margin);if(stage==18)wait_input_ordinal=seq;if(stage==25)++window_renewals[seq];if(stage==4) {preparation_thread=GetCurrentThreadId();if(after_head_ready)after_head_ready();if(preparation_callback)preparation_callback(seq);}if(stage==5 && prepared_callback)prepared_callback(seq);};
+        if(!diagnostics)options.trace_enabled=[]{return false;};
         transport=std::make_shared<xrfg::PrivateOpenXrRuntime>(std::move(options));
         ok(transport->initialize(),"initialize actual private endpoint");xr_ok(transport->start(),"start endpoint");
     }
@@ -585,6 +586,17 @@ void bounded_native_window(bool d12) {
     check(f.real_begins==f.real_ends+f.empty_ends+f.discarded_clocks,"preventive Begin discards remain balanced on stop");
     std::puts(d12?"D12 short native-window renewal is bounded and retains exact content PASS":"D11 short native-window renewal is bounded and retains exact content PASS");
 }
+void quiet_native_clock(bool d12) {
+    Fixture f(d12,true,{},true,false);f.unblock();f.throttled=false;
+    auto chain=f.make_chain();std::vector<unsigned> expected;
+    for(unsigned n=0;n<6;++n){const auto color=60+n*7;f.write(chain,color);expected.push_back(color);f.begin_virtual();xr_ok(f.submit(chain,float(n)),"logging-off native input");}
+    f.wait_count(6);xr_ok(f.transport->drain(),"logging-off native drain");f.transport->stop();
+    check(f.discarded_clocks>0,"native clock renewal must remain active without diagnostic callbacks");
+    check(f.window_renewals.empty(),"disabled diagnostic logging must not emit preventive-window traces");
+    check(f.pixels==expected && f.real_ends==6,"logging-off delivery retains all exact FIFO images");
+    check(f.real_begins==f.real_ends+f.empty_ends+f.discarded_clocks,"logging-off native clocks balance on stop");
+    std::puts(d12?"D12 native clock renewal and exact FIFO delivery with logging off PASS":"D11 native clock renewal and exact FIFO delivery with logging off PASS");
+}
 void native_margin_scope(bool d12) {
     {
         Fixture f(d12);f.unblock();f.throttled=false;
@@ -677,4 +689,4 @@ void queue_priority_policy() {
     std::puts("Final delivery priority: supported HIGH, descriptor preservation, original dedicated fallback, failure propagation PASS");
 }
 }
-int main(int argc,char** argv){if(argc>1){if(std::string_view(argv[1])=="clock"){stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);}else if(std::string_view(argv[1])=="phase"){physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();}else if(std::string_view(argv[1])=="margin"){native_margin_scope(true);native_margin_scope(false);}else if(std::string_view(argv[1])=="pipeline"){overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();}else if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();native_margin_scope(true);native_margin_scope(false);rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);return 0;}
+int main(int argc,char** argv){if(argc>1){if(std::string_view(argv[1])=="clock"){stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);quiet_native_clock(true);quiet_native_clock(false);}else if(std::string_view(argv[1])=="phase"){physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();}else if(std::string_view(argv[1])=="margin"){native_margin_scope(true);native_margin_scope(false);}else if(std::string_view(argv[1])=="pipeline"){overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();}else if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();native_margin_scope(true);native_margin_scope(false);rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);quiet_native_clock(true);quiet_native_clock(false);return 0;}

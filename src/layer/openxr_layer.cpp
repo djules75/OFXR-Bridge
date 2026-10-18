@@ -1739,7 +1739,14 @@ void log_compositor_delivery(SessionState& state) noexcept {
                 static_cast<double>(ms) * 100.0 + 32768.0, 0.0, 65535.0));
         };
         auto& logger = xrfg::bridge_flight_logger();
-        if (const auto vsync = state.steamvr_delivery->vsync_anchor()) {
+        // The private director's clock is refreshed above regardless of F9.
+        // Diagnostics must only observe that cache: another vsync query here
+        // would change the shared phase sampling when logging is enabled.
+        // Cached anchors have zero query cost because this read makes no call.
+        const auto observed_vsync = state.private_runtime
+            ? state.steamvr_delivery->cached_vsync_anchor()
+            : state.steamvr_delivery->vsync_anchor();
+        if (const auto& vsync = observed_vsync) {
             logger.event(xrfg::BridgeFlightOperation::compositor_vsync, 0,
                 vsync->frame_counter,
                 static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
