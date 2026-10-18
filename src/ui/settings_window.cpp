@@ -206,6 +206,7 @@ bool show_settings_window(HWND owner) noexcept {
             SetTimer(handle, kRenderTimer, 33, nullptr);
             window = std::move(candidate);
         }
+        window->widgets.dlssg_profile_loaded=false; // Reopening after another game restores the new remembered target.
         ShowWindow(window->handle, SW_SHOW);
         SetForegroundWindow(window->handle);
         window->render();

@@ -4,7 +4,7 @@
 #include "xrfg/benchmark_suite.hpp"
 #include "imgui.h"
 #include <windows.h>
-#include <commdlg.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <iterator>
@@ -86,54 +86,52 @@ std::string utf8(const std::wstring& value) {
     WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), result.data(), bytes, nullptr, nullptr);
     return result;
 }
-void dlssg_preset(SettingsWidgetState& ui, bool compact) {
+void dlssg_preset(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     using namespace xrfg::standalone;
-    const auto selection_file = configuration_path().parent_path() / L"dlssg-profile-selection.ini";
+    const auto selection_file = configuration_path();
+    if (!state.connected) ui.dlssg_observed_pid=0;
     const auto refresh = [&] {
         DlssgProfile profile; std::wstring error;
         const bool read = !ui.dlssg_executable.empty() && read_dlssg_profile(ui.dlssg_executable, profile, error);
         ui.dlssg_model = read && profile.enabled && profile.custom_override ?
             (profile.preset == 3 ? 2 : profile.preset == 1 ? 1 : 0) : 0;
-        ui.dlssg_profile_status = read ? "Game profile read. Changes apply after restarting the game." :
-            ui.dlssg_executable.empty() ? "Choose the actual game executable before selecting a preset." : utf8(error);
+        ui.dlssg_profile_status = read ? "Game profile read. Changes apply on the next game launch." :
+            ui.dlssg_executable.empty() ? "Start a game with OFXR once. Its preset can then be changed here while the game is closed." : utf8(error);
         ui.dlssg_profile_loaded = true;
     };
     if (!ui.dlssg_profile_loaded) {
         if (compact) ui.dlssg_executable = process_executable();
         else {
-            wchar_t path[32768]{};
-            GetPrivateProfileStringW(L"dlssg", L"executable", L"", path, 32768, selection_file.c_str());
-            ui.dlssg_executable = path;
+            ui.dlssg_executable = last_dlssg_game(selection_file);
         }
         refresh();
     }
-    if (!compact && ImGui::Button("Choose game executable")) {
-        wchar_t path[32768]{};
-        OPENFILENAMEW dialog{}; dialog.lStructSize = sizeof(dialog); dialog.hwndOwner = GetActiveWindow();
-        dialog.lpstrFile = path; dialog.nMaxFile = 32768;
-        dialog.lpstrFilter = L"Game executable (*.exe)\0*.exe\0\0";
-        dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-        if (GetOpenFileNameW(&dialog)) {
-            ui.dlssg_executable = path; refresh();
-            std::filesystem::create_directories(selection_file.parent_path());
-            if (!WritePrivateProfileStringW(L"dlssg", L"executable", path, selection_file.c_str()))
-                ui.dlssg_profile_status = "Executable selected for this tray; could not save selection.";
+    if ((compact && !ui.dlssg_target_saved) ||
+        (!compact && state.connected && ui.dlssg_observed_pid != state.runtime.process_id)) {
+        const auto path = compact ? process_executable() : game_executable(state.runtime.process_id);
+        if (!path.empty()) {
+            ui.dlssg_observed_pid = state.runtime.process_id;
+            if (path != ui.dlssg_executable) { ui.dlssg_executable = path; ui.dlssg_target_saved = false; refresh(); }
+            if (!ui.dlssg_target_saved) ui.dlssg_target_saved = remember_dlssg_game(selection_file, path);
         }
     }
     if (!ui.dlssg_executable.empty()) ImGui::TextWrapped("Game: %s", utf8(ui.dlssg_executable.filename().wstring()).c_str());
     ImGui::BeginDisabled(ui.dlssg_executable.empty());
     int selected = ui.dlssg_model;
-    if (ImGui::Combo("DLSS-G preset (restart game)", &selected, "Game default\0Preset A (slower)\0Preset C (faster)\0")) {
+    if (ImGui::Combo("DLSS-G preset (next launch)", &selected, "Game default\0Preset A (Full, quality)\0Preset C (Lite, faster)\0")) {
         const auto preset = selected == 1 ? DlssgPreset::a : selected == 2 ? DlssgPreset::c : DlssgPreset::game_default;
         std::wstring error;
-        if (write_dlssg_profile(ui.dlssg_executable, preset, error)) {
-            refresh(); ui.dlssg_profile_status = "Saved and verified. Restart the game to load the selected model.";
+        DlssgPreset saved{};
+        if (write_dlssg_profile(ui.dlssg_executable, preset, error, &saved)) {
+            refresh(); ui.dlssg_profile_status = saved != preset
+                ? "Preset C unavailable: Preset A saved and verified for the next launch."
+                : "Saved and verified for the next launch. Restart the game if it is running.";
         } else ui.dlssg_profile_status = utf8(error);
     }
     ImGui::EndDisabled();
     if (ImGui::Button("Refresh preset profile")) refresh();
     ImGui::TextWrapped("%s", ui.dlssg_profile_status.c_str());
-    ImGui::TextWrapped("Preset C requires NVIDIA's updated FG model and a compatible driver. A/C performance depends on the system; global NVIDIA overrides may still apply.");
+    ImGui::TextWrapped("C uses Lite blending; A uses Full quality. If the driver rejects C, OFXR tries A. A saved request does not verify the model loaded by NVIDIA; global overrides may still apply.");
 }
 bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     auto& draft = ui.draft;
@@ -183,7 +181,7 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
         ImGui::EndDisabled();
     }
     if (dlssg) {
-        dlssg_preset(ui, compact);
+        dlssg_preset(ui, state, compact);
         changed |= ImGui::SliderInt("Generated resolution", &draft.native_scale, 25, 100, "%d%%");
         ui.scale_editing |= ImGui::IsItemActive();
         ImGui::TextWrapped("Requires compatible NVIDIA DLSS-G hardware and runtime");
@@ -316,17 +314,21 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
         ? (draft.diagnostics ? "Logging active" : "Stopping logging...")
         : (draft.diagnostics ? "Starting logging..." : "Logging disabled"));
     ImGui::SeparatorText("Automatic tests");
+    if (ImGui::Button("Open ofxr-bridge.ini"))
+        ShellExecuteW(GetActiveWindow(), L"open", configuration_path().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    const bool permitted=benchmark_enabled();
+    if (!permitted) ImGui::TextWrapped("Benchmarks disabled. Set [benchmark] enabled=1 in ofxr-bridge.ini to enable sampling and these buttons.");
     const bool active=benchmark_active(state.benchmark);
-    ImGui::BeginDisabled(active);
+    ImGui::BeginDisabled(active || !permitted);
     changed |= ImGui::Checkbox("Output CSV",&draft.benchmark_csv);
     ImGui::EndDisabled();
     ImGui::TextWrapped("10 seconds per configuration; discard only the first 3 seconds. CSV: min / median / max Output FPS and Cycle estimated. Works with diagnostic logging off. Neural and AFW choices are kept.");
-    ImGui::BeginDisabled(active || !state.connected);
+    ImGui::BeginDisabled(active || !permitted || !state.connected);
     const bool optical=ImGui::Button("Tests without vectors");
     ImGui::SameLine();
     const bool complete=ImGui::Button("Complete tests (DLSS-G C)");
     ImGui::EndDisabled();
-    ImGui::BeginDisabled(active || !state.connected || !state.runtime.luke_detected);
+    ImGui::BeginDisabled(active || !permitted || !state.connected || !state.runtime.luke_detected);
     const bool luke=ImGui::Button("Test Luke Ross");
     ImGui::EndDisabled();
     if(optical || complete || luke) {

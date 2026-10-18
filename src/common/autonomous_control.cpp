@@ -122,14 +122,31 @@ void restore_preferences(Settings& s) noexcept {
     s.backward = p.backward; s.separate_synthesis = p.separate_synthesis; s.lower_vram = p.lower_vram; s.prefer_fps = p.prefer_fps;
     s.triple_frame_gen = p.triple_frame_gen; s.native_scale = p.native_scale;
 }
-Settings load() {
-    std::ifstream input(configuration_path(), std::ios::binary);
-    std::ostringstream data;
-    if (input) data << input.rdbuf();
-    return parse_settings(data.str());
+std::string configuration_text(const std::filesystem::path& path) {
+    std::ifstream input(path,std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(input), {});
 }
-bool save(const Settings& value) {
-    const auto path = configuration_path();
+Settings load() { return parse_settings(configuration_text(configuration_path())); }
+std::string merge_sections(std::string_view old, std::string_view replacement) {
+    std::vector<std::string> replaced;
+    std::istringstream fresh{std::string(replacement)}; std::string line;
+    while (std::getline(fresh,line)) {
+        const auto clean=trim(line);
+        if (clean.starts_with('[') && clean.ends_with(']')) replaced.push_back(clean);
+    }
+    std::istringstream input{std::string(old)}; std::string result; bool keep=true;
+    while (std::getline(input,line)) {
+        const auto clean=trim(line);
+        if (clean.starts_with('[') && clean.ends_with(']'))
+            keep=std::find(replaced.begin(),replaced.end(),clean)==replaced.end();
+        if (keep) result+=line+'\n';
+    }
+    result+='\n'; result+=replacement;
+    if(result.find("[benchmark]")==std::string::npos)result+="\n[benchmark]\nenabled=0\n";
+    return result;
+}
+bool save_sections(const std::filesystem::path& path, std::string_view sections) {
+    const auto text=merge_sections(configuration_text(path),sections);
     std::filesystem::create_directories(path.parent_path());
     auto temporary = path;
 #ifdef _WIN32
@@ -140,7 +157,7 @@ bool save(const Settings& value) {
     {
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
         if (!output) return false;
-        output << serialize_settings(value);
+        output << text;
         output.close();
         if (!output) return false;
     }
@@ -155,6 +172,7 @@ bool save(const Settings& value) {
     return !error;
 #endif
 }
+bool save(const Settings& value) { return save_sections(configuration_path(),serialize_settings(value)); }
 
 class Channel {
 public:
@@ -394,18 +412,42 @@ std::filesystem::path configuration_path() {
         override_directory, static_cast<DWORD>(std::size(override_directory)));
     if (override_length && override_length < std::size(override_directory)) {
         const std::filesystem::path override_path(override_directory);
-        if (override_path.is_absolute()) return override_path / L"autonomous.ini";
+        if (override_path.is_absolute()) return override_path / L"ofxr-bridge.ini";
     }
     PWSTR local = nullptr;
     if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &local)))
         throw std::runtime_error("Local application data is unavailable");
     std::filesystem::path result(local);
     CoTaskMemFree(local);
-    return result / L"OFXR Autonomous" / L"autonomous.ini";
+    return result / L"OFXR Autonomous" / L"ofxr-bridge.ini";
 #else
     const auto* local = std::getenv("XDG_CONFIG_HOME");
-    return std::filesystem::path(local ? local : ".") / "OFXR Autonomous" / "autonomous.ini";
+    return std::filesystem::path(local ? local : ".") / "OFXR Autonomous" / "ofxr-bridge.ini";
 #endif
+}
+
+bool write_configuration_sections(const std::filesystem::path& path, std::string_view sections) noexcept {
+    try { auto& c=channel();Lock lock(c,2000);return lock.acquired && save_sections(path,sections); }
+    catch (...) { return false; }
+}
+bool initialize_user_configuration() noexcept {
+    try {
+        const auto file=configuration_path();
+        if(std::filesystem::exists(file))return true;
+        const auto defaults=sanitize(Settings{});
+        const auto settings=serialize_settings(defaults);
+        auto& c=channel();Lock lock(c,2000);
+        if(!lock.acquired || !save_sections(file,settings))return false;
+        if(c.data->snapshot.desired!=defaults) {c.data->snapshot.desired=defaults;++c.data->snapshot.revision;}
+        return true;
+    } catch (...) {return false;}
+}
+bool benchmark_enabled() noexcept {
+#ifdef _WIN32
+    try {return GetPrivateProfileIntW(L"benchmark",L"enabled",0,configuration_path().c_str())!=0;}
+    catch (...) {}
+#endif
+    return false;
 }
 
 Snapshot snapshot() noexcept {
@@ -647,6 +689,7 @@ void csv_open(SuiteRecorder& rec,BenchmarkStatus& b) {
 } // namespace
 
 bool start_benchmark(bool full,bool luke) noexcept {
+    if (!benchmark_enabled()) return false;
     try {
         auto& c=channel();Lock lock(c,2000);if(!lock.acquired)return false;
         auto& shared=*c.data;auto& s=shared.snapshot;auto& b=s.benchmark;
@@ -661,9 +704,12 @@ bool start_benchmark(bool full,bool luke) noexcept {
         }
         if(full && s.runtime.dlssg_preset_request!=3) {
             const auto game=benchmark_game_path(s.runtime.process_id);std::wstring error;
-            const bool saved=!game.empty() && standalone::write_dlssg_profile(game,standalone::DlssgPreset::c,error);
-            b={};b.phase=saved ? BenchmarkPhase::restart_required : BenchmarkPhase::error;
-            std::snprintf(b.message,sizeof(b.message),"%s",saved
+            standalone::DlssgPreset selected{};
+            const bool saved=!game.empty() && standalone::write_dlssg_profile(game,standalone::DlssgPreset::c,error,&selected);
+            b={};b.phase=saved && selected==standalone::DlssgPreset::c ? BenchmarkPhase::restart_required : BenchmarkPhase::error;
+            std::snprintf(b.message,sizeof(b.message),"%s",saved && selected==standalone::DlssgPreset::a
+                ? "Preset C unavailable: A saved for the next launch. Complete tests require C; use manual DLSS-G or tests without vectors."
+                : saved
                 ? "Preset C saved for this game. Restart it, load the test scene, then press Complete tests."
                 : "Could not select preset C for the running game. Select C in its NVIDIA profile before starting the game.");
             return false;
@@ -691,10 +737,13 @@ void stop_benchmark() noexcept {
 }
 void tick_benchmark(std::uint64_t now) noexcept {
     try {
+        const bool permitted=benchmark_enabled();
         auto& c=channel();Lock lock(c);if(!lock.acquired)return;
         if(!now)now=GetTickCount64();
         auto& shared=*c.data;auto& s=shared.snapshot;auto& b=s.benchmark;auto& rec=suite_recorder();
         const auto own_pid=GetCurrentProcessId();
+        if (!permitted && benchmark_active(b))
+            suite_restore(shared,BenchmarkPhase::stopped,"Benchmarks disabled in ofxr-bridge.ini; original settings restored.",now);
         if(!benchmark_active(b)) {
             std::atomic_ref<std::uint64_t>(shared.benchmark_memory_request).store(0,std::memory_order_release);
             std::atomic_ref<std::uint64_t>(shared.benchmark_metrics_until_ms).store(0,std::memory_order_release);

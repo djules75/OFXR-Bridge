@@ -54,7 +54,7 @@ int main() {
     for (int separate : {0,1}) for (int reduce : {0,1}) {
         autonomous.separate_synthesis = separate; autonomous.lower_vram = reduce;
         const auto ini = build_runtime_ini(release_defaults, autonomous);
-        if (!contains(ini, separate ? "separate_synthesis=1" : "separate_synthesis=0") ||
+        if (!contains(ini, reduce ? "separate_synthesis=1" : "separate_synthesis=0") ||
             !contains(ini, reduce ? "single_swapchain_rings=1" : "single_swapchain_rings=0")) return 1;
     }
     autonomous.separate_synthesis = 0; autonomous.lower_vram = 0;
@@ -62,6 +62,9 @@ int main() {
         parse_settings("[tray]\nsingle_swapchain_rings=1\nseparate_synthesis=0\n").separate_synthesis) return 1;
 
     const std::string default_runtime_ini = build_runtime_ini(release_defaults);
+    if (!contains(default_runtime_ini,"timing_capture=0") ||
+        !contains(default_runtime_ini,"pose_cadence_capture=0") ||
+        !contains(default_runtime_ini,"gpu_instrumentation_enabled=0")) return 1;
     if (release_defaults.frame_generation != FrameGeneration::ofxr ||
         !contains(default_runtime_ini, "frame_generation=ofxr")) return 1;
     LauncherSettings native_settings;

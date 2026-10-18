@@ -44,6 +44,8 @@ int main() {
         baseline.benchmark_csv=true;check(request(baseline),"Save isolated test profile");baseline=snapshot().desired;
         RuntimeStatus runtime{};runtime.sessions=1;runtime.dlssg_preset_request=3;
         runtime.applied_revision=snapshot().revision;report_runtime(runtime);
+        check(!benchmark_enabled() && !start_benchmark(true),"INI flag defaults off and blocks suite commands");
+        check(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable isolated benchmarks in the single INI");
         check(start_benchmark(true),"Start full C suite with process-start C request");
         auto state=snapshot();check(!start_benchmark(false),"A second UI cannot start a competing suite");
         const auto first_requested=state.benchmark.requested_ms;
@@ -102,6 +104,11 @@ int main() {
         std::ifstream layout(std::filesystem::u8path(state.benchmark.csv_path));std::string header;std::getline(layout,header);
         const auto blank=header.find("Fidelity 00 / blank"),one=header.find("Fidelity 00 / 1x1"),two=header.find("Fidelity 00 / 2x2"),four=header.find("Fidelity 00 / 4x4");
         check(blank==std::string::npos && one<two && two<four && four!=std::string::npos,"Luke CSV groups only1x1/2x2/4x4; no disabled AFW tests");
+        runtime.applied_revision=snapshot().revision;report_runtime(runtime);
+        check(start_benchmark(false),"start trial before disabling flag");
+        check(WritePrivateProfileStringW(L"benchmark",L"enabled",L"0",configuration_path().c_str()),"disable active benchmark");
+        tick_benchmark();
+        check(snapshot().benchmark.phase==BenchmarkPhase::stopped && !take_benchmark_memory_request(),"disabling INI stops trial and clears memory requests");
         std::cout<<"Automatic suite: full/optical, C-only, hidden sampling without F9, timing, median, CSV, restore/manual cancellation PASS\n";
         return 0;
     } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}

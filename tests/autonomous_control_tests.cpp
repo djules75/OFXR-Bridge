@@ -266,7 +266,7 @@ int wmain(int count, wchar_t** arguments) {
         // proves initialization from the persisted file rather than cached IPC.
         const auto restart_profile = fixture / L"restart";
         std::filesystem::create_directory(restart_profile);
-        std::filesystem::copy_file(xrfg::autonomous::configuration_path(), restart_profile / L"autonomous.ini");
+        std::filesystem::copy_file(xrfg::autonomous::configuration_path(), restart_profile / L"ofxr-bridge.ini");
         SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR", restart_profile.c_str());
         command = L"\"" + std::wstring(executable) + L"\" --restart";
         const bool restart_started = CreateProcessW(executable, command.data(), nullptr, nullptr, FALSE,
@@ -277,7 +277,7 @@ int wmain(int count, wchar_t** arguments) {
         GetExitCodeProcess(child.hProcess, &result);
         CloseHandle(child.hThread); CloseHandle(child.hProcess);
         require(result == 0, "disk-only process restart retains independent route preferences");
-        std::filesystem::remove(restart_profile / L"autonomous.ini");
+        std::filesystem::remove(restart_profile / L"ofxr-bridge.ini");
         std::filesystem::remove(restart_profile);
         // Simultaneous tray/headset edits are deltas against the state each
         // client observed, never an overwrite by a stale full draft.

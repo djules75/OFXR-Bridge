@@ -34,7 +34,7 @@ public:
     }
     ~ControlProfile() {
         std::error_code error;
-        std::filesystem::remove(directory_/L"autonomous.ini",error);
+        std::filesystem::remove(directory_/L"ofxr-bridge.ini",error);
         std::filesystem::remove(directory_,error);
     }
 };

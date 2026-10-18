@@ -1,5 +1,6 @@
 // Adapted from elliotttate/OFXR-Bridge b8048568 (release 36), LGPL-3.0-or-later.
 #include "xrfg/dlssg_profile.hpp"
+#include "xrfg/autonomous_control.hpp"
 
 #include <windows.h>
 
@@ -7,6 +8,7 @@
 #include <cwchar>
 #include <functional>
 #include <initializer_list>
+#include <fstream>
 #include <utility>
 
 namespace xrfg::standalone {
@@ -162,7 +164,7 @@ bool read_dlssg_profile(const std::filesystem::path& executable,
     }, error);
 }
 
-bool write_dlssg_profile(const std::filesystem::path& executable,
+static bool write_exact_profile(const std::filesystem::path& executable,
                         DlssgPreset preset, std::wstring& error) noexcept {
     return protect([&] {
         if (preset != DlssgPreset::game_default && preset != DlssgPreset::a && preset != DlssgPreset::c)
@@ -207,6 +209,76 @@ bool write_dlssg_profile(const std::filesystem::path& executable,
             throw std::wstring(L"The driver did not retain the requested FG preset.");
         }
     }, error);
+}
+bool write_dlssg_profile(const std::filesystem::path& executable,
+                        DlssgPreset preset, std::wstring& error, DlssgPreset* saved) noexcept {
+    if (write_exact_profile(executable, preset, error)) {
+        if (saved) *saved = preset;
+        return true;
+    }
+    if (preset != DlssgPreset::c) return false;
+    const auto c_error = error;
+    if (write_exact_profile(executable, DlssgPreset::a, error)) {
+        if (saved) *saved = DlssgPreset::a;
+        return true;
+    }
+    error = L"Preset C could not be selected: " + c_error + L" Preset A fallback also failed: " + error;
+    return false;
+}
+
+std::filesystem::path game_executable(unsigned process_id) noexcept {
+    if (!process_id) return {};
+    const auto process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+    if (!process) return {};
+    wchar_t path[32768]{}; DWORD length = 32768;
+    const bool found = QueryFullProcessImageNameW(process, 0, path, &length) != FALSE;
+    CloseHandle(process);
+    try { return found ? std::filesystem::path(path) : std::filesystem::path{}; }
+    catch (...) { return {}; }
+}
+
+std::filesystem::path last_dlssg_game(const std::filesystem::path& selection_file) noexcept {
+    try {
+        if (selection_file == autonomous::configuration_path()) {
+            std::ifstream input(selection_file,std::ios::binary);std::string line;bool selected=false;
+            while(std::getline(input,line)) {
+                if(!line.empty() && line.back()=='\r')line.pop_back();
+                if(line.starts_with('['))selected=line=="[dlssg]";
+                if(!selected || !line.starts_with("executable="))continue;
+                const auto encoded=line.substr(11);
+                const int count=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,encoded.data(),int(encoded.size()),nullptr,0);
+                if(count>0) {
+                    std::wstring decoded(count,L'\0');
+                    MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,encoded.data(),int(encoded.size()),decoded.data(),count);
+                    const std::filesystem::path executable(decoded);
+                    if(executable.is_absolute() && std::filesystem::is_regular_file(executable) &&
+                        _wcsicmp(executable.extension().c_str(),L".exe")==0)return executable;
+                }
+            }
+        }
+        wchar_t path[32768]{};
+        GetPrivateProfileStringW(L"dlssg", L"executable", L"", path, 32768, selection_file.c_str());
+        const std::filesystem::path executable(path);
+        if (executable.is_absolute() && std::filesystem::is_regular_file(executable) &&
+            _wcsicmp(executable.extension().c_str(), L".exe") == 0) return executable;
+    } catch (...) {}
+    return {};
+}
+
+bool remember_dlssg_game(const std::filesystem::path& selection_file,
+                        const std::filesystem::path& executable) noexcept {
+    try {
+        const auto path = validated_path(executable);
+        if (_wcsicmp(last_dlssg_game(selection_file).c_str(), path.c_str()) == 0) return true;
+        if (selection_file == autonomous::configuration_path()) {
+            const int bytes=WideCharToMultiByte(CP_UTF8,0,path.c_str(),int(path.size()),nullptr,0,nullptr,nullptr);
+            std::string encoded(bytes,'\0');
+            WideCharToMultiByte(CP_UTF8,0,path.c_str(),int(path.size()),encoded.data(),bytes,nullptr,nullptr);
+            return autonomous::write_configuration_sections(selection_file,"[dlssg]\nexecutable="+encoded+'\n');
+        }
+        std::filesystem::create_directories(selection_file.parent_path());
+        return WritePrivateProfileStringW(L"dlssg", L"executable", path.c_str(), selection_file.c_str()) != FALSE;
+    } catch (...) { return false; }
 }
 std::filesystem::path process_executable() noexcept {
     wchar_t path[32768]{};

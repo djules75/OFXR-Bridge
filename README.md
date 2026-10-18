@@ -1,3 +1,13 @@
+## V579: fresh single INI and gaming defaults
+
+One user `ofxr-bridge.ini`, fresh defaults without legacy import. Offline native
+DLSS-G preset selection remembers the connected game; no EXE chooser. Driver
+rejection of C explicitly retries A. F9 off disables diagnostics; F8 requires
+F9. Benchmarks and their GUI controls default off behind `[benchmark] enabled=0`
+in the same INI; enabling them still works with F9 off. No interpolation/AFW/
+private distributor change.17 focused checks pass; headset A/C check pending.
+See [details](docs/V579_GAMING_CONFIGURATION.md). Local candidate only.
+
 ## V578: native DLSS-G call-contract diagnostic
 
 Diagnostic on V577; no visual fix claimed. Full F8 now records the exact NGX

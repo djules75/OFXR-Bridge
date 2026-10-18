@@ -19,7 +19,14 @@ struct DlssgProfile {
 bool read_dlssg_profile(const std::filesystem::path& executable,
                        DlssgProfile& result, std::wstring& error) noexcept;
 bool write_dlssg_profile(const std::filesystem::path& executable,
-                        DlssgPreset preset, std::wstring& error) noexcept;
+                        DlssgPreset preset, std::wstring& error,
+                        DlssgPreset* saved = nullptr) noexcept;
+
+// Local target selection only: these functions never write NVIDIA profiles.
+std::filesystem::path game_executable(unsigned process_id) noexcept;
+std::filesystem::path last_dlssg_game(const std::filesystem::path& selection_file) noexcept;
+bool remember_dlssg_game(const std::filesystem::path& selection_file,
+                        const std::filesystem::path& executable) noexcept;
 
 std::filesystem::path process_executable() noexcept;
 // Capture once before menus can edit the next-launch driver preference. This is

@@ -52,6 +52,7 @@ int main(int argc,char** argv) {
     state->d3d11_device=f.device11;state->d3d11_context=f.context;
     if(route=="memory") {
         using namespace xrfg::autonomous;
+        check(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable isolated memory benchmark");
         auto desired=snapshot().desired;desired.benchmark_csv=true;desired.diagnostics=false;
         check(request(desired),"isolated memory test settings");
         RuntimeStatus runtime{};runtime.sessions=1;runtime.applied_revision=snapshot().revision;report_runtime(runtime);

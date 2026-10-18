@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.578.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.579.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that

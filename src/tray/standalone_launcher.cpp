@@ -531,6 +531,7 @@ std::string build_runtime_ini(
            (settings.diagnostics ? "1" : "0") +
            "\r\nmax_file_mb=" + std::to_string(max_file_mb) +
            "\r\nflush_each_event=" + (flush_each_event ? "1" : "0") + "\r\n"
+           "timing_capture=0\r\npose_cadence_capture=0\r\ngpu_instrumentation_enabled=0\r\n"
            "\r\n[overlay]\r\nposition=" + overlay_position_name(settings.overlay_position) + "\r\n";
 }
 

@@ -13,7 +13,7 @@ struct RamTimingFixture {
         root=std::filesystem::temp_directory_path()/(L"ofxr-ram-gpu-"+
             std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64()));
         std::filesystem::create_directories(root);
-        {std::ofstream ini(root/L"ofxr_bridge.ini");ini<<"[diagnostics]\nlogging_enabled=0\ntiming_capture=1\npose_cadence_capture="<<(pose_profile?1:0)<<"\n";}
+        {std::ofstream ini(root/L"ofxr_bridge.ini");ini<<"[diagnostics]\nlogging_enabled=1\ntiming_capture=1\npose_cadence_capture="<<(pose_profile?1:0)<<"\n";}
         xrfg::bridge_flight_logger().initialize(root);
     }
     void verify(bool expect_d3d11 = false, bool expect_gpu_delay = false) {

@@ -179,18 +179,20 @@ void live_switch_records(const fs::path& directory) {
         std::this_thread::sleep_for(std::chrono::milliseconds(270));
         logger.refresh_settings();
         require(logger.enabled() == on, "live logger did not follow stable switch");
-        require(logger.gpu_instrumentation_enabled(), "logging switch changed independent GPU instrumentation");
+        require(logger.gpu_instrumentation_enabled() == on, "GPU instrumentation must follow the logging switch");
     };
     try {
         switch_to(true);
         const auto first = logger.log_path();
         logger.flush();
-        require(read(first).find("phase=M op=runtime_identity result=777") != std::string::npos,
-            "late logging lost startup metadata from disabled mode");
-        require(read(first).find("phase=M op=steamvr_queue_configuration result=0 dur_us=0 a=23 b=3 c=131073") != std::string::npos,
-            "late logging lost the requested/actual queue and initial selection");
-        require(read(first).find("phase=M op=swapchain_eligibility result=13") != std::string::npos,
-            "late logging lost the provider refusal preceding activation");
+        require(read(first).find("runtime_identity result=777") == std::string::npos &&
+            read(first).find("steamvr_queue_configuration result=0 dur_us=0 a=23 b=3 c=131073") == std::string::npos &&
+            read(first).find("swapchain_eligibility result=13") == std::string::npos,
+            "logging off must not record hidden bootstrap metadata");
+        logger.event(xrfg::BridgeFlightOperation::runtime_identity,777,1,2,3);
+        logger.flush();
+        require(read(first).find("phase=I op=runtime_identity result=777")!=std::string::npos,
+            "active logging must retain real metadata for a later restart");
         const auto stale = logger.begin(xrfg::BridgeFlightOperation::application_wait_frame);
         require(stale.sequence != 0, "first live writer token");
         switch_to(false);
@@ -338,8 +340,8 @@ int main(int argc, char** argv) {
             "[diagnostics]\r\nlogging_enabled=0\r\ngpu_instrumentation_enabled=1\r\n");
         xrfg::BridgeFlightLogger gpu;
         gpu.initialize(gpu_directory);
-        require(!gpu.enabled() && gpu.gpu_instrumentation_enabled(),
-            "explicit GPU instrumentation must be independent of normal logging");
+        require(!gpu.enabled() && !gpu.gpu_instrumentation_enabled(),
+            "a retained GPU diagnostic flag must not activate instrumentation while logging is off");
 
         const std::string log = read(log_path);
         require(log.find("phase=B op=app_wait_frame") != std::string::npos,

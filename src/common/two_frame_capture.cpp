@@ -1,6 +1,7 @@
 #include "xrfg/two_frame_capture.hpp"
 #include "xrfg/diagnostic_hotkeys.hpp"
 #include "xrfg/diagnostic_ring_sink.hpp"
+#include "xrfg/bridge_flight_logger.hpp"
 #include <sstream>
 #include "xrfg/luke_host_config.hpp"
 
@@ -77,6 +78,7 @@ struct Session {
 struct Manager {
     std::mutex mutex;
     std::shared_ptr<Session> session;
+    std::atomic_bool has_session{};
     std::atomic_uint32_t active_frame{};
     bool pending_start{};
     bool key_down{};
@@ -528,6 +530,8 @@ void write_session(const std::shared_ptr<Session>& session) {
 std::uint32_t two_frame_capture_begin_end_frame() noexcept {
     try {
         auto& state = manager();
+        if (!bridge_flight_logger().enabled() && !bridge_flight_logger().ram_enabled() &&
+            !state.has_session.load(std::memory_order_relaxed) && !state.active_frame.load(std::memory_order_relaxed)) return 0;
         std::scoped_lock lock(state.mutex);
         const bool down = (GetAsyncKeyState(kImageCaptureKey) & 0x8000) != 0;
         const bool pressed = down && !state.key_down;
@@ -536,10 +540,13 @@ std::uint32_t two_frame_capture_begin_end_frame() noexcept {
             state.session->safe_to_release.load()) {
             if (state.writer.joinable()) state.writer.join();
             state.session.reset();
+            state.has_session.store(false,std::memory_order_relaxed);
         }
-        if (!state.session && pressed && !diagnostic_ring_enabled && !(GetAsyncKeyState(VK_CONTROL)&0x8000)) {
+        if (!state.session && pressed && (bridge_flight_logger().enabled() || bridge_flight_logger().ram_enabled()) &&
+            !diagnostic_ring_enabled && !(GetAsyncKeyState(VK_CONTROL)&0x8000)) {
             if (state.writer.joinable()) state.writer.join();
             state.session = std::make_shared<Session>();
+            state.has_session.store(true,std::memory_order_relaxed);
             state.session->directory = capture_directory();
             state.session->settings = capture_settings();
             state.pending_start = true;
@@ -556,6 +563,7 @@ std::uint32_t two_frame_capture_begin_end_frame() noexcept {
 void two_frame_capture_finish_end_frame(std::uint32_t frame) noexcept {
     try {
         auto& state = manager();
+        if (!frame && !state.has_session.load(std::memory_order_relaxed)) return;
         std::scoped_lock lock(state.mutex);
         if (frame == 0) {
             if (state.pending_start) {
@@ -799,6 +807,7 @@ void two_frame_capture_submission(
     ID3D12CommandQueue* queue, std::uint32_t count,
     ID3D12CommandList* const* lists) noexcept {
     if (!queue || !lists || count == 0) return;
+    if (!manager().has_session.load(std::memory_order_relaxed) && !manager().active_frame.load(std::memory_order_relaxed)) return;
     try {
         std::shared_ptr<Session> session;
         {

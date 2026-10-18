@@ -27,10 +27,10 @@ int main(int argc, char** argv) {
         fs::create_directories(root);
         if(argc==2 && std::string(argv[1])=="disabled") {
             { std::ofstream ini(root/L"ofxr_bridge.ini");
-              ini<<"[diagnostics]\nlogging_enabled=0\ntiming_capture=0\n"; }
+              ini<<"[diagnostics]\nlogging_enabled=0\ntiming_capture=1\npose_cadence_capture=1\ngpu_instrumentation_enabled=1\n"; }
             auto& disabled=xrfg::bridge_flight_logger();
             disabled.shutdown(); disabled.initialize(root);
-            require(!disabled.ram_enabled() && !disabled.enabled() && disabled.log_path().empty(),
+            require(!disabled.ram_enabled() && !disabled.enabled() && !disabled.gpu_instrumentation_enabled() && disabled.log_path().empty(),
                 "disabled capture created recorder");
             using O=xrfg::BridgeFlightOperation;
             const auto token=disabled.begin(O::application_wait_frame);
@@ -147,7 +147,7 @@ int main(int argc, char** argv) {
         require(!xrfg::pause_ram_timing(GetCurrentProcessId(),true),"mapping leaked after shutdown");
         // Retain mature cadence/AFW records, compact read and bounded ingress receipts.
         { std::ofstream ini(root/L"ofxr_bridge.ini");
-          ini<<"[diagnostics]\nlogging_enabled=0\ntiming_capture=1\npose_cadence_capture=1\n"; }
+          ini<<"[diagnostics]\nlogging_enabled=1\ntiming_capture=1\npose_cadence_capture=1\n"; }
         logger.initialize(root);
         require(logger.ram_enabled() && !logger.enabled(),"pose profile enabled normal logging");
         constexpr std::array<std::uint64_t,26> selected{28,71,82,89,90,101,102,103,104,122,123,124,125,126,127,128,129,130,131,132,944,945,946,947,948,949};

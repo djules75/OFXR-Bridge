@@ -14178,13 +14178,14 @@ void capture_application_metadata(const std::shared_ptr<SessionState>& state, co
     try {
         const bool down=(GetAsyncKeyState(VK_CONTROL)&0x8000) &&
             (GetAsyncKeyState(VK_SHIFT)&0x8000) && (GetAsyncKeyState(VK_F10)&0x8000);
-        const bool trigger=down&&!state->diagnostic_key_down;
+        const bool diagnostics=xrfg::bridge_flight_logger().enabled() || xrfg::bridge_flight_logger().ram_enabled();
+        const bool trigger=down&&!state->diagnostic_key_down && diagnostics;
         state->diagnostic_key_down=down;
         // No GPU mutex, queries, thread, copies or disk work outside a capture.
         if (!trigger && !state->frame_capture->busy()) return;
         std::scoped_lock gpu_lock(state->gpu_mutex);
         if(trigger) static_cast<void>(state->frame_capture->start(true));
-        state->frame_capture->tick(true);
+        state->frame_capture->tick(diagnostics);
         ++state->diagnostic_app_frame;
         if (!state->frame_capture->active() || !info || !info->layers) return;
         for (std::uint32_t l=0;l<info->layerCount;++l) {
@@ -14514,16 +14515,18 @@ XrResult layer_end_frame_impl(
     if(state->luke_fresh_only && state->frame_capture) {
         const bool save_down=(GetAsyncKeyState(VK_F8)&0x8000)!=0;
         const bool toggle_down=save_down && (GetAsyncKeyState(VK_CONTROL)&0x8000)!=0;
-        const bool toggle=toggle_down && !state->diagnostic_ring_toggle_down;
+        const bool diagnostics=xrfg::bridge_flight_logger().enabled() || xrfg::bridge_flight_logger().ram_enabled();
+        const bool toggle=diagnostics && toggle_down && !state->diagnostic_ring_toggle_down;
         const bool save=save_down && !state->diagnostic_ring_save_down && !toggle_down;
         state->diagnostic_ring_toggle_down=toggle_down;state->diagnostic_ring_save_down=save_down;
+        if (!diagnostics && state->frame_capture->ring_active()) state->frame_capture->stop_ring();
         if(toggle || state->frame_capture->busy()) {
             std::scoped_lock lock(state->gpu_mutex);
             if(toggle) {
                 if(state->frame_capture->ring_active())state->frame_capture->stop_ring();
                 else static_cast<void>(state->frame_capture->start_ring());
             } else if(save && state->frame_capture->ring_active())static_cast<void>(state->frame_capture->save_ring());
-            state->frame_capture->tick(true);
+            state->frame_capture->tick(diagnostics);
         }
     }
     xrfg::autonomous::apply_runtime_settings();

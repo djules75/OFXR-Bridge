@@ -238,7 +238,9 @@ public:
     void refresh_settings() noexcept;
     // Explicit diagnostic/teardown use only; never called on a render path.
     void flush() noexcept;
-    [[nodiscard]] bool gpu_instrumentation_enabled() const noexcept { return gpu_instrumentation_enabled_.load(std::memory_order_relaxed); }
+    [[nodiscard]] bool gpu_instrumentation_enabled() const noexcept {
+        return gpu_instrumentation_enabled_.load(std::memory_order_relaxed) && (enabled() || ram_enabled());
+    }
 
     [[nodiscard]] bool enabled() const noexcept;
     [[nodiscard]] bool ram_enabled() const noexcept;
@@ -285,6 +287,7 @@ private:
         std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t) noexcept;
     std::atomic<std::shared_ptr<Impl>> impl_;
     std::unique_ptr<RamTimingCapture> ram_;
+    std::atomic<bool> ram_recording_{false};
     std::atomic<bool> gpu_instrumentation_enabled_{false}, disk_enabled_{false}, initialized_{false};
     std::atomic<std::uint64_t> next_poll_{0};
     std::mutex control_mutex_, startup_mutex_;

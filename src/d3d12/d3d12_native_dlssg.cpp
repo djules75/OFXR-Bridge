@@ -331,6 +331,7 @@ std::vector<AdapterFrames> ngx_frames;
 // goes to ofxr-native-dlssg.log in the NGX log directory: NGX's own logs do
 // not record its capability answers.
 void diagnose(const char *format, ...) {
+    if (!bridge_flight_logger().enabled() && !bridge_flight_logger().ram_enabled()) return;
     if (!environment(L"XRFG_TEST_NATIVE_DLSSG_VERBOSE")) return;
     wchar_t local[32768]{};
     GetEnvironmentVariableW(L"LOCALAPPDATA", local, 32768);
@@ -357,7 +358,8 @@ HRESULT acquire_ngx(ID3D12Device *d) {
     const auto dir = module_directory();
     NgxFeaturePaths search(nullptr,dir.wstring());
     auto info=*search.get();
-    if (environment(L"XRFG_TEST_NATIVE_DLSSG_VERBOSE")) {
+    if (environment(L"XRFG_TEST_NATIVE_DLSSG_VERBOSE") &&
+        (bridge_flight_logger().enabled() || bridge_flight_logger().ram_enabled())) {
         info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
         info.LoggingInfo.LoggingCallback = [](const char *message, NVSDK_NGX_Logging_Level,
                                               NVSDK_NGX_Feature) {
@@ -616,14 +618,15 @@ struct D3D12NativeDlssG::Impl {
         char message[160]{};
         std::snprintf(message, sizeof(message), "OFXR native DLSS FG %s: 0x%x (failure %llu)\n",
                       what, code, static_cast<unsigned long long>(failures));
-        OutputDebugStringA(message);
+        if (bridge_flight_logger().enabled() || bridge_flight_logger().ram_enabled()) OutputDebugStringA(message);
         if (test_output) {
             std::fputs(message, stderr);
         }
     }
     void poll_decisions() noexcept {
         try {
-        if (diagnostic_decisions && !decision_log) {
+        const bool logging = bridge_flight_logger().enabled() || bridge_flight_logger().ram_enabled();
+        if (logging && diagnostic_decisions && !decision_log) {
             const auto path = module_directory() /
                 (L"ofxr-native-decisions-pid" + std::to_wstring(GetCurrentProcessId()) +
                  L"-instance" + std::to_wstring(reinterpret_cast<std::uintptr_t>(this)) + L".log");
@@ -639,7 +642,7 @@ struct D3D12NativeDlssG::Impl {
             void *mapped{};
             if (SUCCEEDED(readback.buffer->Map(0, &range, &mapped))) {
                 const auto *flags = static_cast<const UINT *>(mapped);
-                if (decision_log) {
+                if (logging && decision_log) {
                     std::fprintf(decision_log,
                         "%llu publication=%llu eyes=%u outputs=%u disable=%u,%u,%u,%u\n",
                         GetTickCount64(), readback.publication, readback.eyes, readback.outputs,

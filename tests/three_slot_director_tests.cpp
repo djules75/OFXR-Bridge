@@ -1656,7 +1656,7 @@ void luke_inline_diagnostic_test() {
         (L"ofxr-v30013-inline-" + std::to_wstring(GetCurrentProcessId()));
     std::filesystem::create_directories(root);
     { std::ofstream ini(root / "ofxr_bridge.ini");
-      ini << "[diagnostics]\ntiming_capture=1\npose_cadence_capture=1\n"; }
+      ini << "[diagnostics]\nlogging_enabled=1\ntiming_capture=1\npose_cadence_capture=1\n"; }
     auto& logger = xrfg::bridge_flight_logger();
     logger.shutdown(); logger.initialize(root);
     check(logger.ram_enabled() && !logger.enabled(), "inline diagnostic must be RAM only");

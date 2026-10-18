@@ -177,6 +177,10 @@ std::string interface_status_text(const Snapshot& value);
 std::string_view interface_state_text(const Snapshot& value) noexcept;
 std::string_view interface_vectors_text(const Snapshot& value, std::uint64_t now_ms) noexcept;
 std::filesystem::path configuration_path();
+// One user configuration, with fresh defaults and no legacy file import.
+bool initialize_user_configuration() noexcept;
+bool write_configuration_sections(const std::filesystem::path& path, std::string_view sections) noexcept;
+bool benchmark_enabled() noexcept; // controller/UI only; never called by frame sampling
 
 constexpr int generation_ui_index(int mode) noexcept { return mode==3 ? 1 : mode==1 ? 2 : mode==2 ? 3 : 0; }
 constexpr int generation_from_ui(int index) noexcept { return index==1 ? 3 : index==2 ? 1 : index==3 ? 2 : 0; }

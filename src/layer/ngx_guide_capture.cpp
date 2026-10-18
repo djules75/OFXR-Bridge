@@ -93,8 +93,7 @@ bool public_guide_stream(std::uint64_t stream) noexcept {
     return (stream&kKcdPublicStreamNamespace)!=0;
 }
 void log(const char* message, UINT64 a=0, UINT64 b=0, UINT64 c=0, UINT64 d=0) {
-    static const bool forced=GetEnvironmentVariableW(L"XRFG_TEST_NATIVE_DLSSG_DRED",nullptr,0)!=0;
-    if(!forced && !bridge_flight_logger().enabled() && !bridge_flight_logger().ram_enabled())return;
+    if(!bridge_flight_logger().enabled() && !bridge_flight_logger().ram_enabled())return;
     auto& s=state(); std::scoped_lock lock(s.log_mutex);
     if(!s.log) {
         wchar_t dir[MAX_PATH]{}; GetModuleFileNameW(

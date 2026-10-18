@@ -61,7 +61,7 @@ public:
         }
         SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR", original_profile_ ? original_profile_->c_str() : nullptr);
         std::error_code ignored;
-        std::filesystem::remove(directory_ / L"autonomous.ini", ignored);
+        std::filesystem::remove(directory_ / L"ofxr-bridge.ini", ignored);
         std::filesystem::remove(directory_, ignored);
     }
 };

@@ -1,4 +1,5 @@
 #include "xrfg/dlssg_profile.hpp"
+#include <windows.h>
 #include <iostream>
 #include <stdexcept>
 
@@ -15,6 +16,17 @@ int main() {
         if ((preset != 0 && preset != 1 && preset != 3) || process_dlssg_preset() != preset)
             throw std::runtime_error("startup receipt must be valid and immutable");
         if (process_executable().empty()) throw std::runtime_error("actual process executable unavailable");
+        const auto folder = std::filesystem::temp_directory_path() /
+            (L"ofxr-last-game-" + std::to_wstring(GetCurrentProcessId()));
+        const auto selection = folder/L"dlssg-profile-selection.ini";
+        const auto game = game_executable(GetCurrentProcessId());
+        if (game != process_executable() || !game_executable(0).empty())
+            throw std::runtime_error("runtime PID must resolve the actual game executable");
+        if (!remember_dlssg_game(selection, game) || last_dlssg_game(selection) != game)
+            throw std::runtime_error("last game must survive a cold settings load without a connected game");
+        if (remember_dlssg_game(selection, L"relative.exe") || last_dlssg_game(selection) != game)
+            throw std::runtime_error("failed discovery must preserve the prior valid game target");
+        std::filesystem::remove(selection); std::filesystem::remove(folder);
         std::cout << "Preset validation and immutable read-only process receipt PASS\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

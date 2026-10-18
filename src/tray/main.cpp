@@ -3,6 +3,7 @@
 #include "xrfg/autonomous_control.hpp"
 #include "xrfg/autonomous_ui.hpp"
 #include "xrfg/benchmark_suite.hpp"
+#include "xrfg/dlssg_profile.hpp"
 #include "resource.h"
 
 #include <windows.h>
@@ -184,11 +185,8 @@ void load_settings(AppState& state) {
 }
 
 void save_settings(const AppState& state) {
-    std::wstring ignored;
-    static_cast<void>(write_text_atomic(
-        state.settings_path,
-        xrfg::standalone::serialize_settings(state.settings),
-        &ignored));
+    static_cast<void>(xrfg::autonomous::write_configuration_sections(
+        state.settings_path, xrfg::standalone::serialize_settings(state.settings)));
 }
 
 void show_error(HWND owner, const std::wstring& error) {
@@ -218,61 +216,14 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     } catch (...) { /* Cleanup must not depend on diagnostic I/O. */ }
 }
 
-// The newest ofxr_bridge.ini under any other version's cache folder.
-//
-// The two diagnostics knobs are carried forward from the file arming is about
-// to overwrite, which keeps a hand edit across an arm - but a version bump
-// creates an empty folder, so the lookup finds nothing and silently falls back
-// to the defaults. A capture setting deliberately raised for an investigation
-// was then reset by the next build, and the resulting logs were truncated
-// without anything saying so.
-[[nodiscard]] std::filesystem::path previous_runtime_configuration(
-    const std::filesystem::path& local_directory,
-    const std::filesystem::path& destination) {
-    std::error_code code;
-    const auto root = xrfg::standalone::runtime_version_directory(
-        local_directory,
-        kImplementationVersion).parent_path();
-    std::filesystem::path newest;
-    std::filesystem::file_time_type newest_at{};
-    for (const auto& entry :
-         std::filesystem::directory_iterator(root, code)) {
-        if (code || !entry.is_directory(code)) {
-            continue;
-        }
-        const auto candidate = entry.path() / L"ofxr_bridge.ini";
-        if (candidate == destination ||
-            !std::filesystem::exists(candidate, code)) {
-            continue;
-        }
-        const auto at = std::filesystem::last_write_time(candidate, code);
-        if (code) {
-            continue;
-        }
-        if (newest.empty() || at > newest_at) {
-            newest = candidate;
-            newest_at = at;
-        }
-    }
-    return newest;
-}
-
 [[nodiscard]] bool write_runtime_configuration(
     const AppState& state,
     std::wstring* error,
     const std::filesystem::path& arm_manifest = {}) {
     const auto& manifest = arm_manifest.empty() ? state.armed_manifest : arm_manifest;
-    // Carry forward the two diagnostics knobs the tray has no UI for. Arming
-    // rewrites this file whole, so hardcoding them here is what made a
-    // hand-edited max_file_mb survive exactly until the next arm.
-    const auto destination =
-        runtime_directory(state.local_directory) / L"ofxr_bridge.ini";
-    // This version's file if it has one, otherwise the newest any other version
-    // left behind, so the knobs survive a version bump as well as an arm.
-    std::error_code exists_code;
-    const auto source = std::filesystem::exists(destination, exists_code)
-        ? destination
-        : previous_runtime_configuration(state.local_directory, destination);
+    // The single user INI owns diagnostics limits; runtime files are generated.
+    const auto destination = runtime_directory(state.local_directory) / L"ofxr_bridge.ini";
+    const auto source = state.settings_path;
     const unsigned max_file_mb = GetPrivateProfileIntW(
         L"diagnostics",
         L"max_file_mb",
@@ -894,7 +845,8 @@ void show_context_menu(AppState& state) {
 [[nodiscard]] bool set_steamvr_queue_preference(AppState& state, bool separate, std::wstring* error) {
     const bool previous = state.settings.steamvr_separate_queue;
     state.settings.steamvr_separate_queue = separate;
-    if (!write_text_atomic(state.settings_path, xrfg::standalone::serialize_settings(state.settings), error)) {
+    if (!xrfg::autonomous::write_configuration_sections(state.settings_path, xrfg::standalone::serialize_settings(state.settings))) {
+        if (error) *error=L"Could not save ofxr-bridge.ini.";
         state.settings.steamvr_separate_queue = previous;
         return false;
     }
@@ -1076,7 +1028,24 @@ LRESULT CALLBACK window_procedure(
         }
         return 0;
     case WM_TIMER:
-        if(wparam==kBenchmarkTimer) {xrfg::autonomous::tick_benchmark();return 0;}
+        if(wparam==kBenchmarkTimer) {
+            // Desktop controller only; no disk/profile work on the game's frame thread.
+            static unsigned remembered_game{};
+            static ULONGLONG next_game_check{};
+            const auto now = GetTickCount64();
+            if (now >= next_game_check) try {
+                next_game_check = now + 1000;
+                const auto current = xrfg::autonomous::snapshot();
+                if (!current.connected) remembered_game=0;
+                else if (current.runtime.process_id != remembered_game) {
+                    const auto game = xrfg::standalone::game_executable(current.runtime.process_id);
+                    if (xrfg::standalone::remember_dlssg_game(
+                            xrfg::autonomous::configuration_path(), game))
+                        remembered_game = current.runtime.process_id;
+                }
+            } catch (...) {}
+            xrfg::autonomous::tick_benchmark();return 0;
+        }
         return DefWindowProcW(window,message,wparam,lparam);
     case WM_COMMAND:
         handle_command(*state, LOWORD(wparam));
@@ -1225,6 +1194,7 @@ LRESULT CALLBACK window_procedure(
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
+    if (!xrfg::autonomous::initialize_user_configuration()) return EXIT_FAILURE;
     // This entry point displays the panel without creating an activation,
     // changing registrations, writing tray configuration or loading the layer.
     if (arguments && (wcsstr(arguments, L"--settings-only") || wcsstr(arguments, L"--settings-smoke") ||
@@ -1278,7 +1248,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
     try {
         state.executable_directory = executable_directory();
         state.local_directory = local_app_data() / L"OFXR Autonomous";
-        state.settings_path = state.local_directory / L"tray.ini";
+        state.settings_path = xrfg::autonomous::configuration_path();
         std::wstring cleanup_error;
         if (!cleanup_all_owned_registrations(state, &cleanup_error)) {
             log_lifecycle(state.local_directory, L"startup-cleanup", cleanup_error);
@@ -1288,6 +1258,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
         }
         log_lifecycle(state.local_directory, L"startup-cleanup");
         load_settings(state);
+        save_settings(state);
     } catch (...) {
         MessageBoxW(
             nullptr,

@@ -532,16 +532,17 @@ void BridgeFlightLogger::initialize(const std::filesystem::path& module_director
         const auto config_path = module_directory_ / kConfigurationFileName;
         gpu_instrumentation_enabled_.store(GetPrivateProfileIntW(kConfigurationSection,
             L"gpu_instrumentation_enabled", 0, config_path.c_str()) != 0);
-        if (GetPrivateProfileIntW(kConfigurationSection, L"timing_capture", 0, config_path.c_str()) != 0) {
+        candidate_enabled_ = GetPrivateProfileIntW(kConfigurationSection,
+            L"logging_enabled", 0, config_path.c_str()) != 0;
+        candidate_since_ = GetTickCount64();
+        if (candidate_enabled_ && GetPrivateProfileIntW(kConfigurationSection, L"timing_capture", 0, config_path.c_str()) != 0) {
             auto capture = std::make_unique<RamTimingCapture>();
             const bool pose = GetPrivateProfileIntW(kConfigurationSection,
                 L"pose_cadence_capture", 0, config_path.c_str()) != 0;
             if (capture->initialize(pose)) ram_ = std::move(capture);
+            ram_recording_.store(ram_ != nullptr);
             ram_mode_ = true; // Exclusive even if RAM initialization failed.
         } else {
-            candidate_enabled_ = GetPrivateProfileIntW(kConfigurationSection,
-                L"logging_enabled", 0, config_path.c_str()) != 0;
-            candidate_since_ = GetTickCount64();
             if (candidate_enabled_) start_disk_locked();
         }
         initialized_.store(true, std::memory_order_release);
@@ -549,13 +550,13 @@ void BridgeFlightLogger::initialize(const std::filesystem::path& module_director
 }
 
 void BridgeFlightLogger::refresh_settings() noexcept {
-    if (!initialized_.load(std::memory_order_acquire) || ram_mode_) return;
+    if (!initialized_.load(std::memory_order_acquire)) return;
     const auto now = GetTickCount64();
     auto next = next_poll_.load(std::memory_order_relaxed);
     if (now < next || !next_poll_.compare_exchange_strong(next, now + 250)) return;
     try {
         std::scoped_lock control(control_mutex_);
-        if (!initialized_.load() || ram_mode_) return;
+        if (!initialized_.load()) return;
         // Retire the old writer on the control caller, never on whichever
         // producer happens to release the last transient shared reference.
         std::erase_if(retired_, [](const auto& writer) { return writer.use_count() == 1; });
@@ -564,7 +565,9 @@ void BridgeFlightLogger::refresh_settings() noexcept {
         if (desired != candidate_enabled_) {
             candidate_enabled_ = desired; candidate_since_ = now; return;
         }
-        if (now - candidate_since_ < 250 || desired == disk_enabled_.load()) return;
+        if (now - candidate_since_ < 250) return;
+        if (ram_mode_) { ram_recording_.store(desired && ram_ != nullptr, std::memory_order_release); return; }
+        if (desired == disk_enabled_.load()) return;
         if (desired) start_disk_locked();
         else {
             event(BridgeFlightOperation::logger, 0);
@@ -583,7 +586,7 @@ void BridgeFlightLogger::shutdown() noexcept {
         auto prior = impl_.exchange(nullptr, std::memory_order_acq_rel);
         if (prior) retired_.push_back(std::move(prior));
         retired_.clear(); // Teardown callers have already drained producers.
-        ram_.reset(); ram_mode_ = false;
+        ram_recording_.store(false); ram_.reset(); ram_mode_ = false;
         gpu_instrumentation_enabled_.store(false);
         initialized_.store(false, std::memory_order_release);
         next_poll_.store(0);
@@ -600,7 +603,7 @@ void BridgeFlightLogger::flush() noexcept {
     try { const auto implementation = impl_.load(); if (implementation) implementation->flush(); }
     catch (...) {}
 }
-bool BridgeFlightLogger::ram_enabled() const noexcept { return ram_ != nullptr; }
+bool BridgeFlightLogger::ram_enabled() const noexcept { return ram_recording_.load(std::memory_order_relaxed); }
 std::int64_t BridgeFlightLogger::microseconds_for_counter(std::int64_t counter) const noexcept {
     const auto implementation = impl_.load();
     if (!implementation || implementation->frequency.QuadPart <= 0) return 0;
@@ -612,8 +615,8 @@ std::filesystem::path BridgeFlightLogger::log_path() const {
 }
 BridgeFlightToken BridgeFlightLogger::begin(BridgeFlightOperation operation,
     std::uint64_t a, std::uint64_t b, std::uint64_t c) noexcept {
-    if (ram_) return ram_->begin(operation, a, b, c);
-    if (!disk_enabled_.load(std::memory_order_acquire) && !startup_operation(operation, 0)) return {};
+    if (ram_) return ram_enabled() ? ram_->begin(operation, a, b, c) : BridgeFlightToken{};
+    if (!disk_enabled_.load(std::memory_order_acquire)) return {};
     LARGE_INTEGER now{}; if (!QueryPerformanceCounter(&now)) return {};
     remember_startup(operation, 'B', now.QuadPart, 0, 0, a, b, c);
     if (!disk_enabled_.load(std::memory_order_acquire)) return {};
@@ -625,8 +628,8 @@ BridgeFlightToken BridgeFlightLogger::begin(BridgeFlightOperation operation,
 }
 void BridgeFlightLogger::end(BridgeFlightToken token, BridgeFlightOperation operation,
     std::int64_t result, std::uint64_t a, std::uint64_t b, std::uint64_t c) noexcept {
-    if (ram_) { ram_->end(token, operation, result, a, b, c); return; }
-    if (!disk_enabled_.load(std::memory_order_acquire) && !startup_operation(operation, result)) return;
+    if (ram_) { if (ram_enabled()) ram_->end(token, operation, result, a, b, c); return; }
+    if (!disk_enabled_.load(std::memory_order_acquire)) return;
     LARGE_INTEGER now{}; if (!QueryPerformanceCounter(&now)) return;
     const auto duration = base_frequency_ > 0 && token.start_counter > 0 && now.QuadPart >= token.start_counter
         ? static_cast<std::uint64_t>((now.QuadPart - token.start_counter) * 1000000ll / base_frequency_) : 0;
@@ -638,8 +641,8 @@ void BridgeFlightLogger::end(BridgeFlightToken token, BridgeFlightOperation oper
 }
 void BridgeFlightLogger::event(BridgeFlightOperation operation, std::int64_t result,
     std::uint64_t a, std::uint64_t b, std::uint64_t c) noexcept {
-    if (ram_) { ram_->event(operation, result, a, b, c); return; }
-    if (!disk_enabled_.load(std::memory_order_acquire) && !startup_operation(operation, result)) return;
+    if (ram_) { if (ram_enabled()) ram_->event(operation, result, a, b, c); return; }
+    if (!disk_enabled_.load(std::memory_order_acquire)) return;
     LARGE_INTEGER now{}; if (!QueryPerformanceCounter(&now)) return;
     remember_startup(operation, 'I', now.QuadPart, result, 0, a, b, c);
     if (!disk_enabled_.load(std::memory_order_acquire)) return;

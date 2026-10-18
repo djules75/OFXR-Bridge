@@ -1,5 +1,6 @@
 #include "xrfg/settings_widgets.hpp"
 #include "xrfg/benchmark_suite.hpp"
+#include "xrfg/dlssg_profile.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 
@@ -351,7 +352,26 @@ void actual_widgets() {
     require(tray.rendered_text.find("Swapchain fallback")==std::string::npos,"fallback warning does not stick after a fresh healthy session");
 
 }
+void offline_preset() {
+    using namespace xrfg::standalone;
+    report_runtime({});
+    auto desired=snapshot().desired;select_generation(desired,2,desired.backend);
+    require(request(desired),"select native DLSS-G for offline profile editing");
+    const auto selection=configuration_path();
+    require(remember_dlssg_game(selection,process_executable()),"remember the game without changing its NVIDIA profile");
+    Context desktop({900,1100},false);desktop.draw();desktop.draw(true);
+    require(!snapshot().connected && desktop.widgets.dlssg_executable==process_executable(),
+        "cold desktop settings restore last game while disconnected");
+    require(desktop.rendered_text.find("Choose game executable")==std::string::npos &&
+        desktop.rendered_text.find("DLSS-G preset (next launch)")!=std::string::npos,
+        "offline selector replaces file browser");
+    desktop.activate("/Generation_","DLSS-G preset (next launch)");desktop.draw();desktop.draw();
+    bool opened=false;for(auto* window:desktop.context->Windows)
+        opened|=window->Active && (window->Flags&ImGuiWindowFlags_Popup) && std::strstr(window->Name,"##Combo");
+    require(opened,"actual preset dropdown opens with no game connected; no driver write performed");
+}
 void automatic_buttons() {
+    require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable benchmark GUI fixture in single INI");
     RuntimeStatus runtime{};runtime.sessions=1;runtime.luke_detected=true;
     runtime.dlssg_preset_request=3;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
     const auto prior=snapshot().desired;
@@ -373,13 +393,15 @@ int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::strcmp(argv[1], "--route-motion") == 0) route_motion_widgets();
         else if (argc == 2 && std::strcmp(argv[1], "--route-multiplier") == 0) route_multiplier_widgets();
-        else { rebase_and_publish(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); automatic_buttons(); }
+        else { rebase_and_publish(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); automatic_buttons(); offline_preset(); }
         std::filesystem::remove(configuration_path());
+        std::filesystem::remove(profile/L"dlssg-profile-selection.ini");
         std::filesystem::remove(profile);
         std::cout << checks << " shared settings widget checks passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::filesystem::remove(configuration_path());
+        std::filesystem::remove(profile/L"dlssg-profile-selection.ini");
         std::filesystem::remove(profile);
         std::cerr << "settings widgets failed: " << error.what() << '\n';
         return 1;
