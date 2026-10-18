@@ -1497,12 +1497,19 @@ float4 synthesize_midpoint(
                             // stands in.
                             float2 here = game_motion_texel(
                                 pixel - (1.0 - synthesis_fraction()) * last_displacement);
+                            // The band a moving edge uncovers or covers is as
+                            // wide as the motion, so the probes reach past it:
+                            // 16 pixels, or a quarter beyond the displacement
+                            // when that is larger. The tolerance grows with the
+                            // reach, which keeps it the same gradient.
+                            float reach = max(16.0, 1.25 * max(length(last_displacement), length(here)));
+                            float tolerance = 0.1 * reach / 16.0;
                             bool motion_edge = false;
                             [unroll] for (uint probe = 0; probe < 4; ++probe) {
-                                float2 offset = probe == 0 ? float2(16, 0) : probe == 1 ? float2(-16, 0)
-                                              : probe == 2 ? float2(0, 16) : float2(0, -16);
+                                float2 offset = probe == 0 ? float2(reach, 0) : probe == 1 ? float2(-reach, 0)
+                                              : probe == 2 ? float2(0, reach) : float2(0, -reach);
                                 motion_edge = motion_edge ||
-                                    length(game_motion_texel(pixel + offset) - here) > 0.1;
+                                    length(game_motion_texel(pixel + offset) - here) > tolerance;
                             }
                             if (motion_edge) {
                                 output_color = saturate(lerp(
@@ -1514,11 +1521,14 @@ float4 synthesize_midpoint(
                             // surface is another solution of the solve, and the
                             // one whose own A and B samples agree is visible in
                             // both frames, so in front. It is looked for from at
-                            // most two starts on another surface, nearest first.
+                            // most two starts on another surface, nearest first,
+                            // out to 32 pixels or the probes' reach (128 at most).
                             uint solves = 0;
                             bool done = !motion_edge;
-                            [loop] for (uint radius_index = 0; radius_index < 4 && !done; ++radius_index) {
+                            float search_reach = max(32.0, reach);
+                            [loop] for (uint radius_index = 0; radius_index < 6 && !done; ++radius_index) {
                                 float radius = 4.0 * float(1u << radius_index);
+                                if (radius > search_reach) break;
                                 [loop] for (uint direction = 0; direction < 8 && !done; ++direction) {
                                     float angle = float(direction) * 0.78539816;
                                     float2 start = pixel + radius * float2(cos(angle), sin(angle));
