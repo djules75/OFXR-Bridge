@@ -5,6 +5,10 @@ Texture2D<uint> FlowAuxiliary : register(t3);
 Texture2D<int2> ForwardFlow : register(t4);
 Texture2D<uint> ForwardAuxiliary : register(t5);
 Texture2DArray<float2> GameMotionVectors : register(t6);
+#ifdef XRFG_HYBRID
+// The game's depth beside its vectors, at the same render resolution (V505).
+Texture2DArray<float> GameDepth : register(t7);
+#endif
 // Linear filtering with clamped addressing, a static sampler in the root
 // signature: one fetch per bilinear tap where four loads and three lerps used
 // to be written by hand (V458; measured 0.10 ms per eye less composition on
@@ -660,9 +664,10 @@ float2 forward_flow_for_pixel(
 // it; the hybrid needs those for the flow, so there it travels packed.
 float4 game_motion_output_rect() {
 #ifdef XRFG_HYBRID
+    // Bits 15 and 31 of the size carry the depth flags (V505).
     return float4(
         float(UseGameMotion & 0xffffu), float(UseGameMotion >> 16u),
-        float(GameMotionPadding & 0xffffu), float(GameMotionPadding >> 16u));
+        float(GameMotionPadding & 0x7fffu), float((GameMotionPadding >> 16u) & 0x7fffu));
 #else
     return float4(
         float(FlowWidth), float(FlowHeight),
@@ -1126,11 +1131,11 @@ bool game_motion_static_overlay(float2 pixel, float4 current) {
 
 // The game-motion solve below, from start rather than the pixel, for a second
 // surface: true, with its A and B samples, if two steps reach its fixed point.
-bool game_motion_surface(float2 pixel, float2 start, out float4 previous_color,
-    out float4 current_color) {
+bool game_motion_surface_at(float2 pixel, float2 start, out float4 previous_color,
+    out float4 current_color, out float2 endpoint) {
     previous_color = float4(0.0, 0.0, 0.0, 1.0);
     current_color = previous_color;
-    float2 endpoint = start;
+    endpoint = start;
     float2 previous_coordinate = start;
     bool found = true;
     [unroll] for (uint step = 0; step < 3; ++step) {
@@ -1154,6 +1159,31 @@ bool game_motion_surface(float2 pixel, float2 start, out float4 previous_color,
     }
     return found;
 }
+
+bool game_motion_surface(float2 pixel, float2 start, out float4 previous_color,
+    out float4 current_color) {
+    float2 endpoint;
+    return game_motion_surface_at(pixel, start, previous_color, current_color, endpoint);
+}
+
+#ifdef XRFG_HYBRID
+bool game_depth_available() { return (GameMotionPadding & 0x8000u) != 0u; }
+
+// How near the surface B shows at `pixel` is, larger nearer, from the game's
+// depth at the vectors' texel: inverted depth as it comes, conventional
+// depth turned round. Only its order is used.
+float game_nearness(float2 pixel) {
+    float4 output_rect = game_motion_output_rect();
+    float2 uv = (pixel - output_rect.xy + 0.5) / max(output_rect.zw, float2(1.0, 1.0));
+    float2 maximum = GameMotionRect.xy + GameMotionRect.zw - 1.0;
+    int2 texel = int2(clamp(GameMotionRect.xy + uv * GameMotionRect.zw,
+        GameMotionRect.xy, maximum));
+    float depth = GameDepth.Load(int4(texel, 0, 0));
+    return (GameMotionPadding & 0x80000000u) != 0u ? depth : 1.0 - depth;
+}
+
+bool nearer(float a, float b) { return a > b * 1.05 + 1.0e-6; }
+#endif
 
 struct FullscreenVertex {
     float4 position : SV_Position;
@@ -1565,7 +1595,8 @@ float4 synthesize_midpoint(
                         // alternates outside and in. After its odd number of
                         // steps it ends outside, on the covered surface's
                         // displacement, which places A's sample.
-                        if (!camera_explains && solve_residual >= 0.5) {
+                        bool covered_case = !camera_explains && solve_residual >= 0.5;
+                        if (covered_case) {
                             CameraSample covered = sample_previous_target(
                                 pixel + synthesis_fraction() * last_displacement, Slice, ViewIndex);
                             if (covered.valid >= 0.5) {
@@ -1672,6 +1703,47 @@ float4 synthesize_midpoint(
                             }
                         }
 #ifdef XRFG_HYBRID
+                        // V505: a nearer surface can reach the pixel at the
+                        // generated instant although the one found agrees in
+                        // both frames - a thin bar sweeping across background
+                        // that both frames show on a lateral move. The
+                        // background's samples agree, nothing else asks, and
+                        // the bar is missing from every generated frame: half
+                        // transparent at 90 Hz. Points along the motion,
+                        // nearest first, that the game's depth says are
+                        // nearer than the answer start a solve; a nearer
+                        // surface that reaches the pixel is shown instead.
+                        if (game_depth_available() && !covered_case &&
+                            repeated_capture_flag() == 0) {
+                            float here = game_nearness(current_coordinate);
+                            float2 along = length(last_displacement) > 0.5
+                                ? normalize(last_displacement) : float2(1.0, 0.0);
+                            uint depth_solves = 0;
+                            bool depth_found = false;
+                            // Every 2 px out to 16, then every 4 out to 40,
+                            // either side: a 3 px bar is not stepped over.
+                            [loop] for (uint k = 0; k < 28 && !depth_found && depth_solves < 2; ++k) {
+                                uint step = k >> 1u;
+                                float distance = step < 8u
+                                    ? 2.0 * float(step + 1u) : 16.0 + 4.0 * float(step - 7u);
+                                float2 start = pixel + ((k & 1u) != 0u ? -distance : distance) * along;
+                                if (nearer(game_nearness(start), here)) {
+                                    ++depth_solves;
+                                    float4 a, b;
+                                    float2 endpoint;
+                                    if (game_motion_surface_at(pixel, start, a, b, endpoint) &&
+                                        nearer(game_nearness(endpoint), here) &&
+                                        rgb_error(a, b) < 0.1) {
+                                        output_color = saturate(lerp(a, b, synthesis_fraction()));
+                                        explained = rgb_error(a, b);
+                                        depth_found = true;
+#ifdef XRFG_HYBRID_TINT
+                                        last_vectors_case = 3u;
+#endif
+                                    }
+                                }
+                            }
+                        }
                         last_disagreement = explained;
 #endif
                     } else {

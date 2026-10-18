@@ -181,7 +181,13 @@ bool valid(const DlssMotionVectorPublication& publication) noexcept {
             motion.Width &&
         static_cast<std::uint64_t>(publication.motion_y) + publication.motion_height <=
             motion.Height;
-    if (!base_valid || publication.depth == nullptr) return base_valid;
+    return base_valid;
+}
+
+// The optional depth, judged on its own (V505): a depth the layer cannot use
+// leaves the vectors published without it rather than refused.
+bool valid_depth(const DlssMotionVectorPublication& publication) noexcept {
+    if (publication.depth == nullptr) return false;
     const auto depth = publication.depth->GetDesc();
     return depth.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
         publication.depth_width != 0 && publication.depth_height != 0 &&
@@ -380,19 +386,20 @@ void publish_dlss_motion_vectors(
         ++state.statistics.snapshot_copies;
 
         ComPtr<ID3D12Resource> depth_snapshot;
-        if (publication.depth != nullptr) {
+        if (valid_depth(publication)) {
             if (FAILED(snapshot_resource(stream.depth_snapshots,
                     stream.next_depth_snapshot, publication.depth,
                     publication.depth_resource_state,
                     publication.producer_command_list,
                     publication.producer_queue,
                     publication.verified_producer_device, &depth_snapshot))) {
+                // The vectors go on without it.
                 ++state.statistics.snapshot_failures;
-                state.statistics.status = DlssMotionVectorStatus::invalid_input;
-                return;
+                depth_snapshot.Reset();
+            } else {
+                ++state.statistics.snapshot_copies;
+                ++state.statistics.depth_publications;
             }
-            ++state.statistics.snapshot_copies;
-            ++state.statistics.depth_publications;
         }
 
         auto frame = std::make_shared<DlssMotionVectorFrame>();

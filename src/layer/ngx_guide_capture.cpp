@@ -46,8 +46,10 @@ constexpr std::uint64_t kStreamBase = 0x4E47580000000001ULL;
 //   820 a module's exports are detoured: a the slot
 //   821 a feature was created: a the type, b the flags (bit 32: known),
 //       c render width << 32 | height
-//   822 a stream's first publication: a the stream's low bits,
-//       b motion width << 32 | height, c output width << 32 | height
+//   822 a stream's first publication: a the stream's low bits, and from
+//       V505 bit 32 depth came with it, 40-47 its format, 48 inverted, 49
+//       its rectangle is the vectors'; b motion width << 32 | height, c
+//       output width << 32 | height
 //   823 a module's hook failed: a the slot
 constexpr std::int64_t kRecordHooked = 820;
 constexpr std::int64_t kRecordFeature = 821;
@@ -324,6 +326,25 @@ void capture(
         // DLSS reads its vectors as a shader resource; the game put them in
         // that state for it.
         publication.resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        // And its depth, at render resolution (V505): what orders two surfaces
+        // that both reach a pixel - a thin bar over the background behind it.
+        if (auto* const depth = get<ID3D12Resource*>(parameters, NVSDK_NGX_Parameter_Depth)) {
+            const D3D12_RESOURCE_DESC depth_description = depth->GetDesc();
+            publication.depth = depth;
+            publication.depth_x = get<unsigned>(
+                parameters, NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X);
+            publication.depth_y = get<unsigned>(
+                parameters, NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y);
+            publication.depth_width = std::min(
+                render_width != 0 ? render_width : static_cast<unsigned>(depth_description.Width),
+                available(depth_description.Width, publication.depth_x));
+            publication.depth_height = std::min(
+                render_height != 0 ? render_height : depth_description.Height,
+                available(depth_description.Height, publication.depth_y));
+            publication.depth_resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            publication.depth_inverted =
+                (feature.flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
+        }
         publication.producer_command_list = list;
 
         const auto before = dlss_motion_vector_statistics();
@@ -342,8 +363,20 @@ void capture(
         ++s.statistics.publications;
         const auto found = s.features.find(handle);
         if (found != s.features.end() && found->second.publications++ == 0) {
+            // a's upper bits (V505): 32 the game's depth came with it, 40-47
+            // its DXGI format, 48 inverted, 49 its rectangle is the vectors'.
+            std::uint64_t depth_bits = 0;
+            if (publication.depth != nullptr) {
+                depth_bits = (1ULL << 32U) |
+                    (static_cast<std::uint64_t>(publication.depth->GetDesc().Format & 0xFFU) << 40U) |
+                    (publication.depth_inverted ? 1ULL << 48U : 0ULL) |
+                    (publication.depth_x == publication.motion_x &&
+                     publication.depth_y == publication.motion_y &&
+                     publication.depth_width == publication.motion_width &&
+                     publication.depth_height == publication.motion_height ? 1ULL << 49U : 0ULL);
+            }
             record(kRecordPublication,
-                feature.stream & 0xFFFFFFFFULL,
+                (feature.stream & 0xFFFFFFFFULL) | depth_bits,
                 (static_cast<std::uint64_t>(publication.motion_width) << 32U) |
                     publication.motion_height,
                 (static_cast<std::uint64_t>(publication.output_width) << 32U) |

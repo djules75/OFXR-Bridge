@@ -79,7 +79,8 @@ struct NvidiaInputScaleRatio {
     }
 }
 constexpr UINT kMaxReprojectionViews = 2;
-constexpr UINT kSrvDescriptorCount = 7;
+// t7: the game's depth for the hybrid (V505).
+constexpr UINT kSrvDescriptorCount = 8;
 constexpr UINT kUavDescriptorCount = 3;
 constexpr UINT kDescriptorBlockSize =
     kSrvDescriptorCount + kUavDescriptorCount;
@@ -2106,10 +2107,16 @@ struct D3D12FrameSynthesizer::Impl {
                 : backend == D3D12OpticalFlowBackend::nvidia
                     ? image_description.DepthOrArraySize
                     : 1U;
+            D3D12_SHADER_RESOURCE_VIEW_DESC null_depth = null_motion;
+            null_depth.Format = DXGI_FORMAT_R32_FLOAT;
             for (UINT block = 0; block < block_count; ++block) {
                 device->CreateShaderResourceView(nullptr, &null_motion,
                     offset_cpu_handle(cpu_start,
                         block * kDescriptorBlockSize + 6U,
+                        descriptor_increment));
+                device->CreateShaderResourceView(nullptr, &null_depth,
+                    offset_cpu_handle(cpu_start,
+                        block * kDescriptorBlockSize + 7U,
                         descriptor_increment));
             }
         }
@@ -2465,7 +2472,7 @@ struct D3D12FrameSynthesizer::Impl {
                 rtv_descriptors->GetCPUDescriptorHandleForHeapStart();
             device->CreateRenderTargetView(target.Get(), &rtv_view, rtv);
 
-            // Null views of the shapes the shader declares (t0-t6, u0-u2):
+            // Null views of the shapes the shader declares (t0-t7, u0-u2):
             // every read returns zero, which is all a warm-up needs.
             D3D12_DESCRIPTOR_HEAP_DESC shader_description{};
             shader_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -2486,10 +2493,10 @@ struct D3D12FrameSynthesizer::Impl {
                 DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
                 DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R32_UINT,
                 DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R32_UINT,
-                DXGI_FORMAT_R16G16_FLOAT,
+                DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT,
             };
             for (UINT index = 0; index < kSrvDescriptorCount; ++index) {
-                const bool array = index == 0 || index == 1 || index == 6;
+                const bool array = index == 0 || index == 1 || index == 6 || index == 7;
                 D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
                 srv.Format = kSrvFormats[index];
                 srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -3010,8 +3017,56 @@ struct D3D12FrameSynthesizer::Impl {
                 offset_cpu_handle(start,
                     eye * kDescriptorBlockSize + 6U,
                     descriptor_increment));
+            // The eye's depth at t7, or a null view (V505).
+            D3D12_SHADER_RESOURCE_VIEW_DESC depth_description = description;
+            depth_description.Format = DXGI_FORMAT_R32_FLOAT;
+            ID3D12Resource* depth = nullptr;
+            if (usable_guide_depth(*frame) && same_device(device.Get(), frame->depth.Get())) {
+                const D3D12_RESOURCE_DESC depth_resource = frame->depth->GetDesc();
+                depth = frame->depth.Get();
+                depth_description.Format = depth_view_format(depth_resource.Format);
+                depth_description.Texture2DArray.FirstArraySlice =
+                    frame->motion_slice < depth_resource.DepthOrArraySize ? frame->motion_slice : 0U;
+            }
+            device->CreateShaderResourceView(depth, &depth_description,
+                offset_cpu_handle(start,
+                    eye * kDescriptorBlockSize + 7U,
+                    descriptor_increment));
         }
         return S_OK;
+    }
+
+    // A depth buffer's shader-readable view: the depth plane as one float.
+    [[nodiscard]] static DXGI_FORMAT depth_view_format(DXGI_FORMAT format) noexcept {
+        switch (format) {
+        case DXGI_FORMAT_R32_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT:
+        case DXGI_FORMAT_R32_FLOAT:
+            return DXGI_FORMAT_R32_FLOAT;
+        case DXGI_FORMAT_R24G8_TYPELESS:
+        case DXGI_FORMAT_D24_UNORM_S8_UINT:
+        case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
+            return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        case DXGI_FORMAT_R32G8X24_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+        case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
+            return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+        case DXGI_FORMAT_R16_TYPELESS:
+        case DXGI_FORMAT_D16_UNORM:
+        case DXGI_FORMAT_R16_UNORM:
+            return DXGI_FORMAT_R16_UNORM;
+        default:
+            return DXGI_FORMAT_UNKNOWN;
+        }
+    }
+
+    // The game's depth is used where it covers the vectors' rectangle: DLSS
+    // depth is at render resolution, as render-resolution vectors are, and the
+    // shader reads both through the one rectangle (the constants are full).
+    [[nodiscard]] static bool usable_guide_depth(const DlssMotionVectorFrame& frame) noexcept {
+        return frame.depth && depth_view_format(frame.depth->GetDesc().Format) != DXGI_FORMAT_UNKNOWN &&
+            frame.depth_x == frame.motion_x && frame.depth_y == frame.motion_y &&
+            frame.depth_width == frame.motion_width && frame.depth_height == frame.motion_height;
     }
 
     // NOTE: the synthetic destination is drawn into while the private
@@ -3180,7 +3235,12 @@ struct D3D12FrameSynthesizer::Impl {
         SynthesisParameters& parameters,
         const DlssMotionVectorFrame& guide) noexcept {
         parameters.use_game_motion = guide.output_x | (guide.output_y << 16U);
-        parameters.game_motion_padding = guide.output_width | (guide.output_height << 16U);
+        // Bit 15: the guide's depth is bound; bit 31: it is inverted, larger
+        // nearer (V505). Output sizes stay below 32768.
+        parameters.game_motion_padding = (guide.output_width & 0x7FFFU) |
+            ((guide.output_height & 0x7FFFU) << 16U) |
+            (usable_guide_depth(guide) ? 0x8000U : 0U) |
+            (usable_guide_depth(guide) && guide.depth_inverted ? 0x80000000U : 0U);
         parameters.game_motion_rect = {
             static_cast<float>(guide.motion_x),
             static_cast<float>(guide.motion_y),
