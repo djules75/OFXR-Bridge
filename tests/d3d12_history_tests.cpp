@@ -5263,7 +5263,7 @@ int main(int argc, char** argv) {
             const auto session = capture.session;
             StereoPattern observed;
             test_native_dlss_packed_stereo(fixture, false, kFormat, false, &observed);
-            for (const char* stage : {"dlssg_aligned_previous", "dlssg_packed_current",
+            for (const char* stage : {"dlssg_aligned_previous", "dlssg_seed_motion", "dlssg_seed_depth", "dlssg_packed_current",
                 "dlssg_packed_motion", "dlssg_packed_depth", "dlssg_ngx_generated", "dlssg_composed_output"}) {
                 const auto found = std::find_if(session->shots.begin(), session->shots.end(),
                     [=](const auto& shot) { return std::string_view(shot->info.stage) == stage; });
@@ -5289,8 +5289,31 @@ int main(int argc, char** argv) {
             }
             (*composed)->readback->Unmap(0,nullptr);
             require(session->contracts.size() == 4, "native F8 stereo pose/output contracts missing");
+            require(session->native_dlssg_evaluations.size()==2,"native F8 must observe reset and actual pair separately");
+            const auto& seed=session->native_dlssg_evaluations.front();
+            const auto& pair=session->native_dlssg_evaluations.back();
+            require(seed.reset && !pair.reset && seed.index==1 && pair.index==1 && pair.count==1,
+                "native F8 reset/multiplier call identity lost");
+            const auto motion=std::find_if(session->shots.begin(),session->shots.end(),
+                [](const auto& shot){return std::string_view(shot->info.stage)=="dlssg_packed_motion";});
+            require(seed.motion_rect[2]==64 && seed.motion_rect[3]==64 &&
+                pair.motion_rect[2]==(*motion)->description.Width && pair.motion_rect[3]==(*motion)->description.Height &&
+                pair.motion_scale[0]==float((*motion)->description.Width) && pair.motion_scale[1]==float((*motion)->description.Height),
+                "native F8 must preserve actual SDK rectangles/scales, not the ingress texture sizes");
+            require(seed.color!=pair.color && seed.generated==pair.generated && pair.fov>0 && pair.object_separation>0,
+                "native F8 seed precision/output linkage or actual heuristics missing");
+            session->directory=std::filesystem::temp_directory_path()/ ("xrfg-native-call-capture-"+std::to_string(GetCurrentProcessId()));
+            xrfg::write_session(session);
+            std::ifstream parameters(session->directory/"native-dlssg-evaluations.tsv");
+            std::string header,row;std::getline(parameters,header);unsigned rows{};
+            require(header.find("motion_scale")!=std::string::npos && header.find("clip_to_previous")!=std::string::npos,
+                "native F8 exported SDK header missing");
+            while(std::getline(parameters,row)) {++rows;require(std::count(row.begin(),row.end(),'\t')==std::count(header.begin(),header.end(),'\t'),"native F8 SDK TSV columns shifted");}
+            require(rows==2,"native F8 exported SDK rows missing");
             require(!xrfg::two_frame_capture_claim_dlssg_pair(17), "native F8 duplicate pair was accepted");
             capture.active_frame = 0;
+            xrfg::two_frame_capture_native_dlssg_evaluation({});
+            require(session->native_dlssg_evaluations.size()==2,"inactive native F8 collected another SDK call");
             capture.session.reset();
             fixture.require_no_debug_errors();
             std::cout << "Native F8 real provider: six GPU stages, exact stereo midpoint pixels, completion fences and four pose contracts passed\n";

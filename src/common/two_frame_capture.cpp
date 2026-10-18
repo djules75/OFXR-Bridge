@@ -62,6 +62,7 @@ struct Session {
     std::mutex mutex;
     std::vector<std::shared_ptr<Shot>> shots;
     std::vector<ContractShot> contracts;
+    std::vector<TwoFrameNativeDlssgEvaluation> native_dlssg_evaluations;
     std::vector<TimelineShot> timeline;
     std::vector<std::uint64_t> dlssg_streams;
     std::filesystem::path directory;
@@ -296,12 +297,39 @@ void write_session(const std::shared_ptr<Session>& session) {
     manifest << "index\tframe\tstage\tstatus\tstream\tdisplay_time\tswapchain\tserial\teye\tslice\tx\ty\twidth\theight\tresource_width\tresource_height\tformat\tsource_format\trow_pitch\trow_bytes\tbytes\tscale_x\tscale_y\tjitter_x\tjitter_y\tfile\n";
     std::vector<std::shared_ptr<Shot>> shots;
     std::vector<ContractShot> contracts;
+    std::vector<TwoFrameNativeDlssgEvaluation> native_dlssg_evaluations;
     std::vector<TimelineShot> timeline;
     {
         std::scoped_lock lock(session->mutex);
         shots = session->shots;
         contracts = session->contracts;
+        native_dlssg_evaluations = session->native_dlssg_evaluations;
         timeline = session->timeline;
+    }
+    std::ofstream native_manifest(session->directory / L"native-dlssg-evaluations.tsv", std::ios::binary);
+    native_manifest << "frame\tstream\tpublication\tserial\tprevious_serial\treset\tdirect\tresult\tcount\tindex\tflags"
+        "\tcolor\tmotion\tdepth\tgenerated\tdisable\twidth\theight\tcolor_format\tinput_color_format"
+        "\tbackbuffer_rect\tmotion_rect\tdepth_rect\tmotion_scale\tjitter\tdepth_scale\tnear_far_partition"
+        "\tobject_separation\tinvalid_motion\tnear\tfar\tfov\taspect\tposition\tright\tup\tforward"
+        "\tview_to_clip\tclip_to_view\tclip_to_lens\tclip_to_previous\tprevious_to_clip\n";
+    native_manifest << std::setprecision(9);
+    const auto native_array = [&](const auto& values) {
+        native_manifest << '\t';
+        for (std::size_t i=0;i<values.size();++i) { if(i)native_manifest << ',';native_manifest << values[i]; }
+    };
+    for (const auto& c : native_dlssg_evaluations) {
+        native_manifest << c.frame << '\t' << c.stream << '\t' << c.publication << '\t' << c.serial
+            << '\t' << c.previous_serial << '\t' << c.reset << '\t' << c.direct << '\t' << c.result
+            << '\t' << c.count << '\t' << c.index << '\t' << c.flags << '\t' << c.color << '\t' << c.motion
+            << '\t' << c.depth << '\t' << c.generated << '\t' << c.disable << '\t' << c.width << '\t' << c.height
+            << '\t' << c.color_format << '\t' << c.input_color_format;
+        native_array(c.backbuffer_rect);native_array(c.motion_rect);native_array(c.depth_rect);
+        native_array(c.motion_scale);native_array(c.jitter);
+        native_manifest << '\t' << c.depth_scale << '\t' << c.near_far_partition << '\t' << c.object_separation
+            << '\t' << c.invalid_motion << '\t' << c.near_plane << '\t' << c.far_plane << '\t' << c.fov << '\t' << c.aspect;
+        native_array(c.position);native_array(c.right);native_array(c.up);native_array(c.forward);
+        native_array(c.view_to_clip);native_array(c.clip_to_view);native_array(c.clip_to_lens);
+        native_array(c.clip_to_previous);native_array(c.previous_to_clip);native_manifest << '\n';
     }
     std::ofstream timeline_manifest(
         session->directory / L"xr-timeline.tsv", std::ios::binary);
@@ -622,6 +650,19 @@ void two_frame_capture_timeline(
         }
     } catch (...) {
     }
+}
+
+void two_frame_capture_native_dlssg_evaluation(const TwoFrameNativeDlssgEvaluation& info) noexcept {
+    auto& value=manager();const auto frame=value.active_frame.load(std::memory_order_relaxed);
+    if(!frame)return;
+    std::shared_ptr<Session> session;
+    {std::scoped_lock lock(value.mutex);session=value.session;}
+    if(!session)return;
+    try {
+        std::scoped_lock lock(session->mutex);
+        if(session->sealed || session->native_dlssg_evaluations.size()>=16)return;
+        auto copy=info;copy.frame=frame;session->native_dlssg_evaluations.push_back(copy);
+    } catch (...) {} // An optional F8 observer cannot fail generation.
 }
 
 void two_frame_capture_guide_contract(

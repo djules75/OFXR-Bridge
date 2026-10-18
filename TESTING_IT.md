@@ -1,3 +1,12 @@
+## V578: native DLSS-G call-contract diagnostic
+
+Diagnostic on V577; no visual fix claimed. Full F8 now records the exact NGX
+reset/pair options and the seed motion/depth resources. Failed local scale and
+camera experiments were removed; generation math and SteamVR delivery stay at
+V577. See [scope and one next capture](docs/V578_DLSSG_CALL_CONTRACT.md).
+12 focused checks pass. IPC57701/provider45601; normal benchmark/memory controls
+and the local-only owner spreadsheet adapter are unchanged. Local only.
+
 ## V577: combined Lower VRAM and memory-aware suites
 
 One Lower VRAM control, no Luke effect, Normal/VRAM ordinary tests and unchanged

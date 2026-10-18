@@ -1,0 +1,39 @@
+{
+  "version": "V578",
+  "base": "db4645b55d4abe5f506915b33e97df5f35c367d5",
+  "status": "runtime-pending",
+  "passed": 12,
+  "failed": 0,
+  "ctest_seconds": 10.7633221,
+  "ctest_passed": [
+    "xrfg_private_output_distributor_tests",
+    "xrfg_transport_new_vdxr_00_gpu",
+    "xrfg_transport_new_vdxr_11_gpu",
+    "xrfg_private_runtime_dlssg_gpu",
+    "xrfg_private_runtime_dlssg3_gpu",
+    "xrfg_private_runtime_switch_gpu",
+    "xrfg_private_runtime_separate-dlssg_gpu",
+    "xrfg_layer_call_chain",
+    "xrfg_native_dlssg_unsupported",
+    "xrfg_native_dlssg_output_capture",
+    "xrfg_native_dlssg_late_discovery",
+    "xrfg_native_dlssg_gpu"
+  ],
+  "scope": "Diagnostic only: full-F8 capture of exact native NGX reset/pair evaluation options and the seed motion/depth resources. No visual repair claimed.",
+  "headset_validation": "Pending one owner MSFS DLSS-G 2X F8 during the propeller ghost. This is NOT an AFW or presentation fix.",
+  "presentation_pacing_changed": false,
+  "afw_math_changed": false,
+  "interpolation_math_changed": false,
+  "ipc_abi": 57701,
+  "provider_abi": 45601,
+  "pushed": false,
+  "live_installed": false,
+  "tests": "Actual NGX 2X/stereo/viewport/reseed/late discovery and F8 GPU readbacks, exact emitted SDK records/TSV rectangles/scales/seed identity, inactive bypass; private 2X/3X/switch/Lower VRAM and VDXR00/11/loader/distributor.",
+  "rejected_local_experiments": "A unit-scale proposal failed native pixel-quality controls (MAE0.415 vs existing limit0.02) and was removed without weakening tests. An aligned camera-matrix replay displaced content to approximately75% rather than the midpoint and was rejected. No experiment implementation was committed or packaged.",
+  "observation": "Owner MSFS captured NGX RGB equals final-compose RGB byte for byte in both eyes. Exact-input offline replay now uses signed cached310.9.16/modelC, R10 previous/RGBA8 current and captured guides; remaining difference versus game means cause is still unproven. Matrix prediction consistency alone was not sufficient to approve a visual change.",
+  "capture_bounds": "Full plain F8 only, existing pair claim and48images/1.25GiB cap; at most16 SDK records. Two extra seed-guide snapshots per feature may displace later ordinary images within the unchanged budget. F9 rolling diagnostics do not enable this capture.",
+  "test_logs": [
+    "v578-final-tests.log",
+    "v578-final-junit.xml"
+  ]
+}

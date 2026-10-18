@@ -106,6 +106,23 @@ struct TwoFrameGuideContract {
 void two_frame_capture_guide_contract(
     const TwoFrameGuideContract& info) noexcept;
 
+// Exact values at the native NGX call, rather than reconstructed ingress data.
+// Only the full F8 pair claimant records these; no always-on observation.
+struct TwoFrameNativeDlssgEvaluation {
+    std::uint32_t frame{}, index{}, count{}, flags{}, result{};
+    std::uint64_t stream{}, publication{}, serial{}, previous_serial{};
+    bool reset{}, direct{};
+    std::uint64_t color{}, motion{}, depth{}, generated{}, disable{};
+    std::uint32_t width{}, height{}, color_format{}, input_color_format{};
+    std::array<std::uint32_t,4> backbuffer_rect{}, motion_rect{}, depth_rect{};
+    std::array<float,2> motion_scale{}, jitter{};
+    float depth_scale{}, near_far_partition{}, object_separation{}, invalid_motion{};
+    float near_plane{}, far_plane{}, fov{}, aspect{};
+    std::array<float,3> position{}, right{}, up{}, forward{};
+    std::array<float,16> view_to_clip{}, clip_to_view{}, clip_to_lens{}, clip_to_previous{}, previous_to_clip{};
+};
+void two_frame_capture_native_dlssg_evaluation(const TwoFrameNativeDlssgEvaluation& info) noexcept;
+
 void two_frame_capture_note(
     const TwoFrameImageInfo& info, HRESULT status) noexcept;
 

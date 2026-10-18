@@ -1069,6 +1069,29 @@ struct D3D12NativeDlssG::Impl {
                                  near_far_partition);
         const auto result = e.direct ? direct_provider.evaluate(list, e.handle, e.params, &in, &o)
                                      : NGX_D3D12_EVALUATE_DLSSG(list, e.handle, e.params, &in, &o);
+        if (capture_list) {
+            TwoFrameNativeDlssgEvaluation c{};
+            c.stream=gb.stream;c.publication=gb.publication;c.serial=gb.serial;c.previous_serial=gb.previous_serial;
+            c.reset=reset;c.direct=e.direct;c.result=unsigned(result);c.count=count;c.index=index;
+            c.flags=(o.depthInverted?1U:0U)|(o.cameraMotionIncluded?2U:0U)|(o.motionVectorsDilated?4U:0U)|
+                (o.colorBuffersHDR?8U:0U)|(o.orthoProjection?16U:0U)|(o.notRenderingGameFrames?32U:0U);
+            c.color=reinterpret_cast<std::uint64_t>(in.pBackbuffer);c.motion=reinterpret_cast<std::uint64_t>(in.pMVecs);
+            c.depth=reinterpret_cast<std::uint64_t>(in.pDepth);c.generated=reinterpret_cast<std::uint64_t>(in.pOutputInterpFrame);
+            c.disable=reinterpret_cast<std::uint64_t>(in.pOutputDisableInterpolation);
+            c.width=e.width;c.height=e.height;c.color_format=color_format;c.input_color_format=e.color->GetDesc().Format;
+            c.backbuffer_rect={o.backbufferSubrectBase.X,o.backbufferSubrectBase.Y,o.backbufferSubrectSize.Width,o.backbufferSubrectSize.Height};
+            c.motion_rect={o.mvecsSubrectBase.X,o.mvecsSubrectBase.Y,o.mvecsSubrectSize.Width,o.mvecsSubrectSize.Height};
+            c.depth_rect={o.depthSubrectBase.X,o.depthSubrectBase.Y,o.depthSubrectSize.Width,o.depthSubrectSize.Height};
+            c.motion_scale={o.mvecScale[0],o.mvecScale[1]};c.jitter={o.jitterOffset[0],o.jitterOffset[1]};
+            c.depth_scale=depth_scale;c.near_far_partition=near_far_partition;c.object_separation=object_separation;c.invalid_motion=o.motionVectorsInvalidValue;
+            c.near_plane=o.cameraNear;c.far_plane=o.cameraFar;c.fov=o.cameraFOV;c.aspect=o.cameraAspectRatio;
+            std::copy_n(o.cameraPos,3,c.position.begin());std::copy_n(o.cameraRight,3,c.right.begin());
+            std::copy_n(o.cameraUp,3,c.up.begin());std::copy_n(o.cameraFwd,3,c.forward.begin());
+            std::copy_n(&o.cameraViewToClip[0][0],16,c.view_to_clip.begin());std::copy_n(&o.clipToCameraView[0][0],16,c.clip_to_view.begin());
+            std::copy_n(&o.clipToLensClip[0][0],16,c.clip_to_lens.begin());std::copy_n(&o.clipToPrevClip[0][0],16,c.clip_to_previous.begin());
+            std::copy_n(&o.prevClipToClip[0][0],16,c.previous_to_clip.begin());
+            two_frame_capture_native_dlssg_evaluation(c);
+        }
         bridge_flight_logger().event(BridgeFlightOperation::native_dlssg_evaluate,
             unsigned(result), reset, index, e.direct);
         if (NVSDK_NGX_FAILED(result)) {
@@ -1590,6 +1613,8 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                 p.end_pack(t, seed);
                 if (capture) t.flush();
                 snapshot("dlssg_aligned_previous", seed.color.Get(), kRead);
+                snapshot("dlssg_seed_motion", seed.motion.Get(), kRead);
+                snapshot("dlssg_seed_depth", seed.depth.Get(), kRead);
                 if (FAILED(p.evaluate(list, t, seed, bv[first], *ag->eyes[guide_index(first)],
                                       first_params, 1, 1, true))) {
                     t.restore();
