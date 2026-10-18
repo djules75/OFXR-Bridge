@@ -21,12 +21,15 @@ public:
     // Owner-selected V589 comparison: open the native cycle 1ms earlier than
     // V588, in addition to its learned service cost/variation and 100us guard.
     static constexpr std::int64_t additional_lead=1'000'000;
+    static constexpr std::int64_t presentation_margin=100'000+additional_lead;
     [[nodiscard]] std::int64_t lead(std::int64_t period) const noexcept {
-        constexpr auto guard=100'000+additional_lead;
-        return std::clamp<std::int64_t>(cost_+variation_+guard,guard,period);
+        // One native Wait may overlap the current frame. Bound lookahead by
+        // the existing three-credit pipeline, rather than truncating at1P.
+        return std::clamp<std::int64_t>(cost_+variation_+presentation_margin,
+            presentation_margin,period*2+presentation_margin);
     }
     void observe(std::int64_t native_cost,std::int64_t period) noexcept {
-        native_cost=std::clamp<std::int64_t>(native_cost,0,period);
+        native_cost=std::clamp<std::int64_t>(native_cost,0,period*2);
         if(sampled_) {
             const auto rise=std::max(std::int64_t{},native_cost-previous_);
             variation_=std::max(rise,variation_-(variation_+63)/64);
@@ -78,6 +81,15 @@ public:
     void ready(std::int64_t at) noexcept {
         if(!primed_){due_=at;primed_=true;return;}
         if(at>due_){hold_+=at-due_;due_=at;}
+    }
+    // Native completion needs real headroom before End, not a clipped forecast.
+    // Shift only the missing margin, once, and retain its exact phase. This
+    // changes the presentation clock only; producers/preparers keep running.
+    std::int64_t runtime_ready(std::int64_t at,std::int64_t margin) noexcept {
+        const auto target=at+std::max(std::int64_t{},margin);
+        if(!primed_){due_=target;primed_=true;return 0;}
+        if(target<=due_)return 0;
+        const auto deficit=target-due_;hold_+=deficit;due_=target;return deficit;
     }
     [[nodiscard]] bool eligible(std::int64_t now) const noexcept {
         return primed_ && period_>0 && now>=due_ && (!last_ || now-last_>=period_);

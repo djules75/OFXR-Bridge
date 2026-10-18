@@ -21,9 +21,16 @@ int main(){try {
         ramp.observe(work,11*ms);
     }
     require(misses==0,"native entry missed every step despite already observed rising service time");
-    ramp.observe(50*ms,11*ms);require(ramp.lead(11*ms)==11*ms,"native work forecast exceeded a physical period");
+    ramp.observe(50*ms,11*ms);require(ramp.lead(11*ms)<=23'100'000 && ramp.lead(11*ms)>11*ms,"overlapped native forecast lost its extra margin or exceeded the bounded pipeline");
     for(int n=0;n<2000;++n)ramp.observe(0,11*ms);
     require(ramp.lead(11*ms)<1'101'000,"past stall did not recover to the requested1.1ms floor");
+    xrfg::PrivateOutputSchedule margin;
+    margin.period(11*ms);margin.ready(20*ms);require(margin.delivered(20*ms),"margin first output");
+    require(margin.runtime_ready(30*ms,2*ms)==1*ms && margin.deadline()==32*ms,"missing native margin was clipped instead of becoming exact presentation latency");
+    require(margin.runtime_ready(30*ms,2*ms)==0 && margin.delay()==1*ms,"same margin charged repeatedly");
+    require(!margin.eligible(31*ms) && margin.delivered(32*ms),"native margin changed the minimum physical period");
+    require(margin.runtime_ready(40*ms,2*ms)==0 && margin.deadline()==43*ms,"retained native margin unnecessarily grew on early input");
+    require(margin.delivered(43*ms) && margin.delay()==1*ms,"native margin was lost on the following cycle");
     xrfg::PrivateOutputSchedule clock;
     clock.period(11*ms);clock.ready(20*ms);
     require(clock.eligible(20*ms) && clock.delivered(20*ms),"first output");

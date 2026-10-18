@@ -78,12 +78,22 @@ struct PrivateOpenXrRuntime::Impl {
         std::uint64_t sequence{},ready{};
         std::int64_t accepted_at{},source_ready_at{},prepared_at{};
     };
+    struct WaitResult {
+        XrFrameState prediction{XR_TYPE_FRAME_STATE};
+        XrResult result{XR_SUCCESS};
+        std::int64_t entered{},returned{};
+    };
+    struct WaitJob {std::int64_t target{};std::uint64_t accepted_ordinal{};};
     Options options;
     std::mutex mutex,accept_mutex,copy_mutex,stop_mutex;
     std::condition_variable changed;
     std::unordered_map<XrSwapchain,std::shared_ptr<Chain>> chains;
     std::unique_ptr<PrivateOutputFifo<std::shared_ptr<Packet>>> fifo;
-    std::thread consumer,preparer;
+    std::thread consumer,preparer,waiter;
+    std::optional<WaitJob> wait_job;
+    std::optional<WaitResult> wait_result;
+    bool wait_active{};
+    std::uint64_t accepted_packets{},content_wait_jobs{};
     std::deque<std::shared_ptr<Packet>> prepared;
     std::atomic_bool stopping{true};
     XrResult failure{XR_SUCCESS};
@@ -105,8 +115,9 @@ struct PrivateOpenXrRuntime::Impl {
     ComPtr<ID3D11Fence> ready11,copy11;
     HANDLE fence_event{CreateEventW(nullptr,FALSE,FALSE,nullptr)};
     HANDLE timer{CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS)};
+    HANDLE wait_timer{CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS)};
     explicit Impl(Options input):options(std::move(input)) {}
-    ~Impl(){if(fence_event)CloseHandle(fence_event);if(timer)CloseHandle(timer);}
+    ~Impl(){if(fence_event)CloseHandle(fence_event);if(timer)CloseHandle(timer);if(wait_timer)CloseHandle(wait_timer);}
     bool d12() const noexcept {return device12!=nullptr;}
     std::int64_t period(XrDuration fallback) {
         auto value=options.physical_period?options.physical_period():0;
@@ -132,7 +143,8 @@ struct PrivateOpenXrRuntime::Impl {
         }
         return fence->GetCompletedValue()==UINT64_MAX?DXGI_ERROR_DEVICE_REMOVED:S_OK;
     }
-    bool sleep_until(std::int64_t target,std::int64_t fine_window) {
+    bool sleep_until(std::int64_t target,std::int64_t fine_window,bool native_clock=false) {
+        const auto selected_timer=native_clock?wait_timer:timer;
         for(;;) {
             if(stopping)return false;
             auto left=target-clock_ns();if(left<=0)return true;
@@ -143,7 +155,7 @@ struct PrivateOpenXrRuntime::Impl {
             if(left<=fine_window){YieldProcessor();continue;}
             left=std::min<std::int64_t>(left-fine_window,5'000'000);
             LARGE_INTEGER due{};due.QuadPart=-std::max<std::int64_t>(1,(left+99)/100);
-            if(timer && SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE))WaitForSingleObject(timer,10);
+            if(selected_timer && SetWaitableTimer(selected_timer,&due,0,nullptr,nullptr,FALSE))WaitForSingleObject(selected_timer,10);
             else {std::unique_lock lock(mutex);changed.wait_for(lock,std::chrono::nanoseconds(left));}
         }
     }
@@ -353,6 +365,58 @@ struct PrivateOpenXrRuntime::Impl {
         }
         return result;
     }
+    bool post_wait(std::int64_t target,bool needs_input=true) {
+        {std::scoped_lock lock(mutex);
+         if(stopping || wait_job || wait_active || wait_result)return false;
+         wait_job=WaitJob{target,needs_input?++content_wait_jobs:0};}
+        changed.notify_all();return true;
+    }
+    std::optional<WaitResult> take_wait() {
+        std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping || wait_result.has_value();});
+        if(stopping)return {};
+        auto result=std::move(wait_result);wait_result.reset();return result;
+    }
+    void wait_loop() noexcept {
+        try {for(;;) {
+            WaitJob job;
+            {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping ||
+                (wait_job && accepted_packets>=wait_job->accepted_ordinal);});
+             if(stopping)break;job=*wait_job;wait_job.reset();wait_active=true;}
+            if(!sleep_until(job.target,1'250'000,true)) {
+                std::scoped_lock lock(mutex);wait_active=false;break;
+            }
+            WaitResult result;result.entered=clock_ns();
+            try {result.result=real_wait(result.prediction);}
+            catch(...) {result.result=XR_ERROR_RUNTIME_FAILURE;}
+            result.returned=clock_ns();
+            // Optional logging must not turn a successful native Wait into an
+            // unbalanced failed clock if an observer callback itself throws.
+            try {if(tracing())options.trace(18,job.accepted_ordinal,result.entered,GetCurrentThreadId());}catch(...) {}
+            {std::scoped_lock lock(mutex);wait_active=false;wait_result=std::move(result);}
+            changed.notify_all();
+        }} catch(...) {
+            WaitResult result;result.result=XR_ERROR_RUNTIME_FAILURE;
+            {std::scoped_lock lock(mutex);wait_active=false;wait_result=result;wait_job.reset();}
+            changed.notify_all();
+        }
+    }
+    XrTime display_time(const XrFrameState& prediction) {
+        auto result=prediction.predictedDisplayTime;
+        if(options.real.to_qpc) {
+            LARGE_INTEGER target{},frequency{};QueryPerformanceFrequency(&frequency);
+            if(XR_SUCCEEDED(options.real.to_qpc(options.real.instance,result,&target))) {
+                const auto at=target.QuadPart/frequency.QuadPart*1'000'000'000LL+
+                    target.QuadPart%frequency.QuadPart*1'000'000'000LL/frequency.QuadPart;
+                const auto deficit=clock_ns()+PrivateOutputSchedule::preparation_lead-at;
+                // An overlapped Wait may survive a long previous End. Retain
+                // its runtime phase, advancing whole physical display periods
+                // only when that prediction has actually expired.
+                if(deficit>0) {const auto step=period(prediction.predictedDisplayPeriod);
+                    result+=(deficit+step-1)/step*step;}
+            }
+        }
+        return result;
+    }
     void run() noexcept {
         bool waited=false,begun=false;
         XrFrameState prediction{XR_TYPE_FRAME_STATE};
@@ -363,13 +427,16 @@ struct PrivateOpenXrRuntime::Impl {
             // Wait/Begin/Release cost and its measured positive variation.
             // Preparation remains independent of the native entry forecast.
             PrivateRuntimeBudget runtime_budget;
-            auto result=real_wait(prediction);if(XR_FAILED(result)){fail(result);return;}
-            waited=true;
+            auto result=XR_SUCCESS;
+            if(!post_wait(0,false))result=XR_ERROR_SESSION_NOT_RUNNING;
+            auto seed=XR_SUCCEEDED(result)?take_wait():std::optional<WaitResult>{};
+            if(seed){prediction=seed->prediction;result=seed->result;waited=XR_SUCCEEDED(result);}
+            else result=XR_ERROR_SESSION_NOT_RUNNING;
             // Seed the producer's virtual clock, then close this empty cycle
             // immediately. Holding the seed Wait until a level finishes loading
             // would make the first content prediction arbitrarily old.
             XrFrameBeginInfo seed_begin{XR_TYPE_FRAME_BEGIN_INFO};
-            result=options.real.begin(options.real.session,&seed_begin);
+            if(XR_SUCCEEDED(result))result=options.real.begin(options.real.session,&seed_begin);
             if(XR_SUCCEEDED(result)) {
                 waited=false;begun=true;
                 XrFrameEndInfo seed_end{XR_TYPE_FRAME_END_INFO};
@@ -377,7 +444,8 @@ struct PrivateOpenXrRuntime::Impl {
                 seed_end.displayTime=prediction.predictedDisplayTime;
                 result=options.real.end(options.real.session,&seed_end);begun=false;
             }
-            if(XR_FAILED(result))fail(result);
+            if(XR_FAILED(result) && !stopping)fail(result);
+            if(!stopping && !post_wait(0))fail(XR_ERROR_CALL_ORDER_INVALID);
             while(!stopping) {
                 // Start the runtime clock as soon as owned input exists. Image
                 // acquisition/copy/GPU waits run on the independent preparer,
@@ -385,12 +453,11 @@ struct PrivateOpenXrRuntime::Impl {
                 {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping || pending;});if(stopping)break;}
                 const auto physical=period(prediction.predictedDisplayPeriod);
                 schedule.period(physical);
-                if(schedule.primed() && !sleep_until(schedule.deadline()-runtime_budget.lead(physical),
-                    std::min<std::int64_t>(1'250'000,physical/8)))break;
                 const bool diagnostic=tracing();
-                const auto wait_enter=clock_ns();
-                result=real_wait(prediction);
-                const auto wait_leave=diagnostic?clock_ns():0;
+                auto clock=take_wait();if(!clock)break;
+                prediction=clock->prediction;result=clock->result;
+                const auto wait_enter=clock->entered,wait_leave=clock->returned;
+                const auto begin_enter=clock_ns();
                 if(XR_SUCCEEDED(result)) {
                     waited=true;
                     XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
@@ -411,7 +478,7 @@ struct PrivateOpenXrRuntime::Impl {
                 if(XR_FAILED(result)){fail(result);retire(packet);fifo->retire();break;}
                 // Do not charge the prepared-FIFO wait to native work. Starting
                 // native entry earlier changes neither producer nor End cadence.
-                runtime_budget.observe(begun_at-wait_enter+release_leave-release_enter,physical);
+                runtime_budget.observe(wait_leave-wait_enter+begun_at-begin_enter+release_leave-release_enter,physical);
                 if(diagnostic) {
                     options.trace(7,packet->sequence,wait_enter,0);options.trace(6,packet->sequence,wait_leave,0);
                     options.trace(15,packet->sequence,release_enter,release_leave-release_enter);
@@ -422,15 +489,25 @@ struct PrivateOpenXrRuntime::Impl {
                 const auto refill=schedule.input_ready(packet->source_ready_at,options.capacity);
                 if(diagnostic && refill)options.trace(11,packet->sequence,packet->source_ready_at,refill);
                 schedule.ready(packet->prepared_at);
+                const auto margin=schedule.runtime_ready(release_leave,PrivateRuntimeBudget::presentation_margin);
+                if(diagnostic && margin)options.trace(17,packet->sequence,release_leave,margin);
+                // Wait for the next cycle may overlap this frame's handoff.
+                // Begin/End remain exclusively serialized on this consumer;
+                // the worker needs accepted owned input before entering Wait,
+                // and may overlap that input's independent GPU preparation.
+                if(!post_wait(schedule.deadline()+physical-runtime_budget.lead(physical))) {
+                    if(!stopping)fail(XR_ERROR_CALL_ORDER_INVALID);
+                    retire(packet);fifo->retire();break;
+                }
                 // Only the residual time remains. A late completed copy moves
                 // the phase by its exact overrun; it never causes a catch-up burst.
                 // Prepare the final call 100us ahead. The physical deadline
                 // itself is unchanged: never shorten a period to gain lead.
                 if(sleep_until(schedule.preparation_deadline(),std::min<std::int64_t>(1'250'000,physical/8))) {
                     auto end=packet->info;
-                    // Let the runtime select the display time. CPU cadence is
-                    // not a reason to invent a different XR prediction.
-                    end.displayTime=prediction.predictedDisplayTime;
+                    // Use this cycle's runtime phase. A prediction which aged
+                    // through a long prior End advances whole display periods.
+                    end.displayTime=display_time(prediction);
                     if(!prediction.shouldRender){end.layerCount=0;end.layers=nullptr;}
                     // Optional logger work belongs in the early window, not
                     // after every deadline where it would accumulate drift.
@@ -454,8 +531,11 @@ struct PrivateOpenXrRuntime::Impl {
                     if(options.trace)options.trace(8,packet->sequence,at_end,0);
                     if(XR_SUCCEEDED(result))trace(2,packet->sequence,schedule.delay());
                 }
+                // Publish a failed End before freeing a producer credit; a
+                // woken producer must not accept another frame in that gap.
+                if(XR_FAILED(result))fail(result);
                 retire(packet);fifo->retire();
-                if(XR_FAILED(result)){fail(result);break;}
+                if(XR_FAILED(result))break;
             }
         } catch(...) {fail(XR_ERROR_RUNTIME_FAILURE);}
         // Provisional sessions can stop after only seeding the virtual clock.
@@ -463,8 +543,22 @@ struct PrivateOpenXrRuntime::Impl {
         if(waited) {XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};begun=XR_SUCCEEDED(options.real.begin(options.real.session,&begin));}
         if(begun) {
             XrFrameEndInfo empty{XR_TYPE_FRAME_END_INFO};empty.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-            empty.displayTime=prediction.predictedDisplayTime;
+            empty.displayTime=display_time(prediction);
             options.real.end(options.real.session,&empty);
+        }
+        // The next Wait can already be in the runtime while the current End
+        // is closed. It is not cancellable by OpenXR; join it, then balance a
+        // completed prediction exactly once before session end/restart.
+        stopping=true;changed.notify_all();
+        if(waiter.joinable())waiter.join();
+        std::optional<WaitResult> remaining;
+        {std::scoped_lock lock(mutex);remaining=std::move(wait_result);wait_result.reset();wait_job.reset();}
+        if(remaining && XR_SUCCEEDED(remaining->result)) {
+            XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+            if(XR_SUCCEEDED(options.real.begin(options.real.session,&begin))) {
+                XrFrameEndInfo empty{XR_TYPE_FRAME_END_INFO};empty.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+                empty.displayTime=display_time(remaining->prediction);options.real.end(options.real.session,&empty);
+            }
         }
     }
 };
@@ -498,8 +592,9 @@ XrResult PrivateOpenXrRuntime::start() {
     auto& s=*impl_;std::scoped_lock lock(s.mutex);
     if(s.running)return XR_ERROR_SESSION_RUNNING;
     s.fifo=std::make_unique<PrivateOutputFifo<std::shared_ptr<Impl::Packet>>>(s.options.capacity);
-    s.prepared.clear();
+    s.prepared.clear();s.wait_job.reset();s.wait_result.reset();s.wait_active=false;s.accepted_packets=s.content_wait_jobs=0;
     s.failure=XR_SUCCESS;s.stopping=false;s.seeded=false;s.running=true;s.waits=s.begun=0;s.virtual_time=0;
+    s.waiter=std::thread([&s]{s.wait_loop();});
     s.preparer=std::thread([&s]{s.prepare();});
     s.consumer=std::thread([&s]{s.run();});return XR_SUCCESS;
 }
@@ -589,7 +684,7 @@ XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info) {
     packet->accepted_at=clock_ns();
     {std::scoped_lock lock(s.mutex);++s.pending;reservation.counted=true;}
     if(!s.fifo->accept(packet))return XR_ERROR_SESSION_NOT_RUNNING;
-    reservation.accepted=true;{std::scoped_lock lock(s.mutex);s.begun=0;}s.changed.notify_all();
+    reservation.accepted=true;{std::scoped_lock lock(s.mutex);s.begun=0;++s.accepted_packets;}s.changed.notify_all();
     s.trace(1,packet->sequence);return XR_SUCCESS;
 }
 XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* info,XrSwapchain* output,D3D12_RESOURCE_STATES image_state,std::uint32_t image_count) {

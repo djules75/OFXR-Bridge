@@ -1,3 +1,10 @@
+## V590: independent native Wait and held presentation margin
+
+Overlap the next nativeWait with current delivery. Missing headroom becomes
+exact retained presentation latency; physical cadence and producer ownership
+remain unchanged.33focused checks pass; headset improvement remains pending.
+See [details](docs/V590_PIPELINED_NATIVE_WAIT.md).
+
 ## V589: add1ms to the native-entry margin
 
 Owner-selected V588 comparison: open the native SteamVR cycle1ms earlier,

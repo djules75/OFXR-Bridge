@@ -26,7 +26,8 @@ struct PrivateRuntimeDispatch {
     PFN_xrConvertTimeToWin32PerformanceCounterKHR to_qpc{};
 };
 
-// SteamVR's runtime binding sees only the consumer. All application/generator
+// SteamVR Begin/End and image release belong to the consumer; one independent
+// Wait worker prepares the next runtime clock. All application/generator
 // images are private, with leases (not copies) transferred at virtual EndFrame.
 // A preparer owns real acquisition/copy/GPU waits; the physical frame thread
 // consumes completed packets only and releases that FIFO head's real targets.
@@ -67,6 +68,9 @@ public:
         // after stage5 and before this packet's native EndFrame.
         // Stages15/16: release entry QPC/duration, Begin-complete QPC/next
         // native-entry budget. Optional CPU observations, never GPU queries.
+        // Stage17: exact native-margin deficit retained in the output phase.
+        // Stage18: native Wait entry QPC and worker thread ID; a is the
+        // per-start accepted-input ordinal (0 for the seed), not packet ID.
         std::function<void(int,std::uint64_t,std::int64_t,std::int64_t)> trace;
     };
     explicit PrivateOpenXrRuntime(Options);
@@ -75,7 +79,7 @@ public:
     PrivateOpenXrRuntime& operator=(const PrivateOpenXrRuntime&)=delete;
     HRESULT initialize();
     XrResult start(); // after successful real xrBeginSession
-    void stop(); // wakes blocked producers, joins consumer, retires GPU reads
+    void stop(); // wakes producers; consumer closes/joins native Wait; drains GPU reads
     XrResult drain();
     XrResult wait_frame(const XrFrameWaitInfo*, XrFrameState*);
     XrResult predict_frame(XrFrameState*); // upper virtual application clock
