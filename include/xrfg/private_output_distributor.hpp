@@ -13,7 +13,7 @@ namespace xrfg {
 // One clock for all SteamVR outputs. Units are QPC nanoseconds. It never
 // borrows time from the following refresh to catch up after a late output.
 class PrivateOutputSchedule {
-    std::int64_t period_{}, due_{}, last_{}, hold_{};
+    std::int64_t period_{}, due_{}, last_{}, hold_{}, refill_{};
     bool primed_{};
 public:
     // Prepare metadata/optional logging ahead of the handoff, without moving
@@ -31,6 +31,21 @@ public:
         return std::max(std::int64_t{},due_-preparation_lead);
     }
     [[nodiscard]] bool primed() const noexcept {return primed_;}
+    // A source underrun needs an actual refill window, not just an immediate
+    // late handoff with no ready lead left. Add its exact deficit as margin
+    // once AFTER this late frame; the following deadlines retain that phase.
+    // Do not age this frame's already selected runtime cycle with a refill.
+    // The bounded pool
+    // limits useful refill time (a stopped/paused application must not turn
+    // into an arbitrarily long replay pause). This runs only at consumption;
+    // no producer or GPU operation waits here.
+    std::int64_t input_ready(std::int64_t at,std::size_t capacity) noexcept {
+        if(!primed_ || at<=due_ || capacity<2)return 0;
+        const auto deficit=at-due_;
+        const auto refill=std::min(deficit,period_*static_cast<std::int64_t>(capacity-1));
+        hold_+=deficit;due_=at;refill_=std::max(refill_,refill);
+        return refill;
+    }
     // Invoke once the FIFO head's exact GPU completion has been observed.
     // ready is the completion-observation timestamp, not a rounded XR slot.
     void ready(std::int64_t at) noexcept {
@@ -44,8 +59,8 @@ public:
     // for a late wakeup/long prior runtime call, without a short next interval.
     bool delivered(std::int64_t at) noexcept {
         if(!eligible(at))return false;
-        hold_+=std::max(std::int64_t{},at-due_);
-        last_=at;due_=at+period_;
+        hold_+=std::max(std::int64_t{},at-due_)+refill_;
+        last_=at;due_=at+period_+refill_;refill_=0;
         return true;
     }
 };

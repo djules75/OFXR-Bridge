@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <future>
 #include <mutex>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -63,6 +64,9 @@ struct Fixture {
     std::vector<std::int64_t> handoffs;
     std::vector<XrTime> targets;
     XrTime raw_prediction{};
+    std::int64_t wait_return{},prediction_age_limit{};
+    std::vector<std::int64_t> prediction_ages;
+    std::vector<std::int64_t> refill_margins;
     std::shared_ptr<xrfg::PrivateOpenXrRuntime> transport;
     explicit Fixture(bool d12,bool split=true):native12(d12) {
         current=this;
@@ -81,7 +85,7 @@ struct Fixture {
         options.real={reinterpret_cast<XrInstance>(1),reinterpret_cast<XrSession>(2),wait,begin,end,create,destroy,enumerate,acquire,wait_image,release,to_qpc};
         options.device12=device12.Get();options.queue12=delivery_queue?delivery_queue.Get():queue.Get();options.producer_queue12=queue.Get();options.device11=device11.Get();options.context11=context.Get();
         options.physical_period=[]{return period;};options.capacity=3;
-        options.trace=[this](int stage,std::uint64_t seq,std::int64_t,std::int64_t){if(stage==4) {preparation_thread=GetCurrentThreadId();if(after_head_ready)after_head_ready();if(preparation_callback)preparation_callback(seq);}};
+        options.trace=[this](int stage,std::uint64_t seq,std::int64_t,std::int64_t margin){if(stage==11)refill_margins.push_back(margin);if(stage==4) {preparation_thread=GetCurrentThreadId();if(after_head_ready)after_head_ready();if(preparation_callback)preparation_callback(seq);}};
         transport=std::make_shared<xrfg::PrivateOpenXrRuntime>(std::move(options));
         ok(transport->initialize(),"initialize actual private endpoint");xr_ok(transport->start(),"start endpoint");
     }
@@ -101,7 +105,7 @@ struct Fixture {
         // Vary the runtime horizon while retaining the monotonic prediction
         // required by OpenXR. XR time deliberately has another epoch than QPC.
         f.raw_prediction=std::max(f.raw_prediction+1,epoch+ns()+((!f.throttled || n%2)?period:period*3));
-        output->predictedDisplayTime=f.raw_prediction;output->predictedDisplayPeriod=(!f.throttled || n%2)?period:period*2;output->shouldRender=XR_TRUE;return XR_SUCCESS;
+        output->predictedDisplayTime=f.raw_prediction;output->predictedDisplayPeriod=(!f.throttled || n%2)?period:period*2;output->shouldRender=XR_TRUE;f.wait_return=ns();return XR_SUCCESS;
     }
     static XrResult XRAPI_CALL begin(XrSession,const XrFrameBeginInfo*){auto& f=*current;check(f.cycle_waited && !f.cycle_begun,"real Begin follows real Wait");f.cycle_waited=false;f.cycle_begun=true;++f.real_begins;return XR_SUCCESS;}
     static XrResult XRAPI_CALL end(XrSession,const XrFrameEndInfo* info) {
@@ -111,6 +115,11 @@ struct Fixture {
         auto& f=*current;
         check(f.cycle_begun && !f.cycle_waited,"real End follows real Begin");f.cycle_begun=false;
         if(!info->layerCount){++f.empty_ends;return XR_SUCCESS;}
+        if(f.prediction_age_limit && f.real_ends>=2) {
+            f.prediction_ages.push_back(start-f.wait_return);
+            if(start-f.wait_return>f.prediction_age_limit)std::fprintf(stderr,"freshness age%.3fms, limit%.3fms\n",(start-f.wait_return)/1e6,f.prediction_age_limit/1e6);
+            check(start-f.wait_return<=f.prediction_age_limit,"ready output must use a fresh runtime cycle rather than age its prediction through the refresh wait");
+        }
         f.delivery_thread=GetCurrentThreadId();
         if(info->layerCount){std::unique_lock lock(f.mutex);f.end_entered=true;f.changed.notify_all();f.changed.wait(lock,[&]{return !f.block_end.load();});}
         check(info->displayTime==f.raw_prediction,"End must retain this cycle's exact runtime prediction");
@@ -304,5 +313,34 @@ void unchanged_overlay() {
     check(f.pixels==std::vector<unsigned>({40,80}),"shared overlay must not replace either scene image");
     std::puts("Immutable overlay sharing preserves lookahead without extra swapchains PASS");
 }
+void fresh_runtime_window(bool d12,int wait_ms=0) {
+    Fixture f(d12);f.throttled=false;auto chain=f.make_chain();f.write(chain,70);
+    f.slow_frame_wait_ms=wait_ms;
+    // Retaining a recent longer native Wait can leave some lead after a
+    // shorter timer wake. The no-wait case has no such variability; the5ms
+    // case must still avoid V584's approximately6ms deliberate ageing.
+    f.prediction_age_limit=wait_ms?3'000'000:1'000'000;
+    for(unsigned n=0;n<12;++n) {
+        f.begin_virtual();xr_ok(f.submit(chain,float(n)),"fresh-cycle immutable input");
+        if(!n){f.wait_entered();f.unblock();}
+    }
+    f.wait_count(12);xr_ok(f.transport->drain(),"fresh runtime window drain");
+    for(unsigned i=1;i<f.handoffs.size();++i)check(f.handoffs[i]-f.handoffs[i-1]>=period,"fresh runtime window preserves physical minimum");
+    check(f.pixels==std::vector<unsigned>(12,70),"fresh runtime window retains every accepted image");
+    const auto oldest=*std::max_element(f.prediction_ages.begin(),f.prediction_ages.end());
+    std::printf("%s fresh runtime prediction, native Wait%dms, oldest%.3fms under saturated ready FIFO PASS\n",d12?"D3D12":"D3D11",wait_ms,oldest/1e6);
 }
-int main(int argc,char** argv){if(argc>1){cadence_precision(true);cadence_precision(false);return 0;}ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();return 0;}
+void adaptive_source_refill(bool d12) {
+    Fixture f(d12);f.throttled=false;auto chain=f.make_chain();f.write(chain,40);
+    f.begin_virtual();xr_ok(f.submit(chain,0),"adaptive first input");f.wait_entered();f.unblock();f.wait_count(1);
+    std::this_thread::sleep_for(18ms); // deliberate gap, no throughput assertion
+    for(unsigned n=1;n<5;++n){f.begin_virtual();xr_ok(f.submit(chain,float(n)),"adaptive irregular input");}
+    f.wait_count(5);xr_ok(f.transport->drain(),"adaptive refill drain");
+    check(!f.refill_margins.empty(),"late source must build automatic presentation margin");
+    for(auto margin:f.refill_margins)check(margin>0 && margin<=period*2,"refill must fit the existing three-slot pool");
+    check(f.pixels==std::vector<unsigned>(5,40),"irregular input must deliver all five accepted images without awaiting imaginary90fps");
+    for(unsigned i=1;i<f.handoffs.size();++i)check(f.handoffs[i]-f.handoffs[i-1]>=period,"adaptive source refill must not catch up with a burst");
+    std::printf("%s automatic source refill retains all finite irregular input, bounded3slots, strict cadence PASS\n",d12?"D3D12":"D3D11");
+}
+}
+int main(int argc,char** argv){if(argc>1){if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);return 0;}

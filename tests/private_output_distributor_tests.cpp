@@ -24,6 +24,26 @@ int main(){try {
     clock.ready(69*ms);
     require(clock.delivered(83*ms) && clock.delay()==8*ms,"CPU handoff delay not retained");
     clock.ready(84*ms);require(!clock.eligible(90*ms) && clock.delivered(94*ms),"post-overrun interval shorter than refresh");
+    xrfg::PrivateOutputSchedule adaptive;
+    adaptive.period(11*ms);require(adaptive.input_ready(20*ms,3)==0,"initial frame unnecessarily prebuffered");
+    adaptive.ready(20*ms);require(adaptive.delivered(20*ms),"adaptive first output");
+    require(adaptive.input_ready(35*ms,3)==4*ms && adaptive.deadline()==35*ms,"source lateness did not build an exact refill margin");
+    adaptive.ready(36*ms);require(adaptive.delivered(36*ms) && adaptive.deadline()==51*ms,"refill was not retained after delivering the late frame");
+    require(adaptive.input_ready(45*ms,3)==0,"early source added an unnecessary wait");
+    adaptive.ready(46*ms);require(adaptive.delivered(51*ms) && adaptive.delay()==9*ms,"refill phase was lost or charged on every frame");
+    // A 75fps producer on a90Hz display must keep EVERY packet, not await
+    // imaginary90fps input. Refills are bounded by owned pool capacity and
+    // otherwise ready input receives no fixed per-frame latency tax.
+    for(int i=1;i<100;++i) {
+        const auto source=51*ms+i*13'333'333LL;
+        const auto before=adaptive.deadline();
+        const auto added=adaptive.input_ready(source,3);
+        require(added==std::min(std::max(std::int64_t{},source-before),22*ms),"adaptive margin rounded to an entire refresh");
+        adaptive.ready(source);const auto at=std::max(source,adaptive.deadline());
+        require(adaptive.delivered(at),"sub-refresh-rate input was dropped");
+    }
+    const auto paused=adaptive.deadline()+10'000*ms;
+    require(adaptive.input_ready(paused,3)==22*ms,"paused producer caused an unbounded replay pause");
     for(auto period:{8'333'333LL,11'111'111LL,13'333'333LL}) {
         xrfg::PrivateOutputSchedule c;c.period(period);c.ready(1);
         auto at=std::int64_t{1};require(c.delivered(at),"fresh refresh clock");

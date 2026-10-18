@@ -53,6 +53,11 @@ public:
         // when the ready packet is known). Stage8: saved handoff edge
         // after the residual wait/copy, emitted after real End to keep the edge
         // free of diagnostic work. QPC ns, c=0. Stage3 runs in the early window.
+        // Stage10: input readiness before the real-chain preparation gate;
+        // c=1 fence completion observed, c=0 acceptance lower bound when
+        // already complete at dequeue. Stage11: underrun refill, QPC ns and
+        // exact margin retained after the late frame for subsequent deliveries.
+        // A real-chain backlog never triggers a refill.
         std::function<void(int,std::uint64_t,std::int64_t,std::int64_t)> trace;
     };
     explicit PrivateOpenXrRuntime(Options);

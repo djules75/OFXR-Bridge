@@ -1,3 +1,11 @@
+## V585: automatic presentation margin
+
+Retains V584 independent preparation. Genuine late input builds a retained
+refill margin after the late frame; native runtime cycles are selected near
+handoff with an adaptive call budget. Same three credits, exact physical
+refresh minimum, all available input retained. Headset result pending.
+See [details](docs/V585_ADAPTIVE_PRESENTATION.md).
+
 ## V584: independent SteamVR preparation
 
 Real-image acquisition/copy/GPU waits move to a separate preparer; the physical
