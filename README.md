@@ -1,3 +1,10 @@
+## V594: bounded native-window renewal
+
+One preventive renewal per short native window in the common SteamVR director.
+Actual controlled 4096px comparison:877/901 shown with V593,898/901 with this
+policy; final-source repeat 900/901. Residual losses and owner game validation
+remain. [Details](docs/V594_NATIVE_WINDOW_REFRESH.md).
+
 ## V593: refresh stale SteamVR native cycles
 
 The common director retains source frames while renewing an expired native

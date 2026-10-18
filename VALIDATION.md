@@ -1,3 +1,10 @@
+## V594: bounded preventive native renewal
+
+33 focused checks pass; exact V593 fails the new preventive-renewal assertion.
+Actual SteamVR source submissions are uniquely matched to receipt IDs; controlled
+4096px comparison 877/901 versus 898/901, final-source repeat 900/901. Isolated
+losses remain; owner game validation pending. [Evidence](docs/V594_VALIDATION.json).
+
 ## V593: native cycle freshness
 
 33focused checks pass. ExactV592 fails the new native-cycle assertion. Actual

@@ -1,3 +1,12 @@
+## V594: consegna SteamVR, rinnovo preventivo limitato
+
+La produzione nella run V593 rimane stabile: restano perdite nella consegna.
+Prova controllata4096px:877/901 mostrati con V593,898/901 con questa gestione;
+la ripetizione sul sorgente finale mostra900/901. Non dichiarare zero perdite.
+Stesso livello Valhalla,0.3.0 2X,LowerVRAM e Neural spenti,F9 per30secondi nel
+livello,poi chiudere normalmente. Nessun F8 o benchmark. Correzione comune
+SteamVR,compreso Luke Ross con AFW acceso/spento; verifica nel gioco pendente.
+
 ## V593: prova della consegna SteamVR, anche Luke Ross
 
 Corregge il ciclo nativo scaduto mantenendo lo stesso frame in FIFO.

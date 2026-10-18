@@ -524,10 +524,23 @@ struct PrivateOpenXrRuntime::Impl {
                 // Do this before posting lookahead, so the worker remains the
                 // sole Wait caller and Begin/End stay serialized here.
                 unsigned renewed{};
+                bool renewed_window{};
                 while(!stopping && prediction.shouldRender) {
                     const auto at=prediction_qpc(prediction);
-                    if(!at || *at>std::max(clock_ns(),deadline)+PrivateOutputSchedule::preparation_lead)break;
-                    if(diagnostic)options.trace(23,packet->sequence,*at,deadline);
+                    if(!at)break;
+                    const auto target=std::max(clock_ns(),deadline);
+                    bool window_renewal{};
+                    if(*at>target+PrivateOutputSchedule::preparation_lead) {
+                        // A merely future prediction can still name the refresh
+                        // already closing at this handoff. With a physical clock,
+                        // request coverage through the following refresh once.
+                        // Some runtimes cannot extend that horizon on demand:
+                        // accept a still-current replacement instead of spinning.
+                        if(!slots.valid() || *at>target+physical || renewed_window)break;
+                        renewed_window=window_renewal=true;
+                    }
+                    if(diagnostic)options.trace(window_renewal?25:23,packet->sequence,*at,
+                        window_renewal?target+physical:deadline);
                     if(renewed && renewed%8==0 && !sleep_until(clock_ns()+physical,1'250'000))break;
                     if(!post_wait(0,false)){result=XR_ERROR_CALL_ORDER_INVALID;break;}
                     auto fresh=take_wait();

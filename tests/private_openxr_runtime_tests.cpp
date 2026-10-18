@@ -60,9 +60,12 @@ struct Fixture {
     std::function<int(unsigned)> frame_wait_us;
     std::atomic<DWORD> preparation_thread{},delivery_thread{},wait_thread{};
     std::atomic_uint empty_ends{};
+    std::atomic<std::uint64_t> wait_input_ordinal{},begun_input_ordinal{};
     std::atomic_uint discarded_clocks{};
     std::atomic_bool stale_next_clock{};
     std::atomic_bool native_should_render{true};
+    std::unordered_map<std::uint64_t,unsigned> window_renewals;
+    std::vector<std::int64_t> native_windows;
     unsigned expected_views{1};
     std::function<XrResult(XrSwapchain,unsigned)> release_callback;
     std::function<void()> after_head_ready;
@@ -112,7 +115,7 @@ struct Fixture {
                 return xrfg::PrivatePhysicalClock{physical_origin+n*period,period,1000+static_cast<std::uint64_t>(n)};
             };
         }
-        options.trace=[this](int stage,std::uint64_t seq,std::int64_t,std::int64_t margin){if(stage==11)refill_margins.push_back(margin);if(stage==17)native_margins.push_back(margin);if(stage==4) {preparation_thread=GetCurrentThreadId();if(after_head_ready)after_head_ready();if(preparation_callback)preparation_callback(seq);}if(stage==5 && prepared_callback)prepared_callback(seq);};
+        options.trace=[this](int stage,std::uint64_t seq,std::int64_t,std::int64_t margin){if(stage==11)refill_margins.push_back(margin);if(stage==17)native_margins.push_back(margin);if(stage==18)wait_input_ordinal=seq;if(stage==25)++window_renewals[seq];if(stage==4) {preparation_thread=GetCurrentThreadId();if(after_head_ready)after_head_ready();if(preparation_callback)preparation_callback(seq);}if(stage==5 && prepared_callback)prepared_callback(seq);};
         transport=std::make_shared<xrfg::PrivateOpenXrRuntime>(std::move(options));
         ok(transport->initialize(),"initialize actual private endpoint");xr_ok(transport->start(),"start endpoint");
     }
@@ -157,7 +160,7 @@ struct Fixture {
         else f.raw_prediction=std::max(f.raw_prediction+1,epoch+ns()+((!f.throttled || n%2)?period:period*3));
         output->predictedDisplayTime=f.raw_prediction;output->predictedDisplayPeriod=(!f.throttled || n%2)?period:period*2;output->shouldRender=f.native_should_render?XR_TRUE:XR_FALSE;f.wait_return=ns();return XR_SUCCESS;
     }
-    static XrResult XRAPI_CALL begin(XrSession,const XrFrameBeginInfo*){auto& f=*current;std::scoped_lock protocol(f.protocol);check(f.cycle_waited,"real Begin follows exactly one successful Wait");const bool discarded=f.cycle_begun;if(discarded)++f.discarded_clocks;f.cycle_waited=false;f.cycle_begun=true;f.begun_prediction=f.raw_prediction;f.begun_wait_return=f.wait_return;++f.real_begins;return discarded?XR_FRAME_DISCARDED:XR_SUCCESS;}
+    static XrResult XRAPI_CALL begin(XrSession,const XrFrameBeginInfo*){auto& f=*current;std::scoped_lock protocol(f.protocol);check(f.cycle_waited,"real Begin follows exactly one successful Wait");const bool discarded=f.cycle_begun;if(discarded)++f.discarded_clocks;f.cycle_waited=false;f.cycle_begun=true;f.begun_prediction=f.raw_prediction;f.begun_wait_return=f.wait_return;f.begun_input_ordinal=std::max(f.begun_input_ordinal.load(),f.wait_input_ordinal.load());++f.real_begins;return discarded?XR_FRAME_DISCARDED:XR_SUCCESS;}
     static XrResult XRAPI_CALL end(XrSession,const XrFrameEndInfo* info) {
         // Timestamp native entry before fixture validation/bookkeeping, so its
         // work cannot masquerade as an early subsequent runtime handoff.
@@ -166,6 +169,7 @@ struct Fixture {
         XrTime prediction{};std::int64_t predicted_at{};
         {std::scoped_lock protocol(f.protocol);check(f.cycle_begun,"real End follows real Begin even if next Wait completed");f.cycle_begun=false;prediction=f.begun_prediction;predicted_at=f.begun_wait_return;}
         if(!info->layerCount){++f.empty_ends;return XR_SUCCESS;}
+        f.native_windows.push_back(prediction-epoch-start);
         check(prediction>epoch+start,"content requires a current native cycle, not a timestamp advanced on an expired cycle");
         if(f.prediction_age_limit && f.real_ends>=2) {
             f.prediction_ages.push_back(start-predicted_at);
@@ -567,6 +571,20 @@ void nonrenderable_native_clock() {
     check(f.pixels==std::vector<unsigned>({70,110}),"visibility recovery preserves subsequent content");
     std::puts("Nonrenderable expired cycle closes once and resumes visible delivery PASS");
 }
+void bounded_native_window(bool d12) {
+    Fixture f(d12,true,{},true);f.unblock();f.throttled=false;
+    auto chain=f.make_chain();std::vector<unsigned> expected;
+    // This runtime returns now+P, so it cannot promise a whole refresh AFTER
+    // a later physical handoff even when its native cycle is still current.
+    for(unsigned n=0;n<6;++n){const auto color=50+n*9;f.write(chain,color);expected.push_back(color);f.begin_virtual();xr_ok(f.submit(chain,float(n)),"short-but-current native window input");}
+    f.wait_count(6);xr_ok(f.transport->drain(),"bounded native-window drain");f.transport->stop();
+    check(!f.window_renewals.empty(),"a physical handoff needs one preventive attempt when the native window is short");
+    for(auto [seq,count]:f.window_renewals)check(count==1,"preventive renewal is bounded to one attempt for each source packet");
+    check(std::any_of(f.native_windows.begin(),f.native_windows.end(),[](auto window){return window>0 && window<period;}),"a runtime unable to extend its future window must still make progress");
+    check(f.pixels==expected && f.real_ends==6,"preventive renewal preserves all exact FIFO images without extra content Ends");
+    check(f.real_begins==f.real_ends+f.empty_ends+f.discarded_clocks,"preventive Begin discards remain balanced on stop");
+    std::puts(d12?"D12 short native-window renewal is bounded and retains exact content PASS":"D11 short native-window renewal is bounded and retains exact content PASS");
+}
 void native_margin_scope(bool d12) {
     {
         Fixture f(d12);f.unblock();f.throttled=false;
@@ -575,7 +593,9 @@ void native_margin_scope(bool d12) {
         // image wait/copy. This must not create a new native margin afterward.
         f.preparation_callback=[&](std::uint64_t seq){
             const auto limit=std::chrono::steady_clock::now()+3s;
-            while(f.real_begins<seq+1){check(std::chrono::steady_clock::now()<limit,"native Begin overlaps late preparation");std::this_thread::yield();}
+            // Renewals add native Begins without consuming another input.
+            // Match this packet's input ordinal, not the total Begin count.
+            while(f.begun_input_ordinal<seq){check(std::chrono::steady_clock::now()<limit,"this input's native Begin overlaps late preparation");std::this_thread::yield();}
         };
         for(unsigned n=0;n<4;++n){f.begin_virtual();xr_ok(f.submit(chain,float(n)),"late preparation input");f.wait_count(n+1);xr_ok(f.transport->drain(),"late preparation drain");}
         check(f.native_margins.empty(),"late GPU preparation must not be charged another native1.1ms margin");
@@ -657,4 +677,4 @@ void queue_priority_policy() {
     std::puts("Final delivery priority: supported HIGH, descriptor preservation, original dedicated fallback, failure propagation PASS");
 }
 }
-int main(int argc,char** argv){if(argc>1){if(std::string_view(argv[1])=="clock"){stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();}else if(std::string_view(argv[1])=="phase"){physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();}else if(std::string_view(argv[1])=="margin"){native_margin_scope(true);native_margin_scope(false);}else if(std::string_view(argv[1])=="pipeline"){overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();}else if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();native_margin_scope(true);native_margin_scope(false);rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);return 0;}
+int main(int argc,char** argv){if(argc>1){if(std::string_view(argv[1])=="clock"){stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);}else if(std::string_view(argv[1])=="phase"){physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();}else if(std::string_view(argv[1])=="margin"){native_margin_scope(true);native_margin_scope(false);}else if(std::string_view(argv[1])=="pipeline"){overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();}else if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();native_margin_scope(true);native_margin_scope(false);rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);return 0;}
