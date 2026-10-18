@@ -1415,6 +1415,30 @@ struct SessionState {
     std::uint32_t release_phase_depth{};
     std::uint32_t release_phase_window_early{};
     std::uint32_t release_phase_hold{};
+    // Windows in a row read at the deepest depth the shape allows with nearly
+    // every first synthetic still unwritten at its pop, and the latch those
+    // windows set: from then on the once-per-frame hold counts for the rest
+    // of the session (presenter_holds_by_count), in the shallow pipeline with
+    // a non-pipelined application only.
+    //
+    // At the deepest depth the pop has nothing further to give, and on a
+    // saturated GPU it is worse than the count. Released at its synthetic's
+    // pop the application submits its next render a period sooner, but the
+    // GPU finishes that render no sooner - it is the bottleneck - so
+    // synthesis runs after the synthetic it was for has already gone to the
+    // runtime, and the runtime's compositor then finishes the real frame
+    // behind that synthesis and misses a vsync. Measured on IL-2 Korea on
+    // Virtual Desktop at 90 Hz, RTX 5080, deeper pipeline off (issue #36):
+    // with the count, 45 game frames a second, the GPU at 100%, every
+    // synthetic written 8 ms before its pop; with the pop at depth 1, 30 of
+    // 30 unwritten in 61 windows of 62, synthesis on the GPU 27 ms after its
+    // encode, 11 ms after the pop, the compositor's step stretched after
+    // every real frame, 43 then 36 game frames a second with the GPU at
+    // 90%. The count had paced that session at its admission gate - the
+    // previous synthetic retired - and left synthesis a whole period. Where
+    // the GPU has headroom the pop stays and is a period of latency saved.
+    std::uint32_t release_phase_saturated_windows{};
+    bool release_hold_counts_latched{};
     // The sequence of the submission the presenter last popped, owned or
     // borrowed - a repeat pops nothing. The once-per-frame hold waits on this
     // rather than counting presenter frames, so a repeat or a prime cannot
@@ -8430,8 +8454,11 @@ struct ReleasePhaseReport {
     std::uint32_t depth{};
     std::uint32_t unwritten{};
     std::uint32_t early{};
-    // 0 held, 1 one pop deeper, 2 one pop back.
+    // 0 held, 1 one pop deeper, 2 one pop back, 3 the hold latched to the
+    // count for the session.
     std::uint32_t step{};
+    // Windows in a row read saturated at the deepest depth, this one included.
+    std::uint32_t saturated_windows{};
 };
 
 // One observation for the release phase, at a real frame's pop on a session
@@ -8446,6 +8473,12 @@ void observe_release_phase(
     constexpr std::uint32_t kWindowFrames = 30;
     constexpr std::uint32_t kLateFrames = 2;
     constexpr std::uint32_t kHoldWindows = 10;
+    // Saturated: nearly the whole window unwritten at the deepest depth. A
+    // session the pop serves reads 0 or 1; issue #36's read 30 of 30 in 61
+    // windows of 62 and 28 in the other. Three windows in a row is about two
+    // seconds at 45 game frames a second, longer than a loading hitch.
+    constexpr std::uint32_t kSaturatedFrames = 28;
+    constexpr std::uint32_t kSaturatedWindows = 3;
     if (leader_early) {
         ++state.release_phase_window_early;
     }
@@ -8474,12 +8507,31 @@ void observe_release_phase(
         --state.release_phase_depth;
         step = 2;
     }
+    // The deepest depth still unwritten: the pop has nothing left to give.
+    // Only the shallow pipeline with a non-pipelined application latches
+    // (see release_hold_counts_latched): 3X and a pipelined application hand
+    // unwritten synthetics over as a matter of course, and the count is what
+    // the pop was built to replace there (issue #27).
+    if (deepest > 0 && state.release_phase_depth == deepest &&
+        unwritten >= kSaturatedFrames) {
+        ++state.release_phase_saturated_windows;
+    } else {
+        state.release_phase_saturated_windows = 0;
+    }
+    if (!state.release_hold_counts_latched &&
+        state.release_phase_saturated_windows >= kSaturatedWindows &&
+        frames == 2 && !state.deep_pipeline &&
+        !state.pipelined_presenter_mode) {
+        state.release_hold_counts_latched = true;
+        step = 3;
+    }
     if (report != nullptr) {
         report->due = true;
         report->depth = state.release_phase_depth;
         report->unwritten = unwritten;
         report->early = early;
         report->step = step;
+        report->saturated_windows = state.release_phase_saturated_windows;
     }
 }
 
@@ -8489,8 +8541,10 @@ void observe_release_phase(
 // depth now in force, in pops before the frame's own real one; b how many of
 // the window's thirty first synthetics were unwritten at their pop or held
 // for it, with the count already written a period early in the bits above
-// 16; c 1 for a step deeper this window, 2 for a step back, 0 for neither,
-// with the deepest depth the shape allows in the bits above 8.
+// 16; c 1 for a step deeper this window, 2 for a step back, 3 for the hold
+// latched to the count for the session (V496), 0 for none, with the depth
+// in the bits above 8 and the windows in a row read saturated at the deepest
+// depth in the bits above 16. The record stops once the hold counts.
 void log_release_phase(const ReleasePhaseReport& report) noexcept {
     if (!report.due) {
         return;
@@ -8500,7 +8554,8 @@ void log_release_phase(const ReleasePhaseReport& report) noexcept {
         802,
         report.depth,
         report.unwritten | (static_cast<std::uint64_t>(report.early) << 16),
-        report.step | (static_cast<std::uint64_t>(report.depth) << 8));
+        report.step | (static_cast<std::uint64_t>(report.depth) << 8) |
+            (static_cast<std::uint64_t>(report.saturated_windows) << 16));
 }
 
 void pace_presenter_submission(
@@ -10593,11 +10648,22 @@ void stop_continuous_presenter(
 // 99.6% of its synthetics unwritten with the count and 7.6% with the pop.
 // SteamVR's 3X steers the same thing with the release delay instead, and
 // SteamVR has never been released at a measured phase.
+//
+// Except that in the shallow pipeline, with an application that is not
+// pipelined, a session whose synthetics stay unwritten at the deepest depth
+// goes back to the count for good (release_hold_counts_latched): there the
+// GPU is the limit, the pop only moves the application's thread ahead of
+// it, and the count left synthesis a period the pop takes away (issue #36).
 [[nodiscard]] bool presenter_holds_by_count(const SessionState& state) noexcept {
     if (state.dispatch && state.dispatch->steamvr_runtime) {
         return true;
     }
-    return state.deep_pipeline && !state.pipelined_presenter_mode;
+    if (state.pipelined_presenter_mode) {
+        return false;
+    }
+    return state.deep_pipeline ||
+        (state.release_hold_counts_latched &&
+         state.frames_per_application_frame == 2);
 }
 
 // Holds the application until the presenter has got far enough through the
@@ -13779,6 +13845,9 @@ void apply_live_frame_multiplier(
                 std::min(state->release_phase_depth, target - 1U);
             state->release_phase_window_early = 0;
             state->release_phase_hold = 0;
+            // The saturation read belongs to the shape it was read in; the
+            // latch it set stays, and applies again in 2X.
+            state->release_phase_saturated_windows = 0;
             // A counted hold counts from here in the new shape.
             state->application_served_serial = state->presenter_frame_serial;
             state->release_floor_armed = false;
