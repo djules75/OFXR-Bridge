@@ -1,3 +1,10 @@
+## V597: actual End phase and native receipt headroom
+
+33 focused checks pass. Exact V596 fails the new final-call phase assertion;
+V597 passes D11/D12 actual-GPU tests with350us of native submission work before
+vsync.10000-refresh clocks keep the exact period and fixed1ms lead with no
+accumulation. Headset improvement pending. [Evidence](docs/V597_VALIDATION.json).
+
 ## V596: copied-source reuse with protected native targets
 
 33 focused checks pass. Exact V595 fails the new single-source progress case;

@@ -1,3 +1,9 @@
+## V597: actual native EndFrame lead
+
+Advance the final SteamVR xrEndFrame phase by a fixed1ms while preserving the
+headset period. V596 source lifetime remains included.33 focused checks pass;
+real MSFS drop improvement requires owner validation. [Details](docs/V597_NATIVE_END_PHASE.md).
+
 ## V596: Valhalla producer-image lifetime
 
 Free a producer image after its copy fence completes, retaining the immutable

@@ -605,8 +605,9 @@ struct PrivateOpenXrRuntime::Impl {
                 }
                 // Only the residual time remains. A late completed copy moves
                 // the phase by its exact overrun; it never causes a catch-up burst.
-                // Prepare the final call 100us ahead. The physical deadline
-                // itself is unchanged: never shorten a period to gain lead.
+                // Prepare the final call 100us before its handoff edge. The
+                // physical schedule places that edge 1ms before headset vsync;
+                // consecutive slots still advance by the exact physical period.
                 if(sleep_until(std::max(std::int64_t{},deadline-PrivateOutputSchedule::preparation_lead),std::min<std::int64_t>(1'250'000,physical/8))) {
                     auto end=packet->info;
                     // Use this cycle's runtime phase. A prediction which aged

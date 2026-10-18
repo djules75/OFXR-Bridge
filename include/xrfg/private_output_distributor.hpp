@@ -120,10 +120,14 @@ class PrivatePhysicalSchedule {
     std::uint64_t slot_{},last_slot_{};
     bool valid_{},delivered_{};
 public:
+    // Shift the actual native End phase, not just its preceding Wait/Begin.
+    // Reapply this constant to each RAW clock sample, never to the period or
+    // an already shifted deadline: the lead cannot accumulate across frames.
+    static constexpr std::int64_t handoff_lead=1'000'000;
     bool clock(PrivatePhysicalClock value) noexcept {
-        if(value.at<=0 || !value.counter || value.period<2'000'000 || value.period>50'000'000)return false;
+        if(value.at<=handoff_lead || !value.counter || value.period<2'000'000 || value.period>50'000'000)return false;
         if(valid_ && value.counter<clock_.counter)return true; // retain the newer observation
-        clock_=value;valid_=true;return true;
+        clock_=value;clock_.at-=handoff_lead;valid_=true;return true;
     }
     [[nodiscard]] bool valid() const noexcept {return valid_;}
     [[nodiscard]] std::int64_t delay() const noexcept {return latency_;}

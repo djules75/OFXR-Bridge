@@ -34,16 +34,16 @@ int main(){try {
     xrfg::PrivatePhysicalSchedule grid;
     require(grid.clock({20*ms,11*ms,100}),"physical anchor rejected");
     require(grid.observe_work(3*ms,3)==3*ms && grid.delay()==3*ms,"private latency is not applied as packet eligibility");
-    require(grid.claim(24*ms,27*ms,25*ms,27*ms,1*ms)==31*ms && grid.slot()==101,"first physical slot not anchored to headset");
-    require(grid.delivered(31*ms+20'000),"physical first output");
-    require(grid.claim(27*ms,30*ms,39*ms,40*ms,1*ms)==42*ms && grid.slot()==102,"late CPU entry permanently moved the physical phase");
-    require(grid.delivered(42*ms),"next absolute slot did not recover the same clock phase");
+    require(grid.claim(24*ms,27*ms,25*ms,27*ms,1*ms)==30*ms && grid.slot()==101,"first physical slot not anchored to headset");
+    require(grid.delivered(30*ms+20'000),"physical first output");
+    require(grid.claim(27*ms,30*ms,39*ms,40*ms,1*ms)==41*ms && grid.slot()==102,"late CPU entry permanently moved the physical phase");
+    require(grid.delivered(41*ms),"next absolute slot did not recover the same clock phase");
     require(grid.observe_work(8*ms,3)==5*ms && grid.delay()==8*ms,"late GPU work did not add only its exact missing buffered time");
-    require(grid.claim(47*ms,55*ms,50*ms,55*ms,1*ms)==64*ms && grid.slot()==104,"late prepared packet moved phase instead of skipping an expired display slot");
-    require(grid.delivered(64*ms),"late GPU packet was discarded");
+    require(grid.claim(47*ms,55*ms,50*ms,55*ms,1*ms)==63*ms && grid.slot()==104,"late prepared packet moved phase instead of skipping an expired display slot");
+    require(grid.delivered(63*ms),"late GPU packet was discarded");
     require(grid.observe_work(2*ms,3)==0 && grid.delay()==8*ms,"buffered GPU time was lost or charged again");
-    require(grid.claim(57*ms,60*ms,65*ms,65*ms,1*ms)==75*ms && grid.slot()==105,"retained buffer did not apply to next packet on the same grid");
-    require(grid.delivered(75*ms),"buffered following output");
+    require(grid.claim(57*ms,60*ms,65*ms,65*ms,1*ms)==74*ms && grid.slot()==105,"retained buffer did not apply to next packet on the same grid");
+    require(grid.delivered(74*ms),"buffered following output");
     require(grid.observe_work(10'000*ms,3)==14*ms && grid.delay()==22*ms,"pause created unbounded replay latency");
     for(const auto p:{8'333'333LL,11'111'111LL,13'333'333LL}) {
         xrfg::PrivatePhysicalSchedule c;const std::int64_t base=1'000'000'000;
@@ -54,9 +54,24 @@ int main(){try {
             const auto source=base+std::int64_t(n)*13'333'333;
             const auto work=(n%17==0?7:2)*ms;
             c.observe_work(work,3);const auto at=c.claim(source,source+work,source,source+work,100'000);
-            require((at-base)%p==0 && c.slot()>slot && at>=source+c.delay(),"output left physical grid, reused a slot or bypassed held packet latency");
+            require((at+ms-base)%p==0 && c.slot()>slot && at>=source+c.delay(),"output left physical grid, reused a slot or bypassed held packet latency");
             if(n)require(at-last>=p,"fixed slots ran faster than headset");
             require(c.delivered(at),"finite irregular input was lost");last=at;slot=c.slot();
+        }
+    }
+    // End itself must keep a fixed 1ms phase lead at every supported refresh,
+    // including repeated raw clock observations. Never run at P-minus-lead.
+    for(const auto p:{8'333'333LL,11'111'111LL,13'333'333LL}) {
+        xrfg::PrivatePhysicalSchedule early;const std::int64_t base=1'000'000'000;
+        std::int64_t last{};
+        for(std::int64_t n=1;n<=10'000;++n) {
+            const xrfg::PrivatePhysicalClock observed{base+(n-1)*p,p,1000+static_cast<std::uint64_t>(n-1)};
+            require(early.clock(observed) && early.clock(observed),"raw clock resample rejected");
+            const auto expected=base+n*p-ms;
+            const auto at=early.claim(expected-3*ms,expected-2*ms,expected-3*ms,expected-2*ms,100'000);
+            require(at==expected && early.slot()==1000+static_cast<std::uint64_t>(n),"actual End edge is not 1ms before the unchanged physical slot");
+            require(!n || !last || at-last==p,"End advance changed frequency or accumulated with clock resamples");
+            require(early.delivered(at),"advanced physical End edge refused");last=at;
         }
     }
     xrfg::PrivateOutputSchedule clock;
@@ -129,6 +144,6 @@ int main(){try {
     require(fifo.reserve(2),"stop control reserve");
     auto blocked=std::async(std::launch::async,[&]{return fifo.reserve();});
     fifo.stop();require(!blocked.get() && !fifo.pop(),"stop did not release producer/consumer");
-    std::cout<<"Private distributor: 100us preparation without drift over10000refreshes; exact held lateness; strict90/120/75Hz; FIFO ownership; backpressure; stop PASS\n";
+    std::cout<<"Private distributor: fixed1ms End phase and100us preparation without drift over10000refreshes; exact held lateness; strict90/120/75Hz; FIFO ownership; backpressure; stop PASS\n";
     return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

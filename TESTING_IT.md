@@ -1,3 +1,11 @@
+## V597: anticipo della consegna finale
+
+La chiamata xrEndFrame arriva1ms prima sullo stesso periodo del casco.
+Il fix sorgenti V596 resta incluso.33 controlli passati; risultato MSFS da
+verificare: stessa scena e refresh,0.3.0 2X,Lower VRAM e Neural spenti,
+F9 per circa60secondi nel livello e chiusura normale. Non servono F8 o un
+benchmark completo. Confrontare i frame mostrati, oltre a quelli prodotti.
+
 ## V596: prova mirata Valhalla
 
 Corregge l'attesa della sorgente dopo che la copia privata e gia completata.
