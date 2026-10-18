@@ -28,6 +28,19 @@ int main(){try {
         xrfg::PrivateOutputSchedule c;c.period(period);c.ready(1);
         auto at=std::int64_t{1};require(c.delivered(at),"fresh refresh clock");
         for(int i=0;i<200;++i){c.ready(at+1);require(!c.eligible(at+period-1),"refresh minus1ns accepted");at+=period;require(c.delivered(at),"fixed refresh cadence");}
+        // Early preparation changes neither cadence nor held lateness, even
+        // over many refreshes. It is not period-minus100us pacing.
+        for(int i=0;i<10000;++i) {
+            c.ready(at+1);
+            const auto due=c.deadline(),prepare=c.preparation_deadline();
+            require(due-prepare==100'000 && !c.eligible(prepare),"preparation borrowed a refresh");
+            require(c.deadline()==due && c.delay()==0,"early preparation moved phase");
+            at+=period;require(c.delivered(at),"early preparation changed frequency");
+        }
+        c.ready(at+period+250'000);
+        require(c.delay()==250'000 && c.delivered(at+period+250'000),"late preparation discarded exact overrun");
+        at+=period+250'000;c.ready(at+1);
+        require(!c.eligible(c.preparation_deadline()) && c.delivered(at+period),"late preparation caused catch-up");
     }
     // Producer completion depends only on taking ownership of a private slot.
     // A pending consumer handoff keeps its slot until explicit retirement.
@@ -46,6 +59,6 @@ int main(){try {
     require(fifo.reserve(2),"stop control reserve");
     auto blocked=std::async(std::launch::async,[&]{return fifo.reserve();});
     fifo.stop();require(!blocked.get() && !fifo.pop(),"stop did not release producer/consumer");
-    std::cout<<"Private distributor: exact4ms held lateness; strict90/120/75Hz; FIFO ownership; full-slot backpressure; stop PASS\n";
+    std::cout<<"Private distributor: 100us preparation without drift over10000refreshes; exact held lateness; strict90/120/75Hz; FIFO ownership; backpressure; stop PASS\n";
     return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

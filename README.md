@@ -1,3 +1,10 @@
+## V583: selected-preset benchmark, A initial preference
+
+Complete tests keep the startup preset instead of forcing C or requesting a
+restart. A is the initial next-launch preference; explicit C/game-default
+choices remain available. CSV records the actual startup request. Adds the100us early-preparation experiment to V582.
+See [details](docs/V583_SELECTED_PRESET.md). Owner comparison pending.
+
 ## V582: selected-preset benchmark, A initial preference
 
 Complete tests keep the startup preset instead of forcing C or requesting a

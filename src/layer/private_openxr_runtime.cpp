@@ -304,25 +304,35 @@ struct PrivateOpenXrRuntime::Impl {
                 schedule.ready(clock_ns());
                 // Only the residual time remains. A late completed copy moves
                 // the phase by its exact overrun; it never causes a catch-up burst.
-                // A2us edge guard covers QPC quantization and the final native
-                // function-call boundary; it is not a borrowed display slot.
-                if(sleep_until(schedule.deadline()+2'000,std::min<std::int64_t>(1'250'000,physical/8))) {
-                    trace(8,packet->sequence);
+                // Prepare the final call 100us ahead. The physical deadline
+                // itself is unchanged: never shorten a period to gain lead.
+                if(sleep_until(schedule.preparation_deadline(),std::min<std::int64_t>(1'250'000,physical/8))) {
                     auto end=packet->info;
                     // Let the runtime select the display time. CPU cadence is
                     // not a reason to invent a different XR prediction.
                     end.displayTime=prediction.predictedDisplayTime;
                     if(!prediction.shouldRender){end.layerCount=0;end.layers=nullptr;}
-                    // Log before marking the actual handoff edge. Logger work
-                    // between that edge and the native call would corrupt the
-                    // minimum-spacing measurement at sub-microsecond precision.
+                    // Optional logger work belongs in the early window, not
+                    // after every deadline where it would accumulate drift.
                     if(options.trace)options.trace(3,packet->sequence,end.displayTime,prediction.predictedDisplayTime);
-                    const auto at_end=clock_ns();
-                    if(!schedule.delivered(at_end)){result=XR_ERROR_RUNTIME_FAILURE;}
-                    else {
-                        result=options.real.end(options.real.session,&end);begun=false;
-                        if(XR_SUCCEEDED(result))trace(2,packet->sequence,schedule.delay());
+                    // Preserve V579's 2us quantization/function-call guard.
+                    // A late preparation still delivers once, then holds its
+                    // exact overrun; there is no catch-up or extra frame wait.
+                    // Include the edge guard in this final spin window. A
+                    // second tiny timer wait for that2us tail would reintroduce
+                    // scheduler jitter instead of preserving the early wakeup.
+                    if(!sleep_until(schedule.deadline()+2'000,PrivateOutputSchedule::preparation_lead+2'000)) {
+                        retire(packet);fifo->retire();break;
                     }
+                    const auto at_end=clock_ns();
+                    result=options.real.end(options.real.session,&end);begun=false;
+                    // This consumer exclusively owns the schedule. Commit its
+                    // saved edge after the call too, leaving no bookkeeping
+                    // between the timestamp and native entry. The completed
+                    // wait already guarantees eligibility on monotonic QPC.
+                    if(!schedule.delivered(at_end))result=XR_ERROR_RUNTIME_FAILURE;
+                    if(options.trace)options.trace(8,packet->sequence,at_end,0);
+                    if(XR_SUCCEEDED(result))trace(2,packet->sequence,schedule.delay());
                 }
                 retire(packet);fifo->retire();
                 if(XR_FAILED(result)){fail(result);break;}

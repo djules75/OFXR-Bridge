@@ -16,6 +16,9 @@ class PrivateOutputSchedule {
     std::int64_t period_{}, due_{}, last_{}, hold_{};
     bool primed_{};
 public:
+    // Prepare metadata/optional logging ahead of the handoff, without moving
+    // its clock or subtracting a margin from every physical refresh.
+    static constexpr std::int64_t preparation_lead=100'000;
     void period(std::int64_t value) noexcept {
         if(value<2'000'000 || value>50'000'000)return;
         period_=value;
@@ -24,6 +27,9 @@ public:
     [[nodiscard]] std::int64_t period() const noexcept {return period_;}
     [[nodiscard]] std::int64_t delay() const noexcept {return hold_;}
     [[nodiscard]] std::int64_t deadline() const noexcept {return due_;}
+    [[nodiscard]] std::int64_t preparation_deadline() const noexcept {
+        return std::max(std::int64_t{},due_-preparation_lead);
+    }
     [[nodiscard]] bool primed() const noexcept {return primed_;}
     // Invoke once the FIFO head's exact GPU completion has been observed.
     // ready is the completion-observation timestamp, not a rounded XR slot.
