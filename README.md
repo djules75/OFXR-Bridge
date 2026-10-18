@@ -1,3 +1,11 @@
+## V577: combined Lower VRAM and memory-aware suites
+
+One Lower VRAM control, no Luke effect, Normal/VRAM ordinary tests and unchanged
+18-quality Luke suite. End-of-trial process VRAM/RAM snapshots work with F9 off.
+Experimental features is under Display. See [current methodology](docs/V577_LOWER_VRAM_BENCHMARK.md).
+IPC57701/provider45601. Restart matching tray/runtime. DLSS-G output capture
+is retained; no visual fix is claimed.
+
 ## V576 diagnostic: native DLSS-G output capture
 
 V575 delivery is retained. Full F8 now includes the actual native DLSS-G

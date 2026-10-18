@@ -48,6 +48,7 @@
 
 #include <windows.h>
 #include <psapi.h>
+#include <psapi.h>
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
@@ -1504,6 +1505,9 @@ private:
         state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr;
 }
 
+[[nodiscard]] int effective_memory_control(const SessionState& state,int requested) noexcept {
+    return state.luke_afw_enabled ? 0 : requested;
+}
 [[nodiscard]] bool configurable_native_outputs(const SessionState& state) noexcept {
     return state.graphics_binding == SessionGraphicsBinding::d3d12 && !state.luke_afw_enabled;
 }
@@ -2020,9 +2024,10 @@ enum class VideoMemoryStage : std::int64_t {
 void log_video_memory(
     SessionState& session,
     VideoMemoryStage stage,
-    std::uint64_t subject) noexcept {
+    std::uint64_t subject,
+    xrfg::autonomous::BenchmarkMemory* memory = nullptr) noexcept {
     try {
-        if (!xrfg::bridge_flight_logger().enabled()) {
+        if (!memory && !xrfg::bridge_flight_logger().enabled()) {
             return;
         }
         Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter;
@@ -2074,8 +2079,29 @@ void log_video_memory(
             local.CurrentUsage,
             local.Budget,
             subject);
+        if(memory) {
+            memory->vram_valid=true; memory->vram_bytes=local.CurrentUsage;
+            DXGI_QUERY_VIDEO_MEMORY_INFO shared{};
+            if(SUCCEEDED(adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,&shared))) {
+                memory->shared_gpu_valid=true;memory->shared_gpu_bytes=shared.CurrentUsage;
+            }
+        }
     } catch (...) {
     }
+}
+
+void sample_benchmark_memory(SessionState& state) noexcept {
+    const auto revision=xrfg::autonomous::take_benchmark_memory_request();
+    if(!revision)return;
+    xrfg::autonomous::BenchmarkMemory memory{};
+    memory.revision=revision;memory.updated_ms=GetTickCount64();
+    PROCESS_MEMORY_COUNTERS_EX process{};process.cb=sizeof(process);
+    if(K32GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&process),sizeof(process))) {
+        memory.ram_valid=true;memory.ram_working_set_bytes=process.WorkingSetSize;
+        memory.ram_private_commit_bytes=process.PrivateUsage;
+    }
+    log_video_memory(state,VideoMemoryStage::periodic,0,&memory);
+    xrfg::autonomous::report_benchmark_memory(memory);
 }
 
 // swapchain_image for a D3D12 image: what the runtime actually allocated
@@ -5258,8 +5284,8 @@ XrResult layer_create_session_impl(
     if (state->luke_afw_enabled) state->dlss_motion_vectors = true;
     state->djules_history_wait_enabled.store(ordinary_djules_route(*state), std::memory_order_relaxed);
     state->control_revision = initial_control.revision;
-    state->separate_synthesis = initial_control.desired.separate_synthesis;
-    state->lower_vram = initial_control.desired.lower_vram;
+    state->separate_synthesis = effective_memory_control(*state,initial_control.desired.separate_synthesis);
+    state->lower_vram = effective_memory_control(*state,initial_control.desired.lower_vram);
     xrfg::embedded::applied(state->control_id, state->control_revision, state->menu_enabled, 0);
     XrStructureType binding_structure_type = XR_TYPE_UNKNOWN;
     if (create_info != nullptr) {
@@ -11289,10 +11315,8 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             return output;
         }
         // AFW scratch is disjoint from both ordinary director output handles.
-        const bool late_luke_publication = state->session->luke_afw_enabled &&
-            state->session->separate_synthesis > 0 && generation->d3d11_interop &&
-            state->session->frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr &&
-            !afw_source && !defer_d3d11_publication;
+        // V577 retires the former A-only Luke delayed-publication experiment.
+        const bool late_luke_publication = false;
         const std::size_t current_slot = defer_d3d11_publication
             ? kAfwScratchSlot : generation->current_slot;
         const std::size_t synthetic_slot = defer_d3d11_publication
@@ -13909,6 +13933,8 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         options.hybrid=true; options.input_scale=xrfg::D3D12NvidiaInputScale::quarter;
         backend=xrfg::D3D12OpticalFlowBackend::fidelity_fx;
     }
+    const int effective_separation = effective_memory_control(*state,control.desired.separate_synthesis);
+    const int effective_reduction = effective_memory_control(*state,control.desired.lower_vram);
     const bool changed = options.hybrid!=state->nvidia_options.hybrid ||
         control.desired.hybrid!=state->hybrid_requested || force_startup_rendezvous || state->control_reconfigure_required || backend != state->optical_flow_backend ||
         options.preset != state->nvidia_options.preset ||
@@ -13917,7 +13943,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         options.native_scale != state->nvidia_options.native_scale ||
         generation_mode != state->frame_generation_mode ||
         nvidia_new_route != state->nvidia_new_route || djules_route != state->djules_route ||
-        state->separate_synthesis != control.desired.separate_synthesis || state->lower_vram != control.desired.lower_vram;
+        state->separate_synthesis != effective_separation || state->lower_vram != effective_reduction;
     // SteamVR native OFXR can enumerate more eye targets than the current
     // projection uses. Reconfiguration must not spend their deferred budget.
     // AFW/Outlaws keep their separately validated initialization contracts.
@@ -13939,8 +13965,8 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     state->djules_route = djules_route;
     state->djules_history_wait_enabled.store(ordinary_djules_route(*state), std::memory_order_relaxed);
     if (!ordinary_djules_route(*state)) state->presenter_restore_after_bypass=false;
-    state->separate_synthesis = control.desired.separate_synthesis;
-    state->lower_vram = control.desired.lower_vram;
+    state->separate_synthesis = effective_separation;
+    state->lower_vram = effective_reduction;
     state->dlss_motion_vectors = control.desired.motion_vectors == 1 ||
         generation_mode != xrfg::D3D12FrameGenerationMode::ofxr ||
         state->luke_afw_enabled;
@@ -14505,6 +14531,7 @@ XrResult layer_end_frame_impl(
         const std::shared_ptr<SessionState>& state;
         xrfg::autonomous::SwapchainBudgetStatus budget{};
         ~RuntimeReportScope() {
+            sample_benchmark_memory(*state);
             budget.fallback=state->luke_aux_budget_inline.load();
             xrfg::autonomous::publish_runtime_status(state->native_dlss_generated_frames,
             state->generation_status.load(std::memory_order_relaxed),

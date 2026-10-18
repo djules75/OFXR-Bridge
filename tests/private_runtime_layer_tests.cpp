@@ -1,4 +1,6 @@
 // Shipping API/worker/generator code, with only the downstream runtime mocked.
+#include "xrfg/benchmark_suite.hpp"
+#include <fstream>
 #include "../src/layer/openxr_layer.cpp"
 #define main private_transport_core_main
 #include "private_openxr_runtime_tests.cpp"
@@ -16,7 +18,7 @@ int main(int argc,char** argv) {
     xrfg_fixture::ControlProfile profile;
     ComPtr<ID3D12Debug> debug;
     if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
-    Fixture f(native12);f.transport->stop();f.transport.reset();f.throttled=false;f.real_common=true;f.expected_views=2;f.unblock();
+    Fixture f(native12);f.transport->stop();if(route!="memory")f.transport.reset();f.throttled=false;f.real_common=true;f.expected_views=2;f.unblock();
     f.create_state=[] {std::scoped_lock lock(g_state_mutex);return g_swapchains.empty()?D3D12_RESOURCE_STATE_RENDER_TARGET:D3D12_RESOURCE_STATE_COMMON;};
     auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=true;
     dispatch->wait_frame=Fixture::wait;dispatch->begin_frame=Fixture::begin;dispatch->end_frame=Fixture::end;
@@ -48,6 +50,36 @@ int main(int argc,char** argv) {
     if(!native12)ok(xrfg::create_d3d12_device_for_d3d11(f.device11.Get(),f.device12.GetAddressOf(),f.queue.GetAddressOf()),"D11 generator interop device");
     state->d3d12_device=f.device12;state->d3d12_queue=f.queue;
     state->d3d11_device=f.device11;state->d3d11_context=f.context;
+    if(route=="memory") {
+        using namespace xrfg::autonomous;
+        auto desired=snapshot().desired;desired.benchmark_csv=true;desired.diagnostics=false;
+        check(request(desired),"isolated memory test settings");
+        RuntimeStatus runtime{};runtime.sessions=1;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
+        check(start_benchmark(false),"start isolated memory trial");
+        runtime.applied_revision=snapshot().revision;report_runtime(runtime);
+        const auto clock=GetTickCount64();tick_benchmark(clock);
+        check(snapshot().benchmark.phase==BenchmarkPhase::running,"memory trial applied");
+        tick_benchmark(clock+9750);
+        sample_benchmark_memory(*state);
+        check(!take_benchmark_memory_request(),"game sampler consumes one request only");
+        check(state->video_memory_adapter!=nullptr,"sampler finds the actual rendering adapter with F9 off");
+        DXGI_QUERY_VIDEO_MEMORY_INFO expected{};
+        ok(state->video_memory_adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&expected),"independent process VRAM query");
+        const auto path=std::filesystem::u8path(snapshot().benchmark.csv_path);
+        tick_benchmark(clock+10000);
+        std::ifstream csv(path);std::string line;bool gpu{},ram{};
+        while(std::getline(csv,line)) {
+            for(const auto& key:{std::string("VRAM end MiB,"),std::string("RAM working set end MiB,")}) {
+                const auto at=line.find(key);if(at==std::string::npos)continue;
+                const double value=std::stod(line.substr(at+key.size()));
+                if(key.starts_with("VRAM")) {gpu=true;check(std::abs(value-double(expected.CurrentUsage)/1048576.0)<0.01,"CSV VRAM equals current-process DXGI usage on the rendering adapter");}
+                else {ram=true;check(value>0,"real game-process RAM is observed");}
+            }
+        }
+        check(gpu&&ram,"CSV contains actual VRAM and RAM end samples");
+        stop_benchmark();tick_benchmark();
+        std::puts("Memory: one end-of-trial game-process DXGI/working-set snapshot, F9 off, CSV correspondence PASS");return 0;
+    }
     D3D12_COMMAND_QUEUE_DESC queue_info{};queue_info.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
     if(native12)ok(f.device12->CreateCommandQueue(&queue_info,IID_PPV_ARGS(&state->d3d12_synthesis_queue)),"separate generator queue");
     if(native12)state->private_delivery_queue=f.delivery_queue;

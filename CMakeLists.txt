@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.576.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.577.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -991,7 +991,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_compile_features(xrfg_private_runtime_layer_tests PRIVATE cxx_std_20)
         target_compile_definitions(xrfg_private_runtime_layer_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_PLATFORM_WIN32 OFXR_PROVIDER_API_EXPORTS)
         target_link_libraries(xrfg_private_runtime_layer_tests PRIVATE xrfg_core xrfg_d3d12_history xrfg_bridge_flight_logger xrfg_fps_overlay xrfg_implicit_layer psapi xrfg_frame_capture)
-        foreach(route IN ITEMS ref new djules fidelity fsr hybrid dlssg djules3 dlssg3 d11-ref d11-new d11-djules d11-fidelity new-01 new-10 new-11 switch separate-ref separate-new separate-fidelity separate-fsr separate-hybrid separate-dlssg session)
+        foreach(route IN ITEMS ref new djules fidelity fsr hybrid dlssg djules3 dlssg3 d11-ref d11-new d11-djules d11-fidelity new-01 new-10 new-11 switch separate-ref separate-new separate-fidelity separate-fsr separate-hybrid separate-dlssg session memory)
             add_test(NAME xrfg_private_runtime_${route}_gpu COMMAND xrfg_private_runtime_layer_tests ${route})
             set_tests_properties(xrfg_private_runtime_${route}_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         endforeach()

@@ -20,6 +20,7 @@ inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false) {
                 if(step.a || step.b || (step.prefer && !step.triple))continue;
                 step.afw=3;step.shading=quality;
                 if(step.disabled)step.label="AFW only";
+                else if(step.label.ends_with(" Normal"))step.label.replace(step.label.size()-7,7," 00");
                 result.push_back(std::move(step));
             }
         }
@@ -27,16 +28,14 @@ inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false) {
     }
     std::vector<BenchmarkStep> steps{{0,0,0,0,false,false,true,"Disabled"}};
     const auto route=[&](const char* name,int generation,int backend,bool triple=false) {
-        // Same order as manual runs: 00, A, AB, B. B-only cannot retain 3X.
-        for (const auto flags : {0,1,3,2}) {
-            if(triple && flags==2) continue;
+        // Normal and combined Lower VRAM only. Both retain their requested multiplier.
+        for (const auto flags : {0,3}) {
             const int a=flags&1,b=(flags>>1)&1;
             steps.push_back({generation,backend,a,b,triple,triple,false,
-                std::string(name)+" "+(a ? "A" : "")+(b ? "B" : "")+(flags ? "" : "00")});
+                std::string(name)+(flags ? " Lower VRAM" : " Normal")});
         }
     };
     route("Fidelity",0,0);route("0.2.1",0,1);route("Djules 2X",0,3);
-    steps.push_back({0,3,0,0,false,true,false,"Djules 2X 00 Prefer FPS"});
     route("Djules 3X",0,3,true);route("0.3.0",0,2);
     if(full) {route("Hybrid",3,0);route("FSR",1,0);route("DLSS-G C",2,0);}
     return steps;

@@ -16,7 +16,7 @@ struct GenerationPreferences {
     int preset{1};
     int scale{2};
     bool backward{};
-    int separate_synthesis{}; // private output textures, independent of XR ring count
+    int separate_synthesis{}; // legacy field, follows combined Lower VRAM
     int lower_vram{};
     bool prefer_fps{true};
     bool triple_frame_gen{};
@@ -36,7 +36,7 @@ struct Settings {
     int preset{1}; // 0 slow, 1 medium, 2 fast
     int scale{2}; // 0 full, 1 three-quarter, 2 half, 3 quarter
     bool backward{};
-    int separate_synthesis{}; // private output textures, independent of XR ring count
+    int separate_synthesis{}; // legacy field, follows combined Lower VRAM
     int lower_vram{}; // checkbox: 0 off (default), 1 on
     bool prefer_fps{true};
     bool triple_frame_gen{};
@@ -145,6 +145,15 @@ struct Snapshot {
     bool connected{}; // runtime reported within the last five seconds
     BenchmarkStatus benchmark{};
 };
+
+// Once per trial, captured in the game process on its rendering adapter.
+// Unknown/unsupported reads stay invalid, never zero-filled measurements.
+struct BenchmarkMemory {
+    std::uint64_t revision{}, updated_ms{}, vram_bytes{}, shared_gpu_bytes{}, ram_working_set_bytes{}, ram_private_commit_bytes{};
+    bool vram_valid{}, shared_gpu_valid{}, ram_valid{};
+};
+std::uint64_t take_benchmark_memory_request() noexcept;
+void report_benchmark_memory(BenchmarkMemory memory) noexcept;
 
 // Persistent values are independent of the original OFXR/OptiScaler profile.
 // Runtime processes and the tray keep the shared mapping open; named-mutex

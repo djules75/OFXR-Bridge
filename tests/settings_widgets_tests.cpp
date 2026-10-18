@@ -235,24 +235,16 @@ void actual_widgets() {
     require(headset.widgets.draft.enabled == enabled.desired.enabled,
         "headset reflects hot tray checkbox edit");
     require(enabled.desired.lower_vram == 0, "opening settings preserves Lower VRAM off");
-    tray.activate("/Generation_", "Separate synthesis");
+    tray.activate("/Generation_", "Lower VRAM");
     tray.draw(); tray.draw();
-    require(snapshot().desired.separate_synthesis == 1 && snapshot().desired.lower_vram == 0,
-        "separation alone keeps full XR allocation");
-    tray.activate("/Generation_", "Reduce XR swapchains");
-    tray.draw();
-    require(snapshot().desired.lower_vram == 1 && snapshot().desired.separate_synthesis == 1,
-        "tray independently enables reduced allocation");
+    require(snapshot().desired.separate_synthesis == 1 && snapshot().desired.lower_vram == 1,
+        "Lower VRAM enables private textures and reduced rings together");
     headset.draw();
     require(headset.widgets.draft.lower_vram == 1, "headset reflects Lower VRAM on");
-    headset.activate("/Generation_", "Separate synthesis");
+    headset.activate("/Generation_", "Lower VRAM");
     headset.draw(); headset.draw();
-    require(snapshot().desired.separate_synthesis == 0 && snapshot().desired.lower_vram == 1,
-        "headset reduction alone preserves explicit separation off");
-    headset.activate("/Generation_", "Reduce XR swapchains");
-    headset.draw();
-    require(snapshot().desired.lower_vram == 0 && snapshot().desired.separate_synthesis == 0,
-        "headset returns to full direct output");
+    require(snapshot().desired.separate_synthesis == 0 && snapshot().desired.lower_vram == 0,
+        "Lower VRAM off restores both controls");
     tray.draw();
     require(tray.widgets.draft.lower_vram == 0, "tray reflects Lower VRAM off");
     headset.select_tab("Neural Rendering");
@@ -280,6 +272,10 @@ void actual_widgets() {
     headset.draw();
     require(snapshot().desired.diagnostics != enabled.desired.diagnostics,
         "real diagnostics checkbox publishes setting");
+    headset.activate("/Display_", "Experimental features");headset.draw();headset.draw();
+    const bool previous_camera=snapshot().desired.r19_camera;
+    headset.activate("/Display_", "Reduce black bars during headset rotation###R19 synthetic camera (experimental)");headset.draw();headset.draw();
+    require(snapshot().desired.r19_camera!=previous_camera,"experimental camera setting remains live in Display");
     headset.select_tab("Frame generation");
     tray.select_tab("Neural Rendering");
     tray.select_tab("Luke Ross");

@@ -1,8 +1,11 @@
-// Actual Reference inline path. During the downstream XR wait, the current
-// pair's NVIDIA GPU timestamps must already be resolvable with A enabled.
+// Actual Reference inline path. Both requested Lower VRAM states must retain
+// the same normal Luke acquisition/dispatch order and exact stereo pixels.
 void luke_private_inline_probe(const std::shared_ptr<SessionState>& state,
     const std::array<std::shared_ptr<SwapchainState>,2>& chains, bool enabled) {
-    state->luke_afw_enabled=true;state->separate_synthesis=enabled?1:0;
+    state->luke_afw_enabled=true;
+    state->separate_synthesis=effective_memory_control(*state,enabled?1:0);
+    state->lower_vram=effective_memory_control(*state,enabled?1:0);
+    check(!state->separate_synthesis && !state->lower_vram,"Luke memory controls must be no-ops");
     state->nvidia_new_route=false;state->presenter_active=false;state->three_slot_director=false;
     struct Probe {
         std::shared_ptr<SessionState> state;
@@ -11,7 +14,7 @@ void luke_private_inline_probe(const std::shared_ptr<SessionState>& state,
         unsigned current_frame{},witnesses{};bool observed{},enabled{};
     };
     static Probe probe;
-    probe.state=state;probe.original=state->dispatch->wait_swapchain_image;probe.enabled=enabled;
+    probe.state=state;probe.original=state->dispatch->wait_swapchain_image;probe.enabled=false;
     struct Reset {Probe& p;~Reset(){p.state->dispatch->wait_swapchain_image=p.original;p={};}} reset{probe};
     state->dispatch->wait_swapchain_image=[](XrSwapchain,const XrSwapchainImageWaitInfo*) {
         std::unique_lock lock(probe.state->gpu_mutex,std::try_to_lock);

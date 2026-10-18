@@ -12,7 +12,7 @@ int main() {
     SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",folder.c_str());
     try {
         const auto optical=benchmark_plan(false),full=benchmark_plan(true);
-        check(optical.size()==21 && full.size()==33,"Complete plan counts include B variants, skip impossible 3X B-only");
+        check(optical.size()==11 && full.size()==17,"Normal and combined Lower VRAM only; no standalone Prefer FPS test");
         for(const auto& step:optical)check(step.generation==0,"Optical suite must never request vector-only generators");
         unsigned csteps=0,prefer=0;
         Settings baseline;baseline.diagnostics=false;baseline.nr_enabled=true;baseline.afw_mode=2;
@@ -23,7 +23,7 @@ int main() {
             if(step.generation==2){++csteps;check(step.label.starts_with("DLSS-G C"),"Only C is in the full suite");}
             if(step.prefer && !step.triple)++prefer;
         }
-        check(csteps==4 && prefer==1,"Four C transport variants and explicit Prefer FPS trial");
+        check(csteps==2 && prefer==0,"Two C memory variants and no Prefer FPS trial");
         BenchmarkSamples samples;xrfg::InterfaceTelemetry m{};
         m.rates_valid=true;m.output_source=xrfg::InterfaceSource::steamvr_delivery;
         m.cycle_estimated_valid=true;m.generating=true;
@@ -56,14 +56,24 @@ int main() {
             tick_benchmark(clock);state=snapshot();
             check(state.benchmark.phase==BenchmarkPhase::running && state.benchmark.index==i,"Advance after actual application without an open menu");
             check(interface_telemetry_requested(),"Hidden suite requests metrics even with diagnostics off");
-            tick_benchmark(clock+9999);check(snapshot().benchmark.index==i,"Never shorten a configuration below ten seconds");
+            tick_benchmark(clock+9999);
+            const auto request_revision=take_benchmark_memory_request();
+            check(request_revision==state.benchmark.revision,"End-of-test memory request targets this applied revision");
+            check(!take_benchmark_memory_request(),"Memory request is claimed only once");
+            BenchmarkMemory memory{};memory.revision=request_revision;memory.updated_ms=clock+9999;
+            memory.vram_valid=true;memory.vram_bytes=1048576ULL*(i+100);
+            memory.ram_valid=true;memory.ram_working_set_bytes=2097152;
+            report_benchmark_memory(memory);
+            check(snapshot().benchmark.index==i,"Never shorten a configuration below ten seconds");
             tick_benchmark(clock+10000);clock+=10200;
         }
         state=snapshot();check(state.benchmark.phase==BenchmarkPhase::complete && state.desired==baseline,"Completion restores every original setting/profile");
         std::ifstream csv(std::filesystem::u8path(state.benchmark.csv_path));std::stringstream text;text<<csv.rdbuf();
         check(text.str().find("Output FPS median")!=std::string::npos && text.str().find("Cycle estimated median ms")!=std::string::npos,"CSV has both medians");
         const auto csv_text=text.str();
-        check(std::count(csv_text.begin(),csv_text.end(),'\n')==7,"Layout CSV: headers plus six statistics rows");
+        check(csv_text.find("VRAM end MiB,100.000,101.000")!=std::string::npos,"Memory belongs to the trial that just finished, before the next switch");
+        check(!take_benchmark_memory_request(),"Completed suite leaves no outstanding sample request");
+        check(std::count(csv_text.begin(),csv_text.end(),'\n')==11,"Layout CSV: headers, six statistics rows and four memory rows");
         // A manual edit wins instead of being overwritten at the next timed tick.
         runtime.applied_revision=state.revision;report_runtime(runtime);check(start_benchmark(false),"Start optical suite");
         state=snapshot();auto edited=state.desired;edited.nr_enabled=false;

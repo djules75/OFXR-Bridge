@@ -1,6 +1,7 @@
 #include "xrfg/autonomous_control.hpp"
 #include "xrfg/upscaler_observation.hpp"
 #include <windows.h>
+#include <cwctype>
 #include <cmath>
 #include <algorithm>
 #include <filesystem>
@@ -52,15 +53,15 @@ void codec() {
         auto independent = desired;
         independent.separate_synthesis = separate; independent.lower_vram = reduce;
         auto restored = xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(independent));
-        require(restored.separate_synthesis == separate && restored.lower_vram == reduce,
-            "independent transport flags survive restart");
+        require(restored.separate_synthesis == reduce && restored.lower_vram == reduce,
+            "Unified Lower VRAM requests both operations together");
     }
     const auto migrated_profiles = xrfg::autonomous::parse_settings(
         "[autonomous]\nbackend=1\n[route.ofxr_reference]\nlower_vram=1\n"
         "[route.ofxr_new]\nlower_vram=1\nseparate_synthesis=0\n");
     require(migrated_profiles.generation_profiles[1].separate_synthesis == 1 &&
-        migrated_profiles.generation_profiles[2].separate_synthesis == 0,
-        "old inactive profiles migrate without replacing explicit separation off");
+        migrated_profiles.generation_profiles[2].separate_synthesis == 1,
+        "Old partial controls migrate to combined Lower VRAM");
     for (int rate : {0,4,8,99,-1}) {
         auto settings = desired; settings.afw_shading_rate = rate;
         const auto restored=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(settings));
@@ -145,7 +146,7 @@ void route_profiles() {
         select_generation(restored, i < 4 ? 0 : i - 3, i < 4 ? i : 3);
         require(restored.motion_vectors == (i < 4 ? i % 2 : 1) &&
             restored.triple_frame_gen == (i == 3) && restored.lower_vram == (i == 2) &&
-            restored.separate_synthesis == i % 2 &&
+            restored.separate_synthesis == (i == 2) &&
             restored.preset == i % 3 && restored.scale == (i + 1) % 3 &&
             restored.native_scale == 30 + i * 10 && restored.backward == bool(i % 2) &&
             restored.prefer_fps == !bool(i % 2), "each route restores its own complete preferences");
@@ -206,6 +207,16 @@ int wmain(int count, wchar_t** arguments) {
                 L"-" + std::to_wstring(GetTickCount64()));
         SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR", fixture.c_str());
         require(xrfg::autonomous::configuration_path().parent_path() == fixture, "fixture profile isolation");
+        std::uint64_t old_identity=14695981039346656037ULL;
+        for(const auto c:xrfg::autonomous::configuration_path().wstring()) {
+            old_identity^=std::uint64_t(std::towlower(c));old_identity*=1099511628211ULL;
+        }
+        const auto legacy_name=L"Local\\OFXRAutonomousV558-"+std::to_wstring(old_identity)+L"-control";
+        const HANDLE legacy_mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,512,legacy_name.c_str());
+        require(legacy_mapping!=nullptr,"old control mapping fixture");
+        auto* legacy=static_cast<std::uint32_t*>(MapViewOfFile(legacy_mapping,FILE_MAP_ALL_ACCESS,0,0,512));
+        require(legacy!=nullptr,"old control mapping view");
+        legacy[0]=0x41465852;legacy[1]=55801;legacy[2]=512;
         const auto original = xrfg::autonomous::snapshot();
         auto desired = original.desired;
         for (int rate : {0,4,8,99,-1}) {
@@ -224,6 +235,9 @@ int wmain(int count, wchar_t** arguments) {
         desired.native_scale = 63;
         xrfg::autonomous::select_generation(desired, 0, 3);
         require(xrfg::autonomous::request(desired), "atomic profile and shared publication");
+        require(legacy[0]==0x41465852 && legacy[1]==55801 && legacy[2]==512,
+            "new protocol coexists with the live old mapping without changing it");
+        UnmapViewOfFile(legacy);CloseHandle(legacy_mapping);
         const auto updated = xrfg::autonomous::snapshot();
         require(updated.revision == original.revision + 1, "one desired settings revision");
         require(xrfg::autonomous::request(desired), "idempotent request");

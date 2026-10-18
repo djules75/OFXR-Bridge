@@ -182,31 +182,21 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
         }
         ImGui::EndDisabled();
     }
-    if (djules) {
-        ImGui::BeginDisabled(draft.triple_frame_gen);
-        changed |= ImGui::Checkbox("Prefer FPS over latency", &draft.prefer_fps);
-        ImGui::EndDisabled();
-        if (draft.triple_frame_gen) ImGui::TextDisabled("Prefer FPS is enabled with 3X");
-    }
     if (dlssg) {
         dlssg_preset(ui, compact);
         changed |= ImGui::SliderInt("Generated resolution", &draft.native_scale, 25, 100, "%d%%");
         ui.scale_editing |= ImGui::IsItemActive();
         ImGui::TextWrapped("Requires compatible NVIDIA DLSS-G hardware and runtime");
     }
-    bool separate = draft.separate_synthesis != 0;
-    if(ImGui::Checkbox("Separate synthesis", &separate)) {
-        draft.separate_synthesis = separate ? 1 : 0; changed = true;
-    }
     bool lower_vram = draft.lower_vram != 0;
-    if(ImGui::Checkbox("Reduce XR swapchains", &lower_vram)) {
-        draft.lower_vram = lower_vram ? 1 : 0; changed = true;
+    ImGui::BeginDisabled(state.runtime.luke_detected);
+    if(ImGui::Checkbox("Lower VRAM", &lower_vram)) {
+        draft.lower_vram = draft.separate_synthesis = lower_vram ? 1 : 0;
+        changed = true;
     }
-    if(lower_vram && !separate && draft.triple_frame_gen) {
-        draft.triple_frame_gen=false; changed=true;
-    }
-    ImGui::TextWrapped("D3D12: A uses private outputs, B reduces XR swapchains. Luke: A delays XR image acquisition until publication, reusing existing private mirrors; B keeps its existing applicability.");
-    changed |= ImGui::Checkbox("Reduce black bars during headset rotation###R19 synthetic camera (experimental)", &draft.r19_camera);
+    ImGui::EndDisabled();
+    ImGui::TextWrapped(state.runtime.luke_detected ? "Lower VRAM has no effect with Luke Ross."
+        : "Uses private synthesis textures and fewer XR swapchains.");
     ImGui::Separator();
     if (!ImGui::CollapsingHeader("Details")) return changed;
     const auto& telemetry = state.runtime.telemetry;
@@ -354,8 +344,11 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     }
     if(state.benchmark.message[0])ImGui::TextWrapped("%s",state.benchmark.message);
     if(state.benchmark.csv_path[0])ImGui::TextWrapped("CSV: %s",state.benchmark.csv_path);
-    ImGui::TextWrapped("Luke Ross: 18 tests through OFXR 0.3.0, no A/B changes. Three AFW quality passes: 1x1, 2x2, 4x4. Each includes AFW alone once. AFW-disabled tests are omitted; CSV groups the three qualities for each route.");
-    ImGui::TextWrapped("Close the menu and keep the same test scene. Original settings are restored after Stop or completion. Djules 3X B-only is skipped because it cannot retain 3X. Complete tests require preset C selected before starting the game; a live profile edit does not prove a model change.");
+    ImGui::TextWrapped("Luke Ross: 18 tests through OFXR 0.3.0, Lower VRAM has no effect. Three AFW quality passes: 1x1, 2x2, 4x4. Each includes AFW alone once. AFW-disabled tests are omitted; CSV groups the three qualities for each route.");
+    ImGui::TextWrapped("Close the menu and keep the same test scene. Original settings are restored after Stop or completion. Normal suites compare Normal and Lower VRAM only. Memory is sampled once near the end of each trial. Complete tests require preset C selected before starting the game; a live profile edit does not prove a model change.");
+    if(ImGui::CollapsingHeader("Experimental features")) {
+        changed |= ImGui::Checkbox("Reduce black bars during headset rotation###R19 synthetic camera (experimental)", &draft.r19_camera);
+    }
     return changed;
 }
 } // namespace

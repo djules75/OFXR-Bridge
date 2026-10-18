@@ -77,7 +77,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465852;
-constexpr std::uint32_t kAbi = 55801;
+constexpr std::uint32_t kAbi = 57701;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==72); // V471 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==69); // previously reserved padding
@@ -90,6 +90,8 @@ struct Shared {
     alignas(8) std::uint64_t visible_until_ms[3]{};
     alignas(8) std::uint64_t benchmark_metrics_until_ms{};
     Settings benchmark_saved{};
+    alignas(8) std::uint64_t benchmark_memory_request{};
+    BenchmarkMemory benchmark_memory{};
 };
 static_assert(std::is_trivially_copyable_v<Shared>);
 
@@ -168,7 +170,7 @@ public:
             identity ^= static_cast<std::uint64_t>(std::towlower(character));
             identity *= 1099511628211ULL;
         }
-        const auto prefix = L"Local\\OFXRAutonomousV558-" + std::to_wstring(identity);
+        const auto prefix = L"Local\\OFXRAutonomousV577-" + std::to_wstring(identity);
         mutex = CreateMutexW(nullptr, FALSE, (prefix + L"-mutex").c_str());
         if (!mutex) return;
         const DWORD waited = WaitForSingleObject(mutex, 2000);
@@ -230,6 +232,7 @@ Settings sanitize(Settings value) noexcept {
     value.scale = std::clamp(value.scale, 0, 3);
     value.separate_synthesis = std::clamp(value.separate_synthesis, 0, 1);
     value.lower_vram = std::clamp(value.lower_vram, 0, 1);
+    value.separate_synthesis = value.lower_vram;
     value.native_scale = std::clamp(value.native_scale, 25, 100);
     value.afw_mode = std::clamp(value.afw_mode, 0, 3);
     value.afw_ignore_motion_threshold = bounded(value.afw_ignore_motion_threshold, 0.F, 16.F, 2.5F);
@@ -268,6 +271,7 @@ Settings sanitize(Settings value) noexcept {
         p.preset = std::clamp(p.preset, 0, 2); p.scale = std::clamp(p.scale, 0, 3);
         p.separate_synthesis = std::clamp(p.separate_synthesis, 0, 1);
         p.lower_vram = std::clamp(p.lower_vram, 0, 1);
+        p.separate_synthesis = p.lower_vram;
         p.native_scale = std::clamp(p.native_scale, 25, 100);
     }
     restore_preferences(value);
@@ -338,8 +342,11 @@ Settings parse_settings(std::string_view text) {
 #undef READ_FIELD
     }
     if(!flat_separation_seen) value.separate_synthesis=value.lower_vram;
+    value.lower_vram = value.lower_vram > 0 || value.separate_synthesis > 0;
     for(std::size_t i=0;i<profile_seen.size();++i)
         if(!separation_seen[i]) value.generation_profiles[i].separate_synthesis=value.generation_profiles[i].lower_vram;
+    for(auto& profile:value.generation_profiles)
+        profile.lower_vram = profile.lower_vram > 0 || profile.separate_synthesis > 0;
     if (std::any_of(profile_seen.begin(), profile_seen.end(), [](bool seen) { return seen; })) {
         value.profiles_initialized = true;
         if (profile_seen[selected_profile(value)]) restore_preferences(value);
@@ -489,7 +496,7 @@ bool request_changes(const Settings& base, const Settings& desired) noexcept {
 }
 
 namespace {
-struct SuiteResult { Settings settings;BenchmarkSamples samples; };
+struct SuiteResult { Settings settings;BenchmarkSamples samples;BenchmarkMemory memory; };
 struct SuiteRecorder {
     std::uint64_t run{}, revision{}, started{}, next_sample{};
     unsigned index{};
@@ -500,6 +507,8 @@ struct SuiteRecorder {
     std::filesystem::path layout_path;
     std::vector<SuiteResult> results;
     bool afw_success{};
+    bool memory_requested{};
+    BenchmarkMemory memory{};
 };
 SuiteRecorder& suite_recorder() { static SuiteRecorder value;return value; }
 std::string quoted(std::string text) {
@@ -528,6 +537,8 @@ bool suite_publish(Shared& shared,Settings desired,std::uint64_t now) {
     s.desired=desired;++s.revision;
     s.benchmark.revision=s.revision;
     s.benchmark.requested_ms=now;s.benchmark.started_ms=0;
+    std::atomic_ref<std::uint64_t>(shared.benchmark_memory_request).store(0,std::memory_order_release);
+    shared.benchmark_memory={};
     std::atomic_ref<std::uint64_t>(shared.benchmark_metrics_until_ms).store(GetTickCount64()+2000,std::memory_order_release);
     return true;
 }
@@ -541,6 +552,10 @@ void suite_restore(Shared& shared,BenchmarkPhase phase,const char* message,std::
 void csv_stat(std::ostream& stream,const std::vector<double>& values) {
     if(values.empty()) {stream<<"N/A,N/A,N/A";return;}
     stream<<*std::min_element(values.begin(),values.end())<<','<<benchmark_median(values)<<','<<*std::max_element(values.begin(),values.end());
+}
+void csv_mib(std::ostream& stream,bool valid,std::uint64_t bytes) {
+    if(valid)stream<<double(bytes)/1048576.0;
+    else stream<<"N/A";
 }
 bool same_trial(const Settings& a,const Settings& b) {
     return a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation &&
@@ -568,8 +583,8 @@ void csv_layout(const SuiteRecorder& rec,const BenchmarkStatus& b) {
         output<<','<<quoted(label);
     }
     output<<'\n'<<std::fixed<<std::setprecision(3);
-    const char* metrics[]{"Output FPS min","Output FPS median","Output FPS max","Cycle estimated min ms","Cycle estimated median ms","Cycle estimated max ms"};
-    for(unsigned metric=0;metric<6;++metric) {
+    const char* metrics[]{"Output FPS min","Output FPS median","Output FPS max","Cycle estimated min ms","Cycle estimated median ms","Cycle estimated max ms","VRAM end MiB","RAM working set end MiB","RAM private commit end MiB","Shared GPU end MiB"};
+    for(unsigned metric=0;metric<10;++metric) {
         output<<quoted(rec.game)<<','<<XRFG_IMPLEMENTATION_VERSION<<','<<metrics[metric];
         for(const auto& step:steps) {
             const auto wanted=benchmark_settings(rec.settings,step);
@@ -577,6 +592,13 @@ void csv_layout(const SuiteRecorder& rec,const BenchmarkStatus& b) {
             for(const auto& candidate:rec.results)if(same_trial(wanted,candidate.settings))result=&candidate;
             output<<',';
             if(!result){output<<"n.a.";continue;}
+            if(metric>=6) {
+                const auto& m=result->memory;
+                const bool valid=metric==6 ? m.vram_valid : metric==9 ? m.shared_gpu_valid : m.ram_valid;
+                if(!valid)output<<"N/A";
+                else output<<double(metric==6 ? m.vram_bytes : metric==7 ? m.ram_working_set_bytes : metric==8 ? m.ram_private_commit_bytes : m.shared_gpu_bytes)/1048576.0;
+                continue;
+            }
             const auto& values=metric<3 ? result->samples.fps : result->samples.latency;
             if(values.empty()){output<<"N/A";continue;}
             output<<(metric%3==0 ? *std::min_element(values.begin(),values.end()) : metric%3==1 ? benchmark_median(values) : *std::max_element(values.begin(),values.end()));
@@ -595,10 +617,14 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
             <<",3,"<<std::max(0.0,(double(ended)-double(rec.started)-3000.0)/1000.0)<<',';
         csv_stat(rec.stream,rec.samples.fps);rec.stream<<','<<rec.samples.fps.size()<<',';
         csv_stat(rec.stream,rec.samples.latency);rec.stream<<','<<rec.samples.latency.size()<<','
-            <<quoted(verdict)<<'\n';
+            <<rec.memory.updated_ms<<',';
+        csv_mib(rec.stream,rec.memory.vram_valid,rec.memory.vram_bytes);rec.stream<<',';
+        csv_mib(rec.stream,rec.memory.shared_gpu_valid,rec.memory.shared_gpu_bytes);rec.stream<<',';
+        csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_working_set_bytes);rec.stream<<',';
+        csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_private_commit_bytes);rec.stream<<','<<quoted(verdict)<<'\n';
         rec.stream.flush();
         if(!rec.stream)throw std::runtime_error("CSV write failed");
-        rec.results.push_back({rec.settings,rec.samples});csv_layout(rec,b);
+        rec.results.push_back({rec.settings,rec.samples,rec.memory});csv_layout(rec,b);
     }
     rec.revision=0;rec.samples={};
 }
@@ -614,7 +640,7 @@ void csv_open(SuiteRecorder& rec,BenchmarkStatus& b) {
     rec.stream.open(path,std::ios::out|std::ios::trunc);
     rec.stream.imbue(std::locale::classic());rec.stream<<std::fixed<<std::setprecision(3);
     if(!rec.stream)throw std::runtime_error("Cannot create benchmark CSV");
-    rec.stream<<"Build,Run,GamePID,Game,Step,Route,SeparateA,ReduceB,Multiplier,PreferFPS,Neural,AFWMode,AFWShadingRate,DLSSGPreset,SettleSeconds,UsefulSeconds,OutputFPSMin,OutputFPSMedian,OutputFPSMax,FPSSamples,CycleEstimatedMinMs,CycleEstimatedMedianMs,CycleEstimatedMaxMs,CycleSamples,Status\n";
+    rec.stream<<"Build,Run,GamePID,Game,Step,Route,SeparateA,ReduceB,Multiplier,PreferFPS,Neural,AFWMode,AFWShadingRate,DLSSGPreset,SettleSeconds,UsefulSeconds,OutputFPSMin,OutputFPSMedian,OutputFPSMax,FPSSamples,CycleEstimatedMinMs,CycleEstimatedMedianMs,CycleEstimatedMaxMs,CycleSamples,MemorySnapshotMs,VRAMEndMiB,SharedGPUEndMiB,RAMWorkingSetEndMiB,RAMPrivateCommitEndMiB,Status\n";
     rec.stream.flush();if(!rec.stream)throw std::runtime_error("Cannot write benchmark CSV header");
     std::snprintf(b.csv_path,sizeof(b.csv_path),"%s",utf8_path(rec.layout_path).c_str());
 }
@@ -670,6 +696,7 @@ void tick_benchmark(std::uint64_t now) noexcept {
         auto& shared=*c.data;auto& s=shared.snapshot;auto& b=s.benchmark;auto& rec=suite_recorder();
         const auto own_pid=GetCurrentProcessId();
         if(!benchmark_active(b)) {
+            std::atomic_ref<std::uint64_t>(shared.benchmark_memory_request).store(0,std::memory_order_release);
             std::atomic_ref<std::uint64_t>(shared.benchmark_metrics_until_ms).store(0,std::memory_order_release);
             if(rec.run==b.run_id && b.controller_pid==own_pid) {
                 csv_finish(rec,b,b.requested_ms,b.phase==BenchmarkPhase::complete ? "complete" : "stopped / partial");
@@ -702,6 +729,7 @@ void tick_benchmark(std::uint64_t now) noexcept {
                 rec.revision=b.revision;rec.index=b.index;rec.started=now;
                 rec.settings=s.desired;rec.label=b.label;rec.samples={};
                 rec.afw_success=false;
+                rec.memory_requested=false;rec.memory={};
                 rec.next_sample=now;
             }
             if(now>=rec.next_sample) {
@@ -710,6 +738,13 @@ void tick_benchmark(std::uint64_t now) noexcept {
                     rec.samples.observe(s.runtime.telemetry,b.started_ms,now+1);
                 rec.afw_success |= s.runtime.afw_running;
             }
+            if(!rec.memory_requested && now>=b.started_ms+9500) {
+                shared.benchmark_memory={};
+                std::atomic_ref<std::uint64_t>(shared.benchmark_memory_request).store(b.revision,std::memory_order_release);
+                rec.memory_requested=true;
+            }
+            if(shared.benchmark_memory.revision==b.revision && shared.benchmark_memory.updated_ms>=rec.started)
+                rec.memory=shared.benchmark_memory;
             if(now<b.started_ms+10000)return;
             csv_finish(rec,b,now,b.luke && s.desired.afw_mode && !rec.afw_success ? "no confirmed AFW output" : rec.samples.fps.empty() ? "no measured presentation rate" :
                 s.desired.enabled && !rec.samples.generated ? "no confirmed generation" : "complete");
@@ -724,6 +759,25 @@ void tick_benchmark(std::uint64_t now) noexcept {
         } catch(...) {
             rec.stream.close();suite_restore(shared,BenchmarkPhase::error,"CSV output failed; suite stopped. Check the Benchmarks folder.",now);
         }
+    } catch(...) {}
+}
+
+std::uint64_t take_benchmark_memory_request() noexcept {
+    try {
+        auto& c=channel();
+        if(!c.data || !std::atomic_ref<std::uint64_t>(c.data->benchmark_memory_request).load(std::memory_order_acquire))return 0;
+        Lock lock(c);if(!lock.acquired)return 0;
+        const auto& b=c.data->snapshot.benchmark;
+        if(!benchmark_active(b) || b.game_pid!=GetCurrentProcessId())return 0;
+        return std::atomic_ref<std::uint64_t>(c.data->benchmark_memory_request).exchange(0,std::memory_order_acq_rel);
+    } catch(...) {return 0;}
+}
+void report_benchmark_memory(BenchmarkMemory memory) noexcept {
+    try {
+        auto& c=channel();Lock lock(c);if(!lock.acquired)return;
+        const auto& b=c.data->snapshot.benchmark;
+        if(benchmark_active(b) && b.game_pid==GetCurrentProcessId() && memory.revision==b.revision)
+            c.data->benchmark_memory=memory;
     } catch(...) {}
 }
 
