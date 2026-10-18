@@ -1502,11 +1502,30 @@ float4 synthesize_midpoint(
                                         ViewIndex) / 255.0);
                             }
                         }
+#ifdef XRFG_HYBRID
+                        // The hybrid's flow (V502, 0.3's rule): kept wherever
+                        // it explains both frames better than the camera-only
+                        // blend, which at a covering edge is the earlier
+                        // background half over the later building - the
+                        // ghost. NVIDIA's cost and the fast check leaned on
+                        // that blend there; only the bidirectional check stays.
+                        confidence = saturate(1.0 +
+                            (stable_disagreement - disagreement) * 8.0) *
+                            consistency_confidence;
+                        output_color = saturate(lerp(
+                            stable_midpoint,
+                            flow_midpoint,
+                            confidence));
+                        // It never said how well it did, so the hybrid always
+                        // kept the vectors and NVIDIA's flow went unused.
+                        last_disagreement = lerp(stable_disagreement, compared, confidence);
+#else
                         confidence *= consistency_confidence * cost_confidence;
                         output_color = saturate(lerp(
                             stable_midpoint,
                             flow_midpoint,
                             confidence));
+#endif
                     } else if (use_game_motion_pipeline) {
                         // The XR mapping can explain a head turn even when the
                         // game publishes zero scene motion. Do not force a
@@ -1628,6 +1647,10 @@ float4 synthesize_midpoint(
                         last_disagreement = explained;
 #endif
                     } else {
+#ifdef XRFG_HYBRID
+                        // The hybrid's FidelityFX flow, by the same rule (V502).
+                        confidence = saturate(1.0 + (stable_disagreement - disagreement) * 8.0);
+#endif
                         output_color = saturate(lerp(
                             stable_midpoint,
                             flow_midpoint,

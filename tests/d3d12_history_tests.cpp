@@ -4392,15 +4392,22 @@ void test_nvidia_serialized_eye_context_stress(
 // overlay must come out closer to the true in-between frame than a
 // same-pixel blend of the two frames does, which is what a composition with
 // no motion at all would show.
-enum class HybridScene { occlusion, overlay, fade };
+// occlusion_low_res: the occlusion scene with DLSS-style render-resolution
+// vectors, two thirds of the output (DI2 renders 2782 for a 4172 output).
+enum class HybridScene { occlusion, overlay, fade, occlusion_low_res };
 
 void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind) {
     constexpr UINT width = 256, height = 128;
     constexpr int object_left = 72, object_width = 80, object_top = 32, object_bottom = 96;
     constexpr int background_motion = 6;
     const bool overlay = kind == HybridScene::overlay, fade = kind == HybridScene::fade;
+    const bool low_res = kind == HybridScene::occlusion_low_res;
+    const bool occluding = kind == HybridScene::occlusion || low_res;
     const int object_motion = overlay ? 0 : fade ? background_motion : 20;
-    const char* const name = fade ? "fade" : overlay ? "overlay" : "occlusion";
+    const char* const name = fade ? "fade" : overlay ? "overlay"
+        : low_res ? "occlusion low-res vectors" : "occlusion";
+    const UINT motion_width = low_res ? width * 2U / 3U : width;
+    const UINT motion_height = low_res ? height * 2U / 3U : height;
     const auto make_scene = [&](int background_shift, int object_shift, float brightness = 1.0F) {
         StereoPattern pattern;
         for (UINT eye = 0; eye < kEyeCount; ++eye) {
@@ -4436,13 +4443,19 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind) {
     // everywhere, the object's where the object is in B. The overlay scene's
     // vectors claim the object moved with the background.
     auto game_motion = create_and_upload_game_motion_field(
-        fixture, width, height, [&](UINT, UINT x, UINT y) {
-            const int ox = static_cast<int>(x) - object_motion;
-            const bool object = static_cast<int>(y) >= object_top &&
-                static_cast<int>(y) < object_bottom && ox >= object_left &&
-                ox < object_left + object_width;
+        fixture, motion_width, motion_height, [&](UINT, UINT mx, UINT my) {
+            // The output pixel under this render pixel's centre.
+            const int x = static_cast<int>(
+                (static_cast<float>(mx) + 0.5F) * width / motion_width);
+            const int y = static_cast<int>(
+                (static_cast<float>(my) + 0.5F) * height / motion_height);
+            const int ox = x - object_motion;
+            const bool object = y >= object_top && y < object_bottom &&
+                ox >= object_left && ox < object_left + object_width;
+            const float scale = static_cast<float>(motion_width) / width;
             return std::array<float, 2>{
-                static_cast<float>(-(object && !overlay ? object_motion : background_motion)), 0.0F};
+                -scale * static_cast<float>(object && !overlay ? object_motion : background_motion),
+                0.0F};
         });
     std::array<ComPtr<ID3D12Resource>, 2> sources{
         create_source_texture(fixture, width, height),
@@ -4481,8 +4494,10 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind) {
             frame->previous_serial = serial - 1;
             frame->motion_vectors = game_motion;
             frame->producer_queue = fixture.queue();
-            frame->output_width = frame->motion_width = width;
-            frame->output_height = frame->motion_height = height;
+            frame->output_width = width;
+            frame->output_height = height;
+            frame->motion_width = motion_width;
+            frame->motion_height = motion_height;
             frame->motion_slice = frame->output_slice = eye;
             frame->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
             set->eyes[eye] = frame;
@@ -4538,6 +4553,25 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind) {
         const double blend_error = blend_total / static_cast<double>(count);
         std::cout << "hybrid " << name << " eye=" << eye << " edge_mae=" << edge_error
                   << " blend_mae=" << blend_error << '\n';
+        if (occluding) {
+            // Each edge alone: the object moves right, so its left edge
+            // reveals background and its right edge covers it.
+            for (const int edge : {left, right}) {
+                double side_total = 0;
+                std::size_t side_count = 0;
+                for (int y = object_top + 2; y < object_bottom - 2; ++y) {
+                    for (int x = edge - 12; x < edge + 12; ++x) {
+                        const std::size_t offset =
+                            (static_cast<std::size_t>(y) * width + static_cast<UINT>(x)) * kBytesPerPixel;
+                        for (UINT c = 0; c < 3; ++c, ++side_count)
+                            side_total += std::abs(static_cast<int>(actual[eye][offset + c]) -
+                                                   static_cast<int>(expected[eye][offset + c]));
+                    }
+                }
+                std::cout << "  " << (edge == left ? "revealing" : "covering") << " edge_mae="
+                          << side_total / static_cast<double>(side_count) << '\n';
+            }
+        }
         // The overlay's blend is exact (nothing moved), so it is held to an
         // absolute bound; the moving scenes must beat the blend.
         require(overlay ? edge_error <= 12.0 : edge_error < blend_error,
@@ -4763,7 +4797,8 @@ int main(int argc, char** argv) {
         }
         if (argc > 1 && std::string_view(argv[1]) == "hybrid") {
             D3D12WarpFixture hybrid_fixture;
-            for (const auto scene : {HybridScene::occlusion, HybridScene::overlay, HybridScene::fade}) {
+            for (const auto scene : {HybridScene::occlusion, HybridScene::overlay, HybridScene::fade,
+                                     HybridScene::occlusion_low_res}) {
                 test_hybrid_composition(hybrid_fixture, scene);
             }
             test_hybrid_side_by_side(hybrid_fixture);
