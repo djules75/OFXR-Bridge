@@ -84,6 +84,10 @@ int main() {
         manager.session = std::make_shared<xrfg::Session>();
         manager.active_frame = 1;
         auto session = manager.session;
+        require(xrfg::two_frame_capture_claim_dlssg_pair(51), "first native F8 stream");
+        require(!xrfg::two_frame_capture_claim_dlssg_pair(51), "duplicate native F8 stream");
+        require(xrfg::two_frame_capture_claim_dlssg_pair(52), "second native F8 stream");
+        require(!xrfg::two_frame_capture_claim_dlssg_pair(53), "native F8 stream bound");
         // Poison only the D12 mirror after XR publication. A mirror-only
         // witness would now return the wrong bytes for both eyes.
         std::fill(pixels.begin(), pixels.end(), 0xffeeffffu);
@@ -123,6 +127,7 @@ int main() {
         require(receipt.copy_complete_value == before.copy_complete_value,
             "diagnostic rewrote publication receipt");
         manager.active_frame = 0;
+        require(!xrfg::two_frame_capture_claim_dlssg_pair(54), "inactive native F8 claim");
         manager.session.reset();
         success(d12->GetDeviceRemovedReason(), "device retained");
         std::cout << "F8 terminal pixels: exact original D11 publication in both slices despite poisoned D12 mirror; inactive/ring bypass, allocator retention and budget retirement pass\n";

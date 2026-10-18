@@ -1,3 +1,9 @@
+## V576 diagnostic: native DLSS-G output capture
+
+V575 delivery is retained. Full F8 now includes the actual native DLSS-G
+inputs, generated pixels and composed output. No visual repair is claimed.
+See [scope and one capture](docs/V576_DLSSG_OUTPUT_CAPTURE.md).
+
 ## V575 local: precise final delivery wakeup
 
 The common SteamVR consumer wakes its timer early and checks the final bounded

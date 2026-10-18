@@ -1,0 +1,35 @@
+{
+  "version": "V576",
+  "base": "dd05f92fa1c2845f16089b30759bf787043e6919",
+  "status": "diagnostic-runtime-pending",
+  "passed": 11,
+  "failed": 0,
+  "ctest_seconds": 10.601059,
+  "ctest_passed": [
+    "xrfg_private_output_distributor_tests",
+    "xrfg_private_openxr_runtime_gpu",
+    "xrfg_transport_new_vdxr_00_gpu",
+    "xrfg_private_runtime_dlssg_gpu",
+    "xrfg_private_runtime_dlssg3_gpu",
+    "xrfg_private_runtime_switch_gpu",
+    "xrfg_layer_call_chain",
+    "xrfg_afw_terminal_capture",
+    "xrfg_native_dlssg_output_capture",
+    "xrfg_benchmark_suite_tests",
+    "xrfg_native_dlssg_late_discovery"
+  ],
+  "headset_validation": "Pending one native DLSS-G F8; no visual repair claimed.",
+  "scope": "F8-only bounded actual native DLSS-G input/generated/compose readbacks and A/B/output camera contracts.",
+  "presentation_pacing_changed": false,
+  "afw_math_changed": false,
+  "ipc_abi": 55801,
+  "provider_abi": 45601,
+  "pushed": false,
+  "live_installed": false,
+  "validation": "Actual native NVIDIA provider, exact captured stereo midpoint pixels and completion fences; F8 claim bound and inactive/ring bypass. Existing common distributor, route switch, VDXR, loader and benchmark controls.",
+  "test_logs": [
+    "v576-final-tests.log",
+    "v576-final-junit.xml"
+  ],
+  "fixture_iterations": "Initial observer missed pending UAV-to-read barriers; full F8 now flushes its existing batch before readback. A subsequent exact ideal-pattern assertion was replaced with a stricter byte-for-byte comparison against actual rendered output, including alpha, edges and SDK overlay; the original interpolation quality assertions remain unchanged. Final 11 rerun passes."
+}

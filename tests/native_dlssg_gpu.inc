@@ -137,7 +137,8 @@ void test_native_dlss_nvidia_prime(D3D12WarpFixture& fixture) {
 }
 
 void test_native_dlss_packed_stereo(D3D12WarpFixture& fixture, bool cropped,
-                                    DXGI_FORMAT format = kFormat, bool recover_core = false) {
+                                    DXGI_FORMAT format = kFormat, bool recover_core = false,
+                                    StereoPattern* observed = nullptr) {
     constexpr UINT width = 256, height = 128, margin = 16;
     const auto previous = translated_motion_pattern(width, height, {0, 0});
     const auto current = translated_motion_pattern(width, height, {8, -8});
@@ -275,6 +276,7 @@ void test_native_dlss_packed_stereo(D3D12WarpFixture& fixture, bool cropped,
     });
     const auto actual = readback_pattern(fixture, unpacked.Get(),
                                          D3D12_RESOURCE_STATE_RENDER_TARGET);
+    if (observed) *observed = actual;
     const bool sdk_header = ngx_sdk_indicator_enabled() &&
         native_readback_contains_sdk_header(actual, width, height, cropped);
     const UINT quality_margin = sdk_header ? 24 : margin;

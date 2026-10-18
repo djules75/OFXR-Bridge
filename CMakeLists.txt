@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.575.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.576.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1315,6 +1315,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         endif()
         add_test(NAME xrfg_d3d12_history_tests COMMAND xrfg_d3d12_history_tests)
         add_test(NAME xrfg_native_dlssg_unsupported COMMAND xrfg_d3d12_history_tests native-unsupported)
+        add_test(NAME xrfg_native_dlssg_output_capture COMMAND xrfg_d3d12_history_tests native-dlssg-capture)
+        set_tests_properties(xrfg_native_dlssg_output_capture PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 60)
         add_test(NAME xrfg_packed_game_vectors_warp COMMAND xrfg_d3d12_history_tests packed-game-vectors)
         add_test(NAME xrfg_packed_game_vectors_nvidia COMMAND xrfg_d3d12_history_tests packed-game-vectors nvidia)
         add_test(NAME xrfg_native_dlssg_late_discovery COMMAND "${CMAKE_COMMAND}"

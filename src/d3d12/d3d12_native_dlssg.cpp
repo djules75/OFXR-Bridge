@@ -1,5 +1,6 @@
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
+#include "xrfg/two_frame_capture.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -598,6 +599,7 @@ struct D3D12NativeDlssG::Impl {
     std::uint64_t completion_value{};
     std::array<DecisionReadback, kSlots> decisions;
     UINT recorded_slot{kSlots};
+    ComPtr<ID3D12GraphicsCommandList> capture_list;
     bool diagnostic_decisions{}, capture_only{}, test_output{}, reseed_every_pair{};
     bool direct_route{}, recover_requested{}, recovery_attempted{};
     FILE *decision_log{};
@@ -1201,6 +1203,11 @@ void D3D12NativeDlssG::submitted(ID3D12Fence *fence, std::uint64_t value, std::u
     if (impl_) {
         impl_->completion = fence;
         impl_->completion_value = value;
+        if (impl_->capture_list) {
+            ID3D12CommandList* lists[]{impl_->capture_list.Get()};
+            two_frame_capture_submission(impl_->queue.Get(), 1, lists);
+            impl_->capture_list.Reset();
+        }
         for (auto &retired : impl_->retired_features) {
             if (!retired.awaiting_submission) continue;
             retired.fence = fence;
@@ -1473,6 +1480,54 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
         Transitions t(list);
         t.to(a, kCommon, kAnyRead);
         t.to(b, kCommon, kAnyRead);
+        const bool capture = two_frame_capture_images_active() &&
+            two_frame_capture_claim_dlssg_pair(bg->eyes[0]->stream);
+        if (capture) p.capture_list = list;
+        const auto snapshot = [&](const char* stage, ID3D12Resource* image,
+                                  D3D12_RESOURCE_STATES state, UINT output = 0) {
+            if (!capture || !image) return;
+            TwoFrameImageInfo info{};
+            info.stage = stage;
+            info.stream = bg->eyes[0]->stream;
+            info.capture_serial = bg->eyes[0]->publication;
+            info.swapchain = reinterpret_cast<std::uint64_t>(image); // resource identity, not an XR handle
+            info.width = UINT(image->GetDesc().Width);
+            info.height = image->GetDesc().Height;
+            two_frame_capture_timeline(stage, output, info.capture_serial, info.swapchain, 0);
+            two_frame_capture_record_ng_x(info, p.device.Get(), list, image, state);
+        };
+        if (capture) for (UINT i = 0; i < bv.size(); ++i) {
+            const auto& ga = *ag->eyes[guide_index(i)];
+            const auto& gb = *bg->eyes[guide_index(i)];
+            TwoFrameGuideContract c{};
+            c.stage = "native_dlssg_pair";
+            c.stream = gb.stream; c.publication = gb.publication;
+            c.serial = gb.serial; c.previous_serial = ga.serial;
+            c.source_eye = c.destination_eye = int(i);
+            const auto pose = [](const Pose& v, auto& position, auto& orientation) {
+                position = {v.position.x, v.position.y, v.position.z};
+                orientation = {v.orientation.x, v.orientation.y, v.orientation.z, v.orientation.w};
+            };
+            pose(av[i].pose, c.source_pose, c.source_orientation);
+            pose(bv[i].pose, c.destination_pose, c.destination_orientation);
+            XMStoreFloat4x4(reinterpret_cast<XMFLOAT4X4*>(c.source_view_to_clip.data()), projection(av[i].fov, ga));
+            XMStoreFloat4x4(reinterpret_cast<XMFLOAT4X4*>(c.destination_view_to_clip.data()), projection(bv[i].fov, gb));
+            c.motion_width = gb.motion_width; c.motion_height = gb.motion_height;
+            c.depth_width = gb.depth_width; c.depth_height = gb.depth_height;
+            c.output_width = gb.output_width; c.output_height = gb.output_height;
+            c.scale_x = gb.scale_x; c.scale_y = gb.scale_y;
+            c.camera_near = gb.camera_near; c.camera_far = gb.camera_far;
+            c.depth_inverted = gb.depth_inverted; c.depth_infinite = gb.depth_infinite;
+            two_frame_capture_guide_contract(c);
+            for (UINT output = 0; output < outputs.size(); ++output) {
+                c.stage = "native_dlssg_output_camera";
+                c.mode = int(output);
+                pose(bv[i].pose, c.source_pose, c.source_orientation);
+                c.destination_orientation = outputs[output].camera_to_current
+                    ? (*outputs[output].camera_to_current)[i] : std::array<float,4>{0,0,0,1};
+                two_frame_capture_guide_contract(c);
+            }
+        }
         // Align A and the engine backward motion into B's camera plane. The
         // NGX outputs can then keep the existing OpenXR B pose/FOV contract,
         // instead of presenting midpoint-camera pixels as B.
@@ -1533,6 +1588,8 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                     }
                 }
                 p.end_pack(t, seed);
+                if (capture) t.flush();
+                snapshot("dlssg_aligned_previous", seed.color.Get(), kRead);
                 if (FAILED(p.evaluate(list, t, seed, bv[first], *ag->eyes[guide_index(first)],
                                       first_params, 1, 1, true))) {
                     t.restore();
@@ -1548,6 +1605,10 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                              *bg->eyes[guide_index(i)], eye_params[i], b);
             }
             p.end_pack(t, feature);
+            if (capture) t.flush();
+            snapshot("dlssg_packed_current", feature.color.Get(), kRead);
+            snapshot("dlssg_packed_motion", feature.motion.Get(), kRead);
+            snapshot("dlssg_packed_depth", feature.depth.Get(), kRead);
             for (UINT output = 0; output < outputs.size(); ++output) {
                 if (FAILED(p.evaluate(list, t, feature, bv[first], *bg->eyes[guide_index(first)],
                                       eye_params[first], UINT(outputs.size()), output + 1,
@@ -1583,6 +1644,9 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
         }
         t.flush();
         ID3D12DescriptorHeap *hh[]{p.heaps[slot].Get()};
+        if (capture) for (UINT f = 0; f < feature_count; ++f)
+            for (UINT output = 0; output < outputs.size(); ++output)
+                snapshot("dlssg_ngx_generated", p.features[f].generated[output].Get(), kPixelRead, output);
         list->SetDescriptorHeaps(1, hh);
         list->SetGraphicsRootSignature(p.root.Get());
         list->SetPipelineState(p.compose.Get());
@@ -1654,6 +1718,8 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             p.eyes[i].stream = gb.stream;
             p.eyes[i].epoch = gb.epoch;
         }
+        if (capture) for (UINT output = 0; output < outputs.size(); ++output)
+            snapshot("dlssg_composed_output", outputs[output].image, release, output);
         return S_OK;
     } catch (...) {
         return E_OUTOFMEMORY;

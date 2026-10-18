@@ -4,6 +4,8 @@
 #include "xrfg/luke_color_origin.hpp"
 #include "xrfg/d3d12_native_binding.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
+// Private test session; no keyboard input or shipping test control.
+#include "../src/common/two_frame_capture.cpp"
 #include "xrfg/d3d12_guide_composer.hpp"
 #include <filesystem>
 #include <fstream>
@@ -5252,6 +5254,48 @@ int main(int argc, char** argv) {
             return 0;
         }
 #ifdef XRFG_NATIVE_DLSSG
+        if (argc > 1 && std::string_view(argv[1]) == "native-dlssg-capture") {
+            if (!native_test_has_supported_nvidia_adapter()) return 77;
+            D3D12WarpFixture fixture(true);
+            auto& capture = xrfg::manager();
+            capture.session = std::make_shared<xrfg::Session>();
+            capture.active_frame = 1;
+            const auto session = capture.session;
+            StereoPattern observed;
+            test_native_dlss_packed_stereo(fixture, false, kFormat, false, &observed);
+            for (const char* stage : {"dlssg_aligned_previous", "dlssg_packed_current",
+                "dlssg_packed_motion", "dlssg_packed_depth", "dlssg_ngx_generated", "dlssg_composed_output"}) {
+                const auto found = std::find_if(session->shots.begin(), session->shots.end(),
+                    [=](const auto& shot) { return std::string_view(shot->info.stage) == stage; });
+                require(found != session->shots.end(), std::string("missing native F8 stage: ") + stage);
+                const auto& shot = **found;
+                require(SUCCEEDED(shot.status) && shot.fence && shot.fence_value,
+                    "native F8 source list was not associated with GPU completion");
+                const HANDLE ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                require(ready != nullptr, "capture fence event");
+                require_hresult(shot.fence->SetEventOnCompletion(shot.fence_value, ready), "capture readback fence");
+                const DWORD waited = WaitForSingleObject(ready, 5000);
+                CloseHandle(ready);
+                require(waited == WAIT_OBJECT_0, "native F8 readback did not complete");
+            }
+            const auto composed = std::find_if(session->shots.begin(), session->shots.end(),
+                [](const auto& shot) { return std::string_view(shot->info.stage) == "dlssg_composed_output"; });
+            void* mapped{};
+            require_hresult((*composed)->readback->Map(0, nullptr, &mapped), "capture composed map");
+            for (UINT eye=0; eye<2; ++eye) for (UINT y=0; y<128; ++y) for (UINT x=0; x<256; ++x) {
+                const auto* actual = static_cast<const BYTE*>(mapped) + y*(*composed)->footprint.Footprint.RowPitch + (eye*256+x)*4;
+                const auto* pixel = observed[eye].data() + (y*256+x)*4;
+                require(std::equal(actual, actual+4, pixel), "captured composed pixels differ from the actual rendered output");
+            }
+            (*composed)->readback->Unmap(0,nullptr);
+            require(session->contracts.size() == 4, "native F8 stereo pose/output contracts missing");
+            require(!xrfg::two_frame_capture_claim_dlssg_pair(17), "native F8 duplicate pair was accepted");
+            capture.active_frame = 0;
+            capture.session.reset();
+            fixture.require_no_debug_errors();
+            std::cout << "Native F8 real provider: six GPU stages, exact stereo midpoint pixels, completion fences and four pose contracts passed\n";
+            return 0;
+        }
         if (argc > 1 && (std::string_view(argv[1]) == "native-dlssg" ||
                 std::string_view(argv[1]) == "native-dlssg-late" ||
                 std::string_view(argv[1]) == "native-dlssg-core-compat")) {

@@ -18,6 +18,8 @@ void two_frame_capture_mark_afw_evaluation() noexcept;
 [[nodiscard]] bool two_frame_capture_active() noexcept;
 // Full-resolution F8 session only; the rolling F9 ring has its own witnesses.
 [[nodiscard]] bool two_frame_capture_images_active() noexcept;
+// Full F8 only, one native pair per stream and at most two streams.
+[[nodiscard]] bool two_frame_capture_claim_dlssg_pair(std::uint64_t stream) noexcept;
 void two_frame_capture_timeline(
     const char* stream,
     std::int64_t code,

@@ -63,6 +63,7 @@ struct Session {
     std::vector<std::shared_ptr<Shot>> shots;
     std::vector<ContractShot> contracts;
     std::vector<TimelineShot> timeline;
+    std::vector<std::uint64_t> dlssg_streams;
     std::filesystem::path directory;
     std::string settings;
     std::uint64_t allocated{};
@@ -485,6 +486,9 @@ void write_session(const std::shared_ptr<Session>& session) {
         << "Raw images include D3D12 row padding; see manifest.tsv.\n"
         << "Max images=48, max total readback=1.25 GiB. Dropped images="
         << session->dropped_images << "\n";
+    summary << "V576 DLSS-G stages: aligned_previous / packed_current / packed_motion / packed_depth -> ngx_generated -> composed_output.\n"
+        << "One pair per stream, at most two streams. Native stage swapchain is resource identity, not XR handle.\n"
+        << "native_dlssg_pair: original A/B pose/projection. native_dlssg_output_camera: B -> output-to-B quaternion, mode = output index.\n";
     std::ofstream settings(session->directory / L"settings.txt", std::ios::binary);
     settings << session->settings;
     OutputDebugStringA(message.c_str());
@@ -577,6 +581,21 @@ bool two_frame_capture_active() noexcept {
 
 bool two_frame_capture_images_active() noexcept {
     return manager().active_frame.load() != 0;
+}
+
+bool two_frame_capture_claim_dlssg_pair(std::uint64_t stream) noexcept {
+    if (!two_frame_capture_images_active()) return false;
+    try {
+        auto& state = manager();
+        std::scoped_lock lock(state.mutex);
+        if (!state.active_frame || !state.session) return false;
+        std::scoped_lock session_lock(state.session->mutex);
+        auto& streams = state.session->dlssg_streams;
+        if (state.session->sealed || streams.size() >= 2 ||
+            std::find(streams.begin(), streams.end(), stream) != streams.end()) return false;
+        streams.push_back(stream);
+        return true;
+    } catch (...) { return false; }
 }
 
 void two_frame_capture_timeline(
