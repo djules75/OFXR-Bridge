@@ -70,7 +70,7 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
     } else {options.device11=state->d3d11_device.Get();options.context11=state->d3d11_context.Get();}
     const std::weak_ptr<SessionState> weak=state;
     options.physical_period=[weak]() -> std::int64_t {
-        if(auto s=weak.lock())if(s->steamvr_delivery)if(auto p=s->steamvr_delivery->display_period())return p->count();
+        if(auto s=weak.lock())if(s->steamvr_delivery)if(auto p=s->steamvr_delivery->cached_display_period())return p->count();
         return 0;
     };
     options.trace=[](int stage,std::uint64_t sequence,std::int64_t at,std::int64_t hold) {

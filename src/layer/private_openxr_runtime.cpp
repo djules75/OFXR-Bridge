@@ -42,6 +42,7 @@ struct LayerCopy {
 } // namespace
 
 struct PrivateOpenXrRuntime::Impl {
+    struct PreparedTarget;
     struct Image {
         ComPtr<ID3D12Resource> d12;
         ComPtr<ID3D11Texture2D> d11;
@@ -58,18 +59,22 @@ struct PrivateOpenXrRuntime::Impl {
         std::optional<unsigned> released;
         unsigned cursor{};
         bool destroying{};
-        unsigned prepared_users{};
-        std::optional<unsigned> prepared_source;
+        std::shared_ptr<PreparedTarget> latest_target,pending_target;
+        std::vector<std::weak_ptr<PreparedTarget>> retained_targets;
         D3D12_RESOURCE_STATES image_state{D3D12_RESOURCE_STATE_RENDER_TARGET};
     };
     struct Lease {std::shared_ptr<Chain> chain;unsigned image{};};
+    struct PreparedTarget {
+        std::weak_ptr<Chain> chain;
+        unsigned source{},index{},users{};
+        bool acquired{},waited{},complete{},released{};
+    };
     struct Packet {
         XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
         std::vector<LayerCopy> copies;
         std::vector<const XrCompositionLayerBaseHeader*> layers;
         std::vector<Lease> leases;
-        std::vector<std::shared_ptr<Chain>> prepared_chains;
-        std::vector<Lease> copies_needed;
+        std::vector<std::shared_ptr<PreparedTarget>> targets,copies_needed;
         std::uint64_t sequence{},ready{};
         std::int64_t accepted_at{},source_ready_at{},prepared_at{};
     };
@@ -151,8 +156,7 @@ struct PrivateOpenXrRuntime::Impl {
         {std::scoped_lock lock(mutex);
          for(auto& lease:packet->leases)if(lease.chain->images[lease.image].readers)
              --lease.chain->images[lease.image].readers;
-         for(auto& chain:packet->prepared_chains)if(chain->prepared_users && !--chain->prepared_users)
-             chain->prepared_source.reset();
+         for(auto& target:packet->targets)if(target->users)--target->users;
          if(pending)--pending;}
         changed.notify_all();
     }
@@ -209,53 +213,78 @@ struct PrivateOpenXrRuntime::Impl {
         }
         packet.info.layers=packet.layers.data();return XR_SUCCESS;
     }
-    // Only the preparer touches real image acquisition/copies. A real chain
-    // cannot be overwritten until every queued presentation using its current
-    // contents has completed EndFrame. Repeated immutable private images can
-    // share those contents (e.g. an unchanged overlay) without another copy.
+    // The preparer may fill the next acquired real image while EndFrame uses
+    // the previously released image. Keep that next image WAITED, unreleased:
+    // release selects the image seen by EndFrame and belongs to FIFO delivery.
+    // OpenXR permits only one successfully waited, unreleased image per chain.
+    // Repeated immutable source images share their exact prepared generation.
     bool reserve_preparation(Packet& packet) {
         std::unique_lock lock(mutex);
         for(auto& lease:packet.leases) {
             auto chain=lease.chain;
-            changed.wait(lock,[&]{return stopping || !chain->prepared_users || chain->prepared_source==lease.image;});
+            auto reusable=[&]{return chain->latest_target && (chain->latest_target->users ||
+                    (chain->info.createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT)) &&
+                chain->latest_target->source==lease.image;};
+            changed.wait(lock,[&]{return stopping || !chain->pending_target || reusable();});
             if(stopping)return false;
-            if(!chain->prepared_users) {
-                chain->prepared_source=lease.image;
-                packet.copies_needed.push_back(lease);
+            auto target=chain->latest_target;
+            if(!reusable()) {
+                target=std::make_shared<PreparedTarget>();target->chain=chain;target->source=lease.image;
+                chain->latest_target=chain->pending_target=target;
+                std::erase_if(chain->retained_targets,[](auto& weak){return weak.expired();});
+                chain->retained_targets.push_back(target);
+                packet.copies_needed.push_back(target);
             }
-            ++chain->prepared_users;packet.prepared_chains.push_back(std::move(chain));
+            ++target->users;packet.targets.push_back(std::move(target));
         }
         return true;
     }
     XrResult publish(Packet& packet) {
         const bool diagnostic=tracing();
-        struct Target {Lease* lease;unsigned index;bool waited{},released{};};
-        std::vector<Target> targets;targets.reserve(packet.copies_needed.size());
+        std::vector<std::shared_ptr<PreparedTarget>> targets;
+        targets.reserve(packet.copies_needed.size());
         XrResult result=XR_SUCCESS;
-        for(auto& lease:packet.copies_needed) {
+        for(auto& target:packet.copies_needed) {
+            if(stopping){result=XR_ERROR_SESSION_NOT_RUNNING;break;}
+            auto chain=target->chain.lock();if(!chain){result=XR_ERROR_HANDLE_INVALID;break;}
             unsigned index{};XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-            result=options.real.acquire(lease.chain->handle,&acquire,&index);if(XR_FAILED(result))break;
-            targets.push_back({&lease,index});
+            result=options.real.acquire(chain->handle,&acquire,&index);if(XR_FAILED(result))break;
+            target->index=index;target->acquired=true;
             XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wait.timeout=XR_INFINITE_DURATION;
-            result=options.real.wait_image(lease.chain->handle,&wait);if(XR_FAILED(result))break;
-            targets.back().waited=true;
+            result=options.real.wait_image(chain->handle,&wait);if(XR_FAILED(result))break;
+            target->waited=true;
+            // A runtime may return the same physical image that an earlier
+            // released generation still needs for EndFrame (including repeats).
+            // Only that actual alias waits; different real indices keep their
+            // preparation independent of all older presentation leases.
+            {std::unique_lock lock(mutex);
+             auto available=[&]{return std::none_of(chain->retained_targets.begin(),chain->retained_targets.end(),[&](auto& weak){
+                 auto other=weak.lock();return other && other!=target && other->users && other->acquired && other->index==index;});};
+             changed.wait(lock,[&]{return stopping || available();});
+             if(!available()){result=XR_ERROR_SESSION_NOT_RUNNING;break;}}
+            targets.push_back(target);
+            // Finish safe, already-waited targets even when cancellation arrived
+            // during native WaitImage. A static target must be copied before its
+            // one permitted Release; it cannot be acquired again on restart.
+            if(stopping){result=XR_ERROR_SESSION_NOT_RUNNING;break;}
         }
         if(diagnostic)trace(12,packet.sequence);
-        if(XR_SUCCEEDED(result) && !targets.empty()) {
+        if(!targets.empty()) {
             std::scoped_lock gpu(copy_mutex);
             HRESULT copied=S_OK;
             if(d12()) {
                 copied=allocator->Reset();if(SUCCEEDED(copied))copied=list->Reset(allocator.Get(),nullptr);
                 for(auto& target:targets) {
                     if(FAILED(copied))break;
-                    auto& chain=*target.lease->chain;auto& image=chain.images[target.lease->image];
-                    if(target.index>=chain.real12.size()){copied=E_INVALIDARG;break;}
+                    auto owner=target->chain.lock();if(!owner){copied=E_INVALIDARG;break;}
+                    auto& chain=*owner;auto& image=chain.images[target->source];
+                    if(target->index>=chain.real12.size()){copied=E_INVALIDARG;break;}
                     const auto state=chain.image_state;
                     D3D12_RESOURCE_BARRIER barriers[2]{};
                     for(auto& b:barriers){b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;b.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;}
                     barriers[0].Transition.pResource=image.d12.Get();barriers[0].Transition.StateBefore=state;barriers[0].Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_SOURCE;
-                    barriers[1].Transition.pResource=chain.real12[target.index].Get();barriers[1].Transition.StateBefore=state;barriers[1].Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_DEST;
-                    list->ResourceBarrier(2,barriers);list->CopyResource(chain.real12[target.index].Get(),image.d12.Get());
+                    barriers[1].Transition.pResource=chain.real12[target->index].Get();barriers[1].Transition.StateBefore=state;barriers[1].Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_DEST;
+                    list->ResourceBarrier(2,barriers);list->CopyResource(chain.real12[target->index].Get(),image.d12.Get());
                     for(auto& b:barriers)std::swap(b.Transition.StateBefore,b.Transition.StateAfter);list->ResourceBarrier(2,barriers);
                 }
                 if(SUCCEEDED(copied))copied=list->Close();
@@ -264,23 +293,31 @@ struct PrivateOpenXrRuntime::Impl {
                 if(SUCCEEDED(copied))copied=await(copy12.Get(),copy_serial,false);
             } else {
                 for(auto& target:targets) {
-                    auto& chain=*target.lease->chain;
-                    if(target.index>=chain.real11.size()){copied=E_INVALIDARG;break;}
-                    context11->CopyResource(chain.real11[target.index].Get(),chain.images[target.lease->image].d11.Get());
+                    auto owner=target->chain.lock();if(!owner){copied=E_INVALIDARG;break;}
+                    auto& chain=*owner;
+                    if(target->index>=chain.real11.size()){copied=E_INVALIDARG;break;}
+                    context11->CopyResource(chain.real11[target->index].Get(),chain.images[target->source].d11.Get());
                 }
                 if(SUCCEEDED(copied)){copied=context11->Signal(copy11.Get(),copy_serial+1);if(SUCCEEDED(copied))++copy_serial;}
                 context11->Flush();if(diagnostic)trace(13,packet.sequence);
                 if(SUCCEEDED(copied))copied=await(copy11.Get(),copy_serial,false);
             }
             if(diagnostic)trace(14,packet.sequence);
-            result=xr(copied);
-        }
-        for(auto& target:targets)if(target.waited) {
-            XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-            auto released=options.real.release(target.lease->chain->handle,&release);
-            if(XR_FAILED(released) && XR_SUCCEEDED(result))result=released;
+            if(SUCCEEDED(copied))for(auto& target:targets)target->complete=true;
+            if(XR_SUCCEEDED(result))result=xr(copied);
         }
         return result;
+    }
+    XrResult release_prepared(Packet& packet) {
+        for(auto& target:packet.targets)if(!target->released) {
+            auto chain=target->chain.lock();if(!chain || !target->waited || !target->complete)return XR_ERROR_CALL_ORDER_INVALID;
+            XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            const auto result=options.real.release(chain->handle,&release);if(XR_FAILED(result))return result;
+            {std::scoped_lock lock(mutex);target->released=true;
+             if(chain->pending_target==target)chain->pending_target.reset();}
+            changed.notify_all();
+        }
+        return XR_SUCCESS;
     }
     void prepare() noexcept {
         try {
@@ -300,7 +337,7 @@ struct PrivateOpenXrRuntime::Impl {
                 }
                 trace(4,packet->sequence);
                 const auto result=publish(*packet);
-                if(XR_FAILED(result)) {fail(result);retire(packet);fifo->retire();break;}
+                if(XR_FAILED(result)) {if(!stopping)fail(result);retire(packet);fifo->retire();break;}
                 trace(5,packet->sequence);
                 packet->prepared_at=clock_ns();
                 {std::scoped_lock lock(mutex);prepared.push_back(std::move(packet));}
@@ -371,6 +408,11 @@ struct PrivateOpenXrRuntime::Impl {
                 std::shared_ptr<Packet> packet;
                 {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping || !prepared.empty();});
                  if(stopping)break;packet=std::move(prepared.front());prepared.pop_front();}
+                // All copies/fences are complete. Commit only this FIFO head's
+                // real images; a later prepared image remains unreleased until
+                // its turn, so it cannot replace this frame's scene or overlay.
+                result=release_prepared(*packet);
+                if(XR_FAILED(result)){fail(result);retire(packet);fifo->retire();break;}
                 if(diagnostic) {options.trace(7,packet->sequence,wait_enter,0);options.trace(6,packet->sequence,wait_leave,0);}
                 // Only fully prepared packets reach this thread. Arrival time,
                 // not a rounded refresh slot, supplies the exact late hold.
@@ -468,8 +510,30 @@ void PrivateOpenXrRuntime::stop() {
     // reads before dropping the pending packet leases and command allocator.
     if(s.copy_serial) {if(s.d12())s.await(s.copy12.Get(),s.copy_serial,false);else s.await(s.copy11.Get(),s.copy_serial,false);}
     if(s.ready_serial) {if(s.d12())s.await(s.ready12.Get(),s.ready_serial,false);else s.await(s.ready11.Get(),s.ready_serial,false);}
+    // A stopped ready packet may own a successfully waited real target which
+    // was intentionally never released. Finish ownership after GPU reads drain,
+    // before a session restart or swapchain destruction can reuse that image.
+    std::vector<std::shared_ptr<Impl::Chain>> owned_chains;
+    {std::scoped_lock lock(s.mutex);owned_chains.reserve(s.chains.size());
+     for(auto& [h,c]:s.chains)owned_chains.push_back(c);}
+    for(auto& c:owned_chains)if(auto target=c->pending_target;target && target->acquired && !target->released) {
+        if(!target->waited) {
+            XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wait.timeout=XR_INFINITE_DURATION;
+            target->waited=XR_SUCCEEDED(s.options.real.wait_image(c->handle,&wait));
+        }
+        if(target->waited) {
+            XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            target->released=XR_SUCCEEDED(s.options.real.release(c->handle,&release));
+        }
+    }
     {std::scoped_lock lock(s.mutex);s.fifo.reset();s.prepared.clear();s.pending=0;s.running=false;
-     for(auto& [h,c]:s.chains) {c->prepared_users=0;c->prepared_source.reset();for(auto& image:c->images)image.readers=0;}}
+     for(auto& [h,c]:s.chains) {
+         // Static runtime images can be acquired/released only once for their
+         // entire lifetime, including a session stop/start with retained chains.
+         if(c->latest_target && (c->info.createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) &&
+             c->latest_target->complete && c->latest_target->released)c->latest_target->users=0;
+         else c->latest_target.reset();
+         c->pending_target.reset();c->retained_targets.clear();for(auto& image:c->images)image.readers=0;}}
     s.changed.notify_all();
 }
 XrResult PrivateOpenXrRuntime::drain() {
@@ -577,6 +641,7 @@ XrResult PrivateOpenXrRuntime::enumerate_images(XrSwapchain handle,std::uint32_t
 XrResult PrivateOpenXrRuntime::acquire_image(XrSwapchain handle,const XrSwapchainImageAcquireInfo* info,std::uint32_t* output) {
     if(!valid(info,XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO) || !output)return XR_ERROR_VALIDATION_FAILURE;
     auto& s=*impl_;std::unique_lock lock(s.mutex);auto it=s.chains.find(handle);if(it==s.chains.end())return XR_ERROR_HANDLE_INVALID;auto chain=it->second;
+    if((chain->info.createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) && chain->released)return XR_ERROR_CALL_ORDER_INVALID;
     auto available=[&]() -> std::optional<unsigned> {
         for(unsigned n=0;n<chain->images.size();++n){auto index=(chain->cursor+n)%chain->images.size();auto& image=chain->images[index];if(!image.acquired && !image.readers)return static_cast<unsigned>(index);}return {};
     };

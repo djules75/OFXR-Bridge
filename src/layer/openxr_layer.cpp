@@ -1710,6 +1710,12 @@ void log_benchmark_configuration(SessionState& state) noexcept {
 }
 
 void log_compositor_delivery(SessionState& state) noexcept {
+    // Refresh the atomic physical-period snapshot on the application observer
+    // path, including F9/UI-off operation. A busy observer lock returns its
+    // cache; the independent physical director never calls OpenVR or waits
+    // for that lock merely to read a known headset frequency.
+    if(state.private_runtime && state.steamvr_delivery)
+        static_cast<void>(state.steamvr_delivery->display_period());
     if (state.fps_overlay) {
         std::scoped_lock lock(state.presenter_mutex);
         state.fps_overlay->set_display_period(state.presenter_active ? state.presenter_display_period : state.minimum_runtime_display_period);

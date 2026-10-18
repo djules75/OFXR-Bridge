@@ -204,6 +204,13 @@ public:
     [[nodiscard]] std::optional<std::chrono::nanoseconds>
     display_period() noexcept;
 
+    // Director-safe observation of the last physical period published by
+    // display_period()/gpu_render_timing(). Never attaches, locks the observer
+    // mutex or calls OpenVR. Empty until an application/observer read succeeds;
+    // the director can use its native prediction while that value is unknown.
+    [[nodiscard]] std::optional<std::chrono::nanoseconds>
+    cached_display_period() const noexcept;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

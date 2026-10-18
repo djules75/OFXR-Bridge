@@ -29,8 +29,10 @@ struct PrivateRuntimeDispatch {
 // SteamVR's runtime binding sees only the consumer. All application/generator
 // images are private, with leases (not copies) transferred at virtual EndFrame.
 // A preparer owns real acquisition/copy/GPU waits; the physical frame thread
-// consumes completed packets only. Real-chain contents remain leased until
-// EndFrame has captured them, without allocating additional XR swapchains.
+// consumes completed packets only and releases that FIFO head's real targets.
+// The next image may be acquired/waited/copied while an older RELEASED image
+// is presented, but stays unreleased until its own EndFrame can capture it.
+// This retains last-released image semantics without additional XR swapchains.
 // Native D3D11 and D3D12 are supported; existing Vulkan/D3D11 translation binds
 // D3D12 below this endpoint and therefore uses the identical D3D12 transport.
 class PrivateOpenXrRuntime final {
@@ -48,7 +50,8 @@ public:
         // stage: 1 accepted, 2 accepted by real runtime, -1 failed; sequence,
         // QPC ns and accumulated phase displacement (not a latency meter).
         // Stage3 instead carries submitted and raw predicted XR displayTime.
-        // Stages4/5: preparer source GPU ready / real image copy complete.
+        // Stages4/5: preparer source GPU ready / real image copy complete,
+        // with the real target still waited/unreleased until FIFO delivery.
         // Stages7/6: saved real Wait entry/return (overlaps preparation, emitted
         // when the ready packet is known). Stage8: saved handoff edge
         // after the residual wait/copy, emitted after real End to keep the edge
@@ -60,7 +63,8 @@ public:
         // A real-chain backlog never triggers a refill.
         // Stages12/13/14: targets acquired/waited, copy submitted/signalled,
         // and copy-fence completion observed. F9-only CPU QPC observations,
-        // not GPU execution timestamps. Real release finishes at stage5.
+        // not GPU execution timestamps. Real release follows on the consumer,
+        // after stage5 and before this packet's native EndFrame.
         std::function<void(int,std::uint64_t,std::int64_t,std::int64_t)> trace;
     };
     explicit PrivateOpenXrRuntime(Options);

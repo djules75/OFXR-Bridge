@@ -27,6 +27,7 @@ struct Chain {
     std::vector<ComPtr<ID3D12Resource>> d12;
     std::vector<ComPtr<ID3D11Texture2D>> d11;
     unsigned acquired{},released{};bool owned{},waited{};
+    bool static_image{};unsigned acquisitions{};
     D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_RENDER_TARGET};
 };
 struct Fixture;
@@ -50,7 +51,7 @@ struct Fixture {
     std::atomic_bool block_end{true},end_entered{},fail_end{};
     std::atomic_uint real_acquires{},real_waits{},real_begins{},real_ends{};
     bool cycle_waited{},cycle_begun{};
-    bool throttled{true},real_common{};
+    bool throttled{true},real_common{},reuse_current_real_image{};
     std::atomic_int slow_image_wait_ms{};
     std::atomic_int slow_frame_wait_ms{};
     std::atomic<DWORD> preparation_thread{},delivery_thread{};
@@ -59,8 +60,10 @@ struct Fixture {
     std::function<XrResult(XrSwapchain,unsigned)> release_callback;
     std::function<void()> after_head_ready;
     std::function<void(std::uint64_t)> preparation_callback;
+    std::function<void(std::uint64_t)> prepared_callback;
+    std::function<void(XrSwapchain,unsigned)> image_wait_callback;
     std::function<D3D12_RESOURCE_STATES()> create_state;
-    std::vector<unsigned> pixels;
+    std::vector<unsigned> pixels,overlay_pixels;
     std::vector<float> positions;
     std::vector<std::int64_t> handoffs;
     std::vector<XrTime> targets;
@@ -90,7 +93,7 @@ struct Fixture {
         options.real={reinterpret_cast<XrInstance>(1),reinterpret_cast<XrSession>(2),wait,begin,end,create,destroy,enumerate,acquire,wait_image,release,to_qpc};
         options.device12=device12.Get();options.queue12=delivery_queue?delivery_queue.Get():queue.Get();options.producer_queue12=queue.Get();options.device11=device11.Get();options.context11=context.Get();
         options.physical_period=[]{return period;};options.capacity=3;
-        options.trace=[this](int stage,std::uint64_t seq,std::int64_t,std::int64_t margin){if(stage==11)refill_margins.push_back(margin);if(stage==4) {preparation_thread=GetCurrentThreadId();if(after_head_ready)after_head_ready();if(preparation_callback)preparation_callback(seq);}};
+        options.trace=[this](int stage,std::uint64_t seq,std::int64_t,std::int64_t margin){if(stage==11)refill_margins.push_back(margin);if(stage==4) {preparation_thread=GetCurrentThreadId();if(after_head_ready)after_head_ready();if(preparation_callback)preparation_callback(seq);}if(stage==5 && prepared_callback)prepared_callback(seq);};
         transport=std::make_shared<xrfg::PrivateOpenXrRuntime>(std::move(options));
         ok(transport->initialize(),"initialize actual private endpoint");xr_ok(transport->start(),"start endpoint");
     }
@@ -102,6 +105,25 @@ struct Fixture {
         ok(device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&allocator)),"test allocator");
         ok(device12->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),nullptr,IID_PPV_ARGS(&list)),"test list");
         record(list.Get());ok(list->Close(),"test close");ID3D12CommandList* lists[]={list.Get()};target->ExecuteCommandLists(1,lists);gpu_wait(target);
+    }
+    unsigned read_pixel(Chain& chain) {
+        unsigned color{};
+        if(native12) {
+            auto source=chain.d12[chain.released];D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;desc.Width=256;desc.Height=1;desc.DepthOrArraySize=desc.MipLevels=1;desc.SampleDesc.Count=1;desc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_READBACK;ComPtr<ID3D12Resource> readback;
+            ok(device12->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&readback)),"readback");
+            commands([&](ID3D12GraphicsCommandList* list){
+                D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;b.Transition={source.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,chain.state,D3D12_RESOURCE_STATE_COPY_SOURCE};list->ResourceBarrier(1,&b);
+                D3D12_TEXTURE_COPY_LOCATION from{};from.pResource=source.Get();from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                D3D12_TEXTURE_COPY_LOCATION to{};to.pResource=readback.Get();to.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;to.PlacedFootprint.Footprint={DXGI_FORMAT_R8G8B8A8_UNORM,1,1,1,256};D3D12_BOX box{0,0,0,1,1,1};list->CopyTextureRegion(&to,0,0,0,&from,&box);
+                std::swap(b.Transition.StateBefore,b.Transition.StateAfter);list->ResourceBarrier(1,&b);
+            },delivery_queue.Get());
+            void* data{};ok(readback->Map(0,nullptr,&data),"map readback");color=*static_cast<unsigned char*>(data);readback->Unmap(0,nullptr);
+        } else {
+            auto source=chain.d11[chain.released];D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);desc.BindFlags=desc.MiscFlags=0;desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Texture2D> readback;
+            ok(device11->CreateTexture2D(&desc,nullptr,&readback),"D11 readback");context->CopyResource(readback.Get(),source.Get());D3D11_MAPPED_SUBRESOURCE mapped{};ok(context->Map(readback.Get(),0,D3D11_MAP_READ,0,&mapped),"D11 map");color=*static_cast<unsigned char*>(mapped.pData);context->Unmap(readback.Get(),0);
+        }
+        return color;
     }
     static XrResult XRAPI_CALL wait(XrSession,const XrFrameWaitInfo*,XrFrameState* output) {
         auto& f=*current;const auto n=++f.real_waits;
@@ -128,33 +150,25 @@ struct Fixture {
         f.delivery_thread=GetCurrentThreadId();
         if(info->layerCount){std::unique_lock lock(f.mutex);f.end_entered=true;f.changed.notify_all();f.changed.wait(lock,[&]{return !f.block_end.load();});}
         check(info->displayTime==f.raw_prediction,"End must retain this cycle's exact runtime prediction");
-        unsigned color{};float position{};
+        unsigned color{},overlay_color{};bool has_overlay{};float position{};
         if(info->layerCount) {
             auto* p=reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
             check(p->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION && p->viewCount==f.expected_views,"owned projection metadata");
             auto& chain=f.chains.at(p->views[0].subImage.swapchain);position=p->views[0].pose.position.x;
             std::scoped_lock lock(f.gpu);
-            if(f.native12) {
-                auto source=chain.d12[chain.released];D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;desc.Width=256;desc.Height=1;desc.DepthOrArraySize=desc.MipLevels=1;desc.SampleDesc.Count=1;desc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-                D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_READBACK;ComPtr<ID3D12Resource> readback;
-                ok(f.device12->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&readback)),"readback");
-                f.commands([&](ID3D12GraphicsCommandList* list){
-                    D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;b.Transition={source.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,chain.state,D3D12_RESOURCE_STATE_COPY_SOURCE};list->ResourceBarrier(1,&b);
-                    D3D12_TEXTURE_COPY_LOCATION from{};from.pResource=source.Get();from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                    D3D12_TEXTURE_COPY_LOCATION to{};to.pResource=readback.Get();to.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;to.PlacedFootprint.Footprint={DXGI_FORMAT_R8G8B8A8_UNORM,1,1,1,256};D3D12_BOX box{0,0,0,1,1,1};list->CopyTextureRegion(&to,0,0,0,&from,&box);
-                    std::swap(b.Transition.StateBefore,b.Transition.StateAfter);list->ResourceBarrier(1,&b);
-                },f.delivery_queue.Get());
-                void* data{};ok(readback->Map(0,nullptr,&data),"map readback");color=*static_cast<unsigned char*>(data);readback->Unmap(0,nullptr);
-            } else {
-                auto source=chain.d11[chain.released];D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);desc.BindFlags=desc.MiscFlags=0;desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Texture2D> readback;
-                ok(f.device11->CreateTexture2D(&desc,nullptr,&readback),"D11 readback");f.context->CopyResource(readback.Get(),source.Get());D3D11_MAPPED_SUBRESOURCE mapped{};ok(f.context->Map(readback.Get(),0,D3D11_MAP_READ,0,&mapped),"D11 map");color=*static_cast<unsigned char*>(mapped.pData);f.context->Unmap(readback.Get(),0);
+            color=f.read_pixel(chain);
+            if(info->layerCount>1) {
+                auto* quad=reinterpret_cast<const XrCompositionLayerQuad*>(info->layers[1]);
+                check(quad->type==XR_TYPE_COMPOSITION_LAYER_QUAD,"owned overlay metadata");
+                overlay_color=f.read_pixel(f.chains.at(quad->subImage.swapchain));has_overlay=true;
             }
         }
-        {std::scoped_lock lock(f.mutex);f.pixels.push_back(color);f.positions.push_back(position);f.handoffs.push_back(start);f.targets.push_back(info->displayTime);++f.real_ends;}
+        {std::scoped_lock lock(f.mutex);f.pixels.push_back(color);if(has_overlay)f.overlay_pixels.push_back(overlay_color);f.positions.push_back(position);f.handoffs.push_back(start);f.targets.push_back(info->displayTime);++f.real_ends;}
         f.changed.notify_all();return f.fail_end?XR_ERROR_RUNTIME_FAILURE:XR_SUCCESS;
     }
     static XrResult XRAPI_CALL create(XrSession,const XrSwapchainCreateInfo* info,XrSwapchain* output) {
         auto& f=*current;*output=reinterpret_cast<XrSwapchain>(f.next_handle++);auto& chain=f.chains[*output];
+        chain.static_image=(info->createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT)!=0;
         chain.state=f.create_state?f.create_state():f.real_common?D3D12_RESOURCE_STATE_COMMON:D3D12_RESOURCE_STATE_RENDER_TARGET;
         for(unsigned i=0;i<2;++i)if(f.native12) {
             D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;desc.Width=info->width;desc.Height=info->height;desc.DepthOrArraySize=static_cast<UINT16>(info->arraySize);desc.MipLevels=1;desc.Format=static_cast<DXGI_FORMAT>(info->format);desc.SampleDesc.Count=1;desc.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
@@ -170,12 +184,12 @@ struct Fixture {
         auto& f=*current;auto& chain=f.chains.at(handle);*count=2;if(!capacity)return XR_SUCCESS;if(capacity<2)return XR_ERROR_SIZE_INSUFFICIENT;
         for(unsigned i=0;i<2;++i)if(f.native12)reinterpret_cast<XrSwapchainImageD3D12KHR*>(images)[i].texture=chain.d12[i].Get();else reinterpret_cast<XrSwapchainImageD3D11KHR*>(images)[i].texture=chain.d11[i].Get();return XR_SUCCESS;
     }
-    static XrResult XRAPI_CALL acquire(XrSwapchain h,const XrSwapchainImageAcquireInfo*,std::uint32_t* index){auto& f=*current;auto& c=f.chains.at(h);check(!c.owned,"physical image ownership");c.acquired=(c.released+1)%2;c.owned=true;c.waited=false;*index=c.acquired;++f.real_acquires;return XR_SUCCESS;}
-    static XrResult XRAPI_CALL wait_image(XrSwapchain h,const XrSwapchainImageWaitInfo*){auto& f=*current;auto& c=f.chains.at(h);check(c.owned,"physical wait after acquire");if(const auto delay=f.slow_image_wait_ms.load()){LARGE_INTEGER due{};due.QuadPart=-delay*10'000LL;check(f.preparation_timer && SetWaitableTimer(f.preparation_timer,&due,0,nullptr,nullptr,FALSE),"precise preparation delay");check(WaitForSingleObject(f.preparation_timer,1000)==WAIT_OBJECT_0,"preparation delay completed");}c.waited=true;return XR_SUCCESS;}
+    static XrResult XRAPI_CALL acquire(XrSwapchain h,const XrSwapchainImageAcquireInfo*,std::uint32_t* index){auto& f=*current;auto& c=f.chains.at(h);check(!c.owned,"physical image ownership");check(!c.static_image || !c.acquisitions,"static physical image can be acquired only once");++c.acquisitions;c.acquired=f.reuse_current_real_image?c.released:(c.released+1)%2;c.owned=true;c.waited=false;*index=c.acquired;++f.real_acquires;return XR_SUCCESS;}
+    static XrResult XRAPI_CALL wait_image(XrSwapchain h,const XrSwapchainImageWaitInfo*){auto& f=*current;auto& c=f.chains.at(h);check(c.owned,"physical wait after acquire");if(const auto delay=f.slow_image_wait_ms.load()){LARGE_INTEGER due{};due.QuadPart=-delay*10'000LL;check(f.preparation_timer && SetWaitableTimer(f.preparation_timer,&due,0,nullptr,nullptr,FALSE),"precise preparation delay");check(WaitForSingleObject(f.preparation_timer,1000)==WAIT_OBJECT_0,"preparation delay completed");}c.waited=true;if(f.image_wait_callback)f.image_wait_callback(h,c.acquired);return XR_SUCCESS;}
     static XrResult XRAPI_CALL release(XrSwapchain h,const XrSwapchainImageReleaseInfo*){auto& c=current->chains.at(h);check(c.owned && c.waited,"physical release after wait");c.released=c.acquired;c.owned=false;return XR_SUCCESS;}
     static XrResult XRAPI_CALL to_qpc(XrInstance,XrTime t,LARGE_INTEGER* q){LARGE_INTEGER f{};QueryPerformanceFrequency(&f);const auto n=t-epoch;q->QuadPart=n/1'000'000'000LL*f.QuadPart+n%1'000'000'000LL*f.QuadPart/1'000'000'000LL;return XR_SUCCESS;}
-    XrSwapchain make_chain() {
-        XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};info.format=DXGI_FORMAT_R8G8B8A8_UNORM;info.width=info.height=info.arraySize=info.faceCount=info.mipCount=info.sampleCount=1;info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    XrSwapchain make_chain(bool static_image=false) {
+        XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};info.createFlags=static_image?XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT:0;info.format=DXGI_FORMAT_R8G8B8A8_UNORM;info.width=info.height=info.arraySize=info.faceCount=info.mipCount=info.sampleCount=1;info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
         XrSwapchain handle{};xr_ok(transport->create_swapchain(&info,&handle),"private swapchain creation");return handle;
     }
     void write(XrSwapchain handle,unsigned value) {
@@ -252,7 +266,11 @@ void preparation_overlap(bool d12) {
     for(unsigned i=1;i<=8;++i){f.write(chain,i*25);f.begin_virtual();xr_ok(f.submit(chain,float(i)),"accept paced packet");}
     f.wait_count(8);xr_ok(f.transport->drain(),"paced FIFO drain");
     check(f.pixels==std::vector<unsigned>({25,50,75,100,125,150,175,200}),"paced delivery preserves every FIFO image");
-    for(unsigned i=1;i<f.handoffs.size();++i)check(f.handoffs[i]-f.handoffs[i-1]>=period,"fresh prediction keeps physical refresh minimum");
+    for(unsigned i=1;i<f.handoffs.size();++i) {
+        const auto interval=f.handoffs[i]-f.handoffs[i-1];
+        if(interval<period)std::fprintf(stderr,"%s overlap handoff%u interval%lldns, required%lldns\n",d12?"D3D12":"D3D11",i,static_cast<long long>(interval),static_cast<long long>(period));
+        check(interval>=period,"fresh prediction keeps physical refresh minimum");
+    }
     const auto average=(f.handoffs.back()-f.handoffs.front())/(f.handoffs.size()-1);
     std::fprintf(stderr,"%s overlap measured interval%.3fms\n",d12?"D3D12":"D3D11",average/1e6);
     check(average<period+3'000'000,"refresh pacing must include preparation instead of adding it to every interval");
@@ -318,6 +336,107 @@ void unchanged_overlay() {
     check(f.pixels==std::vector<unsigned>({40,80}),"shared overlay must not replace either scene image");
     std::puts("Immutable overlay sharing preserves lookahead without extra swapchains PASS");
 }
+void same_chain_lookahead(bool d12) {
+    Fixture f(d12);auto chain=f.make_chain();
+    f.write(chain,40);f.begin_virtual();xr_ok(f.submit(chain,1),"first same-chain input");f.wait_entered();
+    const auto previous=f.chains.at(chain).released;
+    std::promise<void> ready;auto seen=ready.get_future();
+    f.prepared_callback=[&](std::uint64_t seq){if(seq==2)ready.set_value();};
+    f.write(chain,80);f.begin_virtual();xr_ok(f.submit(chain,2),"next same-chain input");
+    check(seen.wait_for(3s)==std::future_status::ready,"next real image must finish GPU preparation while prior same-chain EndFrame is blocked");
+    auto& real=f.chains.at(chain);
+    check(f.real_acquires==2 && real.owned && real.waited,"exactly one next real target stays acquired/waited");
+    check(real.released==previous && real.acquired!=previous,"copying ahead must not release/replace the previous EndFrame image");
+    check(f.chains.size()==1,"lookahead allocates no extra real swapchain");
+    f.unblock();f.wait_count(2);xr_ok(f.transport->drain(),"same-chain lookahead drain");
+    check(f.pixels==std::vector<unsigned>({40,80}),"same-chain lookahead preserves the previous and next scene pixels");
+    check(f.handoffs[1]-f.handoffs[0]>=period,"same-chain lookahead retains strict physical cadence");
+    std::printf("%s same-chain GPU lookahead with unreleased next target and exact FIFO pixels PASS\n",d12?"D3D12":"D3D11");
+}
+void changing_overlay_lookahead() {
+    Fixture f(true);auto a=f.make_chain(),b=f.make_chain(),overlay=f.make_chain();
+    f.write(overlay,20);f.write(a,40);f.begin_virtual();xr_ok(f.submit(a,1,overlay),"first changing-overlay frame");f.wait_entered();
+    const auto previous=f.chains.at(overlay).released;
+    std::promise<void> ready;auto seen=ready.get_future();
+    f.prepared_callback=[&](std::uint64_t seq){if(seq==2)ready.set_value();};
+    f.write(overlay,60);f.write(b,80);f.begin_virtual();xr_ok(f.submit(b,2,overlay),"next changing-overlay frame");
+    check(seen.wait_for(3s)==std::future_status::ready,"changing shared overlay must not prevent next scene and overlay GPU preparation");
+    auto& real=f.chains.at(overlay);
+    check(real.owned && real.waited && real.released==previous,"new overlay stays waited/unreleased while previous frame captures old overlay");
+    check(f.real_acquires==4 && f.chains.size()==3,"changing-overlay lookahead reuses existing real chains only");
+    f.unblock();f.wait_count(2);xr_ok(f.transport->drain(),"changing-overlay lookahead drain");
+    check(f.pixels==std::vector<unsigned>({40,80}),"changing shared overlay preserves both scene images");
+    check(f.overlay_pixels==std::vector<unsigned>({20,60}),"native End captures previous overlay then next overlay, never the future released image");
+    check(f.chains.at(overlay).released!=previous && !f.chains.at(overlay).owned,"new overlay is released only for its own FIFO frame");
+    std::puts("Changing shared overlay preserves next-scene GPU lookahead without early release PASS");
+}
+void stop_prepared_target() {
+    Fixture f(true);auto chain=f.make_chain();
+    f.write(chain,40);f.begin_virtual();xr_ok(f.submit(chain,1),"stop target first input");f.wait_entered();
+    std::promise<void> ready;auto seen=ready.get_future();
+    f.prepared_callback=[&](std::uint64_t seq){if(seq==2)ready.set_value();};
+    f.write(chain,80);f.begin_virtual();xr_ok(f.submit(chain,2),"stop target next input");
+    check(seen.wait_for(3s)==std::future_status::ready,"stop test owns a GPU-complete unreleased target");
+    auto stopped=std::async(std::launch::async,[&]{f.transport->stop();});
+    const auto limit=std::chrono::steady_clock::now()+3s;
+    for(;;) {XrFrameState prediction{XR_TYPE_FRAME_STATE};
+        if(f.transport->predict_frame(&prediction)==XR_ERROR_SESSION_NOT_RUNNING)break;
+        check(std::chrono::steady_clock::now()<limit,"stop must mark the endpoint stopped before waiting for native End");std::this_thread::yield();}
+    f.unblock();check(stopped.wait_for(3s)==std::future_status::ready,"stop drains an unreleased prepared image");stopped.get();
+    check(f.real_ends==1 && !f.chains.at(chain).owned,"stop releases canceled prepared target without presenting it");
+    f.prepared_callback={};xr_ok(f.transport->start(),"restart after pending target cleanup");
+    f.begin_virtual();xr_ok(f.submit(chain,3),"restart retained private input");f.wait_count(2);xr_ok(f.transport->drain(),"restart target drain");
+    check(f.pixels==std::vector<unsigned>({40,80}),"restart copies retained private source after canceled real target cleanup");
+    std::puts("Stop releases an unpresented waited target and preserves restart ownership PASS");
+}
+void reused_real_index(bool cancel) {
+    Fixture f(true);f.reuse_current_real_image=true;auto chain=f.make_chain();
+    f.write(chain,40);f.begin_virtual();xr_ok(f.submit(chain,1),"reused-index first input");f.wait_entered();
+    std::promise<void> acquired;auto seen=acquired.get_future();
+    f.image_wait_callback=[&](XrSwapchain h,unsigned){if(h==chain && f.real_acquires==2)acquired.set_value();};
+    f.write(chain,80);f.begin_virtual();xr_ok(f.submit(chain,2),"reused-index next input");
+    check(seen.wait_for(3s)==std::future_status::ready,"runtime returns the still-current physical index for the next target");
+    {std::scoped_lock lock(f.gpu);check(f.read_pixel(f.chains.at(chain))==40,"next copy must not overwrite an older retained generation sharing the same real index");}
+    if(cancel) {
+        auto stopped=std::async(std::launch::async,[&]{f.transport->stop();});
+        const auto limit=std::chrono::steady_clock::now()+3s;
+        for(;;){XrFrameState prediction{XR_TYPE_FRAME_STATE};if(f.transport->predict_frame(&prediction)==XR_ERROR_SESSION_NOT_RUNNING)break;
+            check(std::chrono::steady_clock::now()<limit,"stop wakes real-index lease wait");std::this_thread::yield();}
+        f.unblock();check(stopped.wait_for(3s)==std::future_status::ready,"stop drains a real-index reuse wait");stopped.get();
+        check(f.pixels==std::vector<unsigned>({40}) && !f.chains.at(chain).owned,"canceling an aliased target preserves prior pixels and releases acquired ownership");
+    } else {
+        f.unblock();f.wait_count(2);xr_ok(f.transport->drain(),"reused-index drain");
+        check(f.pixels==std::vector<unsigned>({40,80}),"runtime index reuse waits only for the old generation then preserves both FIFO images");
+    }
+    std::printf("Reused physical image index protects retained pixels%s PASS\n",cancel?" and stops cleanly":"");
+}
+void static_image_repeat() {
+    Fixture f(true);f.unblock();auto chain=f.make_chain(true);f.write(chain,70);
+    for(unsigned n=1;n<=4;++n){f.begin_virtual();xr_ok(f.submit(chain,float(n)),"repeat immutable static source");f.wait_count(n);xr_ok(f.transport->drain(),"static repeat drain");}
+    check(f.real_acquires==1,"static repeated image reuses the sole runtime acquisition after users reach zero");
+    unsigned index{};check(f.transport->acquire_image(chain,nullptr,&index)==XR_ERROR_CALL_ORDER_INVALID,"private static image cannot be acquired again after release");
+    f.transport->stop();xr_ok(f.transport->start(),"static retained chain restart");
+    f.begin_virtual();xr_ok(f.submit(chain,5),"repeat static source after session restart");f.wait_count(5);xr_ok(f.transport->drain(),"static restart drain");
+    check(f.real_acquires==1 && f.pixels==std::vector<unsigned>(5,70),"static generation survives session restart without a second physical acquire/release");
+    std::puts("Static image repeats retain one physical acquisition across drained frames and restart PASS");
+}
+void stop_first_static_target() {
+    Fixture f(true);f.unblock();auto chain=f.make_chain(true);f.write(chain,70);
+    std::promise<void> entered,proceed;auto seen=entered.get_future();auto gate=proceed.get_future();
+    f.image_wait_callback=[&](XrSwapchain h,unsigned){if(h==chain){entered.set_value();gate.wait();}};
+    f.begin_virtual();xr_ok(f.submit(chain,1),"first static target before cancellation");
+    check(seen.wait_for(3s)==std::future_status::ready,"static first target is acquired/waited before GPUcopy");
+    auto stopped=std::async(std::launch::async,[&]{f.transport->stop();});
+    const auto limit=std::chrono::steady_clock::now()+3s;
+    for(;;){XrFrameState prediction{XR_TYPE_FRAME_STATE};if(f.transport->predict_frame(&prediction)==XR_ERROR_SESSION_NOT_RUNNING)break;
+        check(std::chrono::steady_clock::now()<limit,"stop marks static target cancellation before native Wait returns");std::this_thread::yield();}
+    proceed.set_value();check(stopped.wait_for(3s)==std::future_status::ready,"stop finishes the first static GPUcopy and releases its one acquired target");stopped.get();
+    check(f.real_acquires==1 && !f.chains.at(chain).owned && f.real_ends==0,"canceled static target is released once without presenting");
+    f.image_wait_callback={};xr_ok(f.transport->start(),"restart after canceled first static target");
+    f.begin_virtual();xr_ok(f.submit(chain,2),"reuse completed static target after cancellation");f.wait_count(1);xr_ok(f.transport->drain(),"canceled static restart drain");
+    check(f.real_acquires==1 && f.pixels==std::vector<unsigned>({70}),"restart presents the exact static source without forbidden reacquisition");
+    std::puts("Stop after first static Wait finishes its safe GPUcopy and restarts with one acquisition PASS");
+}
 void fresh_runtime_window(bool d12,int wait_ms=0) {
     Fixture f(d12);f.throttled=false;auto chain=f.make_chain();f.write(chain,70);
     f.slow_frame_wait_ms=wait_ms;
@@ -367,4 +486,4 @@ void queue_priority_policy() {
     std::puts("Final delivery priority: supported HIGH, descriptor preservation, original dedicated fallback, failure propagation PASS");
 }
 }
-int main(int argc,char** argv){if(argc>1){if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);return 0;}
+int main(int argc,char** argv){if(argc>1){if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);return 0;}

@@ -1,3 +1,11 @@
+## V587: changing shared images no longer drain preparation
+
+Prepare the next real image while retaining the previous released generation;
+release only the completed FIFO head on delivery. Read physical Hz atomically.
+No additional swapchains/images or cadence change.33 focused checks pass;
+actual MSFS headset improvement remains pending.
+See [details](docs/V587_PREPARED_RELEASE.md).
+
 ## V586: final SteamVR delivery priority
 
 Request supported HIGH priority for the existing dedicated D3D12 delivery

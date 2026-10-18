@@ -8,6 +8,7 @@
 #include <windows.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -164,6 +165,9 @@ struct SteamVrDelivery::Impl {
     // display_period()'s cache.
     std::optional<std::chrono::nanoseconds> display_period;
     std::chrono::steady_clock::time_point display_period_read{};
+    // The physical director must not take mutex: optional compositor polling
+    // holds it across OpenVR calls, which can stall inside the runtime.
+    std::atomic<std::int64_t> display_period_snapshot{};
     AttachRoute route{AttachRoute::none};
     bool owns_context{};
     ScenePresentationRate scene_receipts;
@@ -504,7 +508,8 @@ SteamVrDelivery::display_period() noexcept {
         if (!impl_) {
             return std::nullopt;
         }
-        std::scoped_lock lock(impl_->mutex);
+        std::unique_lock lock(impl_->mutex, std::try_to_lock);
+        if (!lock) return cached_display_period();
         if (!impl_->established) {
             return std::nullopt;
         }
@@ -525,14 +530,23 @@ SteamVrDelivery::display_period() noexcept {
             vr::k_unTrackedDeviceIndex_Hmd, vr::Prop_DisplayFrequency_Float, &error);
         if (error != vr::TrackedProp_Success || !(hertz >= 20.0F) || hertz > 500.0F) {
             impl_->display_period.reset();
+            impl_->display_period_snapshot.store(0, std::memory_order_release);
             return std::nullopt;
         }
         impl_->display_period = std::chrono::nanoseconds(
             static_cast<std::int64_t>(1e9 / static_cast<double>(hertz)));
+        impl_->display_period_snapshot.store(impl_->display_period->count(), std::memory_order_release);
         return impl_->display_period;
     } catch (...) {
         return std::nullopt;
     }
+}
+
+std::optional<std::chrono::nanoseconds>
+SteamVrDelivery::cached_display_period() const noexcept {
+    if (!impl_) return std::nullopt;
+    const auto period = impl_->display_period_snapshot.load(std::memory_order_acquire);
+    return period > 0 ? std::optional{std::chrono::nanoseconds(period)} : std::nullopt;
 }
 
 std::optional<std::chrono::nanoseconds>
@@ -666,6 +680,14 @@ std::optional<SteamVrDelivery::GpuRenderTiming> SteamVrDelivery::gpu_render_timi
                 vr::Prop_DisplayFrequency_Float, &error);
             if (error == vr::TrackedProp_Success && std::isfinite(hz) && hz > 0)
                 result.display_period = std::chrono::nanoseconds(static_cast<std::int64_t>(1.0e9 / hz));
+            if (error == vr::TrackedProp_Success && std::isfinite(hz) && hz >= 20 && hz <= 500) {
+                impl_->display_period = std::chrono::nanoseconds(static_cast<std::int64_t>(1e9 / static_cast<double>(hz)));
+                impl_->display_period_snapshot.store(impl_->display_period->count(), std::memory_order_release);
+                impl_->display_period_read = std::chrono::steady_clock::now();
+            } else {
+                impl_->display_period.reset();
+                impl_->display_period_snapshot.store(0, std::memory_order_release);
+            }
         }
         return result;
     } catch (...) { return std::nullopt; }
