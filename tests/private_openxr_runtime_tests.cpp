@@ -76,6 +76,7 @@ struct Fixture {
     std::int64_t wait_return{},begun_wait_return{},prediction_age_limit{};
     std::vector<std::int64_t> prediction_ages;
     std::vector<std::int64_t> refill_margins;
+    std::vector<std::int64_t> native_margins;
     std::shared_ptr<xrfg::PrivateOpenXrRuntime> transport;
     explicit Fixture(bool d12,bool split=true,std::function<int(unsigned)> variable_wait={}):native12(d12),frame_wait_us(std::move(variable_wait)) {
         current=this;
@@ -98,7 +99,7 @@ struct Fixture {
         options.real={reinterpret_cast<XrInstance>(1),reinterpret_cast<XrSession>(2),wait,begin,end,create,destroy,enumerate,acquire,wait_image,release,to_qpc};
         options.device12=device12.Get();options.queue12=delivery_queue?delivery_queue.Get():queue.Get();options.producer_queue12=queue.Get();options.device11=device11.Get();options.context11=context.Get();
         options.physical_period=[]{return period;};options.capacity=3;
-        options.trace=[this](int stage,std::uint64_t seq,std::int64_t,std::int64_t margin){if(stage==11)refill_margins.push_back(margin);if(stage==4) {preparation_thread=GetCurrentThreadId();if(after_head_ready)after_head_ready();if(preparation_callback)preparation_callback(seq);}if(stage==5 && prepared_callback)prepared_callback(seq);};
+        options.trace=[this](int stage,std::uint64_t seq,std::int64_t,std::int64_t margin){if(stage==11)refill_margins.push_back(margin);if(stage==17)native_margins.push_back(margin);if(stage==4) {preparation_thread=GetCurrentThreadId();if(after_head_ready)after_head_ready();if(preparation_callback)preparation_callback(seq);}if(stage==5 && prepared_callback)prepared_callback(seq);};
         transport=std::make_shared<xrfg::PrivateOpenXrRuntime>(std::move(options));
         ok(transport->initialize(),"initialize actual private endpoint");xr_ok(transport->start(),"start endpoint");
     }
@@ -478,6 +479,30 @@ void overlapped_wait_failure() {
     f.transport->stop();check(!f.cycle_waited && !f.cycle_begun,"failed lookahead leaves no native frame open");
     std::puts("Future native Wait failure preserves current delivery and propagates PASS");
 }
+void native_margin_scope(bool d12) {
+    {
+        Fixture f(d12);f.unblock();f.throttled=false;
+        auto chain=f.make_chain();f.write(chain,70);f.slow_image_wait_ms=8;
+        // The native cycle is already ready before each deliberately late
+        // image wait/copy. This must not create a new native margin afterward.
+        f.preparation_callback=[&](std::uint64_t seq){
+            const auto limit=std::chrono::steady_clock::now()+3s;
+            while(f.real_begins<seq+1){check(std::chrono::steady_clock::now()<limit,"native Begin overlaps late preparation");std::this_thread::yield();}
+        };
+        for(unsigned n=0;n<4;++n){f.begin_virtual();xr_ok(f.submit(chain,float(n)),"late preparation input");f.wait_count(n+1);xr_ok(f.transport->drain(),"late preparation drain");}
+        check(f.native_margins.empty(),"late GPU preparation must not be charged another native1.1ms margin");
+        check(f.pixels==std::vector<unsigned>(4,70),"late preparation retains all finite FIFO inputs");
+        for(unsigned n=1;n<f.handoffs.size();++n)check(f.handoffs[n]-f.handoffs[n-1]>=period,"late preparation preserves physical minimum");
+    }
+    {
+        Fixture f(d12,true,[](unsigned n){return n==2?8'000:0;});f.unblock();f.throttled=false;
+        auto chain=f.make_chain();f.write(chain,80);
+        f.begin_virtual();xr_ok(f.submit(chain,1),"late native input");f.wait_count(1);xr_ok(f.transport->drain(),"late native drain");
+        check(!f.native_margins.empty(),"genuinely late native Begin still receives held presentation headroom");
+        check(f.pixels==std::vector<unsigned>({80}),"native margin preserves the owned image");
+    }
+    std::printf("%s native headroom excludes late GPU preparation and retains late native margin PASS\n",d12?"D3D12":"D3D11");
+}
 void rising_native_wait() {
     Fixture f(true,true,[](unsigned n){return 200+std::min(n>8?n-8:0u,20u)*400;});f.unblock();f.throttled=false;
     // Reproduce the observed staircase: each call takes another0.4ms while
@@ -544,4 +569,4 @@ void queue_priority_policy() {
     std::puts("Final delivery priority: supported HIGH, descriptor preservation, original dedicated fallback, failure propagation PASS");
 }
 }
-int main(int argc,char** argv){if(argc>1){if(std::string_view(argv[1])=="pipeline"){overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();}else if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);return 0;}
+int main(int argc,char** argv){if(argc>1){if(std::string_view(argv[1])=="margin"){native_margin_scope(true);native_margin_scope(false);}else if(std::string_view(argv[1])=="pipeline"){overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();}else if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();native_margin_scope(true);native_margin_scope(false);rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);return 0;}

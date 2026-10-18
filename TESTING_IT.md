@@ -1,3 +1,10 @@
+## V591 — confronto Valhalla
+
+Corretto il margine di1,1ms aggiunto dopo le copie tardive anche con OpenXR
+già pronto. Ripetere la stessa scena/sequenza del benchmark585/590. Il fix
+passa33controlli; recupero FPS nel visore ancora da verificare. Nessun F8.
+Per confrontare prodotti/consegnati usare F9 in una breve prova manuale.
+
 ## V590: independent native Wait and held presentation margin
 
 Overlap the next nativeWait with current delivery. Missing headroom becomes

@@ -82,7 +82,9 @@ public:
         if(!primed_){due_=at;primed_=true;return;}
         if(at>due_){hold_+=at-due_;due_=at;}
     }
-    // Native completion needs real headroom before End, not a clipped forecast.
+    // Native Wait/Begin completion needs headroom before End. Pass its timestamp,
+    // never a later image-copy/release completion: that would recharge the native
+    // margin after each late GPU packet even when the native cycle was ready.
     // Shift only the missing margin, once, and retain its exact phase. This
     // changes the presentation clock only; producers/preparers keep running.
     std::int64_t runtime_ready(std::int64_t at,std::int64_t margin) noexcept {

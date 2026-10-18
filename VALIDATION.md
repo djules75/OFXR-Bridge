@@ -1,3 +1,9 @@
+## V591 — native margin scope
+
+33focused checks pass, including new D3D11/D3D12 late-preparation and late-native
+cases. Exact V590 fails the new regression check. [Evidence](docs/V591_VALIDATION.json).
+V591 headset improvement remains pending.
+
 ## V590: independent native Wait and held presentation margin
 
 Overlap the next nativeWait with current delivery. Missing headroom becomes

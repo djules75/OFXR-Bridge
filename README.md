@@ -1,3 +1,10 @@
+## V591: native headroom without a repeated post-copy pause
+
+Correct a V590 Valhalla regression: native headroom starts at Begin completion,
+not at later GPU completion. Independent Wait, ownership and refresh cadence
+remain intact.33focused checks pass; headset comparison pending.
+See [details](docs/V591_NATIVE_MARGIN_SCOPE.md).
+
 ## V590: independent native Wait and held presentation margin
 
 Overlap the next nativeWait with current delivery. Missing headroom becomes

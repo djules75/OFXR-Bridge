@@ -489,8 +489,11 @@ struct PrivateOpenXrRuntime::Impl {
                 const auto refill=schedule.input_ready(packet->source_ready_at,options.capacity);
                 if(diagnostic && refill)options.trace(11,packet->sequence,packet->source_ready_at,refill);
                 schedule.ready(packet->prepared_at);
-                const auto margin=schedule.runtime_ready(release_leave,PrivateRuntimeBudget::presentation_margin);
-                if(diagnostic && margin)options.trace(17,packet->sequence,release_leave,margin);
+                // Reserve headroom for native Wait/Begin, not for a later GPU
+                // completion. Recharging it after every late copy adds a fresh
+                // 1.1ms pause to otherwise ready native cycles (V590 regression).
+                const auto margin=schedule.runtime_ready(begun_at,PrivateRuntimeBudget::presentation_margin);
+                if(diagnostic && margin)options.trace(17,packet->sequence,begun_at,margin);
                 // Wait for the next cycle may overlap this frame's handoff.
                 // Begin/End remain exclusively serialized on this consumer;
                 // the worker needs accepted owned input before entering Wait,
