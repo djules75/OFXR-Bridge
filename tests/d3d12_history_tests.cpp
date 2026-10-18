@@ -4544,6 +4544,11 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind) {
             std::string("hybrid ") + name + " did not beat the same-pixel blend for eye " +
                 std::to_string(eye) + ": " + std::to_string(edge_error) + " vs " +
                 std::to_string(blend_error));
+        // V500: the vectors keep the edges they explain as an occlusion
+        // (2.4 before, when the flow took them; 0.7 after).
+        require(kind != HybridScene::occlusion || edge_error <= 1.2,
+            std::string("hybrid occlusion edges went back to the flow for eye ") +
+                std::to_string(eye) + ": " + std::to_string(edge_error));
     }
     require(operation_succeeded(synthesizer.wait_for_idle()), "hybrid final drain failed");
     require(operation_succeeded(history->invalidate()), "hybrid history invalidate failed");

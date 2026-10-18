@@ -1146,6 +1146,47 @@ FullscreenVertex FullscreenTriangleVS(uint vertex_id : SV_VertexID) {
     return output;
 }
 
+#ifdef XRFG_HYBRID
+// V500. The vectors branch answers an occlusion with one frame's sample, so
+// its two warped samples disagree there by construction: one frame shows the
+// surface, the other what hides it. The hybrid used to read that disagreement
+// as the vectors failing and hand the pixel to the optical flow, whose
+// smeared samples agree by accident - the ghost at a revealing edge. These
+// check the occlusion instead, so the hybrid judges the answer given.
+//
+// A's sample at `a` claimed to show the surface that B shows at `surface`:
+// traced by that surface's own vector it must sit at `a` in A, so A at `a`
+// matches B where the surface is now. The colour error of that match; 1 when
+// the trace leaves an image or lands on another motion.
+float occluder_error(float2 a, float4 a_color, float2 surface) {
+    float error = 1.0;
+    float2 motion = game_motion_texel(surface);
+    MappedCoordinate then = map_source_to_target(
+        surface + game_motion_for_pixel(surface, Slice, ViewIndex), PreviousMappings[ViewIndex]);
+    float2 now = a - (then.coordinate - surface);
+    if (then.valid >= 0.5 &&
+        length(game_motion_texel(now) - motion) <= max(1.0, 0.15 * length(motion))) {
+        CameraSample b = sample_current_target(now, Slice, ViewIndex);
+        if (b.valid >= 0.5) error = rgb_error(a_color, b.color);
+    }
+    return error;
+}
+
+// B's surface at `pixel` followed back to A by its own vector: the error
+// between the two, or 1 off the image. Small when that surface is one the
+// vectors track - the occluder that covers what A showed there.
+float tracked_surface_error(float2 pixel, float4 b_color) {
+    float error = 1.0;
+    MappedCoordinate then = map_source_to_target(
+        pixel + game_motion_for_pixel(pixel, Slice, ViewIndex), PreviousMappings[ViewIndex]);
+    if (then.valid >= 0.5) {
+        CameraSample a = sample_previous_target(then.coordinate, Slice, ViewIndex);
+        if (a.valid >= 0.5) error = rgb_error(a.color, b_color);
+    }
+    return error;
+}
+#endif
+
 float4 synthesize_midpoint(
     FullscreenVertex input,
     float flow_value_scale,
@@ -1478,6 +1519,13 @@ float4 synthesize_midpoint(
                         // whose shading changed - a fade, a flash - and their
                         // motion-compensated blend is the frame between.
                         output_color = saturate(camera_explains ? stable_midpoint : flow_midpoint);
+#ifdef XRFG_HYBRID
+                        // The error of the answer given (V500): never above
+                        // the warped samples', lower where an occlusion the
+                        // branch handled explains their disagreement.
+                        float explained = camera_explains
+                            ? min(compared, stable_disagreement) : compared;
+#endif
                         // Background a leading edge is covering shows only in
                         // A. There the solve has no fixed point: B shows the
                         // occluder at the pixel, so it starts inside it and
@@ -1487,7 +1535,15 @@ float4 synthesize_midpoint(
                         if (!camera_explains && solve_residual >= 0.5) {
                             CameraSample covered = sample_previous_target(
                                 pixel + synthesis_fraction() * last_displacement, Slice, ViewIndex);
-                            if (covered.valid >= 0.5) output_color = saturate(covered.color);
+                            if (covered.valid >= 0.5) {
+                                output_color = saturate(covered.color);
+#ifdef XRFG_HYBRID
+                                // B shows the occluder at the pixel; if the
+                                // vectors track it, A's sample stands.
+                                explained = min(explained,
+                                    tracked_surface_error(pixel, current_fallback.color));
+#endif
+                            }
                         } else if (!camera_explains && disagreement > 0.1 && repeated_capture_flag() == 0) {
                             // Where the motion is not uniform - a vector 16
                             // pixels away differs by a tenth of a pixel -
@@ -1505,15 +1561,34 @@ float4 synthesize_midpoint(
                             float reach = max(16.0, 1.25 * max(length(last_displacement), length(here)));
                             float tolerance = 0.1 * reach / 16.0;
                             bool motion_edge = false;
+#ifdef XRFG_HYBRID
+                            // The other surfaces the probes meet: one of them
+                            // is what hides A's sample, when B's is background
+                            // a trailing edge uncovers.
+                            float revealed = 1.0;
+#endif
                             [unroll] for (uint probe = 0; probe < 4; ++probe) {
                                 float2 offset = probe == 0 ? float2(reach, 0) : probe == 1 ? float2(-reach, 0)
                                               : probe == 2 ? float2(0, reach) : float2(0, -reach);
-                                motion_edge = motion_edge ||
-                                    length(game_motion_texel(pixel + offset) - here) > tolerance;
+                                bool differs = length(game_motion_texel(pixel + offset) - here) > tolerance;
+                                motion_edge = motion_edge || differs;
+#ifdef XRFG_HYBRID
+                                if (differs)
+                                    revealed = min(revealed, occluder_error(
+                                        previous_coordinate, previous_sample.color, pixel + offset));
+#endif
                             }
                             if (motion_edge) {
                                 output_color = saturate(lerp(
                                     current_sample.color, flow_midpoint, confidence));
+#ifdef XRFG_HYBRID
+                                // A's sample is that surface: B's alone is the
+                                // background, and the vectors explain the pair.
+                                if (revealed < 0.05) {
+                                    output_color = saturate(current_sample.color);
+                                    explained = min(explained, revealed);
+                                }
+#endif
                             }
                             // B's sample may in turn be background that B has
                             // already uncovered but a faster surface in front
@@ -1539,6 +1614,9 @@ float4 synthesize_midpoint(
                                         if (game_motion_surface(pixel, start, a, b) &&
                                             rgb_error(a, b) < 0.05) {
                                             output_color = saturate(lerp(a, b, synthesis_fraction()));
+#ifdef XRFG_HYBRID
+                                            explained = rgb_error(a, b);
+#endif
                                             done = true;
                                         }
                                         done = done || solves >= 2;
@@ -1547,10 +1625,7 @@ float4 synthesize_midpoint(
                             }
                         }
 #ifdef XRFG_HYBRID
-                        // What the vectors branch chose has no single
-                        // disagreement of its own; the hybrid judges it by
-                        // its warped samples'.
-                        last_disagreement = compared;
+                        last_disagreement = explained;
 #endif
                     } else {
                         output_color = saturate(lerp(
