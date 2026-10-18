@@ -54,6 +54,7 @@ struct Fixture {
     bool throttled{true},real_common{},reuse_current_real_image{};
     std::atomic_int slow_image_wait_ms{};
     std::atomic_int slow_frame_wait_ms{};
+    std::function<int(unsigned)> frame_wait_us;
     std::atomic<DWORD> preparation_thread{},delivery_thread{};
     std::atomic_uint empty_ends{};
     unsigned expected_views{1};
@@ -72,7 +73,7 @@ struct Fixture {
     std::vector<std::int64_t> prediction_ages;
     std::vector<std::int64_t> refill_margins;
     std::shared_ptr<xrfg::PrivateOpenXrRuntime> transport;
-    explicit Fixture(bool d12,bool split=true):native12(d12) {
+    explicit Fixture(bool d12,bool split=true,std::function<int(unsigned)> variable_wait={}):native12(d12),frame_wait_us(std::move(variable_wait)) {
         current=this;
         if(d12) {
             ok(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device12)),"actual D3D12 device");
@@ -127,7 +128,8 @@ struct Fixture {
     }
     static XrResult XRAPI_CALL wait(XrSession,const XrFrameWaitInfo*,XrFrameState* output) {
         auto& f=*current;const auto n=++f.real_waits;
-        if(const auto delay=f.slow_frame_wait_ms.load()){LARGE_INTEGER due{};due.QuadPart=-delay*10'000LL;check(f.frame_wait_timer && SetWaitableTimer(f.frame_wait_timer,&due,0,nullptr,nullptr,FALSE),"precise runtime delay");check(WaitForSingleObject(f.frame_wait_timer,1000)==WAIT_OBJECT_0,"runtime delay completed");}
+        const auto delay=f.frame_wait_us?f.frame_wait_us(n):f.slow_frame_wait_ms.load()*1000;
+        if(delay){LARGE_INTEGER due{};due.QuadPart=-delay*10LL;check(f.frame_wait_timer && SetWaitableTimer(f.frame_wait_timer,&due,0,nullptr,nullptr,FALSE),"precise runtime delay");check(WaitForSingleObject(f.frame_wait_timer,1000)==WAIT_OBJECT_0,"runtime delay completed");}
         check(!f.cycle_waited && !f.cycle_begun,"one real Wait per cycle");f.cycle_waited=true;
         // Vary the runtime horizon while retaining the monotonic prediction
         // required by OpenXR. XR time deliberately has another epoch than QPC.
@@ -437,6 +439,22 @@ void stop_first_static_target() {
     check(f.real_acquires==1 && f.pixels==std::vector<unsigned>({70}),"restart presents the exact static source without forbidden reacquisition");
     std::puts("Stop after first static Wait finishes its safe GPUcopy and restarts with one acquisition PASS");
 }
+void rising_native_wait() {
+    Fixture f(true,true,[](unsigned n){return 200+std::min(n>8?n-8:0u,20u)*400;});f.unblock();f.throttled=false;
+    // Reproduce the observed staircase: each call takes another0.4ms while
+    // immutable pixels are already ready. The predictor must learn variation,
+    // rather than missing every refresh by the same unreserved increment.
+    auto chain=f.make_chain();f.write(chain,70);
+    for(unsigned n=0;n<40;++n){f.begin_virtual();xr_ok(f.submit(chain,float(n)),"rising native Wait owned input");}
+    f.wait_count(40);xr_ok(f.transport->drain(),"rising native Wait drain");
+    unsigned late{};
+    for(unsigned n=1;n<f.handoffs.size();++n){const auto delta=f.handoffs[n]-f.handoffs[n-1];check(delta>=period,"rising Wait retains strict physical minimum");if(n>=8 && n<=28 && delta>period+200'000)++late;}
+    const auto average=(f.handoffs[28]-f.handoffs[8])/20;
+    std::fprintf(stderr,"Rising native Wait: mean%.6fms, late%u/21\n",average/1e6,late);
+    check(average<period+200'000 && late<=5,"rising runtime cost must not cause a persistent sub-refresh staircase with ready input");
+    check(f.pixels==std::vector<unsigned>(40,70),"variable native entry retains every FIFO image");
+    std::puts("Rising native Wait learns service-time variation without slowing production or shortening physical cadence PASS");
+}
 void fresh_runtime_window(bool d12,int wait_ms=0) {
     Fixture f(d12);f.throttled=false;auto chain=f.make_chain();f.write(chain,70);
     f.slow_frame_wait_ms=wait_ms;
@@ -486,4 +504,4 @@ void queue_priority_policy() {
     std::puts("Final delivery priority: supported HIGH, descriptor preservation, original dedicated fallback, failure propagation PASS");
 }
 }
-int main(int argc,char** argv){if(argc>1){if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);return 0;}
+int main(int argc,char** argv){if(argc>1){if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);return 0;}

@@ -10,6 +10,29 @@
 
 namespace xrfg {
 
+// Forecast native Wait/Begin/Release work separately from the physical clock.
+// A last-duration-only estimate misses every step of a rising blocking Wait.
+// Learn its positive variation too; never include source/preparation waits or
+// sleep here, and never change the physical EndFrame interval to gain margin.
+class PrivateRuntimeBudget {
+    std::int64_t cost_{},previous_{},variation_{};
+    bool sampled_{};
+public:
+    [[nodiscard]] std::int64_t lead(std::int64_t period) const noexcept {
+        return std::clamp<std::int64_t>(cost_+variation_+100'000,100'000,period);
+    }
+    void observe(std::int64_t native_cost,std::int64_t period) noexcept {
+        native_cost=std::clamp<std::int64_t>(native_cost,0,period);
+        if(sampled_) {
+            const auto rise=std::max(std::int64_t{},native_cost-previous_);
+            variation_=std::max(rise,variation_-(variation_+63)/64);
+        }
+        cost_=native_cost>=cost_?native_cost:
+            std::max(native_cost,cost_-(cost_-native_cost+15)/16);
+        previous_=native_cost;sampled_=true;
+    }
+};
+
 // One clock for all SteamVR outputs. Units are QPC nanoseconds. It never
 // borrows time from the following refresh to catch up after a late output.
 class PrivateOutputSchedule {

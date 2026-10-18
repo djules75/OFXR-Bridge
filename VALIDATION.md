@@ -1,3 +1,10 @@
+## V588: reserve changing native runtime work before delivery
+
+Include native Release and measured service-time variation when opening the
+SteamVR cycle. Physical cadence, preparation, images and producer policy stay
+unchanged.33 focused checks pass; MSFS headset comparison remains pending.
+See [details](docs/V588_RUNTIME_BUDGET.md).
+
 ## V587: changing shared images no longer drain preparation
 
 Prepare the next real image while retaining the previous released generation;

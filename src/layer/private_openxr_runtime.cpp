@@ -360,9 +360,9 @@ struct PrivateOpenXrRuntime::Impl {
             PrivateOutputSchedule schedule;
             // Request the runtime cycle near its actual handoff, not at the
             // start of an entire refresh/preparation interval. Reserve only
-            // the observed Wait/Begin cost plus the metadata lead. Preparation
-            // remains independent and overlaps a blocking runtime Wait.
-            std::int64_t runtime_budget=PrivateOutputSchedule::preparation_lead;
+            // Wait/Begin/Release cost and its measured positive variation.
+            // Preparation remains independent of the native entry forecast.
+            PrivateRuntimeBudget runtime_budget;
             auto result=real_wait(prediction);if(XR_FAILED(result)){fail(result);return;}
             waited=true;
             // Seed the producer's virtual clock, then close this empty cycle
@@ -385,7 +385,7 @@ struct PrivateOpenXrRuntime::Impl {
                 {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping || pending;});if(stopping)break;}
                 const auto physical=period(prediction.predictedDisplayPeriod);
                 schedule.period(physical);
-                if(schedule.primed() && !sleep_until(schedule.deadline()-runtime_budget,
+                if(schedule.primed() && !sleep_until(schedule.deadline()-runtime_budget.lead(physical),
                     std::min<std::int64_t>(1'250'000,physical/8)))break;
                 const bool diagnostic=tracing();
                 const auto wait_enter=clock_ns();
@@ -398,22 +398,25 @@ struct PrivateOpenXrRuntime::Impl {
                     if(XR_SUCCEEDED(result)){waited=false;begun=true;}
                 }
                 if(XR_FAILED(result)){fail(result);break;}
-                const auto observed=std::clamp<std::int64_t>(clock_ns()-wait_enter+
-                    PrivateOutputSchedule::preparation_lead,PrivateOutputSchedule::preparation_lead,physical);
-                // A longer native call immediately gets enough overlap on the
-                // next cycle. Release excess budget gradually after short calls
-                // rather than alternately missing every longer runtime Wait.
-                runtime_budget=observed>=runtime_budget?observed:
-                    std::max(observed,runtime_budget-(runtime_budget-observed+15)/16);
+                const auto begun_at=clock_ns();
                 std::shared_ptr<Packet> packet;
                 {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping || !prepared.empty();});
                  if(stopping)break;packet=std::move(prepared.front());prepared.pop_front();}
                 // All copies/fences are complete. Commit only this FIFO head's
                 // real images; a later prepared image remains unreleased until
                 // its turn, so it cannot replace this frame's scene or overlay.
+                const auto release_enter=clock_ns();
                 result=release_prepared(*packet);
+                const auto release_leave=clock_ns();
                 if(XR_FAILED(result)){fail(result);retire(packet);fifo->retire();break;}
-                if(diagnostic) {options.trace(7,packet->sequence,wait_enter,0);options.trace(6,packet->sequence,wait_leave,0);}
+                // Do not charge the prepared-FIFO wait to native work. Starting
+                // native entry earlier changes neither producer nor End cadence.
+                runtime_budget.observe(begun_at-wait_enter+release_leave-release_enter,physical);
+                if(diagnostic) {
+                    options.trace(7,packet->sequence,wait_enter,0);options.trace(6,packet->sequence,wait_leave,0);
+                    options.trace(15,packet->sequence,release_enter,release_leave-release_enter);
+                    options.trace(16,packet->sequence,begun_at,runtime_budget.lead(physical));
+                }
                 // Only fully prepared packets reach this thread. Arrival time,
                 // not a rounded refresh slot, supplies the exact late hold.
                 const auto refill=schedule.input_ready(packet->source_ready_at,options.capacity);

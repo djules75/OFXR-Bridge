@@ -65,6 +65,8 @@ public:
         // and copy-fence completion observed. F9-only CPU QPC observations,
         // not GPU execution timestamps. Real release follows on the consumer,
         // after stage5 and before this packet's native EndFrame.
+        // Stages15/16: release entry QPC/duration, Begin-complete QPC/next
+        // native-entry budget. Optional CPU observations, never GPU queries.
         std::function<void(int,std::uint64_t,std::int64_t,std::int64_t)> trace;
     };
     explicit PrivateOpenXrRuntime(Options);
