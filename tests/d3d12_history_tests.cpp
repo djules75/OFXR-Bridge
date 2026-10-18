@@ -4554,6 +4554,198 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind) {
     require(operation_succeeded(history->invalidate()), "hybrid history invalidate failed");
 }
 
+void upload_single_slice(
+    D3D12WarpFixture& fixture,
+    ID3D12Resource* texture,
+    const std::vector<std::uint8_t>& bytes) {
+    const D3D12_RESOURCE_DESC description = texture->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
+    UINT row_count = 0;
+    UINT64 row_size = 0, total_size = 0;
+    fixture.device()->GetCopyableFootprints(
+        &description, 0, 1, 0, &layout, &row_count, &row_size, &total_size);
+    const UINT width = static_cast<UINT>(description.Width);
+    require(bytes.size() == static_cast<std::size_t>(width) * description.Height * kBytesPerPixel,
+        "single-slice pattern dimensions do not match the texture");
+    ComPtr<ID3D12Resource> upload = create_buffer(
+        fixture, D3D12_HEAP_TYPE_UPLOAD, total_size, D3D12_RESOURCE_STATE_GENERIC_READ);
+    void* mapped = nullptr;
+    const D3D12_RANGE no_read{0, 0};
+    require_hresult(upload->Map(0, &no_read, &mapped), "ID3D12Resource::Map(single-slice upload)");
+    for (UINT y = 0; y < row_count; ++y) {
+        std::memcpy(static_cast<std::byte*>(mapped) + layout.Offset +
+                static_cast<std::size_t>(y) * layout.Footprint.RowPitch,
+            bytes.data() + static_cast<std::size_t>(y) * width * kBytesPerPixel,
+            static_cast<std::size_t>(row_size));
+    }
+    upload->Unmap(0, nullptr);
+    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+        const auto to_copy = transition_barrier(
+            texture, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
+        list->ResourceBarrier(1, &to_copy);
+        D3D12_TEXTURE_COPY_LOCATION source{};
+        source.pResource = upload.Get();
+        source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        source.PlacedFootprint = layout;
+        D3D12_TEXTURE_COPY_LOCATION destination{};
+        destination.pResource = texture;
+        destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        destination.SubresourceIndex = 0;
+        list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        const auto back = transition_barrier(
+            texture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        list->ResourceBarrier(1, &back);
+    });
+}
+
+// V501: UEVR's Native Stereo - both eyes side by side in one array-size-one
+// image, a DLSS stream per eye. The hybrid has to draw each half with its own
+// eye's vectors; the right eye's object moves at another speed, so a half
+// drawn with the other eye's vectors misplaces its edges. UEVR crops each eye
+// inside its half (DI2: 0-3663 and 4680-8344 of 8344), so the views here are
+// cropped too, and the guides are placed as the resolver places them.
+void test_hybrid_side_by_side(D3D12WarpFixture& fixture) {
+    constexpr UINT half = 256, width = half * 2U, height = 128;
+    constexpr int object_left = 72, object_width = 80, object_top = 32, object_bottom = 96;
+    constexpr int background_motion = 6;
+    constexpr std::array<int, 2> object_motion{20, 12};
+    const auto make_scene = [&](int background_shift, const std::array<int, 2>& object_shift) {
+        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(width) * height * kBytesPerPixel);
+        for (UINT y = 0; y < height; ++y) {
+            for (UINT x = 0; x < width; ++x) {
+                const UINT eye = x / half;
+                const int local = static_cast<int>(x % half);
+                const int ox = local - object_shift[eye];
+                const bool object = static_cast<int>(y) >= object_top &&
+                    static_cast<int>(y) < object_bottom && ox >= object_left &&
+                    ox < object_left + object_width;
+                const int bx = local - background_shift + 64;
+                const RgbaBytes color = object
+                    ? ((ox / 5) % 2 ? RgbaBytes{240, 210, 40, 255} : RgbaBytes{30, 60, 200, 255})
+                    : RgbaBytes{static_cast<std::uint8_t>(40 + (bx * 13 + static_cast<int>(y) * 5) % 160),
+                                static_cast<std::uint8_t>(60 + ((bx / 3) % 7) * 20 + eye * 9),
+                                static_cast<std::uint8_t>(90 + (bx * 7) % 120), 255};
+                std::copy(color.begin(), color.end(), bytes.begin() +
+                    (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel);
+            }
+        }
+        return bytes;
+    };
+    const auto previous = make_scene(0, {0, 0});
+    const auto current = make_scene(background_motion, object_motion);
+    const auto expected = make_scene(background_motion / 2, {object_motion[0] / 2, object_motion[1] / 2});
+    // One render-resolution field per eye, as two slices of one texture.
+    auto game_motion = create_and_upload_game_motion_field(
+        fixture, half, height, [&](UINT eye, UINT x, UINT y) {
+            const int ox = static_cast<int>(x) - object_motion[eye];
+            const bool object = static_cast<int>(y) >= object_top &&
+                static_cast<int>(y) < object_bottom && ox >= object_left &&
+                ox < object_left + object_width;
+            return std::array<float, 2>{
+                static_cast<float>(-(object ? object_motion[eye] : background_motion)), 0.0F};
+        });
+    std::array<ComPtr<ID3D12Resource>, 2> sources{
+        create_single_slice_texture(fixture, width, height),
+        create_single_slice_texture(fixture, width, height)};
+    std::array<ComPtr<ID3D12Resource>, 2> current_destinations{
+        create_single_slice_texture(fixture, width, height),
+        create_single_slice_texture(fixture, width, height)};
+    std::array<ComPtr<ID3D12Resource>, 1> synthetic_destinations{
+        create_single_slice_texture(fixture, width, height)};
+    upload_single_slice(fixture, sources[0].Get(), previous);
+    upload_single_slice(fixture, sources[1].Get(), current);
+    std::array<ID3D12Resource*, 2> source_pointers{sources[0].Get(), sources[1].Get()};
+    std::array<ID3D12Resource*, 2> current_pointers{
+        current_destinations[0].Get(), current_destinations[1].Get()};
+    std::array<ID3D12Resource*, 1> synthetic_pointers{synthetic_destinations[0].Get()};
+    auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
+    require(operation_succeeded(history->initialize(fixture.device(), fixture.queue(),
+                source_pointers, D3D12_RESOURCE_STATE_RENDER_TARGET)),
+        "side-by-side history initialization failed");
+    xrfg::D3D12FrameSynthesizer synthesizer;
+    xrfg::D3D12NvidiaOpticalFlowOptions options;
+    options.hybrid = true;
+    require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(),
+                history, current_pointers, synthetic_pointers, kFormat,
+                D3D12_RESOURCE_STATE_RENDER_TARGET, xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+                options)),
+        "side-by-side synthesizer initialization failed");
+    const auto guides = [&](std::uint64_t serial) {
+        auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
+        set->eye_count = kEyeCount;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            auto frame = std::make_shared<xrfg::DlssMotionVectorFrame>();
+            frame->stream = 411 + eye;
+            frame->epoch = 3;
+            frame->serial = serial;
+            frame->previous_serial = serial - 1;
+            frame->motion_vectors = game_motion;
+            frame->producer_queue = fixture.queue();
+            frame->output_width = frame->motion_width = half;
+            frame->output_height = frame->motion_height = height;
+            frame->output_x = eye * half;
+            frame->motion_slice = eye;
+            frame->output_slice = 0;
+            frame->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            set->eyes[eye] = frame;
+        }
+        return set;
+    };
+    constexpr UINT crop = 32;
+    ReprojectionViews views = make_reprojection_views();
+    for (UINT eye = 0; eye < kEyeCount; ++eye) {
+        views[eye].image_rect = {eye * half + (eye == 1 ? crop : 0U), 0, half - crop, height};
+        views[eye].array_slice = 0;
+    }
+    xrfg::D3D12HistoryCaptureTicket capture_a{}, capture_b{};
+    require(operation_succeeded(history->capture(0, &capture_a)) &&
+            operation_succeeded(history->commit(capture_a)),
+        "side-by-side capture A failed");
+    xrfg::D3D12FrameSynthesisTicket prime{}, pair{};
+    require(operation_succeeded(synthesizer.submit_prime(capture_a, views, 0, &prime, guides(1))),
+        "side-by-side prime failed");
+    require_frame_start_gate(synthesizer, "side-by-side frame-start gate");
+    require(operation_succeeded(history->capture(1, &capture_b)) &&
+            operation_succeeded(history->commit(capture_b)),
+        "side-by-side capture B failed");
+    const auto statistics_before = xrfg::dlss_motion_vector_statistics();
+    require(operation_succeeded(synthesizer.submit_pair(capture_b, views, views, 0, 1, &pair,
+                std::nullopt, guides(2))),
+        "side-by-side pair failed");
+    fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+    const auto statistics_after = xrfg::dlss_motion_vector_statistics();
+    require(statistics_after.hybrid_used == statistics_before.hybrid_used + 1,
+        "the side-by-side pair was not composed by the hybrid");
+    const auto actual = readback_single_slice(
+        fixture, synthetic_destinations[0].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+    for (UINT eye = 0; eye < kEyeCount; ++eye) {
+        const int left = object_left + object_motion[eye] / 2, right = left + object_width;
+        double total = 0, blend_total = 0;
+        std::size_t count = 0;
+        for (int y = object_top + 2; y < object_bottom - 2; ++y) {
+            for (int local = 0; local < static_cast<int>(half); ++local) {
+                if (std::abs(local - left) >= 12 && std::abs(local - right) >= 12) continue;
+                const std::size_t offset = (static_cast<std::size_t>(y) * width +
+                    eye * half + static_cast<UINT>(local)) * kBytesPerPixel;
+                for (UINT c = 0; c < 3; ++c, ++count) {
+                    const int truth = expected[offset + c];
+                    blend_total += std::abs((previous[offset + c] + current[offset + c]) / 2 - truth);
+                    total += std::abs(static_cast<int>(actual[offset + c]) - truth);
+                }
+            }
+        }
+        const double edge_error = total / static_cast<double>(count);
+        const double blend_error = blend_total / static_cast<double>(count);
+        std::cout << "hybrid side-by-side eye=" << eye << " edge_mae=" << edge_error
+                  << " blend_mae=" << blend_error << '\n';
+        require(edge_error <= 1.2,
+            "hybrid side-by-side eye " + std::to_string(eye) +
+                " did not draw with its own vectors: " + std::to_string(edge_error));
+    }
+    require(operation_succeeded(synthesizer.wait_for_idle()), "side-by-side final drain failed");
+    require(operation_succeeded(history->invalidate()), "side-by-side history invalidate failed");
+}
+
 int main(int argc, char** argv) {
     const bool trace_test = std::getenv("XRFG_TEST_GPU_TRACE") != nullptr;
     const auto trace_dir = std::filesystem::temp_directory_path() /
@@ -4574,6 +4766,7 @@ int main(int argc, char** argv) {
             for (const auto scene : {HybridScene::occlusion, HybridScene::overlay, HybridScene::fade}) {
                 test_hybrid_composition(hybrid_fixture, scene);
             }
+            test_hybrid_side_by_side(hybrid_fixture);
             hybrid_fixture.require_no_debug_errors();
             return 0;
         }

@@ -1979,11 +1979,17 @@ struct D3D12FrameSynthesizer::Impl {
             uav_description.Texture2D.MipSlice = 0;
             uav_description.Texture2D.PlaneSlice = 0;
             if (backend == D3D12OpticalFlowBackend::nvidia) {
+                // Side by side in one slice (V501), the hybrid draws each view
+                // with its own block: the one eye's flow is repeated there.
+                const UINT nvidia_blocks = nvidia_options.hybrid
+                    ? std::max<UINT>(image_description.DepthOrArraySize, kMaxReprojectionViews)
+                    : image_description.DepthOrArraySize;
                 for (UINT eye_index = 0;
-                     eye_index < image_description.DepthOrArraySize;
+                     eye_index < nvidia_blocks;
                      ++eye_index) {
                     const UINT base = eye_index * kDescriptorBlockSize;
-                    NvidiaEyeResources& eye = slot.nvidia_eyes[eye_index];
+                    NvidiaEyeResources& eye = slot.nvidia_eyes[std::min<UINT>(
+                        eye_index, image_description.DepthOrArraySize - 1U)];
                     srv_description.Format = DXGI_FORMAT_R16G16_SINT;
                     device->CreateShaderResourceView(
                         eye.flow.Get(),
@@ -2052,7 +2058,7 @@ struct D3D12FrameSynthesizer::Impl {
                 // block for that eye's guide, so there they are repeated into
                 // every block.
                 const UINT flow_blocks = nvidia_options.hybrid
-                    ? image_description.DepthOrArraySize
+                    ? std::max<UINT>(image_description.DepthOrArraySize, kMaxReprojectionViews)
                     : 1U;
                 for (UINT block = 0; block < flow_blocks; ++block) {
                     const UINT base = block * kDescriptorBlockSize;
@@ -2095,8 +2101,9 @@ struct D3D12FrameSynthesizer::Impl {
             null_motion.Texture2DArray.MipLevels = 1;
             null_motion.Texture2DArray.FirstArraySlice = 0;
             null_motion.Texture2DArray.ArraySize = 1;
-            const UINT block_count =
-                backend == D3D12OpticalFlowBackend::nvidia || nvidia_options.hybrid
+            const UINT block_count = nvidia_options.hybrid
+                ? std::max<UINT>(image_description.DepthOrArraySize, kMaxReprojectionViews)
+                : backend == D3D12OpticalFlowBackend::nvidia
                     ? image_description.DepthOrArraySize
                     : 1U;
             for (UINT block = 0; block < block_count; ++block) {
@@ -2933,7 +2940,8 @@ struct D3D12FrameSynthesizer::Impl {
     void create_source_views(
         WorkSlot& slot,
         ID3D12Resource* previous_resource,
-        ID3D12Resource* current_resource) noexcept {
+        ID3D12Resource* current_resource,
+        UINT guide_eyes = 0) noexcept {
         D3D12_SHADER_RESOURCE_VIEW_DESC description{};
         description.Format = view_format;
         description.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
@@ -2946,7 +2954,7 @@ struct D3D12FrameSynthesizer::Impl {
         description.Texture2DArray.ResourceMinLODClamp = 0.0F;
         const D3D12_CPU_DESCRIPTOR_HANDLE start =
             slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
-        const UINT block_count = image_description.DepthOrArraySize;
+        const UINT block_count = std::max<UINT>(image_description.DepthOrArraySize, guide_eyes);
         for (UINT block = 0; block < block_count; ++block) {
             const UINT base = block * kDescriptorBlockSize;
             device->CreateShaderResourceView(
@@ -2964,7 +2972,7 @@ struct D3D12FrameSynthesizer::Impl {
         WorkSlot& slot,
         const DlssMotionVectorSet& frames) noexcept {
         if (frames.eye_count == 0 ||
-            frames.eye_count != image_description.DepthOrArraySize ||
+            frames.eye_count < image_description.DepthOrArraySize ||
             frames.eye_count > kDlssMotionVectorEyeCount) {
             return E_INVALIDARG;
         }
@@ -3026,6 +3034,28 @@ struct D3D12FrameSynthesizer::Impl {
     // ALLOW_SIMULTANEOUS_ACCESS and copying across on the application's
     // queue - which is what the D3D11 interop path already does.
 
+    // Side-by-side stereo (V501): UEVR's Native Stereo hands OpenXR one
+    // array-size-one image with both eyes' viewports in it while DLSS keeps a
+    // stream per eye, and the resolver pairs those as the image's two halves.
+    // A pair then takes a guide per view rather than per slice, and each view
+    // draws with its own descriptor block and guide. As in 0.3.
+    [[nodiscard]] UINT expected_guide_eyes(UINT view_count) const noexcept {
+        return std::min<UINT>(
+            std::max<UINT>(image_description.DepthOrArraySize, view_count),
+            kDlssMotionVectorEyeCount);
+    }
+
+    [[nodiscard]] bool side_by_side_guides(
+        const DlssMotionVectorSet& guides) const noexcept {
+        return guides.eye_count > image_description.DepthOrArraySize;
+    }
+
+    // The guide, and the descriptor block, a view draws with.
+    [[nodiscard]] UINT guide_eye(const DlssMotionVectorSet& guides,
+        UINT view_index, UINT slice) const noexcept {
+        return side_by_side_guides(guides) ? view_index : slice;
+    }
+
     [[nodiscard]] bool valid_game_motion_pair(
         const RollingSource& previous_source,
         const RollingSource& current_source) const noexcept {
@@ -3033,7 +3063,7 @@ struct D3D12FrameSynthesizer::Impl {
         const auto& current = current_source.motion_vectors;
         if (!previous_vectors || !current || previous_vectors->eye_count == 0 ||
             previous_vectors->eye_count != current->eye_count ||
-            current->eye_count != image_description.DepthOrArraySize ||
+            current->eye_count != expected_guide_eyes(current_source.view_count) ||
             current->eye_count > kDlssMotionVectorEyeCount) {
             return false;
         }
@@ -3055,7 +3085,7 @@ struct D3D12FrameSynthesizer::Impl {
         const RollingSource& source) const noexcept {
         const auto& frames = source.motion_vectors;
         if (!frames || frames->eye_count == 0 ||
-            frames->eye_count != image_description.DepthOrArraySize ||
+            frames->eye_count != expected_guide_eyes(source.view_count) ||
             frames->eye_count > kDlssMotionVectorEyeCount) {
             return false;
         }
@@ -3076,7 +3106,7 @@ struct D3D12FrameSynthesizer::Impl {
         const auto& current = current_source.motion_vectors;
         if (!previous_vectors || !current || previous_vectors->eye_count == 0 ||
             previous_vectors->eye_count != current->eye_count ||
-            current->eye_count != image_description.DepthOrArraySize ||
+            current->eye_count != expected_guide_eyes(current_source.view_count) ||
             current->eye_count > kDlssMotionVectorEyeCount) {
             return false;
         }
@@ -3111,24 +3141,31 @@ struct D3D12FrameSynthesizer::Impl {
         for (UINT view_index = 0; view_index < target_views.size(); ++view_index) {
             const UINT slice = resolved_array_slice(target_views[view_index], view_index,
                 target_views.size(), image_description.DepthOrArraySize);
-            if (slice >= guides.eye_count) return false;
-            const auto& guide = guides.eyes[slice];
+            const UINT eye = guide_eye(guides, view_index, slice);
+            if (eye >= guides.eye_count) return false;
+            // Side by side, the resolver has already put each eye's DLSS
+            // output at its half of the image (output_x); a view is cropped
+            // inside that half, never placed at its own origin - UEVR's
+            // right eye starts 508 pixels into its half (V501).
+            const auto& guide = guides.eyes[eye];
             const D3D12ImageRect rect = resolved_rect(
                 target_views[view_index].image_rect,
                 static_cast<UINT>(image_description.Width), image_description.Height);
+            const D3D12ImageRect placed{guide->output_x, guide->output_y,
+                guide->output_width, guide->output_height};
             const std::uint64_t rect_right =
                 static_cast<std::uint64_t>(rect.offset_x) + rect.width;
             const std::uint64_t rect_bottom =
                 static_cast<std::uint64_t>(rect.offset_y) + rect.height;
             const std::uint64_t guide_right =
-                static_cast<std::uint64_t>(guide->output_x) + guide->output_width;
+                static_cast<std::uint64_t>(placed.offset_x) + placed.width;
             const std::uint64_t guide_bottom =
-                static_cast<std::uint64_t>(guide->output_y) + guide->output_height;
+                static_cast<std::uint64_t>(placed.offset_y) + placed.height;
             if (rect.width == 0 || rect.height == 0 ||
-                rect.offset_x < guide->output_x || rect.offset_y < guide->output_y ||
+                rect.offset_x < placed.offset_x || rect.offset_y < placed.offset_y ||
                 rect_right > guide_right || rect_bottom > guide_bottom ||
-                guide->output_width > 0xFFFFU || guide->output_height > 0xFFFFU ||
-                guide->output_x > 0xFFFFU || guide->output_y > 0xFFFFU) {
+                placed.width > 0xFFFFU || placed.height > 0xFFFFU ||
+                placed.offset_x > 0xFFFFU || placed.offset_y > 0xFFFFU) {
                 return false;
             }
         }
@@ -3192,7 +3229,10 @@ struct D3D12FrameSynthesizer::Impl {
         std::uint32_t current_destination_index,
         const std::optional<OverlayPlacement>& debug_marker) noexcept {
         const auto& guides = current_source.motion_vectors;
-        if (!guides || !valid_game_motion_pair(previous_source, current_source)) {
+        // Side-by-side guides are the hybrid's only (V501); here the pair
+        // falls back to the flow rather than draw both eyes with one guide.
+        if (!guides || !valid_game_motion_pair(previous_source, current_source) ||
+            side_by_side_guides(*guides)) {
             return E_INVALIDARG;
         }
         dred_marker(slot.command_list.Get(), "OFXR DLSS-vector begin");
@@ -3608,7 +3648,8 @@ struct D3D12FrameSynthesizer::Impl {
         ID3D12Resource* const current_resource = current_source.resource.Get();
         ID3D12Resource* const current_destination =
             current_destinations[current_destination_index].resource.Get();
-        create_source_views(slot, previous_resource, current_resource);
+        create_source_views(slot, previous_resource, current_resource,
+            guides != nullptr ? guides->eye_count : 0U);
         if (guides != nullptr) {
             const HRESULT views = create_game_motion_views(slot, *guides);
             if (FAILED(views)) return views;
@@ -3845,9 +3886,11 @@ struct D3D12FrameSynthesizer::Impl {
                     image_description.DepthOrArraySize);
                 parameters.slice = slice;
                 parameters.view_index = view_index;
+                const UINT eye = guides != nullptr
+                    ? guide_eye(*guides, view_index, slice) : slice;
                 const D3D12_GPU_DESCRIPTOR_HANDLE block = offset_gpu_handle(
                     gpu_start,
-                    slice * kDescriptorBlockSize,
+                    eye * kDescriptorBlockSize,
                     descriptor_increment);
                 synthesis->SetGraphicsRootDescriptorTable(0, block);
                 synthesis->SetGraphicsRootDescriptorTable(
@@ -3857,7 +3900,7 @@ struct D3D12FrameSynthesizer::Impl {
                         kSrvDescriptorCount,
                         descriptor_increment));
                 if (guides != nullptr) {
-                    apply_hybrid_guide_constants(parameters, *guides->eyes[slice]);
+                    apply_hybrid_guide_constants(parameters, *guides->eyes[eye]);
                 }
                 synthesis->SetGraphicsRoot32BitConstants(
                     2,
@@ -4126,7 +4169,8 @@ struct D3D12FrameSynthesizer::Impl {
         ID3D12Resource* const current_resource = current_source.resource.Get();
         ID3D12Resource* const current_destination =
             current_destinations[current_destination_index].resource.Get();
-        create_source_views(slot, previous_resource, current_resource);
+        create_source_views(slot, previous_resource, current_resource,
+            guides != nullptr ? guides->eye_count : 0U);
         if (guides != nullptr) {
             const HRESULT views = create_game_motion_views(slot, *guides);
             if (FAILED(views)) return views;
@@ -4280,12 +4324,13 @@ struct D3D12FrameSynthesizer::Impl {
                 if (guides != nullptr) {
                     // This eye's block: the flow views repeated there and
                     // the eye's guide at index 6.
+                    const UINT eye = guide_eye(*guides, view_index, slice);
                     const D3D12_GPU_DESCRIPTOR_HANDLE block = offset_gpu_handle(
-                        gpu_start, slice * kDescriptorBlockSize, descriptor_increment);
+                        gpu_start, eye * kDescriptorBlockSize, descriptor_increment);
                     slot.command_list->SetGraphicsRootDescriptorTable(0, block);
                     slot.command_list->SetGraphicsRootDescriptorTable(1,
                         offset_gpu_handle(block, kSrvDescriptorCount, descriptor_increment));
-                    apply_hybrid_guide_constants(parameters, *guides->eyes[slice]);
+                    apply_hybrid_guide_constants(parameters, *guides->eyes[eye]);
                 }
                 slot.command_list->SetGraphicsRoot32BitConstants(
                     2,
