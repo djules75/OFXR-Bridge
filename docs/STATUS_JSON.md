@@ -92,7 +92,7 @@ should read those and ignore everything else.
 | `updated` | string | When this file was written, ISO 8601 UTC. |
 | `ofxr.build` | number | OFXR's internal build number. |
 | `session` | object or null | The running game: `process` (executable name), `pid`, `runtime` (the OpenXR runtime's name) and `deep_pipeline` (Prefer FPS over latency). `null` without a game. |
-| `settings` | object | What `tray.ini` asks for: `multiplier`, optical flow `backend` (`nvidia` or `fidelityfx`), NVIDIA `preset` (`slow`, `medium`, `fast`), `flow_resolution` in percent (`100`, `75`, `50`), `bidirectional`, `deep_pipeline`, `edge_ghosting_reduction`, `repeating_pattern_lock`. |
+| `settings` | object | What `tray.ini` asks for: `multiplier`, optical flow `backend` (`nvidia` or `fidelityfx`), NVIDIA `preset` (`slow`, `medium`, `fast`), `flow_resolution` in percent (`100`, `75`, `50`, `25`), `bidirectional`, `deep_pipeline`, `edge_ghosting_reduction`, `repeating_pattern_lock`. |
 
 ## Reading it reliably
 

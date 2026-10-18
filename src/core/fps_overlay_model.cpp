@@ -24,6 +24,20 @@ const char* overlay_position_name(FpsOverlayPosition position) noexcept {
     }
 }
 
+FpsOverlaySize parse_overlay_size(std::string_view value) noexcept {
+    if (value == "medium") return FpsOverlaySize::medium;
+    if (value == "small") return FpsOverlaySize::little;
+    return FpsOverlaySize::big;
+}
+
+const char* overlay_size_name(FpsOverlaySize size) noexcept {
+    switch (size) {
+    case FpsOverlaySize::medium: return "medium";
+    case FpsOverlaySize::little: return "small";
+    default: return "big";
+    }
+}
+
 FpsCounter::Bucket& FpsCounter::bucket(std::int64_t now) noexcept {
     now = std::max<std::int64_t>(now, 0);
     if (start_ns_ < 0) start_ns_ = now;
@@ -127,7 +141,8 @@ std::array<unsigned, 7> glyph(char c) noexcept {
 }
 
 std::vector<std::uint32_t> rasterize_fps_overlay(
-    std::uint32_t width, std::uint32_t height, const FpsSnapshot& snapshot, bool bgra) {
+    std::uint32_t width, std::uint32_t height, const FpsSnapshot& snapshot, bool bgra,
+    FpsOverlaySize size) {
     if (width < 24 || width > 2048 || height < 12 || height > 1024) return {};
     const auto color = [bgra](unsigned r, unsigned g, unsigned b) {
         return 0xff000000u | (bgra ? b | (g << 8) | (r << 16)
@@ -146,18 +161,25 @@ std::vector<std::uint32_t> rasterize_fps_overlay(
         static_cast<int>(std::clamp(rate, 0.0f, 999.0f) + 0.5f)));
     // The tray's pause symbol is the same orange.
     const auto pause = color(255, 150, 0);
-    unsigned x = (width - (length * 6 - 1) * scale) / 2;
-    const unsigned top = (height - 7 * scale) / 2;
-    for (const char* p = text; *p; ++p, x += 6 * scale) {
-        const auto rows = glyph(*p);
-        const auto ink = *p == 'p' ? pause : status;
-        for (unsigned y = 0; y < 7; ++y) for (unsigned column = 0; column < 5; ++column) {
-            if ((rows[y] & (1u << (4 - column))) == 0) continue;
-            for (unsigned sy = 0; sy < scale; ++sy) for (unsigned sx = 0; sx < scale; ++sx) {
-                const unsigned px = x + column * scale + sx;
-                const unsigned py = top + y * scale + sy;
-                pixels[static_cast<std::size_t>(py) * width + px] = ink;
-            }
+    // One glyph pixel's side in texture pixels; fractional below big, where
+    // each texture pixel takes the glyph pixel under its centre.
+    const float cell = std::max(1.0f, static_cast<float>(scale) *
+        (size == FpsOverlaySize::little ? 1.0f / 3.0f
+         : size == FpsOverlaySize::medium ? 0.5f : 1.0f));
+    const auto text_width = static_cast<unsigned>(std::ceil((length * 6 - 1) * cell));
+    const auto text_height = static_cast<unsigned>(std::ceil(7 * cell));
+    const unsigned left = (width - text_width) / 2;
+    const unsigned top = (height - text_height) / 2;
+    for (unsigned py = top; py < top + text_height && py < height; ++py) {
+        const auto y = static_cast<unsigned>((py - top + 0.5f) / cell);
+        if (y >= 7) continue;
+        for (unsigned px = left; px < left + text_width && px < width; ++px) {
+            const auto cell_column = static_cast<unsigned>((px - left + 0.5f) / cell);
+            const unsigned index = cell_column / 6, column = cell_column % 6;
+            if (index >= length || column == 5) continue;
+            if ((glyph(text[index])[y] & (1u << (4 - column))) == 0) continue;
+            pixels[static_cast<std::size_t>(py) * width + px] =
+                text[index] == 'p' ? pause : status;
         }
     }
     return pixels;

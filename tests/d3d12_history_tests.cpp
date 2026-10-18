@@ -4164,6 +4164,11 @@ int main() {
                            input_scale.data(), input_scale_length) == "50") {
                 nvidia_options.input_scale =
                     xrfg::D3D12NvidiaInputScale::half;
+            } else if (input_scale_length == 2 &&
+                       std::string_view(
+                           input_scale.data(), input_scale_length) == "25") {
+                nvidia_options.input_scale =
+                    xrfg::D3D12NvidiaInputScale::quarter;
             }
             std::array<char, 8> bidirectional{};
             const DWORD bidirectional_length = GetEnvironmentVariableA(

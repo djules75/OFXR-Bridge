@@ -306,6 +306,8 @@ template <typename Handle>
         scale_code = 0x10000U;
     } else if (options.input_scale == xrfg::D3D12NvidiaInputScale::half) {
         scale_code = 0x20000U;
+    } else if (options.input_scale == xrfg::D3D12NvidiaInputScale::quarter) {
+        scale_code = 0x30000U;
     }
     return code | (options.bidirectional ? 0x100U : 0U) | scale_code;
 }

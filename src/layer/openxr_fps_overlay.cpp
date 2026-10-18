@@ -53,6 +53,7 @@ struct OpenXrFpsOverlay::Impl {
     FpsCounter application_counter;
     FpsCounter synthetic_counter;
     FpsOverlayPosition position{FpsOverlayPosition::upper_right};
+    FpsOverlaySize size{FpsOverlaySize::big};
     std::int64_t next_refresh{};
     bool attempted{}, initialized{}, image_valid{}, acquired{}, waited{}, disabled{};
     bool paused{};
@@ -226,7 +227,7 @@ struct OpenXrFpsOverlay::Impl {
         if (completed == UINT64_MAX) { disabled = true; return false; }
         if (completed < image.fence_value) return false;
         const bool bgra = format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
-        const auto pixels = rasterize_fps_overlay(width, height, snapshot, bgra);
+        const auto pixels = rasterize_fps_overlay(width, height, snapshot, bgra, size);
         if (pixels.empty()) return false;
         HRESULT result = S_OK;
         const auto value = next_fence++;
@@ -292,6 +293,11 @@ struct OpenXrFpsOverlay::Impl {
         std::string value;
         for (wchar_t c : setting) { if (!c) break; value += c < 128 ? static_cast<char>(c) : '?'; }
         position = parse_overlay_position(value);
+        GetPrivateProfileStringW(L"overlay", L"size", L"big",
+            setting.data(), static_cast<DWORD>(setting.size()), ini.c_str());
+        value.clear();
+        for (wchar_t c : setting) { if (!c) break; value += c < 128 ? static_cast<char>(c) : '?'; }
+        size = parse_overlay_size(value);
         if (position == FpsOverlayPosition::off || disabled || !info->layerCount || !info->layers) return;
         float left = -1, right = 1, down = -1, up = 1;
         std::uint32_t eye_width = 0;

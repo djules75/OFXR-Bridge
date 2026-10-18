@@ -518,7 +518,9 @@ ConfiguredNvidiaOptions read_nvidia_options(
             ? ConfiguredNvidiaInputScale::three_quarter
             : input_scale == 50
                 ? ConfiguredNvidiaInputScale::half
-                : ConfiguredNvidiaInputScale::full;
+                : input_scale == 25
+                    ? ConfiguredNvidiaInputScale::quarter
+                    : ConfiguredNvidiaInputScale::full;
         options.bidirectional = GetPrivateProfileIntW(
             L"ofxr",
             L"nvidia_bidirectional",

@@ -154,6 +154,41 @@ int main(int argc, char** argv) {
                 "pause symbol leaves the number as it was");
         require(!rasterize_fps_overlay(24, 12, FpsSnapshot{999, false, 1.0f, true}, false).empty(),
                 "pause symbol fits beside three digits");
+        // Medium and small: the same digits at half and a third of the
+        // size, centred where big puts them.
+        require(rasterize_fps_overlay(240, 120, snapshot, false, FpsOverlaySize::big) == green,
+                "big is the original size");
+        // Ink count, and the centre of the ink's bounding box: "90" fills its
+        // text box, so that centre is the text's.
+        const auto ink = [](const std::vector<std::uint32_t>& image, double& cx, double& cy) {
+            std::size_t count = 0, x0 = 240, x1 = 0, y0 = 120, y1 = 0;
+            for (std::size_t i = 0; i < image.size(); ++i) if (image[i]) {
+                ++count;
+                x0 = std::min(x0, i % 240); x1 = std::max(x1, i % 240);
+                y0 = std::min(y0, i / 240); y1 = std::max(y1, i / 240);
+            }
+            cx = (static_cast<double>(x0) + static_cast<double>(x1)) / 2;
+            cy = (static_cast<double>(y0) + static_cast<double>(y1)) / 2;
+            return count;
+        };
+        double big_x{}, big_y{}, medium_x{}, medium_y{}, small_x{}, small_y{};
+        const auto big_ink = ink(green, big_x, big_y);
+        const auto medium_ink = ink(
+            rasterize_fps_overlay(240, 120, snapshot, false, FpsOverlaySize::medium), medium_x, medium_y);
+        const auto small_ink = ink(
+            rasterize_fps_overlay(240, 120, snapshot, false, FpsOverlaySize::little), small_x, small_y);
+        require(medium_ink * 4 == big_ink, "medium is half the size per axis");
+        require(small_ink * 9 > big_ink * 8 / 10 && small_ink * 9 < big_ink * 12 / 10,
+                "small is a third of the size per axis");
+        require(std::abs(medium_x - big_x) <= 1 && std::abs(medium_y - big_y) <= 1 &&
+                std::abs(small_x - big_x) <= 1 && std::abs(small_y - big_y) <= 1,
+                "smaller text keeps the counter's centre");
+        require(!rasterize_fps_overlay(24, 12, FpsSnapshot{999, false, 1.0f, true}, false,
+                                       FpsOverlaySize::little).empty(),
+                "small fits the minimal image");
+        for (auto size : {FpsOverlaySize::big, FpsOverlaySize::medium, FpsOverlaySize::little})
+            require(parse_overlay_size(overlay_size_name(size)) == size, "size name round trip");
+        require(parse_overlay_size("") == FpsOverlaySize::big, "size defaults to big");
         // Optional visual artifact, not a live image or runtime dependency.
         if (argc > 1) {
             std::ofstream file(argv[1], std::ios::binary);

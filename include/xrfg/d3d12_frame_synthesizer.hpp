@@ -98,6 +98,7 @@ enum class D3D12OpticalFlowInputScale {
     full,
     three_quarter,
     half,
+    quarter,
 };
 
 // The name the NVIDIA options and the tray settings already use.

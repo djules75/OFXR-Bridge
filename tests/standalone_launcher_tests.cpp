@@ -144,7 +144,7 @@ int main() {
     // Every value away from its default, so the round trip proves parsing.
     settings.backend = FlowBackend::fidelity_fx;
     settings.nvidia_preset = NvidiaPerformancePreset::slow;
-    settings.nvidia_input_scale = NvidiaInputScale::half;
+    settings.nvidia_input_scale = NvidiaInputScale::quarter;
     settings.nvidia_bidirectional = true;
     settings.deep_pipeline = false;
     settings.triple_frame_gen = true;
@@ -156,17 +156,20 @@ int main() {
     settings.capture_at_end_frame = false;
     settings.diagnostics = true;
     settings.pause_hotkey = "shift+scrolllock";
+    settings.overlay_size = xrfg::FpsOverlaySize::little;
     const std::string serialized = serialize_settings(settings);
     const LauncherSettings parsed = parse_settings(serialized);
     if (parsed.backend != FlowBackend::fidelity_fx ||
         parsed.nvidia_preset != NvidiaPerformancePreset::slow ||
-        parsed.nvidia_input_scale != NvidiaInputScale::half ||
+        parsed.nvidia_input_scale != NvidiaInputScale::quarter ||
         !parsed.nvidia_bidirectional || parsed.deep_pipeline ||
         !parsed.triple_frame_gen ||
         parsed.excluded_processes != "Home.exe; Other-Shipping.exe" ||
         parsed.single_swapchain_rings || parsed.vulkan_session_bridge ||
         parsed.vulkan_support || parsed.d3d11_bridge ||
         parsed.capture_at_end_frame || !parsed.diagnostics ||
+        parsed.overlay_size != xrfg::FpsOverlaySize::little ||
+        !contains(build_runtime_ini(parsed), "\r\n[overlay]\r\nposition=upper_right\r\nsize=small\r\n") ||
         !contains(build_runtime_ini(parsed), "capture_at_end_frame=0")) {
         std::cerr << "standalone settings round-trip failed\n";
         return 1;
@@ -246,7 +249,7 @@ int main() {
     const std::string runtime_ini = build_runtime_ini(settings);
     if (!contains(runtime_ini, "[ofxr]\r\nbackend=fidelityfx") ||
         !contains(runtime_ini, "nvidia_preset=slow") ||
-        !contains(runtime_ini, "nvidia_input_scale=50") ||
+        !contains(runtime_ini, "nvidia_input_scale=25") ||
         !contains(runtime_ini, "nvidia_bidirectional=1") ||
         !contains(runtime_ini, "deep_pipeline=0") ||
         !contains(runtime_ini, "triple_frame_gen=1") ||

@@ -11,6 +11,15 @@ enum class FpsOverlayPosition { off, upper_left, upper_right, lower_left, lower_
 [[nodiscard]] FpsOverlayPosition parse_overlay_position(std::string_view value) noexcept;
 [[nodiscard]] const char* overlay_position_name(FpsOverlayPosition position) noexcept;
 
+// The digits' size within the counter's panel: big is the original, medium
+// half of it and small a third. The panel itself keeps its size and place, so
+// the counter's centre does not move and the text keeps the big size's pixel
+// density instead of being minified by the compositor.
+// "little" because windows.h defines small as a macro; its ini value is "small".
+enum class FpsOverlaySize { big, medium, little };
+[[nodiscard]] FpsOverlaySize parse_overlay_size(std::string_view value) noexcept;
+[[nodiscard]] const char* overlay_size_name(FpsOverlaySize size) noexcept;
+
 struct FpsSnapshot {
     float submitted_fps{};
     bool active{};
@@ -87,6 +96,7 @@ struct OverlayPlacement {
     FpsOverlayPosition position, float left, float right, float down, float up) noexcept;
 [[nodiscard]] std::uint32_t overlay_texture_width(std::uint32_t eye_width) noexcept;
 [[nodiscard]] std::vector<std::uint32_t> rasterize_fps_overlay(
-    std::uint32_t width, std::uint32_t height, const FpsSnapshot& snapshot, bool bgra);
+    std::uint32_t width, std::uint32_t height, const FpsSnapshot& snapshot, bool bgra,
+    FpsOverlaySize size = FpsOverlaySize::big);
 
 } // namespace xrfg

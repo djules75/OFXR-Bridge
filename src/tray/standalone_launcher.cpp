@@ -159,6 +159,8 @@ std::string nvidia_input_scale_ini_value(NvidiaInputScale scale) {
         return "75";
     case NvidiaInputScale::half:
         return "50";
+    case NvidiaInputScale::quarter:
+        return "25";
     case NvidiaInputScale::full:
     default:
         return "105";
@@ -202,7 +204,9 @@ LauncherSettings parse_settings(std::string_view text) {
                         ? NvidiaInputScale::three_quarter
                         : value == "50"
                             ? NvidiaInputScale::half
-                            : NvidiaInputScale::full;
+                            : value == "25"
+                                ? NvidiaInputScale::quarter
+                                : NvidiaInputScale::full;
                 } else if (key == "nvidia_bidirectional") {
                     settings.nvidia_bidirectional = value == "1" ||
                         lower_ascii(value) == "true";
@@ -236,6 +240,8 @@ LauncherSettings parse_settings(std::string_view text) {
                         lower_ascii(value) == "true";
                 } else if (key == "overlay_position") {
                     settings.overlay_position = parse_overlay_position(lower_ascii(value));
+                } else if (key == "overlay_size") {
+                    settings.overlay_size = parse_overlay_size(lower_ascii(value));
                 } else if (key == "diagnostics") {
                     settings.diagnostics = value == "1" ||
                                            lower_ascii(value) == "true";
@@ -313,6 +319,7 @@ std::string build_status_json(const StatusInputs& inputs) {
         : settings.nvidia_preset == NvidiaPerformancePreset::fast ? "fast" : "medium";
     const int flow_resolution = settings.nvidia_input_scale == NvidiaInputScale::half
         ? 50
+        : settings.nvidia_input_scale == NvidiaInputScale::quarter ? 25
         : settings.nvidia_input_scale == NvidiaInputScale::three_quarter ? 75 : 100;
     json += "  \"settings\": {\n";
     json += "    \"multiplier\": " + std::to_string(configured) + ",\n";
@@ -348,6 +355,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\ncapture_at_end_frame=" + (settings.capture_at_end_frame ? "1" : "0") +
            "\r\ndiagnostics=" + (settings.diagnostics ? "1" : "0") +
            "\r\noverlay_position=" + overlay_position_name(settings.overlay_position) +
+           "\r\noverlay_size=" + overlay_size_name(settings.overlay_size) +
            "\r\npause_hotkey=" + settings.pause_hotkey +
            "\r\nedge_ghosting_reduction=" +
            (settings.edge_ghosting_reduction ? "1" : "0") +
@@ -595,7 +603,8 @@ std::string build_runtime_ini(
            (settings.diagnostics ? "1" : "0") +
            "\r\nmax_file_mb=" + std::to_string(max_file_mb) +
            "\r\nflush_each_event=" + (flush_each_event ? "1" : "0") + "\r\n"
-           "\r\n[overlay]\r\nposition=" + overlay_position_name(settings.overlay_position) + "\r\n";
+           "\r\n[overlay]\r\nposition=" + overlay_position_name(settings.overlay_position) +
+           "\r\nsize=" + overlay_size_name(settings.overlay_size) + "\r\n";
 }
 
 std::filesystem::path runtime_version_directory(

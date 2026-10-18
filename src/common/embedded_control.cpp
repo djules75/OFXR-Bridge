@@ -54,7 +54,7 @@ Snapshot snapshot() {
 }
 bool request(Settings s) {
     if (s.backend < 0 || s.backend > 1 || s.preset < 0 || s.preset > 2 ||
-        s.scale < 0 || s.scale > 2 || s.motion_vectors < 0 || s.motion_vectors > 1 ||
+        s.scale < 0 || s.scale > 3 || s.motion_vectors < 0 || s.motion_vectors > 1 ||
         s.frame_generation != 0) return false;
     auto& c = control(); std::scoped_lock lock(c.mutex);
     const auto old = c.settings;
@@ -63,7 +63,7 @@ bool request(Settings s) {
     if (old.enabled != s.enabled) ok &= write(L"ofxr", L"enabled", s.enabled ? L"1" : L"0");
     if (old.backend != s.backend) ok &= write(L"ofxr", L"backend", s.backend ? L"nvidia" : L"fidelityfx");
     const wchar_t* presets[]{L"slow", L"medium", L"fast"};
-    const wchar_t* scales[]{L"100", L"75", L"50"};
+    const wchar_t* scales[]{L"100", L"75", L"50", L"25"};
     if (old.preset != s.preset) ok &= write(L"ofxr", L"nvidia_preset", presets[s.preset]);
     if (old.scale != s.scale) ok &= write(L"ofxr", L"nvidia_input_scale", scales[s.scale]);
     if (old.backward != s.backward) ok &= write(L"ofxr", L"nvidia_bidirectional", s.backward ? L"1" : L"0");

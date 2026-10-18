@@ -65,6 +65,8 @@ struct NvidiaInputScaleRatio {
         return {3U, 4U};
     case D3D12NvidiaInputScale::half:
         return {1U, 2U};
+    case D3D12NvidiaInputScale::quarter:
+        return {1U, 4U};
     case D3D12NvidiaInputScale::full:
     default:
         return {1U, 1U};

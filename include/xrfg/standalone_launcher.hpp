@@ -27,6 +27,7 @@ enum class NvidiaInputScale {
     full,
     three_quarter,
     half,
+    quarter,
 };
 
 struct LauncherSettings {
@@ -79,6 +80,7 @@ struct LauncherSettings {
     bool capture_at_end_frame{true};
     bool diagnostics{};
     FpsOverlayPosition overlay_position{FpsOverlayPosition::upper_right};
+    FpsOverlaySize overlay_size{FpsOverlaySize::big};
     // The system-wide key for "Pause frame generation" while armed, in
     // parse_hotkey's form. No menu entry; edit tray.ini. Empty, "off" or
     // anything parse_hotkey refuses means no key.

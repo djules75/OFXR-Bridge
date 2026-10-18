@@ -54,6 +54,8 @@ enum MenuCommand : UINT {
     toggle_arm = 90,
     toggle_pause = 91,
     change_pause_key = 92,
+    frame_gen_2x = 100,
+    frame_gen_3x = 101,
     backend_fidelity_fx = 110,
     backend_nvidia_slow = 111,
     backend_nvidia_medium = 112,
@@ -63,8 +65,8 @@ enum MenuCommand : UINT {
     nvidia_scale_full = 115,
     nvidia_scale_three_quarter = 116,
     nvidia_scale_half = 117,
+    nvidia_scale_quarter = 129,
     toggle_deep_pipeline = 118,
-    toggle_triple_frame_gen = 119,
     toggle_lower_vram = 126,
     reset_defaults = 127,
     toggle_diagnostics = 120,
@@ -74,6 +76,9 @@ enum MenuCommand : UINT {
     overlay_lower_left = 124,
     overlay_lower_right = 125,
     open_logs = 130,
+    overlay_size_big = 131,
+    overlay_size_medium = 132,
+    overlay_size_small = 133,
     donate_creator = 138,
     donate_maintainer = 139,
     show_about = 140,
@@ -607,6 +612,9 @@ void log_lifecycle(const std::filesystem::path& local_directory,
             break;
         case xrfg::standalone::NvidiaInputScale::half:
             tooltip += L" @ 50%";
+            break;
+        case xrfg::standalone::NvidiaInputScale::quarter:
+            tooltip += L" @ 25%";
             break;
         case xrfg::standalone::NvidiaInputScale::full:
         default:
@@ -1315,6 +1323,24 @@ void show_context_menu(AppState& state) {
             ? L"Disarm bridge"
             : L"Arm bridge until manual disarm");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    HMENU multiplier_menu = CreatePopupMenu();
+    if (multiplier_menu) {
+        AppendMenuW(
+            multiplier_menu,
+            MF_STRING | (state.settings.triple_frame_gen ? MF_UNCHECKED : MF_CHECKED),
+            frame_gen_2x,
+            L"2X");
+        AppendMenuW(
+            multiplier_menu,
+            MF_STRING | (state.settings.triple_frame_gen ? MF_CHECKED : MF_UNCHECKED),
+            frame_gen_3x,
+            L"3X");
+        AppendMenuW(
+            menu,
+            MF_POPUP,
+            reinterpret_cast<UINT_PTR>(multiplier_menu),
+            L"Frame Gen multiplier [live change]");
+    }
     AppendMenuW(
         menu,
         MF_STRING | (state.armed && state.pause_signal ? MF_ENABLED : MF_GRAYED),
@@ -1366,7 +1392,7 @@ void show_context_menu(AppState& state) {
                  ? MF_CHECKED
                  : MF_UNCHECKED),
         backend_nvidia_medium,
-        L"NVIDIA Medium");
+        L"NVIDIA Medium (default)");
     AppendMenuW(
         backend_menu,
         MF_STRING |
@@ -1424,7 +1450,16 @@ void show_context_menu(AppState& state) {
                  ? MF_CHECKED
                  : MF_UNCHECKED),
         nvidia_scale_half,
-        L"50%");
+        L"50% (default)");
+    AppendMenuW(
+        nvidia_scale_menu,
+        MF_STRING |
+            (state.settings.nvidia_input_scale ==
+                     xrfg::standalone::NvidiaInputScale::quarter
+                 ? MF_CHECKED
+                 : MF_UNCHECKED),
+        nvidia_scale_quarter,
+        L"25%");
     AppendMenuW(
         menu,
         MF_POPUP,
@@ -1440,13 +1475,8 @@ void show_context_menu(AppState& state) {
             (state.settings.triple_frame_gen ? MF_GRAYED : MF_ENABLED),
         toggle_deep_pipeline,
         state.settings.triple_frame_gen
-            ? L"Prefer FPS over latency (on with 3X Frame Gen)"
+            ? L"Prefer FPS over latency (on with 3X)"
             : L"Prefer FPS over latency");
-    AppendMenuW(
-        menu,
-        MF_STRING | (state.settings.triple_frame_gen ? MF_CHECKED : MF_UNCHECKED),
-        toggle_triple_frame_gen,
-        L"3X Frame Gen [live change]");
     AppendMenuW(
         menu,
         MF_STRING | (state.settings.single_swapchain_rings ? MF_CHECKED : MF_UNCHECKED),
@@ -1460,6 +1490,16 @@ void show_context_menu(AppState& state) {
         L"Bridge flight recorder [live change]");
     HMENU overlay_menu = CreatePopupMenu();
     if (overlay_menu) {
+        const struct { UINT command; xrfg::FpsOverlaySize size; const wchar_t* text; } sizes[]{
+            {overlay_size_big, xrfg::FpsOverlaySize::big, L"Big"},
+            {overlay_size_medium, xrfg::FpsOverlaySize::medium, L"Medium"},
+            {overlay_size_small, xrfg::FpsOverlaySize::little, L"Small"}};
+        for (const auto& entry : sizes) {
+            AppendMenuW(overlay_menu, MF_STRING |
+                (state.settings.overlay_size == entry.size ? MF_CHECKED : MF_UNCHECKED),
+                entry.command, entry.text);
+        }
+        AppendMenuW(overlay_menu, MF_SEPARATOR, 0, nullptr);
         const struct { UINT command; xrfg::FpsOverlayPosition position; const wchar_t* text; } entries[]{
             {overlay_upper_left, xrfg::FpsOverlayPosition::upper_left, L"Upper left"},
             {overlay_upper_right, xrfg::FpsOverlayPosition::upper_right, L"Upper right"},
@@ -1581,6 +1621,11 @@ void handle_command(AppState& state, UINT command) {
             xrfg::standalone::NvidiaInputScale::half;
         update_runtime_options(state);
         break;
+    case nvidia_scale_quarter:
+        state.settings.nvidia_input_scale =
+            xrfg::standalone::NvidiaInputScale::quarter;
+        update_runtime_options(state);
+        break;
     case toggle_deep_pipeline:
         if (state.settings.triple_frame_gen) {
             break;
@@ -1618,12 +1663,12 @@ void handle_command(AppState& state, UINT command) {
                 state.window,
                 L"Reset every OFXR setting to its factory default?\n\n"
                 L"Optical flow: NVIDIA Medium at 50%, bidirectional "
-                L"consistency off. Prefer FPS over latency: on. 3X Frame "
-                L"Gen: off. Lower VRAM: on. FPS overlay: upper right. Bridge "
+                L"consistency off. Prefer FPS over latency: on. Frame Gen "
+                L"multiplier: 2X. Lower VRAM: on. FPS overlay: upper right, big. Bridge "
                 L"flight recorder: off. Pause key: Ctrl + Alt + F7. Edge "
                 L"ghosting reduction: off. Repeating-pattern lock: on. Settings "
                 L"only reachable in tray.ini go back to their defaults too.\n\n"
-                L"The FPS overlay, the flight recorder and 3X Frame Gen change "
+                L"The FPS overlay, the flight recorder and the Frame Gen multiplier change "
                 L"in running games at once; the rest applies the next time the "
                 L"game starts.",
                 L"OFXR Bridge - reset to default",
@@ -1639,8 +1684,12 @@ void handle_command(AppState& state, UINT command) {
             L"in running games at once, the rest the next time the game "
             L"starts.");
         break;
-    case toggle_triple_frame_gen:
-        state.settings.triple_frame_gen = !state.settings.triple_frame_gen;
+    case frame_gen_2x:
+    case frame_gen_3x:
+        if (state.settings.triple_frame_gen == (command == frame_gen_3x)) {
+            break;
+        }
+        state.settings.triple_frame_gen = command == frame_gen_3x;
         if (state.settings.triple_frame_gen) {
             // 3X runs on what this sets up; it stays on afterwards.
             state.settings.deep_pipeline = true;
@@ -1654,8 +1703,8 @@ void handle_command(AppState& state, UINT command) {
                 state.window,
                 L"Restart your game to apply this change.\n\n"
                 L"The game that is running was started with \"Prefer FPS over "
-                L"latency\" off, so 3X Frame Gen cannot be switched while it "
-                L"runs. The setting is saved: the game will use it the next "
+                L"latency\" off, so the Frame Gen multiplier cannot be changed "
+                L"while it runs. The setting is saved: the game will use it the next "
                 L"time it starts.",
                 L"OFXR Bridge - game restart needed",
                 MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
@@ -1663,8 +1712,8 @@ void handle_command(AppState& state, UINT command) {
             show_balloon(
                 state,
                 state.settings.triple_frame_gen
-                    ? L"3X Frame Gen: on"
-                    : L"3X Frame Gen: off",
+                    ? L"Frame Gen multiplier: 3X"
+                    : L"Frame Gen multiplier: 2X",
                 state.settings.triple_frame_gen
                     ? L"Two generated frames for every frame the game "
                       L"renders: the game runs at a third of your headset's "
@@ -1686,6 +1735,15 @@ void handle_command(AppState& state, UINT command) {
             : xrfg::FpsOverlayPosition::upper_right;
         update_runtime_options(
             state, L"The FPS overlay position updates in running applications.");
+        break;
+    case overlay_size_big:
+    case overlay_size_medium:
+    case overlay_size_small:
+        state.settings.overlay_size = command == overlay_size_small ? xrfg::FpsOverlaySize::little
+            : command == overlay_size_medium ? xrfg::FpsOverlaySize::medium
+            : xrfg::FpsOverlaySize::big;
+        update_runtime_options(
+            state, L"The FPS overlay size updates in running applications.");
         break;
     case toggle_diagnostics:
         state.settings.diagnostics = !state.settings.diagnostics;
