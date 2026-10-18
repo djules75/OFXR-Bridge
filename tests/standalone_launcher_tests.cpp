@@ -22,8 +22,8 @@ int main() {
 
     const LauncherSettings release_defaults;
     const std::string default_runtime_ini = build_runtime_ini(release_defaults);
-    // status.json: the top-level keys, null without a session, the running
-    // session's multiplier over the setting's, escaping.
+    // status.json: the top-level keys, null without a session, no settings
+    // section, the running session's multiplier over the setting's, escaping.
     {
         xrfg::standalone::StatusInputs idle;
         idle.armed = true;
@@ -48,7 +48,6 @@ int main() {
             !contains(without, "\"multiplier\": 2,") ||
             !contains(without, "\"generating\": null,") ||
             !contains(without, "\"output_fps\": null,") ||
-            !contains(without, "\"session\": null,") ||
             !contains(without, "\"build\": 488") ||
             !contains(without, "\"updated\": \"2026-10-17T09:12:03.512Z\"") ||
             !contains(with, "\"paused\": true,") || !contains(with, "\"multiplier\": 3,") ||
@@ -58,7 +57,9 @@ int main() {
             !contains(with, "\"display_hz\": 90.0,") ||
             !contains(with, "\"process\": \"Flight\\\"Sim\\\\2024.exe\"") ||
             !contains(with, "\"pid\": 23456,") ||
-            !contains(with, "    \"multiplier\": 2,")) {
+            contains(without, "settings") || contains(with, "settings") ||
+            !contains(without, "\"session\": null\n}\n") ||
+            !contains(with, "\"deep_pipeline\": false\n  }\n}\n")) {
             std::cerr << "status.json was not as documented\n";
             return 1;
         }

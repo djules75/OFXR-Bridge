@@ -288,8 +288,7 @@ namespace {
 }  // namespace
 
 std::string build_status_json(const StatusInputs& inputs) {
-    const LauncherSettings& settings = inputs.settings;
-    const std::uint32_t configured = settings.triple_frame_gen ? 3U : 2U;
+    const std::uint32_t configured = inputs.settings.triple_frame_gen ? 3U : 2U;
     const bool session = inputs.session_present;
     const StatusSession& running = inputs.session;
     std::string json = "{\n";
@@ -313,30 +312,11 @@ std::string build_status_json(const StatusInputs& inputs) {
         json += "    \"pid\": " + std::to_string(running.pid) + ",\n";
         json += "    \"runtime\": " + json_string(running.runtime) + ",\n";
         json += std::string("    \"deep_pipeline\": ") + json_bool(running.deep_pipeline) + "\n";
-        json += "  },\n";
+        json += "  }\n";
     } else {
-        json += "  \"session\": null,\n";
+        json += "  \"session\": null\n";
     }
-    const char* preset = settings.nvidia_preset == NvidiaPerformancePreset::slow
-        ? "slow"
-        : settings.nvidia_preset == NvidiaPerformancePreset::fast ? "fast" : "medium";
-    const int flow_resolution = settings.nvidia_input_scale == NvidiaInputScale::half
-        ? 50
-        : settings.nvidia_input_scale == NvidiaInputScale::quarter ? 25
-        : settings.nvidia_input_scale == NvidiaInputScale::three_quarter ? 75 : 100;
-    json += "  \"settings\": {\n";
-    json += "    \"multiplier\": " + std::to_string(configured) + ",\n";
-    json += std::string("    \"backend\": \"") +
-        (settings.backend == FlowBackend::nvidia ? "nvidia" : "fidelityfx") + "\",\n";
-    json += std::string("    \"preset\": \"") + preset + "\",\n";
-    json += "    \"flow_resolution\": " + std::to_string(flow_resolution) + ",\n";
-    json += std::string("    \"bidirectional\": ") + json_bool(settings.nvidia_bidirectional) + ",\n";
-    json += std::string("    \"deep_pipeline\": ") + json_bool(settings.deep_pipeline) + ",\n";
-    json += std::string("    \"edge_ghosting_reduction\": ") +
-        json_bool(settings.edge_ghosting_reduction) + ",\n";
-    json += std::string("    \"repeating_pattern_lock\": ") +
-        json_bool(settings.repeating_pattern_lock) + "\n";
-    json += "  }\n}\n";
+    json += "}\n";
     return json;
 }
 

@@ -101,9 +101,10 @@ struct LauncherSettings {
     bool expert_mode{};
 };
 
-// status.json (docs/STATUS_JSON.md): the tray's state, the running game as
-// its layer published it, and the settings. `session_present` false writes
-// the session and its rates as null.
+// status.json (docs/STATUS_JSON.md): the tray's state and the running game as
+// its layer published it; the settings only for the configured multiplier,
+// written without a game. `session_present` false writes the session and its
+// rates as null.
 struct StatusSession {
     std::uint32_t pid{};
     std::string process;  // UTF-8

@@ -12,7 +12,7 @@ replace parsing `tray-lifecycle.log`.
 - **Path:** `%LOCALAPPDATA%\OFXR Bridge\status.json`, next to `tray.ini`.
 - **Written by the tray** once a second while it runs, and immediately when it
   is armed or disarmed, frame generation is paused or resumed, or a setting
-  changes from the menu.
+  changes from the menu (the multiplier is the one setting the file carries).
 - **Atomic:** each write goes to `status.json.tmp` first and replaces
   `status.json` in one rename, so a reader never sees half a file. If your
   program keeps the file open, the tray cannot replace it and tries again a
@@ -41,16 +41,6 @@ A game running in 3X:
     "pid": 23456,
     "runtime": "SteamVR/OpenXR : steamvr",
     "deep_pipeline": true
-  },
-  "settings": {
-    "multiplier": 3,
-    "backend": "nvidia",
-    "preset": "medium",
-    "flow_resolution": 50,
-    "bidirectional": false,
-    "deep_pipeline": true,
-    "edge_ghosting_reduction": false,
-    "repeating_pattern_lock": true
   }
 }
 ```
@@ -69,8 +59,7 @@ With no game running, the game's fields are `null`:
   "display_hz": null,
   "updated": "2026-10-17T09:15:41.007Z",
   "ofxr": { "build": 488 },
-  "session": null,
-  "settings": { "multiplier": 2, "...": "..." }
+  "session": null
 }
 ```
 
@@ -92,7 +81,6 @@ should read those and ignore everything else.
 | `updated` | string | When this file was written, ISO 8601 UTC. |
 | `ofxr.build` | number | OFXR's internal build number. |
 | `session` | object or null | The running game: `process` (executable name), `pid`, `runtime` (the OpenXR runtime's name) and `deep_pipeline` (Prefer FPS over latency). `null` without a game. |
-| `settings` | object | What `tray.ini` asks for: `multiplier`, optical flow `backend` (`nvidia` or `fidelityfx`), NVIDIA `preset` (`slow`, `medium`, `fast`), `flow_resolution` in percent (`100`, `75`, `50`, `25`), `bidirectional`, `deep_pipeline`, `edge_ghosting_reduction`, `repeating_pattern_lock`. |
 
 ## Reading it reliably
 
