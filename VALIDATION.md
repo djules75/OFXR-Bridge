@@ -1,3 +1,10 @@
+## V582: selected-preset benchmark, A initial preference
+
+Complete tests keep the startup preset instead of forcing C or requesting a
+restart. A is the initial next-launch preference; explicit C/game-default
+choices remain available. CSV records the actual startup request. Pacing remains V581/V579; no V580 experiment.
+See [details](docs/V582_SELECTED_PRESET.md). Owner comparison pending.
+
 ## V581: desktop preset refresh
 
 Fix a cached empty/stale DLSS-G game target while desktop settings remain open.

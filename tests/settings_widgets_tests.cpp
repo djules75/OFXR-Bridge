@@ -390,7 +390,7 @@ void automatic_buttons() {
     runtime.dlssg_preset_request=3;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
     const auto prior=snapshot().desired;
     Context tray({690,900},false);tray.draw();tray.draw();tray.select_tab("Display");tray.draw(true);
-    for(const auto label:{"Tests without vectors","Complete tests (DLSS-G C)","Test Luke Ross","Output CSV"})
+    for(const auto label:{"Tests without vectors","Complete tests","Test Luke Ross","Output CSV"})
         require(tray.rendered_text.find(label)!=std::string::npos,"All automatic controls are in Display");
     tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
     require(benchmark_active(snapshot().benchmark),"Display button starts actual shared suite command");

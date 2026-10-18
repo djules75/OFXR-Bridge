@@ -37,7 +37,7 @@ inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false) {
     };
     route("Fidelity",0,0);route("0.2.1",0,1);route("Djules 2X",0,3);
     route("Djules 3X",0,3,true);route("0.3.0",0,2);
-    if(full) {route("Hybrid",3,0);route("FSR",1,0);route("DLSS-G C",2,0);}
+    if(full) {route("Hybrid",3,0);route("FSR",1,0);route("DLSS-G",2,0);}
     return steps;
 }
 inline Settings benchmark_settings(Settings saved,const BenchmarkStep& step) {

@@ -27,6 +27,12 @@ std::filesystem::path game_executable(unsigned process_id) noexcept;
 std::filesystem::path last_dlssg_game(const std::filesystem::path& selection_file) noexcept;
 bool remember_dlssg_game(const std::filesystem::path& selection_file,
                         const std::filesystem::path& executable) noexcept;
+DlssgPreset preferred_dlssg_preset(const std::filesystem::path& configuration) noexcept;
+bool remember_dlssg_preset(const std::filesystem::path& configuration,DlssgPreset preset) noexcept;
+// Desktop controller only, before launch/once at discovery. Never called by
+// benchmark commands. Applies the owner's preference (A when unset) per game.
+bool apply_preferred_dlssg_preset(const std::filesystem::path& configuration,
+    const std::filesystem::path& executable,std::wstring& error) noexcept;
 
 std::filesystem::path process_executable() noexcept;
 // Capture once before menus can edit the next-launch driver preference. This is

@@ -274,11 +274,35 @@ bool remember_dlssg_game(const std::filesystem::path& selection_file,
             const int bytes=WideCharToMultiByte(CP_UTF8,0,path.c_str(),int(path.size()),nullptr,0,nullptr,nullptr);
             std::string encoded(bytes,'\0');
             WideCharToMultiByte(CP_UTF8,0,path.c_str(),int(path.size()),encoded.data(),bytes,nullptr,nullptr);
-            return autonomous::write_configuration_sections(selection_file,"[dlssg]\nexecutable="+encoded+'\n');
+            return autonomous::write_configuration_sections(selection_file,"[dlssg]\nexecutable="+encoded+
+                "\npreset="+std::to_string(static_cast<unsigned>(preferred_dlssg_preset(selection_file)))+'\n');
         }
         std::filesystem::create_directories(selection_file.parent_path());
         return WritePrivateProfileStringW(L"dlssg", L"executable", path.c_str(), selection_file.c_str()) != FALSE;
     } catch (...) { return false; }
+}
+DlssgPreset preferred_dlssg_preset(const std::filesystem::path& configuration) noexcept {
+    const auto value=GetPrivateProfileIntW(L"dlssg",L"preset",1,configuration.c_str());
+    return value==0 ? DlssgPreset::game_default : value==3 ? DlssgPreset::c : DlssgPreset::a;
+}
+bool remember_dlssg_preset(const std::filesystem::path& configuration,DlssgPreset preset) noexcept {
+    if(preset!=DlssgPreset::game_default && preset!=DlssgPreset::a && preset!=DlssgPreset::c)return false;
+    try {
+        const auto target=last_dlssg_game(configuration).u8string();
+        const std::string encoded(reinterpret_cast<const char*>(target.data()),target.size());
+        return autonomous::write_configuration_sections(configuration,"[dlssg]\nexecutable="+encoded+
+            "\npreset="+std::to_string(static_cast<unsigned>(preset))+'\n');
+    } catch(...) {return false;}
+}
+bool apply_preferred_dlssg_preset(const std::filesystem::path& configuration,
+    const std::filesystem::path& executable,std::wstring& error) noexcept {
+    const auto desired=preferred_dlssg_preset(configuration);
+    DlssgProfile profile;
+    if(!read_dlssg_profile(executable,profile,error))return false;
+    if(desired==DlssgPreset::game_default ? !profile.custom_override :
+        profile.enabled && profile.custom_override && profile.preset==static_cast<unsigned>(desired))return true;
+    DlssgPreset saved{};
+    return write_dlssg_profile(executable,desired,error,&saved) && remember_dlssg_preset(configuration,saved);
 }
 std::filesystem::path process_executable() noexcept {
     wchar_t path[32768]{};

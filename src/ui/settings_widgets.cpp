@@ -136,9 +136,11 @@ void dlssg_preset(SettingsWidgetState& ui, const Snapshot& state, bool compact) 
         std::wstring error;
         DlssgPreset saved{};
         if (write_dlssg_profile(ui.dlssg_executable, preset, error, &saved)) {
+            const bool remembered = remember_dlssg_preset(selection_file,saved);
             refresh(); ui.dlssg_profile_status = saved != preset
                 ? "Preset C unavailable: Preset A saved and verified for the next launch."
                 : "Saved and verified for the next launch. Restart the game if it is running.";
+            if (!remembered) ui.dlssg_profile_status += " Could not remember the preset preference in ofxr-bridge.ini.";
         } else ui.dlssg_profile_status = utf8(error);
     }
     ImGui::EndDisabled();
@@ -343,7 +345,7 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     ImGui::BeginDisabled(active || !permitted || !state.connected);
     const bool optical=ImGui::Button("Tests without vectors");
     ImGui::SameLine();
-    const bool complete=ImGui::Button("Complete tests (DLSS-G C)");
+    const bool complete=ImGui::Button("Complete tests");
     ImGui::EndDisabled();
     ImGui::BeginDisabled(active || !permitted || !state.connected || !state.runtime.luke_detected);
     const bool luke=ImGui::Button("Test Luke Ross");
@@ -364,7 +366,7 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     if(state.benchmark.message[0])ImGui::TextWrapped("%s",state.benchmark.message);
     if(state.benchmark.csv_path[0])ImGui::TextWrapped("CSV: %s",state.benchmark.csv_path);
     ImGui::TextWrapped("Luke Ross: 18 tests through OFXR 0.3.0, Lower VRAM has no effect. Three AFW quality passes: 1x1, 2x2, 4x4. Each includes AFW alone once. AFW-disabled tests are omitted; CSV groups the three qualities for each route.");
-    ImGui::TextWrapped("Close the menu and keep the same test scene. Original settings are restored after Stop or completion. Normal suites compare Normal and Lower VRAM only. Memory is sampled once near the end of each trial. Complete tests require preset C selected before starting the game; a live profile edit does not prove a model change.");
+    ImGui::TextWrapped("Close the menu and keep the same test scene. Original settings are restored after Stop or completion. Normal suites compare Normal and Lower VRAM only. Memory is sampled once near the end of each trial. Tests keep the startup DLSS-G preset and never change its NVIDIA profile. A is the initial preference; changing presets requires restarting the game.");
     if(ImGui::CollapsingHeader("Experimental features")) {
         changed |= ImGui::Checkbox("Reduce black bars during headset rotation###R19 synthetic camera (experimental)", &draft.r19_camera);
     }

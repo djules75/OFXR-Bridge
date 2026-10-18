@@ -1040,8 +1040,13 @@ LRESULT CALLBACK window_procedure(
                 else if (current.runtime.process_id != remembered_game) {
                     const auto game = xrfg::standalone::game_executable(current.runtime.process_id);
                     if (xrfg::standalone::remember_dlssg_game(
-                            xrfg::autonomous::configuration_path(), game))
+                            xrfg::autonomous::configuration_path(), game)) {
+                        std::wstring preset_error;
+                        if(!xrfg::standalone::apply_preferred_dlssg_preset(
+                            xrfg::autonomous::configuration_path(),game,preset_error))
+                            log_lifecycle(state->local_directory,L"DLSS-G-preference",preset_error);
                         remembered_game = current.runtime.process_id;
+                    }
                 }
             } catch (...) {}
             xrfg::autonomous::tick_benchmark();return 0;
@@ -1259,6 +1264,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
         log_lifecycle(state.local_directory, L"startup-cleanup");
         load_settings(state);
         save_settings(state);
+        const auto preset_target=xrfg::standalone::last_dlssg_game(state.settings_path);
+        if(!preset_target.empty()) {
+            std::wstring preset_error;
+            if(!xrfg::standalone::apply_preferred_dlssg_preset(state.settings_path,preset_target,preset_error))
+                log_lifecycle(state.local_directory,L"DLSS-G-preference",preset_error);
+        }
     } catch (...) {
         MessageBoxW(
             nullptr,

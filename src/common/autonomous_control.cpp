@@ -1,6 +1,5 @@
 #include "xrfg/autonomous_control.hpp"
 #include "xrfg/benchmark_suite.hpp"
-#include "xrfg/dlssg_profile.hpp"
 #include "xrfg/presented_output_rate.hpp"
 
 #include <algorithm>
@@ -542,6 +541,7 @@ struct SuiteResult { Settings settings;BenchmarkSamples samples;BenchmarkMemory 
 struct SuiteRecorder {
     std::uint64_t run{}, revision{}, started{}, next_sample{};
     unsigned index{};
+    unsigned dlssg_preset{};
     std::ofstream stream;
     BenchmarkSamples samples;
     Settings settings;
@@ -655,7 +655,8 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
         const auto& s=rec.settings;
         rec.stream<<XRFG_IMPLEMENTATION_VERSION<<','<<b.run_id<<','<<b.game_pid<<','<<quoted(rec.game)<<','<<rec.index+1<<','<<quoted(rec.label)<<','
             <<s.separate_synthesis<<','<<s.lower_vram<<','<<(s.triple_frame_gen ? 3 : 2)<<','<<s.prefer_fps<<','
-            <<s.nr_enabled<<','<<s.afw_mode<<','<<s.afw_shading_rate<<','<<(s.frame_generation==2 ? "C startup request" : "N/A")
+            <<s.nr_enabled<<','<<s.afw_mode<<','<<s.afw_shading_rate<<','<<(s.frame_generation!=2 ? "N/A" :
+                rec.dlssg_preset==1 ? "A startup request" : rec.dlssg_preset==3 ? "C startup request" : "Game default / unverified")
             <<",3,"<<std::max(0.0,(double(ended)-double(rec.started)-3000.0)/1000.0)<<',';
         csv_stat(rec.stream,rec.samples.fps);rec.stream<<','<<rec.samples.fps.size()<<',';
         csv_stat(rec.stream,rec.samples.latency);rec.stream<<','<<rec.samples.latency.size()<<','
@@ -670,8 +671,9 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
     }
     rec.revision=0;rec.samples={};
 }
-void csv_open(SuiteRecorder& rec,BenchmarkStatus& b) {
+void csv_open(SuiteRecorder& rec,BenchmarkStatus& b,unsigned preset) {
     rec=SuiteRecorder{};rec.run=b.run_id;
+    rec.dlssg_preset=preset;
     rec.game=utf8_path(benchmark_game_path(b.game_pid).filename());
     if(!b.csv)return;
     const auto folder=configuration_path().parent_path()/L"Benchmarks";
@@ -701,18 +703,6 @@ bool start_benchmark(bool full,bool luke) noexcept {
         if(luke && !s.runtime.luke_detected) {
             b={};b.phase=BenchmarkPhase::error;
             std::snprintf(b.message,sizeof(b.message),"Luke Ross was not detected in the active game.");return false;
-        }
-        if(full && s.runtime.dlssg_preset_request!=3) {
-            const auto game=benchmark_game_path(s.runtime.process_id);std::wstring error;
-            standalone::DlssgPreset selected{};
-            const bool saved=!game.empty() && standalone::write_dlssg_profile(game,standalone::DlssgPreset::c,error,&selected);
-            b={};b.phase=saved && selected==standalone::DlssgPreset::c ? BenchmarkPhase::restart_required : BenchmarkPhase::error;
-            std::snprintf(b.message,sizeof(b.message),"%s",saved && selected==standalone::DlssgPreset::a
-                ? "Preset C unavailable: A saved for the next launch. Complete tests require C; use manual DLSS-G or tests without vectors."
-                : saved
-                ? "Preset C saved for this game. Restart it, load the test scene, then press Complete tests."
-                : "Could not select preset C for the running game. Select C in its NVIDIA profile before starting the game.");
-            return false;
         }
         shared.benchmark_saved=s.desired;
         const auto now=GetTickCount64();
@@ -757,7 +747,7 @@ void tick_benchmark(std::uint64_t now) noexcept {
         b.controller_pid=own_pid;
         std::atomic_ref<std::uint64_t>(shared.benchmark_metrics_until_ms).store(GetTickCount64()+2000,std::memory_order_release);
         try {
-            if(rec.run!=b.run_id)csv_open(rec,b);
+            if(rec.run!=b.run_id)csv_open(rec,b,s.runtime.dlssg_preset_request);
             if(!suite_runtime_fresh(s.runtime) || s.runtime.process_id!=b.game_pid) {
                 csv_finish(rec,b,now,"game disconnected / partial");
                 suite_restore(shared,BenchmarkPhase::error,"Game disconnected. Original settings restored.",now);rec.stream.close();return;

@@ -14,16 +14,16 @@ int main() {
         const auto optical=benchmark_plan(false),full=benchmark_plan(true);
         check(optical.size()==11 && full.size()==17,"Normal and combined Lower VRAM only; no standalone Prefer FPS test");
         for(const auto& step:optical)check(step.generation==0,"Optical suite must never request vector-only generators");
-        unsigned csteps=0,prefer=0;
+        unsigned dlssg_steps=0,prefer=0;
         Settings baseline;baseline.diagnostics=false;baseline.nr_enabled=true;baseline.afw_mode=2;
         for(const auto& step:full) {
             auto s=benchmark_settings(baseline,step);
             check(!s.diagnostics && s.nr_enabled && s.afw_mode==2,"Keep diagnostics, Neural and AFW choices");
             check(!s.triple_frame_gen || s.separate_synthesis || !s.lower_vram,"Never silently test 2X as 3X");
-            if(step.generation==2){++csteps;check(step.label.starts_with("DLSS-G C"),"Only C is in the full suite");}
+            if(step.generation==2){++dlssg_steps;check(step.label.starts_with("DLSS-G ") && !step.label.starts_with("DLSS-G C"),"Route labels must not invent a preset");}
             if(step.prefer && !step.triple)++prefer;
         }
-        check(csteps==2 && prefer==0,"Two C memory variants and no Prefer FPS trial");
+        check(dlssg_steps==2 && prefer==0,"Two DLSS-G memory variants and no Prefer FPS trial");
         BenchmarkSamples samples;xrfg::InterfaceTelemetry m{};
         m.rates_valid=true;m.output_source=xrfg::InterfaceSource::steamvr_delivery;
         m.cycle_estimated_valid=true;m.generating=true;
@@ -42,11 +42,11 @@ int main() {
         ++m.updated_ms;m.output_source=xrfg::InterfaceSource::accepted_scene_submissions;
         unknown.observe(m,1000,11000);check(unknown.fps.size()==2,"Distinct accepted Luke total enters benchmark with explicit source");
         baseline.benchmark_csv=true;check(request(baseline),"Save isolated test profile");baseline=snapshot().desired;
-        RuntimeStatus runtime{};runtime.sessions=1;runtime.dlssg_preset_request=3;
+        RuntimeStatus runtime{};runtime.sessions=1;runtime.dlssg_preset_request=1;
         runtime.applied_revision=snapshot().revision;report_runtime(runtime);
         check(!benchmark_enabled() && !start_benchmark(true),"INI flag defaults off and blocks suite commands");
         check(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable isolated benchmarks in the single INI");
-        check(start_benchmark(true),"Start full C suite with process-start C request");
+        check(start_benchmark(true),"Start full suite with A without changing profile or requesting restart");
         auto state=snapshot();check(!start_benchmark(false),"A second UI cannot start a competing suite");
         const auto first_requested=state.benchmark.requested_ms;
         tick_benchmark(first_requested+250);
@@ -73,6 +73,11 @@ int main() {
         std::ifstream csv(std::filesystem::u8path(state.benchmark.csv_path));std::stringstream text;text<<csv.rdbuf();
         check(text.str().find("Output FPS median")!=std::string::npos && text.str().find("Cycle estimated median ms")!=std::string::npos,"CSV has both medians");
         const auto csv_text=text.str();
+        const auto details_path=std::filesystem::u8path(state.benchmark.csv_path);
+        std::ifstream details(details_path.parent_path()/(details_path.stem().wstring()+L"-details.csv"));
+        std::stringstream details_text;details_text<<details.rdbuf();
+        check(details_text.str().find(",A startup request,")!=std::string::npos &&
+            details_text.str().find("C startup request")==std::string::npos,"CSV records A receipt instead of inventing C");
         check(csv_text.find("VRAM end MiB,100.000,101.000")!=std::string::npos,"Memory belongs to the trial that just finished, before the next switch");
         check(!take_benchmark_memory_request(),"Completed suite leaves no outstanding sample request");
         check(std::count(csv_text.begin(),csv_text.end(),'\n')==11,"Layout CSV: headers, six statistics rows and four memory rows");
@@ -109,7 +114,25 @@ int main() {
         check(WritePrivateProfileStringW(L"benchmark",L"enabled",L"0",configuration_path().c_str()),"disable active benchmark");
         tick_benchmark();
         check(snapshot().benchmark.phase==BenchmarkPhase::stopped && !take_benchmark_memory_request(),"disabling INI stops trial and clears memory requests");
-        std::cout<<"Automatic suite: full/optical, C-only, hidden sampling without F9, timing, median, CSV, restore/manual cancellation PASS\n";
+        check(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"re-enable for preset compatibility checks");
+        for(const auto preset:{0U,3U}) {
+            runtime.dlssg_preset_request=preset;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
+            check(start_benchmark(true),"Full suite accepts default/unverified or explicit C without enforcing another preset");
+            check(snapshot().runtime.dlssg_preset_request==preset,"Suite does not change the startup receipt");
+            clock=snapshot().benchmark.requested_ms+500;
+            for(std::size_t i=0;i<full.size();++i) {
+                runtime.applied_revision=snapshot().revision;report_runtime(runtime);tick_benchmark(clock);
+                check(snapshot().benchmark.phase==BenchmarkPhase::running,"A/C/default use the same uninterrupted suite");
+                tick_benchmark(clock+10000);clock+=10200;
+            }
+            check(snapshot().benchmark.phase==BenchmarkPhase::complete,"Full suite completes without a forced preset restart");
+            const auto path=std::filesystem::u8path(snapshot().benchmark.csv_path);
+            std::ifstream preset_details(path.parent_path()/(path.stem().wstring()+L"-details.csv"));
+            std::stringstream recorded;recorded<<preset_details.rdbuf();
+            check(recorded.str().find(preset==3 ? ",C startup request," : ",Game default / unverified,")!=std::string::npos,
+                "CSV preserves the actual startup receipt including an unverified default");
+        }
+        std::cout<<"Automatic suite: full/optical with A/C/default, no preset enforcement, truthful A CSV, hidden sampling without F9, timing, median, restore/manual cancellation PASS\n";
         return 0;
     } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }

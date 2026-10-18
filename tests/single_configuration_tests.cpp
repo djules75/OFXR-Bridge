@@ -30,8 +30,15 @@ int main() {
         GetPrivateProfileStringW(L"tray",L"pause_hotkey",L"",hotkey,128,configuration_path().c_str());
         check(std::wstring(hotkey)==L"ctrl+alt+f7","new settings sections must coexist");
         check(xrfg::standalone::remember_dlssg_game(configuration_path(),xrfg::standalone::process_executable()),"remember game in shared INI");
+        using namespace xrfg::standalone;
+        check(preferred_dlssg_preset(configuration_path())==DlssgPreset::a,"A is the initial preference without importing old settings");
+        check(remember_dlssg_preset(configuration_path(),DlssgPreset::c),"explicit C choice remains available");
         check(request(state.desired) && xrfg::standalone::last_dlssg_game(configuration_path())==xrfg::standalone::process_executable(),
             "later UI save must preserve offline preset target");
+        check(preferred_dlssg_preset(configuration_path())==DlssgPreset::c,"renderer save preserves explicit C");
+        check(remember_dlssg_game(configuration_path(),process_executable()) && preferred_dlssg_preset(configuration_path())==DlssgPreset::c,"game discovery does not reset explicit preference");
+        check(remember_dlssg_preset(configuration_path(),DlssgPreset::game_default) && preferred_dlssg_preset(configuration_path())==DlssgPreset::game_default,"explicit game default can opt out");
+        check(remember_dlssg_preset(configuration_path(),DlssgPreset::a) && last_dlssg_game(configuration_path())==process_executable(),"select A without losing the remembered game");
         check(write_configuration_sections(configuration_path(),"[tray]\npause_hotkey=off\nsteamvr_separate_queue=1\n"),"tray save");
         check(parse_settings([&]{std::ifstream in(configuration_path());return std::string(std::istreambuf_iterator<char>(in),{});}()).backend==Settings{}.backend && benchmark_enabled(),
             "tray save must preserve rendering choices and benchmark flag");
