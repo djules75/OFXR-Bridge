@@ -1,3 +1,10 @@
+## V596: Valhalla producer-image lifetime
+
+Free a producer image after its copy fence completes, retaining the immutable
+real target until native End. This addresses the observed normal-route source
+stall; residual MSFS presentation losses remain separate. 33 focused checks
+pass; owner game validation pending. [Details](docs/V596_SOURCE_COPY_LIFETIME.md).
+
 ## V595: read-only diagnostic clock observation
 
 F9 observes the private director's existing vsync cache instead of updating it

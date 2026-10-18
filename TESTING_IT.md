@@ -1,3 +1,11 @@
+## V596: prova mirata Valhalla
+
+Corregge l'attesa della sorgente dopo che la copia privata e gia completata.
+Prova il passaggio Djules 3X -> 2X -> Reference 0.2.1, con Lower VRAM spento,
+e controlla se rimane il limite anomalo di circa 44 FPS. F9 puo restare acceso;
+non servono F8 o un benchmark completo. Pacing e distributore invariati.
+I drop residui di MSFS non sono dichiarati risolti. 33 controlli passati.
+
 ## V595: diagnostica senza ricampionare il clock
 
 F9 legge la cache vsync del director senza aggiornarla con una chiamata

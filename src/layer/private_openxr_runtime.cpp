@@ -47,6 +47,7 @@ struct PrivateOpenXrRuntime::Impl {
         ComPtr<ID3D12Resource> d12;
         ComPtr<ID3D11Texture2D> d11;
         unsigned readers{};
+        std::uint64_t generation{};
         bool acquired{},waited{};
     };
     struct Chain {
@@ -58,15 +59,17 @@ struct PrivateOpenXrRuntime::Impl {
         std::deque<unsigned> acquired;
         std::optional<unsigned> released;
         unsigned cursor{};
+        unsigned consumers{}; // retain the real XR chain until every native End finishes
         bool destroying{};
         std::shared_ptr<PreparedTarget> latest_target,pending_target;
         std::vector<std::weak_ptr<PreparedTarget>> retained_targets;
         D3D12_RESOURCE_STATES image_state{D3D12_RESOURCE_STATE_RENDER_TARGET};
     };
-    struct Lease {std::shared_ptr<Chain> chain;unsigned image{};};
+    struct Lease {std::shared_ptr<Chain> chain;unsigned image{};std::uint64_t generation{};bool source_released{};};
     struct PreparedTarget {
         std::weak_ptr<Chain> chain;
         unsigned source{},index{},users{};
+        std::uint64_t source_generation{};
         bool acquired{},waited{},complete{},released{};
     };
     struct Packet {
@@ -167,8 +170,12 @@ struct PrivateOpenXrRuntime::Impl {
     }
     void retire(const std::shared_ptr<Packet>& packet) {
         {std::scoped_lock lock(mutex);
-         for(auto& lease:packet->leases)if(lease.chain->images[lease.image].readers)
-             --lease.chain->images[lease.image].readers;
+         for(auto& lease:packet->leases) {
+             if(!lease.source_released && lease.chain->images[lease.image].readers)
+                 --lease.chain->images[lease.image].readers;
+             lease.source_released=true;
+             if(lease.chain->consumers)--lease.chain->consumers;
+         }
          for(auto& target:packet->targets)if(target->users)--target->users;
          if(pending)--pending;}
         changed.notify_all();
@@ -179,8 +186,20 @@ struct PrivateOpenXrRuntime::Impl {
         if(it==chains.end() || it->second->destroying)return XR_ERROR_HANDLE_INVALID;
         auto& chain=*it->second;
         if(!chain.released || chain.images[*chain.released].acquired)return XR_ERROR_CALL_ORDER_INVALID;
-        packet.leases.push_back({it->second,*chain.released});
+        packet.leases.push_back({it->second,*chain.released,chain.images[*chain.released].generation});
+        ++chain.consumers;
         ++chain.images[*chain.released].readers;return XR_SUCCESS;
+    }
+    void release_copied_sources(Packet& packet) {
+        // Only publish()'s completed copy fence authorizes this transition.
+        // Real targets, chain consumers and FIFO credits remain owned until End.
+        {std::scoped_lock lock(mutex);
+         for(auto& lease:packet.leases)if(!lease.source_released) {
+             if(lease.chain->images[lease.image].readers)--lease.chain->images[lease.image].readers;
+             lease.source_released=true;
+         }}
+        changed.notify_all();
+        if(tracing())trace(26,packet.sequence,static_cast<std::int64_t>(packet.leases.size()));
     }
     // Called under mutex. Every pointer submitted after EndFrame returns is
     // owned here. Unknown extension chains are refused, never borrowed.
@@ -237,12 +256,14 @@ struct PrivateOpenXrRuntime::Impl {
             auto chain=lease.chain;
             auto reusable=[&]{return chain->latest_target && (chain->latest_target->users ||
                     (chain->info.createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT)) &&
-                chain->latest_target->source==lease.image;};
+                    chain->latest_target->source==lease.image &&
+                    chain->latest_target->source_generation==lease.generation;};
             changed.wait(lock,[&]{return stopping || !chain->pending_target || reusable();});
             if(stopping)return false;
             auto target=chain->latest_target;
             if(!reusable()) {
                 target=std::make_shared<PreparedTarget>();target->chain=chain;target->source=lease.image;
+                target->source_generation=lease.generation;
                 chain->latest_target=chain->pending_target=target;
                 std::erase_if(chain->retained_targets,[](auto& weak){return weak.expired();});
                 chain->retained_targets.push_back(target);
@@ -355,6 +376,7 @@ struct PrivateOpenXrRuntime::Impl {
                 trace(4,packet->sequence);
                 const auto result=publish(*packet);
                 if(XR_FAILED(result)) {if(!stopping)fail(result);retire(packet);fifo->retire();break;}
+                release_copied_sources(*packet);
                 trace(5,packet->sequence);
                 packet->prepared_at=clock_ns();
                 {std::scoped_lock lock(mutex);prepared.push_back(std::move(packet));}
@@ -716,7 +738,7 @@ void PrivateOpenXrRuntime::stop() {
          if(c->latest_target && (c->info.createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) &&
              c->latest_target->complete && c->latest_target->released)c->latest_target->users=0;
          else c->latest_target.reset();
-         c->pending_target.reset();c->retained_targets.clear();for(auto& image:c->images)image.readers=0;}}
+         c->pending_target.reset();c->retained_targets.clear();c->consumers=0;for(auto& image:c->images)image.readers=0;}}
     s.changed.notify_all();
 }
 XrResult PrivateOpenXrRuntime::drain() {
@@ -755,7 +777,10 @@ XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info) {
     struct Reservation {
         Impl& s;std::shared_ptr<Impl::Packet>& packet;bool accepted{},counted{};
         ~Reservation(){if(accepted)return;{std::scoped_lock lock(s.mutex);
-            if(packet)for(auto& lease:packet->leases)--lease.chain->images[lease.image].readers;
+            if(packet)for(auto& lease:packet->leases) {
+                if(!lease.source_released)--lease.chain->images[lease.image].readers;
+                --lease.chain->consumers;
+            }
             if(counted)--s.pending;}s.fifo->cancel();s.changed.notify_all();}
     } reservation{s,packet};
     packet=std::make_shared<Impl::Packet>();XrResult result;
@@ -807,7 +832,7 @@ XrResult PrivateOpenXrRuntime::destroy_swapchain(XrSwapchain handle) {
     auto& s=*impl_;std::unique_lock lock(s.mutex);auto it=s.chains.find(handle);if(it==s.chains.end())return XR_ERROR_HANDLE_INVALID;
     auto chain=it->second;chain->destroying=true;
     if(s.stopping){lock.unlock();stop();lock.lock();}
-    s.changed.wait(lock,[&]{return std::none_of(chain->images.begin(),chain->images.end(),[](auto& i){return i.readers!=0;});});
+    s.changed.wait(lock,[&]{return !chain->consumers && std::none_of(chain->images.begin(),chain->images.end(),[](auto& i){return i.readers!=0;});});
     s.chains.erase(handle);lock.unlock();return s.options.real.destroy(handle);
 }
 XrResult PrivateOpenXrRuntime::enumerate_images(XrSwapchain handle,std::uint32_t capacity,std::uint32_t* count,XrSwapchainImageBaseHeader* output) {
@@ -842,7 +867,7 @@ XrResult PrivateOpenXrRuntime::release_image(XrSwapchain handle,const XrSwapchai
     if(!valid(info,XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO))return XR_ERROR_VALIDATION_FAILURE;
     auto& s=*impl_;std::scoped_lock lock(s.mutex);auto it=s.chains.find(handle);if(it==s.chains.end())return XR_ERROR_HANDLE_INVALID;auto& chain=*it->second;
     if(chain.acquired.empty() || !chain.images[chain.acquired.front()].waited)return XR_ERROR_CALL_ORDER_INVALID;
-    auto index=chain.acquired.front();chain.acquired.pop_front();chain.images[index].acquired=false;chain.images[index].waited=false;chain.released=index;s.changed.notify_all();return XR_SUCCESS;
+    auto index=chain.acquired.front();chain.acquired.pop_front();chain.images[index].acquired=false;chain.images[index].waited=false;++chain.images[index].generation;chain.released=index;s.changed.notify_all();return XR_SUCCESS;
 }
 bool PrivateOpenXrRuntime::owns(XrSwapchain handle) const {std::scoped_lock lock(impl_->mutex);return impl_->chains.contains(handle);}
 } // namespace xrfg

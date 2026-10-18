@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.595.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.596.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -551,7 +551,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_link_libraries(xrfg_private_openxr_runtime_tests PRIVATE xrfg_steamvr_delivery)
         target_compile_features(xrfg_private_openxr_runtime_tests PRIVATE cxx_std_20)
         add_test(NAME xrfg_private_openxr_runtime_gpu COMMAND xrfg_private_openxr_runtime_tests)
-        set_tests_properties(xrfg_private_openxr_runtime_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+        # This aggregate includes all ownership/clock cases plus D11/D12 single-source reuse.
+        # Individual progress/cadence limits remain in the assertions.
+        set_tests_properties(xrfg_private_openxr_runtime_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
     endif()
 
     add_library(xrfg_fps_overlay STATIC src/layer/openxr_fps_overlay.cpp)

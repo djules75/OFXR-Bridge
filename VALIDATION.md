@@ -1,3 +1,10 @@
+## V596: copied-source reuse with protected native targets
+
+33 focused checks pass. Exact V595 fails the new single-source progress case;
+V596 passes with actual D11/D12 GPU copies, exact generations/pixels and native
+chain lifetime checks. Owner Valhalla validation pending; remaining MSFS drops
+are outside this build's scope. [Evidence](docs/V596_VALIDATION.json).
+
 ## V595: diagnostic clock independence
 
 33 focused checks pass, including D11/D12 native renewal and exact FIFO pixels

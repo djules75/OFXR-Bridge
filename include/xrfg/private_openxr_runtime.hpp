@@ -30,6 +30,9 @@ struct PrivateRuntimeDispatch {
 // SteamVR Begin/End and image release belong to the consumer; one independent
 // Wait worker prepares the next runtime clock. All application/generator
 // images are private, with leases (not copies) transferred at virtual EndFrame.
+// Source read leases end only after the copy GPU fence completes. Real target
+// ownership and FIFO credits remain until native End; source generations prevent
+// a rewritten private image from reusing an older prepared copy.
 // A preparer owns real acquisition/copy/GPU waits; the physical frame thread
 // consumes completed packets only and releases that FIFO head's real targets.
 // The next image may be acquired/waited/copied while an older RELEASED image
@@ -84,6 +87,8 @@ public:
         // and requested handoff+physical-period coverage. This is bounded to one
         // attempt per packet, separate from expired-cycle recovery. A still-current
         // replacement may retain a shorter horizon; never spin for that preference.
+        // Stage26: source read leases released after completed copy; packet ID,
+        // QPC ns and lease count. This does not retire real targets or FIFO credits.
         std::function<void(int,std::uint64_t,std::int64_t,std::int64_t)> trace;
     };
     explicit PrivateOpenXrRuntime(Options);
