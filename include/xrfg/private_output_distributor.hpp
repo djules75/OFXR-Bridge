@@ -18,8 +18,12 @@ class PrivateRuntimeBudget {
     std::int64_t cost_{},previous_{},variation_{};
     bool sampled_{};
 public:
+    // Owner-selected V589 comparison: open the native cycle 1ms earlier than
+    // V588, in addition to its learned service cost/variation and 100us guard.
+    static constexpr std::int64_t additional_lead=1'000'000;
     [[nodiscard]] std::int64_t lead(std::int64_t period) const noexcept {
-        return std::clamp<std::int64_t>(cost_+variation_+100'000,100'000,period);
+        constexpr auto guard=100'000+additional_lead;
+        return std::clamp<std::int64_t>(cost_+variation_+guard,guard,period);
     }
     void observe(std::int64_t native_cost,std::int64_t period) noexcept {
         native_cost=std::clamp<std::int64_t>(native_cost,0,period);

@@ -459,9 +459,10 @@ void fresh_runtime_window(bool d12,int wait_ms=0) {
     Fixture f(d12);f.throttled=false;auto chain=f.make_chain();f.write(chain,70);
     f.slow_frame_wait_ms=wait_ms;
     // Retaining a recent longer native Wait can leave some lead after a
-    // shorter timer wake. The no-wait case has no such variability; the5ms
-    // case must still avoid V584's approximately6ms deliberate ageing.
-    f.prediction_age_limit=wait_ms?3'000'000:1'000'000;
+    // shorter timer wake. V589 deliberately opens native entry another1ms
+    // earlier, so allow exactly that increment in prediction age; the physical
+    // minimum interval and all cadence/FIFO assertions remain unchanged.
+    f.prediction_age_limit=wait_ms?4'000'000:2'000'000;
     for(unsigned n=0;n<12;++n) {
         f.begin_virtual();xr_ok(f.submit(chain,float(n)),"fresh-cycle immutable input");
         if(!n){f.wait_entered();f.unblock();}

@@ -1,3 +1,10 @@
+## V589: add1ms to the native-entry margin
+
+Owner-selected V588 comparison: open the native SteamVR cycle1ms earlier,
+within the existing one-period cap. Physical handoff frequency and producer
+policy are unchanged.33focused checks pass; headset comparison is pending.
+See [details](docs/V589_EXTRA_NATIVE_LEAD.md).
+
 ## V588: reserve changing native runtime work before delivery
 
 Include native Release and measured service-time variation when opening the

@@ -10,9 +10,9 @@ static void require(bool v,const char* what){if(!v)throw std::runtime_error(what
 int main(){try {
     constexpr std::int64_t ms=1'000'000;
     xrfg::PrivateRuntimeBudget budget;
-    require(budget.lead(11*ms)==100'000,"unsampled native entry reserved a whole frame");
+    require(budget.lead(11*ms)==1'100'000,"unsampled native entry must reserve the requested extra1ms, not a whole frame");
     budget.observe(5*ms,11*ms);
-    require(budget.lead(11*ms)==5*ms+100'000,"first observation invented a variation penalty");
+    require(budget.lead(11*ms)==5*ms+1'100'000,"first observation lost the requested extra1ms or invented variation");
     unsigned misses{};
     xrfg::PrivateRuntimeBudget ramp;
     for(int n=0;n<24;++n) {
@@ -23,7 +23,7 @@ int main(){try {
     require(misses==0,"native entry missed every step despite already observed rising service time");
     ramp.observe(50*ms,11*ms);require(ramp.lead(11*ms)==11*ms,"native work forecast exceeded a physical period");
     for(int n=0;n<2000;++n)ramp.observe(0,11*ms);
-    require(ramp.lead(11*ms)<101'000,"past stall left a permanent full-period native prediction age");
+    require(ramp.lead(11*ms)<1'101'000,"past stall did not recover to the requested1.1ms floor");
     xrfg::PrivateOutputSchedule clock;
     clock.period(11*ms);clock.ready(20*ms);
     require(clock.eligible(20*ms) && clock.delivered(20*ms),"first output");
