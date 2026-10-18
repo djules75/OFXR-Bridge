@@ -11,6 +11,9 @@ struct Settings {
     bool backward{};
     int motion_vectors{}; // 0 optical flow, 1 DLSS ingress
     int frame_generation{}; // ABI compatibility: standalone accepts only 0.
+    // Hybrid: the game's vectors composed with the optical flow, where a
+    // pair has them (V497). `[ofxr] hybrid`; fixed for the session.
+    bool hybrid{};
     bool operator==(const Settings&) const = default;
 };
 struct Snapshot {

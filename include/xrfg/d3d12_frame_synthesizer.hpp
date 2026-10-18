@@ -113,6 +113,13 @@ struct D3D12NvidiaOpticalFlowOptions {
     D3D12OpticalFlowInputScale input_scale{
         D3D12OpticalFlowInputScale::half};
     bool bidirectional{};
+    // Hybrid: the game's motion vectors, where the session receives them,
+    // composed per pixel with whichever optical flow this backend runs. Off,
+    // vectors replace the flow for a pair that has them (the vectors-only
+    // composition); on, both run and the pixel takes the one that explains
+    // the two frames better. Pairs without vectors run the flow alone either
+    // way.
+    bool hybrid{};
 };
 
 // A second synthetic produced from the same pair, for a session that hands
@@ -294,10 +301,10 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// The composition's two refinements as the ini sets them (edge_ghosting_
-// reduction, repeating_pattern_lock), for every synthesizer in the process.
-// Both on by default. The tray's live tuning window, where it is open
-// (expert mode), overrides them.
+// The composition's refinements as the ini sets them, for every synthesizer
+// in the process. Edge ghosting reduction is off on this branch whatever the
+// ini says; the repeating-pattern lock is on by default. The tray's live
+// tuning window, where it is open (expert mode), overrides the lock.
 void set_composition_switches(
     bool edge_ghosting_reduction,
     bool repeating_pattern_lock) noexcept;

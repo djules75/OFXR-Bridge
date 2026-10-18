@@ -2,6 +2,7 @@
 #include "xrfg/d3d12_history.hpp"
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
+#include "xrfg/ngx_guide_capture.hpp"
 #include "xrfg/d3d11_bridge.hpp"
 #include "xrfg/d3d11_d3d12_interop.hpp"
 #include "xrfg/vulkan_d3d12_interop.hpp"
@@ -1076,6 +1077,8 @@ struct SessionState {
     bool vulkan_support{};
     xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options{};
     bool dlss_motion_vectors{};
+    // Each eye's release watermark (V497), read when the other eye resolves.
+    std::array<std::atomic<std::uint64_t>, 2> eye_release_publication{};
     SessionGraphicsBinding graphics_binding{SessionGraphicsBinding::none};
     std::uint64_t graphics_binding_capabilities{};
     // Set once the runtime has refused a private swapchain. A runtime caps how
@@ -2256,6 +2259,13 @@ struct SwapchainState {
     std::vector<VkImage> enumerated_vulkan_images;
     std::optional<xrfg::D3D12HistoryCaptureTicket> last_released_capture;
     std::shared_ptr<const xrfg::DlssMotionVectorSet> last_released_motion_vectors;
+    // Which eye of a two-view projection this swapchain holds alone (V497),
+    // from the last xrEndFrame's mapping; -1 unknown. The game's DLSS
+    // evaluations are assigned to it by that (resolve_dlss_motion_vectors).
+    std::atomic<int> projection_eye{-1};
+    // The publication watermark at this swapchain's last release: which of
+    // the game's evaluations existed when its colour was handed over.
+    std::uint64_t release_publication{};
     // SessionState::capture_at_end_frame: the image the application released
     // since its last xrEndFrame, whose history capture is still to be queued.
     // Set at the release in place of the capture, consumed at the top of the
@@ -4947,7 +4957,8 @@ XrResult layer_create_session_impl(
     state->nvidia_options = {
         static_cast<xrfg::D3D12NvidiaPerformancePreset>(initial_control.desired.preset),
         static_cast<xrfg::D3D12NvidiaInputScale>(initial_control.desired.scale),
-        initial_control.desired.backward};
+        initial_control.desired.backward,
+        initial_control.desired.hybrid};
     // One display period of extra depth, bought with one display period of
     // latency: every synthetic is held until it is a period old, so synthesis
     // gets a period to finish instead of the gap the game leaves. On by
@@ -4967,7 +4978,8 @@ XrResult layer_create_session_impl(
     state->pause_applied = state->manual_control.pause_requested();
     state->recorder_applied = xrfg::bridge_flight_logger().enabled();
     state->menu_enabled = initial_control.desired.enabled && !state->pause_applied;
-    state->dlss_motion_vectors = initial_control.desired.motion_vectors == 1;
+    state->dlss_motion_vectors = initial_control.desired.motion_vectors == 1 ||
+        initial_control.desired.hybrid;
     state->control_revision = initial_control.revision;
     xrfg::embedded::applied(state->control_id, state->control_revision, state->menu_enabled, 0);
     XrStructureType binding_structure_type = XR_TYPE_UNKNOWN;
@@ -5211,6 +5223,25 @@ XrResult layer_create_session_impl(
         state->frames_per_application_frame,
         state->deep_pipeline ? 1u : 0u,
         triple_requested ? 1u : 0u);
+    // The game's own DLSS vectors, for the vectors-only and the hybrid
+    // compositions: captured from its NGX calls on a native D3D12 session.
+    // A bridged session's game renders in D3D11 or Vulkan, whose NGX the
+    // capture does not detour; a provider (an OFXR-aware OptiScaler) can
+    // still publish there.
+    const bool ngx_capture = state->graphics_binding == SessionGraphicsBinding::d3d12 &&
+        !state->d3d11_bridge && !state->vulkan_bridge && state->d3d12_queue &&
+        state->dlss_motion_vectors;
+    if (ngx_capture) {
+        xrfg::configure_ngx_guide_capture(state->d3d12_queue.Get(), true);
+    }
+    // 702: the game's vectors. a the hybrid asked for, b the vectors asked
+    // for, c the NGX capture started for this session.
+    xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::presenter_transition,
+        702,
+        initial_control.desired.hybrid ? 1u : 0u,
+        state->dlss_motion_vectors ? 1u : 0u,
+        ngx_capture ? 1u : 0u);
     if (dispatch->steamvr_runtime &&
         state->graphics_binding == SessionGraphicsBinding::d3d12 &&
         create_info != nullptr && state->d3d12_device && state->d3d12_queue) {
@@ -5377,6 +5408,9 @@ XrResult layer_destroy_session_impl(XrSession session) {
         destroy_frame_generation_swapchains(swapchain_state);
     }
     drain_binding_queue(state.get());
+    if (state->d3d12_queue) {
+        xrfg::stop_ngx_guide_capture(state->d3d12_queue.Get());
+    }
 
     const XrResult result = state->dispatch->destroy_session(session);
     if (XR_SUCCEEDED(result)) {
@@ -6963,13 +6997,25 @@ XrResult release_swapchain_image_locked(
 
     std::optional<xrfg::D3D12HistoryCaptureTicket> pending_capture;
     std::shared_ptr<const xrfg::DlssMotionVectorSet> pending_motion_vectors;
+    // The publication watermark at this release (V497): which of the game's
+    // DLSS evaluations existed when this colour was handed over. The eye's
+    // guide is chosen by it, at the capture (deferred or not) and again
+    // after xrEndFrame's mapping, when both eyes' releases are known.
+    const std::uint64_t release_publication = candidate_index && history &&
+        state->session->dlss_motion_vectors ? xrfg::dlss_motion_vector_publications() : 0;
+    const int released_eye = state->projection_eye.load(std::memory_order_relaxed);
     if (candidate_index && history && !defer_capture) {
         if (state->session->dlss_motion_vectors) {
             std::scoped_lock lock(state->mutex);
             if (*candidate_index < state->enumerated_d3d12_images.size()) {
                 pending_motion_vectors = xrfg::resolve_dlss_motion_vectors(
                     state->enumerated_d3d12_images[*candidate_index].Get(),
-                    state->session->d3d12_queue.Get());
+                    state->session->d3d12_queue.Get(),
+                    released_eye, release_publication,
+                    released_eye == 0 || released_eye == 1
+                        ? state->session->eye_release_publication[1 - released_eye].load(
+                              std::memory_order_relaxed)
+                        : 0);
             }
         }
         xrfg::D3D12HistoryCaptureTicket ticket{};
@@ -7048,6 +7094,11 @@ XrResult release_swapchain_image_locked(
                 state->last_released_index = released_index;
                 state->last_released_capture.reset();
                 state->last_released_motion_vectors.reset();
+                state->release_publication = release_publication;
+                if (released_eye == 0 || released_eye == 1) {
+                    state->session->eye_release_publication[released_eye].store(
+                        release_publication, std::memory_order_relaxed);
+                }
                 commit_capture = pending_capture &&
                                  pending_capture->source_index == released_index;
                 // Deferred: the capture of this image is queued at the
@@ -7241,6 +7292,98 @@ XrResult layer_release_swapchain_image_impl(
 // submitted, which is the whole point: at the release some of it might not
 // have been submitted yet. Only images the mirror still vouches for are
 // captured; one it has lost track of since the release is dropped.
+// Records, for each swapchain that holds one eye of a two-view projection
+// alone, which eye it is (SwapchainState::projection_eye). V497, from 0.3's
+// V456: the game's DLSS evaluations are assigned to swapchains by it.
+void note_projection_eyes(
+    const ProjectionSnapshot& snapshot,
+    const ProjectionMappingResult& mappings) noexcept {
+    try {
+        if (mappings.reason != ProjectionMappingReason::ready) {
+            return;
+        }
+        for (const ProjectionResourceMapping& mapping : mappings.mappings) {
+            const auto swapchain = find_swapchain(mapping.application_swapchain);
+            if (!swapchain) {
+                continue;
+            }
+            int eye = -1;
+            if (mapping.views.size() == 1 && swapchain->create_info.arraySize == 1) {
+                const ProjectionViewReference& view = mapping.views.front();
+                if (view.projection_index < snapshot.layers.size() &&
+                    snapshot.layers[view.projection_index].views.size() == 2 &&
+                    view.view_index < 2) {
+                    eye = static_cast<int>(view.view_index);
+                }
+            }
+            const int previous =
+                swapchain->projection_eye.exchange(eye, std::memory_order_relaxed);
+            if (previous != eye) {
+                // The last capture resolved its guides under the previous
+                // identity. The next release resolves the new eye.
+                std::scoped_lock lock(swapchain->mutex);
+                swapchain->last_released_motion_vectors.reset();
+            }
+        }
+    } catch (...) {
+    }
+}
+
+// After xrEndFrame's mapping, with both eyes' releases known, revisit each
+// eye's guide join: at its own release an eye could only see the other's
+// previous release, so a right-first game got the wrong evaluation (V497,
+// from 0.3's R15). Colour and its capture ticket stay as released. Record
+// 751 per eye for the first frames and now and then after: a the eye, b its
+// release watermark, c the chosen guide's publication (0 refused).
+void refresh_projection_guides(
+    SessionState& session,
+    const ProjectionMappingResult& mappings) noexcept {
+    if (!session.dlss_motion_vectors || mappings.reason != ProjectionMappingReason::ready) {
+        return;
+    }
+    try {
+        std::array<std::shared_ptr<SwapchainState>, 2> chains{};
+        std::array<std::uint64_t, 2> releases{};
+        for (const auto& mapping : mappings.mappings) {
+            const auto chain = find_swapchain(mapping.application_swapchain);
+            if (!chain) continue;
+            const int eye = chain->projection_eye.load(std::memory_order_relaxed);
+            if (eye != 0 && eye != 1) continue;
+            std::scoped_lock lock(chain->mutex);
+            if (!chain->last_released_capture || !chain->last_released_index ||
+                chain->last_released_capture->source_index != *chain->last_released_index ||
+                *chain->last_released_index >= chain->enumerated_d3d12_images.size()) continue;
+            // Two colours for one eye are not a stereo join.
+            if (chains[eye] && chains[eye] != chain) return;
+            chains[eye] = chain;
+            releases[eye] = chain->release_publication;
+        }
+        if (!chains[0] || !chains[1]) return;
+        static std::atomic<std::uint64_t> records{0};
+        const std::uint64_t record = records.fetch_add(1, std::memory_order_relaxed);
+        const bool log = record < 128 || record % 512 == 0;
+        std::scoped_lock gpu_lock(session.gpu_mutex);
+        for (std::size_t eye = 0; eye < chains.size(); ++eye) {
+            session.eye_release_publication[eye].store(releases[eye], std::memory_order_relaxed);
+        }
+        for (std::size_t eye = 0; eye < chains.size(); ++eye) {
+            std::scoped_lock lock(chains[eye]->mutex);
+            const auto guides = releases[eye] ? xrfg::resolve_dlss_motion_vectors(
+                chains[eye]->enumerated_d3d12_images[*chains[eye]->last_released_index].Get(),
+                session.d3d12_queue.Get(), static_cast<int>(eye), releases[eye], releases[1 - eye])
+                : nullptr;
+            chains[eye]->last_released_motion_vectors = guides;
+            if (log) {
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::presenter_transition,
+                    751, eye, releases[eye],
+                    guides && guides->eyes[0] ? guides->eyes[0]->publication : 0);
+            }
+        }
+    } catch (...) {
+    }
+}
+
 void capture_pending_end_frame_images(
     const std::shared_ptr<SessionState>& session) noexcept {
     if (!session || !session->capture_at_end_frame) {
@@ -7282,9 +7425,15 @@ void capture_pending_end_frame_images(
                 if (session->dlss_motion_vectors) {
                     std::scoped_lock lock(state->mutex);
                     if (*index < state->enumerated_d3d12_images.size()) {
+                        const int eye = state->projection_eye.load(std::memory_order_relaxed);
                         motion_vectors = xrfg::resolve_dlss_motion_vectors(
                             state->enumerated_d3d12_images[*index].Get(),
-                            session->d3d12_queue.Get());
+                            session->d3d12_queue.Get(),
+                            eye, state->release_publication,
+                            eye == 0 || eye == 1
+                                ? session->eye_release_publication[1 - eye].load(
+                                      std::memory_order_relaxed)
+                                : 0);
                     }
                 }
                 xrfg::D3D12HistoryCaptureWait wait{};
@@ -12354,16 +12503,22 @@ void apply_embedded_control(
     }
     const xrfg::D3D12NvidiaOpticalFlowOptions options{
         static_cast<xrfg::D3D12NvidiaPerformancePreset>(control.desired.preset),
-        static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward};
+        static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward,
+        control.desired.hybrid};
     const bool changed = state->control_reconfigure_required || backend != state->optical_flow_backend ||
         options.preset != state->nvidia_options.preset ||
         options.input_scale != state->nvidia_options.input_scale ||
-        options.bidirectional != state->nvidia_options.bidirectional;
+        options.bidirectional != state->nvidia_options.bidirectional ||
+        options.hybrid != state->nvidia_options.hybrid;
     // Enumeration is excluded by frame_call_mutex, so newly created contexts
     // also see this tuple. A partial failure remains bypass, never mixed flow.
     state->optical_flow_backend = backend;
     state->nvidia_options = options;
-    state->dlss_motion_vectors = control.desired.motion_vectors == 1;
+    state->dlss_motion_vectors = control.desired.motion_vectors == 1 || control.desired.hybrid;
+    if (state->dlss_motion_vectors && state->graphics_binding == SessionGraphicsBinding::d3d12 &&
+        !state->d3d11_bridge && !state->vulkan_bridge && state->d3d12_queue) {
+        xrfg::configure_ngx_guide_capture(state->d3d12_queue.Get(), true);
+    }
     for (const auto& chain : swapchains) {
         std::unique_lock lock(chain->mutex);
         // The same gates the enumeration path applies, and for the same reason.
@@ -12747,8 +12902,10 @@ void follow_composition_switches() noexcept {
                   .count(),
         std::memory_order_relaxed);
     const auto directory = current_layer_directory();
+    // Edge ghosting reduction is off on this branch (V497) whatever the ini
+    // says: the composition no longer compiles its search.
     xrfg::set_composition_switches(
-        xrfg::implicit_layer::read_edge_ghosting_reduction(directory),
+        false,
         xrfg::implicit_layer::read_repeating_pattern_lock(directory));
 }
 
@@ -13135,6 +13292,8 @@ XrResult layer_end_frame_impl(
     if (has_projection) {
         resource_mappings = build_projection_resource_mappings(current_snapshot);
         log_projection_view_rects(*state, current_snapshot);
+        note_projection_eyes(current_snapshot, resource_mappings);
+        refresh_projection_guides(*state, resource_mappings);
     } else {
         resource_mappings.reason = ProjectionMappingReason::no_projection_views;
     }

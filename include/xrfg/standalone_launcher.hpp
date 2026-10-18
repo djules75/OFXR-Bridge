@@ -43,6 +43,10 @@ struct LauncherSettings {
     // "3X Frame Gen": two synthetic frames per application frame. Off by
     // default.
     bool triple_frame_gen{};
+    // "Hybrid": the game's own DLSS motion vectors composed per pixel with
+    // the optical flow, on a D3D12 game that runs DLSS (V497). Off by
+    // default; applies at the next game start.
+    bool hybrid{};
     // Executables the layer declines to load in, ';'-separated; written to
     // the layer's ini as excluded_processes. Pimax Home by default (see
     // implicit_layer.hpp). No menu entry; edit tray.ini.

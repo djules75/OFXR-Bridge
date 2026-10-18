@@ -126,22 +126,46 @@ struct DlssMotionVectorStatistics {
     std::uint64_t temporal_rejections{};
     std::uint64_t invalid_rejections{};
     std::uint64_t used{};
+    // Pairs composed by the hybrid: vectors and optical flow both (V497).
+    std::uint64_t hybrid_used{};
     std::uint64_t last_used_publication{};
     DlssMotionVectorStatus status{DlssMotionVectorStatus::waiting_for_dlss};
 };
 
 void publish_dlss_motion_vectors(
     const DlssMotionVectorPublication& publication) noexcept;
+// Whether two ID3D12Device interfaces are the same device underneath. An
+// interposer such as NVIDIA Streamline hands the game a proxy device and
+// proxy queues while resources report the real device, so pointer identity
+// says "different" for one and the same GPU device. Identical pointers are
+// the same; otherwise, on one adapter, a private-data value set through one
+// interface and read back through the other proves shared backing. Verified
+// pairs are remembered; the check never guesses.
+bool same_d3d12_device_backing(ID3D12Device* left, ID3D12Device* right) noexcept;
 void configure_dlss_motion_vector_tracking(bool enabled) noexcept;
 // Call only after all queue work that may reference published snapshots has
 // completed. A live disable intentionally retains them until this safe point.
 void retire_disabled_dlss_motion_vector_resources() noexcept;
 void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept;
+// The guides for an XR image. With an array image both eyes come as a
+// stereo set. With a one-slice image (a swapchain per eye) and its eye (0 or
+// 1; -1 unknown), the set holds that eye's own evaluation: chosen by the
+// publication watermark at the eye's colour release (released_at, with the
+// other eye's other_released_at), or without one by the order the stereo
+// path gives two - two streams, or one stream alternating eyes (V497, from
+// 0.3's R15).
 std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
     ID3D12Resource* output,
-    ID3D12CommandQueue* consumer_queue) noexcept;
+    ID3D12CommandQueue* consumer_queue,
+    int eye = -1,
+    std::uint64_t released_at = 0,
+    std::uint64_t other_released_at = 0) noexcept;
+// The process-monotonic publication count: a release watermark.
+std::uint64_t dlss_motion_vector_publications() noexcept;
 void report_dlss_motion_vector_status(DlssMotionVectorStatus status) noexcept;
 void report_dlss_motion_vector_use() noexcept;
+// A pair the hybrid composition used: counted as used, and as hybrid.
+void report_dlss_hybrid_use() noexcept;
 DlssMotionVectorStatistics dlss_motion_vector_statistics() noexcept;
 
 }  // namespace xrfg

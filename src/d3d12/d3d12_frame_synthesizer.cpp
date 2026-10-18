@@ -11,6 +11,11 @@
 
 #include "fullscreen_vertex_shader.hpp"
 #include "game_motion_synthesize_midpoint_pixel_shader.hpp"
+#include "hybrid_synthesize_midpoint_pixel_shader.hpp"
+#include "hybrid_nvidia_synthesize_midpoint_pixel_shader.hpp"
+#include "hybrid_nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp"
+#include "hybrid_nvidia_fast_synthesize_midpoint_pixel_shader.hpp"
+#include "hybrid_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_fast_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp"
@@ -27,6 +32,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <initializer_list>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -110,6 +116,10 @@ constexpr D3D12_RESOURCE_STATES kShaderReadState =
         return false;
     }
 
+    // A proxy device (Streamline) and the real one: the same underneath.
+    if (same_d3d12_device_backing(expected, actual.Get())) {
+        return true;
+    }
     ComPtr<IUnknown> expected_identity;
     ComPtr<IUnknown> actual_identity;
     return SUCCEEDED(expected->QueryInterface(IID_PPV_ARGS(expected_identity.GetAddressOf()))) &&
@@ -331,15 +341,24 @@ constexpr UINT kEncodeSrgbFlowInputFlag = 2U;
 }
 
 // The ini's switches (set_composition_switches): bit 0 edge ghosting
-// reduction, bit 1 repeating-pattern lock.
+// reduction, bit 1 repeating-pattern lock. Edge ghosting reduction is off on
+// this branch (V497): the composition no longer compiles its search, so the
+// bit is recorded but changes nothing.
 std::atomic<std::uint32_t> g_composition_switches{2U};
 
-// Where the live window is not open: the built-in values with the ini's two
-// switches, in the same constants. Edge ghosting reduction off and the lock
-// on leaves the constants alone, which is what the shader's built-in values
-// already are. Each change of the
-// switches is recorded once, as embedded_configuration result=812 with a the
-// two bits.
+// Which composition a draw's constants are laid out for. The flow
+// composition's game-motion constants are free, so the live window's
+// pattern-lock values ride there (frame_synthesis.hlsl, live_tuning_present);
+// the vectors-only composition carries the guide rectangle in them, and the
+// hybrid carries the guide rectangle in them too, with the window's hybrid
+// values in the spare bits of synthesis_flags.
+enum class CompositionLayout { flow, game_motion, hybrid };
+
+// Where the live window is not open: the built-in values with the ini's
+// pattern-lock switch, in the same constants. Lock on leaves the constants
+// alone, which is what the shader's built-in values already are. Each change
+// of the switches is recorded once, as embedded_configuration result=812
+// with the two bits.
 void apply_composition_switches(SynthesisParameters& parameters) noexcept {
     static std::atomic<std::uint32_t> recorded{0xFFFFFFFFU};
     const std::uint32_t switches = g_composition_switches.load(std::memory_order_relaxed);
@@ -349,112 +368,101 @@ void apply_composition_switches(SynthesisParameters& parameters) noexcept {
             812,
             switches);
     }
-    if (switches == 2U) {
+    if ((switches & 2U) != 0U) {
         return;
     }
-    parameters.game_motion_padding = 1U | ((switches & 1U) != 0U ? 2U : 0U) |
-        ((switches & 2U) != 0U ? 4U : 0U) | (3U << 4U) | (1U << 8U);
+    parameters.game_motion_padding = 1U | (3U << 4U) | (1U << 8U);
     parameters.game_motion_rect = {8.0F, 24.0F / 255.0F, 2.0F / 255.0F, 1.0F};
     parameters.game_motion_scale = {0.1F, 1.0F / 255.0F};
 }
 
-// The tray's live tuning window (xrfg::live_tuning) for edge ghosting
-// reduction, carried in the game-motion constants, which only the
-// game-motion branch reads; frame_synthesis.hlsl decodes them (see
-// live_tuning_present). Called once per pair. The block is opened lazily and
-// a failed open is not retried for a second, so a session without the window
-// costs one clock read per pair; with it, one read of mapped memory. Each new
-// set of values is recorded once, as embedded_configuration result=811:
-//   a: bit 0 on, bits 4-7 rings, 8-11 survivors, 16-23 survivor margin,
-//      24-31 endpoint error trigger (255ths)
-//   b: spread trigger (centipixels) << 32 | lands-on-itself tolerance
-//      (centipixels) << 16 | tolerance per pixel of speed (permille)
-//   c: repeating-pattern lock on << 8 | its margin (255ths), from V478
-// (810 was V475's record, which also carried the background fill.)
-void apply_live_composition_tuning(SynthesisParameters& parameters) noexcept {
+// The tray's live tuning window (xrfg::live_tuning). The block is opened
+// lazily and a failed open is not retried for a second, so a session without
+// the window costs one clock read per pair; with it, one read of mapped
+// memory. One copy of the whole block, so the values used and recorded
+// belong together even if the tray writes in the middle.
+[[nodiscard]] bool read_live_tuning(xrfg::live_tuning::Block* values) noexcept {
     static std::mutex mutex;
     static HANDLE mapping = nullptr;
     static const xrfg::live_tuning::Block* block = nullptr;
     static std::chrono::steady_clock::time_point next_attempt{};
-    static std::uint32_t recorded_sequence = 0;
-    static bool recorded_any = false;
-    if (parameters.use_game_motion != 0U) {
-        return;
-    }
     std::scoped_lock lock(mutex);
     if (block == nullptr) {
         const auto now = std::chrono::steady_clock::now();
         if (now < next_attempt) {
-            apply_composition_switches(parameters);
-            return;
+            return false;
         }
         next_attempt = now + std::chrono::seconds(1);
         mapping = OpenFileMappingW(
             FILE_MAP_READ, FALSE, xrfg::live_tuning::kMappingName);
         if (mapping == nullptr) {
-            apply_composition_switches(parameters);
-            return;
+            return false;
         }
         block = static_cast<const xrfg::live_tuning::Block*>(MapViewOfFile(
             mapping, FILE_MAP_READ, 0, 0, sizeof(xrfg::live_tuning::Block)));
         if (block == nullptr) {
             CloseHandle(mapping);
             mapping = nullptr;
-            apply_composition_switches(parameters);
-            return;
+            return false;
         }
     }
     const volatile xrfg::live_tuning::Block* live = block;
     if (live->magic != xrfg::live_tuning::kMagic ||
         live->version != xrfg::live_tuning::kVersion) {
-        apply_composition_switches(parameters);
+        return false;
+    }
+    std::memcpy(values, block, sizeof(*values));
+    return true;
+}
+
+// The window's values into a draw's constants, called once per pair. The
+// pattern lock reaches the flow composition's constants only (the other two
+// layouts carry the guide rectangle there); the hybrid values ride in
+// synthesis_flags for every layout, where only the hybrid reads them. Each
+// new set of values is recorded once, as embedded_configuration result=813:
+//   a: repeating-pattern lock on << 8 | its margin (255ths)
+//   b: hybrid agree threshold (255ths) << 16 | choice slope << 8 | vectors
+//      slope
+// (811 was V475-V494's record, with the edge ghosting reduction values that
+// left with the feature.)
+void apply_live_composition_tuning(
+    SynthesisParameters& parameters,
+    CompositionLayout layout) noexcept {
+    static std::atomic<std::uint64_t> recorded{~0ULL};
+    if (layout == CompositionLayout::game_motion) {
         return;
     }
-    // One copy of the whole block, so the values used and recorded belong
-    // together even if the tray writes in the middle.
     xrfg::live_tuning::Block values{};
-    std::memcpy(&values, block, sizeof(values));
-    const std::uint32_t sequence = values.sequence;
-    const bool enabled = values.edge_ghosting_reduction != 0U;
-    const std::uint32_t rings = std::clamp<std::uint32_t>(values.search_rings, 1U, 5U);
-    const std::uint32_t survivors =
-        std::clamp<std::uint32_t>(values.survivor_limit, 1U, 3U);
-    const std::uint32_t spread = std::min<std::uint32_t>(values.spread_trigger_centipixels, 0xFFFFU);
-    const std::uint32_t error = std::min<std::uint32_t>(values.error_trigger_255ths, 255U);
-    const std::uint32_t margin = std::min<std::uint32_t>(values.survivor_margin_255ths, 255U);
-    const std::uint32_t fixed_base =
-        std::min<std::uint32_t>(values.fixed_point_base_centipixels, 0xFFFFU);
-    const std::uint32_t fixed_speed =
-        std::min<std::uint32_t>(values.fixed_point_speed_permille, 0xFFFFU);
+    if (!read_live_tuning(&values)) {
+        if (layout == CompositionLayout::flow) {
+            apply_composition_switches(parameters);
+        }
+        return;
+    }
     const bool pattern_lock = values.pattern_lock != 0U;
     const std::uint32_t lock_margin =
         std::min<std::uint32_t>(values.pattern_lock_margin_255ths, 255U);
-
-    parameters.game_motion_padding = 1U | (enabled ? 2U : 0U) |
-        (pattern_lock ? 4U : 0U) | (rings << 4U) | (survivors << 8U);
-    parameters.game_motion_rect = {
-        static_cast<float>(spread) / 100.0F,
-        static_cast<float>(error) / 255.0F,
-        static_cast<float>(margin) / 255.0F,
-        static_cast<float>(fixed_base) / 100.0F,
-    };
-    parameters.game_motion_scale = {
-        static_cast<float>(fixed_speed) / 1000.0F,
-        static_cast<float>(lock_margin) / 255.0F,
-    };
-    if (!recorded_any || sequence != recorded_sequence) {
-        recorded_any = true;
-        recorded_sequence = sequence;
+    const std::uint32_t agree =
+        std::min<std::uint32_t>(values.hybrid_agree_threshold_255ths, 62U);
+    const std::uint32_t choice =
+        std::clamp<std::uint32_t>(values.hybrid_choice_slope, 1U, 15U);
+    const std::uint32_t vectors =
+        std::clamp<std::uint32_t>(values.hybrid_vectors_slope, 1U, 15U);
+    if (layout == CompositionLayout::flow) {
+        parameters.game_motion_padding = 1U | (pattern_lock ? 4U : 0U) |
+            (3U << 4U) | (1U << 8U);
+        parameters.game_motion_rect = {8.0F, 24.0F / 255.0F, 2.0F / 255.0F, 1.0F};
+        parameters.game_motion_scale = {0.1F, static_cast<float>(lock_margin) / 255.0F};
+    }
+    parameters.synthesis_flags = (parameters.synthesis_flags & 0x00FFFF03U) |
+        ((agree + 1U) << 2U) | (choice << 24U) | (vectors << 28U);
+    if (recorded.exchange(values.sequence, std::memory_order_relaxed) != values.sequence) {
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::embedded_configuration,
-            811,
-            static_cast<std::uint64_t>(
-                (enabled ? 1U : 0U) | (rings << 4U) | (survivors << 8U)) |
-                (static_cast<std::uint64_t>(margin) << 16U) |
-                (static_cast<std::uint64_t>(error) << 24U),
-            (static_cast<std::uint64_t>(spread) << 32U) |
-                (static_cast<std::uint64_t>(fixed_base) << 16U) | fixed_speed,
-            (static_cast<std::uint64_t>(pattern_lock ? 1U : 0U) << 8U) | lock_margin);
+            813,
+            (static_cast<std::uint64_t>(pattern_lock ? 1U : 0U) << 8U) | lock_margin,
+            (static_cast<std::uint64_t>(agree) << 16U) |
+                (static_cast<std::uint64_t>(choice) << 8U) | vectors);
     }
 }
 
@@ -882,6 +890,13 @@ struct D3D12FrameSynthesizer::Impl {
     ComPtr<ID3D12PipelineState> pack_pipeline;
     ComPtr<ID3D12PipelineState> graphics_pipeline;
     ComPtr<ID3D12PipelineState> game_motion_graphics_pipeline;
+    // The hybrid composition (nvidia_options.hybrid): the FidelityFX flavour,
+    // or the NVIDIA ones, forward and bidirectional, for the preset.
+    ComPtr<ID3D12PipelineState> hybrid_graphics_pipeline;
+    ComPtr<ID3D12PipelineState> hybrid_nvidia_graphics_pipeline;
+    ComPtr<ID3D12PipelineState> hybrid_nvidia_bidirectional_graphics_pipeline;
+    // Set by record_pair when the pair it recorded composed with the hybrid.
+    bool last_pair_hybrid{};
     ComPtr<ID3D12PipelineState> nvidia_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_luma_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_graphics_pipeline;
@@ -1261,10 +1276,50 @@ struct D3D12FrameSynthesizer::Impl {
                 sizeof(g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader),
             };
         }
-        return device->CreateGraphicsPipelineState(
+        result = device->CreateGraphicsPipelineState(
             &graphics_description,
             IID_PPV_ARGS(
                 nvidia_bidirectional_graphics_pipeline.GetAddressOf()));
+        if (FAILED(result) || !nvidia_options.hybrid) {
+            return result;
+        }
+
+        // The hybrid pipelines, for the backend this session runs: a pair
+        // with vectors draws with one of these, a pair without with the
+        // plain ones above.
+        if (backend == D3D12OpticalFlowBackend::nvidia) {
+            const bool fast = nvidia_options.preset == D3D12NvidiaPerformancePreset::fast;
+            graphics_description.PS = fast
+                ? D3D12_SHADER_BYTECODE{
+                      g_xrfg_hybrid_nvidia_fast_synthesize_midpoint_pixel_shader,
+                      sizeof(g_xrfg_hybrid_nvidia_fast_synthesize_midpoint_pixel_shader)}
+                : D3D12_SHADER_BYTECODE{
+                      g_xrfg_hybrid_nvidia_synthesize_midpoint_pixel_shader,
+                      sizeof(g_xrfg_hybrid_nvidia_synthesize_midpoint_pixel_shader)};
+            result = device->CreateGraphicsPipelineState(
+                &graphics_description,
+                IID_PPV_ARGS(hybrid_nvidia_graphics_pipeline.GetAddressOf()));
+            if (FAILED(result)) {
+                return result;
+            }
+            graphics_description.PS = fast
+                ? D3D12_SHADER_BYTECODE{
+                      g_xrfg_hybrid_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader,
+                      sizeof(g_xrfg_hybrid_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader)}
+                : D3D12_SHADER_BYTECODE{
+                      g_xrfg_hybrid_nvidia_bidirectional_synthesize_midpoint_pixel_shader,
+                      sizeof(g_xrfg_hybrid_nvidia_bidirectional_synthesize_midpoint_pixel_shader)};
+            return device->CreateGraphicsPipelineState(
+                &graphics_description,
+                IID_PPV_ARGS(hybrid_nvidia_bidirectional_graphics_pipeline.GetAddressOf()));
+        }
+        graphics_description.PS = {
+            g_xrfg_hybrid_synthesize_midpoint_pixel_shader,
+            sizeof(g_xrfg_hybrid_synthesize_midpoint_pixel_shader),
+        };
+        return device->CreateGraphicsPipelineState(
+            &graphics_description,
+            IID_PPV_ARGS(hybrid_graphics_pipeline.GetAddressOf()));
     }
 
     [[nodiscard]] HRESULT create_fidelityfx_resources(UINT node_mask) {
@@ -1992,26 +2047,36 @@ struct D3D12FrameSynthesizer::Impl {
                             descriptor_increment));
                 }
             } else {
-                srv_description.Format = DXGI_FORMAT_R16G16_SINT;
-                device->CreateShaderResourceView(
-                    optical_flow_vector.Get(),
-                    &srv_description,
-                    offset_cpu_handle(cpu_start, 2, descriptor_increment));
-                srv_description.Format = DXGI_FORMAT_R32_UINT;
-                device->CreateShaderResourceView(
-                    optical_flow_scene_change.Get(),
-                    &srv_description,
-                    offset_cpu_handle(cpu_start, 3, descriptor_increment));
-                srv_description.Format = DXGI_FORMAT_R16G16_SINT;
-                device->CreateShaderResourceView(
-                    optical_flow_vector.Get(),
-                    &srv_description,
-                    offset_cpu_handle(cpu_start, 4, descriptor_increment));
-                srv_description.Format = DXGI_FORMAT_R32_UINT;
-                device->CreateShaderResourceView(
-                    optical_flow_scene_change.Get(),
-                    &srv_description,
-                    offset_cpu_handle(cpu_start, 5, descriptor_increment));
+                // FidelityFX's flow views live in the first block, which
+                // every eye's draw binds. A hybrid draw binds each eye's own
+                // block for that eye's guide, so there they are repeated into
+                // every block.
+                const UINT flow_blocks = nvidia_options.hybrid
+                    ? image_description.DepthOrArraySize
+                    : 1U;
+                for (UINT block = 0; block < flow_blocks; ++block) {
+                    const UINT base = block * kDescriptorBlockSize;
+                    srv_description.Format = DXGI_FORMAT_R16G16_SINT;
+                    device->CreateShaderResourceView(
+                        optical_flow_vector.Get(),
+                        &srv_description,
+                        offset_cpu_handle(cpu_start, base + 2, descriptor_increment));
+                    srv_description.Format = DXGI_FORMAT_R32_UINT;
+                    device->CreateShaderResourceView(
+                        optical_flow_scene_change.Get(),
+                        &srv_description,
+                        offset_cpu_handle(cpu_start, base + 3, descriptor_increment));
+                    srv_description.Format = DXGI_FORMAT_R16G16_SINT;
+                    device->CreateShaderResourceView(
+                        optical_flow_vector.Get(),
+                        &srv_description,
+                        offset_cpu_handle(cpu_start, base + 4, descriptor_increment));
+                    srv_description.Format = DXGI_FORMAT_R32_UINT;
+                    device->CreateShaderResourceView(
+                        optical_flow_scene_change.Get(),
+                        &srv_description,
+                        offset_cpu_handle(cpu_start, base + 5, descriptor_increment));
+                }
                 uav_description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
                 device->CreateUnorderedAccessView(
                     packed_color.Get(),
@@ -2030,9 +2095,10 @@ struct D3D12FrameSynthesizer::Impl {
             null_motion.Texture2DArray.MipLevels = 1;
             null_motion.Texture2DArray.FirstArraySlice = 0;
             null_motion.Texture2DArray.ArraySize = 1;
-            const UINT block_count = backend == D3D12OpticalFlowBackend::nvidia
-                ? image_description.DepthOrArraySize
-                : 1U;
+            const UINT block_count =
+                backend == D3D12OpticalFlowBackend::nvidia || nvidia_options.hybrid
+                    ? image_description.DepthOrArraySize
+                    : 1U;
             for (UINT block = 0; block < block_count; ++block) {
                 device->CreateShaderResourceView(nullptr, &null_motion,
                     offset_cpu_handle(cpu_start,
@@ -2481,6 +2547,18 @@ struct D3D12FrameSynthesizer::Impl {
             list->RSSetScissorRects(1, &scissor);
             list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             list->DrawInstanced(3, 1, 0, 0);
+            // The hybrid pipeline this session may draw with, on the same
+            // null views; its first pair would otherwise pay the compile.
+            ID3D12PipelineState* const hybrid_pipeline =
+                backend == D3D12OpticalFlowBackend::nvidia
+                    ? (nvidia_options.bidirectional
+                           ? hybrid_nvidia_bidirectional_graphics_pipeline.Get()
+                           : hybrid_nvidia_graphics_pipeline.Get())
+                    : hybrid_graphics_pipeline.Get();
+            if (hybrid_pipeline != nullptr) {
+                list->SetPipelineState(hybrid_pipeline);
+                list->DrawInstanced(3, 1, 0, 0);
+            }
             if (FAILED(list->Close())) {
                 return;
             }
@@ -3015,6 +3093,96 @@ struct D3D12FrameSynthesizer::Impl {
         return true;
     }
 
+    // Whether a pair's guides can be drawn with: no guide is one of the
+    // images the draw reads or writes, and every target view lies inside its
+    // eye's DLSS output rectangle - the vectors-only composition's own
+    // conditions, shared with the hybrid.
+    [[nodiscard]] bool guides_fit_views(
+        const DlssMotionVectorSet& guides,
+        std::span<const D3D12ReprojectionView> target_views,
+        std::initializer_list<ID3D12Resource*> excluded) const noexcept {
+        for (UINT eye = 0; eye < guides.eye_count; ++eye) {
+            const auto& guide = guides.eyes[eye];
+            if (!guide || !guide->motion_vectors) return false;
+            for (ID3D12Resource* resource : excluded) {
+                if (guide->motion_vectors.Get() == resource) return false;
+            }
+        }
+        for (UINT view_index = 0; view_index < target_views.size(); ++view_index) {
+            const UINT slice = resolved_array_slice(target_views[view_index], view_index,
+                target_views.size(), image_description.DepthOrArraySize);
+            if (slice >= guides.eye_count) return false;
+            const auto& guide = guides.eyes[slice];
+            const D3D12ImageRect rect = resolved_rect(
+                target_views[view_index].image_rect,
+                static_cast<UINT>(image_description.Width), image_description.Height);
+            const std::uint64_t rect_right =
+                static_cast<std::uint64_t>(rect.offset_x) + rect.width;
+            const std::uint64_t rect_bottom =
+                static_cast<std::uint64_t>(rect.offset_y) + rect.height;
+            const std::uint64_t guide_right =
+                static_cast<std::uint64_t>(guide->output_x) + guide->output_width;
+            const std::uint64_t guide_bottom =
+                static_cast<std::uint64_t>(guide->output_y) + guide->output_height;
+            if (rect.width == 0 || rect.height == 0 ||
+                rect.offset_x < guide->output_x || rect.offset_y < guide->output_y ||
+                rect_right > guide_right || rect_bottom > guide_bottom ||
+                guide->output_width > 0xFFFFU || guide->output_height > 0xFFFFU ||
+                guide->output_x > 0xFFFFU || guide->output_y > 0xFFFFU) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // One eye's guide in a hybrid draw's constants: the DLSS output
+    // rectangle packed 16 bits a value (frame_synthesis.hlsl,
+    // game_motion_output_rect), the guide rectangle, the scale from the
+    // guide's render-space units into output pixels, and the jitter delta.
+    static void apply_hybrid_guide_constants(
+        SynthesisParameters& parameters,
+        const DlssMotionVectorFrame& guide) noexcept {
+        parameters.use_game_motion = guide.output_x | (guide.output_y << 16U);
+        parameters.game_motion_padding = guide.output_width | (guide.output_height << 16U);
+        parameters.game_motion_rect = {
+            static_cast<float>(guide.motion_x),
+            static_cast<float>(guide.motion_y),
+            static_cast<float>(guide.motion_width),
+            static_cast<float>(guide.motion_height)};
+        parameters.game_motion_scale = {
+            guide.scale_x * static_cast<float>(guide.output_width) /
+                static_cast<float>(guide.motion_width),
+            guide.scale_y * static_cast<float>(guide.output_height) /
+                static_cast<float>(guide.motion_height)};
+        parameters.game_motion_jitter_delta = guide.jittered
+            ? std::array<float, 2>{
+                  guide.jitter_x - guide.previous_jitter_x,
+                  guide.jitter_y - guide.previous_jitter_y}
+            : std::array<float, 2>{};
+    }
+
+    // The guides' transitions into the shader-read state (to_read) or back,
+    // one per distinct resource; how many were written.
+    static UINT guide_barriers(
+        const DlssMotionVectorSet& guides,
+        bool to_read,
+        std::array<D3D12_RESOURCE_BARRIER, kDlssMotionVectorEyeCount>& barriers) noexcept {
+        UINT count = 0;
+        for (UINT eye = 0; eye < guides.eye_count; ++eye) {
+            const auto& guide = guides.eyes[eye];
+            if (guide->resource_state != kShaderReadState &&
+                (eye == 0 || guide->motion_vectors.Get() !=
+                                 guides.eyes[0]->motion_vectors.Get())) {
+                barriers[count++] = to_read
+                    ? transition_barrier(guide->motion_vectors.Get(),
+                          guide->resource_state, kShaderReadState)
+                    : transition_barrier(guide->motion_vectors.Get(),
+                          kShaderReadState, guide->resource_state);
+            }
+        }
+        return count;
+    }
+
     [[nodiscard]] HRESULT record_game_motion_pair(
         WorkSlot& slot,
         const RollingSource& previous_source,
@@ -3115,7 +3283,7 @@ struct D3D12FrameSynthesizer::Impl {
 
         const auto rtv_start = rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
-            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
+            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFF0000FFU) |
                 packed_synthesis_fraction(synthetic_output_fraction(output));
             const UINT first_rtv =
                 synthetic_output_destination(output, synthetic_destination_index) * image_description.DepthOrArraySize;
@@ -3428,7 +3596,10 @@ struct D3D12FrameSynthesizer::Impl {
         std::span<const D3D12ReprojectionView> target_views,
         std::uint32_t synthetic_destination_index,
         std::uint32_t current_destination_index,
-        const std::optional<OverlayPlacement>& debug_marker) noexcept {
+        const std::optional<OverlayPlacement>& debug_marker,
+        // The pair's game motion vectors for the hybrid composition, or
+        // null for the flow alone. Already checked by guides_fit_views.
+        const DlssMotionVectorSet* guides = nullptr) noexcept {
         if (slot.synthesis_command_list == nullptr) {
             return E_UNEXPECTED;
         }
@@ -3438,6 +3609,10 @@ struct D3D12FrameSynthesizer::Impl {
         ID3D12Resource* const current_destination =
             current_destinations[current_destination_index].resource.Get();
         create_source_views(slot, previous_resource, current_resource);
+        if (guides != nullptr) {
+            const HRESULT views = create_game_motion_views(slot, *guides);
+            if (FAILED(views)) return views;
+        }
         if (nvidia_gpu_timing_enabled) {
             slot.timing_metadata = {};
             slot.timing_metadata.previous_serial = previous_source.ticket.serial;
@@ -3488,7 +3663,8 @@ struct D3D12FrameSynthesizer::Impl {
         SynthesisParameters parameters{};
         parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
             pack_input_flags(view_format);
-        apply_live_composition_tuning(parameters);
+        apply_live_composition_tuning(parameters,
+            guides != nullptr ? CompositionLayout::hybrid : CompositionLayout::flow);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;
@@ -3629,20 +3805,32 @@ struct D3D12FrameSynthesizer::Impl {
         synthesis->ResourceBarrier(
             before_synthesis_count,
             before_synthesis.data());
+        std::array<D3D12_RESOURCE_BARRIER, kDlssMotionVectorEyeCount> guide_transitions{};
+        if (guides != nullptr) {
+            const UINT count = guide_barriers(*guides, true, guide_transitions);
+            if (count != 0) {
+                synthesis->ResourceBarrier(count, guide_transitions.data());
+            }
+        }
 
         synthesis->SetDescriptorHeaps(1, heaps);
         synthesis->SetGraphicsRootSignature(root_signature.Get());
         synthesis->SetPipelineState(
-            nvidia_options.bidirectional
-                ? nvidia_bidirectional_graphics_pipeline.Get()
-                : nvidia_graphics_pipeline.Get());
-        dred_marker(synthesis, "OFXR NVIDIA composition draw");
+            guides != nullptr
+                ? (nvidia_options.bidirectional
+                       ? hybrid_nvidia_bidirectional_graphics_pipeline.Get()
+                       : hybrid_nvidia_graphics_pipeline.Get())
+                : (nvidia_options.bidirectional
+                       ? nvidia_bidirectional_graphics_pipeline.Get()
+                       : nvidia_graphics_pipeline.Get()));
+        dred_marker(synthesis, guides != nullptr
+            ? "OFXR hybrid NVIDIA composition draw" : "OFXR NVIDIA composition draw");
         synthesis->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         const D3D12_CPU_DESCRIPTOR_HANDLE rtv_start =
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
-            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
+            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFF0000FFU) |
                 packed_synthesis_fraction(synthetic_output_fraction(output));
             const UINT first_rtv =
                 synthetic_output_destination(output, synthetic_destination_index) *
@@ -3668,6 +3856,9 @@ struct D3D12FrameSynthesizer::Impl {
                         block,
                         kSrvDescriptorCount,
                         descriptor_increment));
+                if (guides != nullptr) {
+                    apply_hybrid_guide_constants(parameters, *guides->eyes[slice]);
+                }
                 synthesis->SetGraphicsRoot32BitConstants(
                     2,
                     kSynthesisConstantCount,
@@ -3726,6 +3917,12 @@ struct D3D12FrameSynthesizer::Impl {
         synthesis->ResourceBarrier(
             before_current_copy_count,
             before_current_copy.data());
+        if (guides != nullptr) {
+            const UINT count = guide_barriers(*guides, false, guide_transitions);
+            if (count != 0) {
+                synthesis->ResourceBarrier(count, guide_transitions.data());
+            }
+        }
         if (nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
             // Last mark of the pair's synthesis, before the current copy
             // that is submitted separately. The span therefore covers
@@ -3841,17 +4038,78 @@ struct D3D12FrameSynthesizer::Impl {
         bool* used_game_motion) noexcept {
         if (used_game_motion == nullptr) return E_POINTER;
         *used_game_motion = false;
-        if (valid_game_motion_pair(previous_source, current_source)) {
-            const HRESULT result = record_game_motion_pair(slot, previous_source,
-                current_source, target_views, synthetic_destination_index,
-                current_destination_index, debug_marker);
-            if (SUCCEEDED(result)) {
-                *used_game_motion = true;
-                return result;
+        last_pair_hybrid = false;
+        // A pair with the game's vectors: the hybrid composes them with the
+        // flow; otherwise they replace it. A pair whose guides the draw
+        // cannot use runs the flow alone, as a pair without any does.
+        const DlssMotionVectorSet* guides = nullptr;
+        // 815: a pair with the game's vectors the hybrid could not use, the
+        // first eight. a 1 the two frames' guides do not pair (b previous
+        // serial << 32 | current's previous serial, c previous epoch << 32 |
+        // current epoch), 2 the guides do not cover the views (b the first
+        // view's width << 32 | height, c the guide's output width << 32 |
+        // height), 3 the guide's resource is on another device.
+        static std::atomic<unsigned> rejections_recorded{0};
+        const auto record_rejection = [&](std::uint64_t reason, std::uint64_t b, std::uint64_t c) {
+            if (rejections_recorded.fetch_add(1, std::memory_order_relaxed) < 8) {
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::embedded_configuration, 815, reason, b, c);
             }
-            report_dlss_motion_vector_status(DlssMotionVectorStatus::invalid_input);
+        };
+        if (valid_game_motion_pair(previous_source, current_source)) {
+            if (nvidia_options.hybrid) {
+                guides = current_source.motion_vectors.get();
+                if (!guides_fit_views(*guides, target_views,
+                        {previous_source.resource.Get(), current_source.resource.Get(),
+                         current_destinations[current_destination_index].resource.Get(),
+                         synthetic_destinations[synthetic_destination_index].resource.Get()})) {
+                    report_dlss_motion_vector_status(DlssMotionVectorStatus::invalid_input);
+                    const D3D12ImageRect first_rect = target_views.empty()
+                        ? D3D12ImageRect{}
+                        : resolved_rect(target_views[0].image_rect,
+                              static_cast<UINT>(image_description.Width), image_description.Height);
+                    const auto& guide = guides->eyes[0];
+                    record_rejection(2,
+                        (static_cast<std::uint64_t>(first_rect.width) << 32U) | first_rect.height,
+                        guide ? (static_cast<std::uint64_t>(guide->output_width) << 32U) |
+                                guide->output_height : 0);
+                    guides = nullptr;
+                }
+            } else {
+                const HRESULT result = record_game_motion_pair(slot, previous_source,
+                    current_source, target_views, synthetic_destination_index,
+                    current_destination_index, debug_marker);
+                if (SUCCEEDED(result)) {
+                    *used_game_motion = true;
+                    return result;
+                }
+                report_dlss_motion_vector_status(DlssMotionVectorStatus::invalid_input);
+            }
         } else if (current_source.motion_vectors) {
             report_dlss_motion_vector_status(DlssMotionVectorStatus::temporal_mismatch);
+            if (nvidia_options.hybrid) {
+                const auto& previous_vectors = previous_source.motion_vectors;
+                const auto& current = current_source.motion_vectors;
+                const auto a = previous_vectors && previous_vectors->eye_count != 0
+                    ? previous_vectors->eyes[0] : nullptr;
+                const auto b = current->eye_count != 0 ? current->eyes[0] : nullptr;
+                const bool device_mismatch = b && b->motion_vectors &&
+                    !same_device(device.Get(), b->motion_vectors.Get());
+                record_rejection(device_mismatch ? 3U : 1U,
+                    ((a ? a->serial : 0ULL) << 32U) | (b ? b->previous_serial : 0ULL),
+                    ((a ? a->epoch : 0ULL) << 32U) | (b ? b->epoch : 0ULL));
+            }
+        }
+        last_pair_hybrid = guides != nullptr;
+        if (guides != nullptr) {
+            // 814: the first hybrid pair of the process. a the backend.
+            static std::atomic_bool recorded{false};
+            if (!recorded.exchange(true)) {
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::embedded_configuration,
+                    814,
+                    backend == D3D12OpticalFlowBackend::nvidia ? 1U : 0U);
+            }
         }
         if (backend == D3D12OpticalFlowBackend::nvidia) {
             return record_nvidia_pair(
@@ -3861,14 +4119,20 @@ struct D3D12FrameSynthesizer::Impl {
                 target_views,
                 synthetic_destination_index,
                 current_destination_index,
-                debug_marker);
+                debug_marker,
+                guides);
         }
         ID3D12Resource* const previous_resource = previous_source.resource.Get();
         ID3D12Resource* const current_resource = current_source.resource.Get();
         ID3D12Resource* const current_destination =
             current_destinations[current_destination_index].resource.Get();
         create_source_views(slot, previous_resource, current_resource);
-        dred_marker(slot.command_list.Get(), "OFXR FidelityFX pair begin");
+        if (guides != nullptr) {
+            const HRESULT views = create_game_motion_views(slot, *guides);
+            if (FAILED(views)) return views;
+        }
+        dred_marker(slot.command_list.Get(), guides != nullptr
+            ? "OFXR hybrid FidelityFX pair begin" : "OFXR FidelityFX pair begin");
 
         const std::array<D3D12_RESOURCE_BARRIER, 2> before_synthesis{
             transition_barrier(
@@ -3883,6 +4147,13 @@ struct D3D12FrameSynthesizer::Impl {
         slot.command_list->ResourceBarrier(
             static_cast<UINT>(before_synthesis.size()),
             before_synthesis.data());
+        std::array<D3D12_RESOURCE_BARRIER, kDlssMotionVectorEyeCount> guide_transitions{};
+        if (guides != nullptr) {
+            const UINT count = guide_barriers(*guides, true, guide_transitions);
+            if (count != 0) {
+                slot.command_list->ResourceBarrier(count, guide_transitions.data());
+            }
+        }
 
         const D3D12_RESOURCE_BARRIER before_pack = transition_barrier(
             packed_color.Get(),
@@ -3907,7 +4178,8 @@ struct D3D12FrameSynthesizer::Impl {
         SynthesisParameters parameters{};
         parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
             pack_input_flags(view_format);
-        apply_live_composition_tuning(parameters);
+        apply_live_composition_tuning(parameters,
+            guides != nullptr ? CompositionLayout::hybrid : CompositionLayout::flow);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;
@@ -3980,15 +4252,17 @@ struct D3D12FrameSynthesizer::Impl {
                 gpu_start,
                 kSrvDescriptorCount,
                 descriptor_increment));
-        slot.command_list->SetPipelineState(graphics_pipeline.Get());
-        dred_marker(slot.command_list.Get(), "OFXR FidelityFX composition draw");
+        slot.command_list->SetPipelineState(
+            guides != nullptr ? hybrid_graphics_pipeline.Get() : graphics_pipeline.Get());
+        dred_marker(slot.command_list.Get(), guides != nullptr
+            ? "OFXR hybrid FidelityFX composition draw" : "OFXR FidelityFX composition draw");
         slot.command_list->IASetPrimitiveTopology(
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         const D3D12_CPU_DESCRIPTOR_HANDLE rtv_start =
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
-            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
+            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFF0000FFU) |
                 packed_synthesis_fraction(synthetic_output_fraction(output));
             const UINT first_rtv =
                 synthetic_output_destination(output, synthetic_destination_index) *
@@ -4003,6 +4277,16 @@ struct D3D12FrameSynthesizer::Impl {
                     image_description.DepthOrArraySize);
                 parameters.slice = slice;
                 parameters.view_index = view_index;
+                if (guides != nullptr) {
+                    // This eye's block: the flow views repeated there and
+                    // the eye's guide at index 6.
+                    const D3D12_GPU_DESCRIPTOR_HANDLE block = offset_gpu_handle(
+                        gpu_start, slice * kDescriptorBlockSize, descriptor_increment);
+                    slot.command_list->SetGraphicsRootDescriptorTable(0, block);
+                    slot.command_list->SetGraphicsRootDescriptorTable(1,
+                        offset_gpu_handle(block, kSrvDescriptorCount, descriptor_increment));
+                    apply_hybrid_guide_constants(parameters, *guides->eyes[slice]);
+                }
                 slot.command_list->SetGraphicsRoot32BitConstants(
                     2,
                     kSynthesisConstantCount,
@@ -4024,6 +4308,12 @@ struct D3D12FrameSynthesizer::Impl {
             }
         }
 
+        if (guides != nullptr) {
+            const UINT count = guide_barriers(*guides, false, guide_transitions);
+            if (count != 0) {
+                slot.command_list->ResourceBarrier(count, guide_transitions.data());
+            }
+        }
         const std::array<D3D12_RESOURCE_BARRIER, 1> before_current_copy{
             transition_barrier(
                 previous_resource,
@@ -4189,7 +4479,7 @@ struct D3D12FrameSynthesizer::Impl {
 
         SynthesisParameters parameters{};
         parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
-        apply_live_composition_tuning(parameters);
+        apply_live_composition_tuning(parameters, CompositionLayout::flow);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;
@@ -4215,7 +4505,7 @@ struct D3D12FrameSynthesizer::Impl {
         const D3D12_CPU_DESCRIPTOR_HANDLE rtv_start =
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
-            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
+            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFF0000FFU) |
                 packed_synthesis_fraction(synthetic_output_fraction(output));
             const UINT first_rtv =
                 synthetic_output_destination(output, synthetic_destination_index) *
@@ -4947,7 +5237,11 @@ struct D3D12FrameSynthesizer::Impl {
             }
             return result;
         }
-        if (used_game_motion) report_dlss_motion_vector_use();
+        if (used_game_motion) {
+            report_dlss_motion_vector_use();
+        } else if (last_pair_hybrid) {
+            report_dlss_hybrid_use();
+        }
 
         next.last_use_fence_value = fence_value;
         result = history->retire_consumer(

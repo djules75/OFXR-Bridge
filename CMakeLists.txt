@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.494.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.497.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -133,6 +133,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     set(XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp")
     set(XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_fast_synthesize_midpoint_pixel_shader.hpp")
     set(XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp")
+    set(XRFG_HYBRID_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/hybrid_synthesize_midpoint_pixel_shader.hpp")
+    set(XRFG_HYBRID_NVIDIA_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/hybrid_nvidia_synthesize_midpoint_pixel_shader.hpp")
+    set(XRFG_HYBRID_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/hybrid_nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp")
+    set(XRFG_HYBRID_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/hybrid_nvidia_fast_synthesize_midpoint_pixel_shader.hpp")
+    set(XRFG_HYBRID_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/hybrid_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp")
     add_custom_command(
         OUTPUT
             "${XRFG_PACK_INPUT_HEADER}"
@@ -145,6 +150,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
             "${XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"
             "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
+            "${XRFG_HYBRID_SYNTHESIZE_PIXEL_HEADER}"
+            "${XRFG_HYBRID_NVIDIA_SYNTHESIZE_PIXEL_HEADER}"
+            "${XRFG_HYBRID_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
+            "${XRFG_HYBRID_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"
+            "${XRFG_HYBRID_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E PackFlowInput
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
@@ -187,6 +197,31 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}" /Vn g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeHybridMidpointPS
+            /D XRFG_HYBRID=1
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_HYBRID_SYNTHESIZE_PIXEL_HEADER}" /Vn g_xrfg_hybrid_synthesize_midpoint_pixel_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeHybridNvidiaMidpointPS
+            /D XRFG_HYBRID=1
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_HYBRID_NVIDIA_SYNTHESIZE_PIXEL_HEADER}" /Vn g_xrfg_hybrid_nvidia_synthesize_midpoint_pixel_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeHybridNvidiaBidirectionalMidpointPS
+            /D XRFG_HYBRID=1
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_HYBRID_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}" /Vn g_xrfg_hybrid_nvidia_bidirectional_synthesize_midpoint_pixel_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeHybridNvidiaFastMidpointPS
+            /D XRFG_HYBRID=1
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_HYBRID_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}" /Vn g_xrfg_hybrid_nvidia_fast_synthesize_midpoint_pixel_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeHybridNvidiaFastBidirectionalMidpointPS
+            /D XRFG_HYBRID=1
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_HYBRID_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}" /Vn g_xrfg_hybrid_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
         DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
         VERBATIM)
@@ -207,7 +242,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_NVIDIA_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"
-        "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}")
+        "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
+        "${XRFG_HYBRID_SYNTHESIZE_PIXEL_HEADER}"
+        "${XRFG_HYBRID_NVIDIA_SYNTHESIZE_PIXEL_HEADER}"
+        "${XRFG_HYBRID_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
+        "${XRFG_HYBRID_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"
+        "${XRFG_HYBRID_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}")
     target_include_directories(xrfg_d3d12_history
         PUBLIC include "${XRFG_VULKAN_INCLUDE_DIR}"
         PRIVATE
@@ -266,6 +306,42 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             /W4 /permissive- /EHsc)
     endif()
 
+    # The NGX guide capture (V497): the game's own DLSS motion vectors, taken
+    # from its NGX calls. The public DLSS SDK headers (github.com/NVIDIA/DLSS,
+    # include/) describe the parameter interface; safetyhook detours the
+    # exports, and fetches Zydis for itself.
+    set(XRFG_DLSS_SDK_INCLUDE_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/external/DLSS/include"
+        CACHE PATH "NVIDIA DLSS SDK headers (nvsdk_ngx.h and its includes)")
+    if(NOT EXISTS "${XRFG_DLSS_SDK_INCLUDE_DIR}/nvsdk_ngx_params.h")
+        message(FATAL_ERROR
+            "The NVIDIA DLSS SDK headers are required for the layer's NGX guide "
+            "capture. Place the SDK's include/ at ${XRFG_DLSS_SDK_INCLUDE_DIR} - "
+            "see docs/BUILDING.md.")
+    endif()
+    include(FetchContent)
+    set(SAFETYHOOK_FETCH_ZYDIS ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(ofxr_safetyhook
+        GIT_REPOSITORY https://github.com/cursey/safetyhook.git
+        GIT_TAG c3f3f306a0f12d1811c0b713ad2ed2a8ddc6cf55)
+    FetchContent_MakeAvailable(ofxr_safetyhook)
+
+    add_library(xrfg_ngx_guide_capture STATIC
+        src/layer/ngx_guide_capture.cpp
+        include/xrfg/ngx_guide_capture.hpp)
+    target_include_directories(xrfg_ngx_guide_capture
+        PUBLIC include "${XRFG_DLSS_SDK_INCLUDE_DIR}")
+    target_link_libraries(xrfg_ngx_guide_capture
+        PUBLIC xrfg_d3d12_history xrfg_bridge_flight_logger
+        PRIVATE safetyhook)
+    target_compile_features(xrfg_ngx_guide_capture PUBLIC cxx_std_20)
+    target_compile_definitions(xrfg_ngx_guide_capture PRIVATE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN)
+    if(MSVC)
+        target_compile_options(xrfg_ngx_guide_capture PRIVATE /W4 /permissive- /EHsc)
+    endif()
+
     if(NOT EXISTS "${XRFG_OPENVR_INCLUDE_DIR}/openvr.h")
         message(FATAL_ERROR
             "openvr.h is required for the layer: the overlay reports what the "
@@ -302,6 +378,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     target_link_libraries(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE
         xrfg_core
         xrfg_d3d12_history
+        xrfg_ngx_guide_capture
         xrfg_bridge_flight_logger
         xrfg_fps_overlay
         xrfg_implicit_layer
@@ -499,6 +576,33 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(
             NAME xrfg_provider_api
             COMMAND xrfg_provider_api_tests $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>)
+
+        # The NGX guide capture against a stand-in nvngx_dlss.dll. The
+        # stand-in is built under fake-ngx/, never beside the tray, so no
+        # package can pick it up.
+        add_library(xrfg_fake_nvngx_dlss SHARED tests/fake_nvngx_dlss.cpp)
+        set_target_properties(xrfg_fake_nvngx_dlss PROPERTIES
+            OUTPUT_NAME nvngx_dlss
+            PREFIX ""
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/fake-ngx")
+        target_include_directories(xrfg_fake_nvngx_dlss PRIVATE "${XRFG_DLSS_SDK_INCLUDE_DIR}")
+        target_compile_features(xrfg_fake_nvngx_dlss PRIVATE cxx_std_20)
+        if(MSVC)
+            target_compile_options(xrfg_fake_nvngx_dlss PRIVATE /W4 /permissive- /EHsc)
+            target_compile_definitions(xrfg_fake_nvngx_dlss PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        endif()
+        add_executable(xrfg_ngx_guide_capture_tests tests/ngx_guide_capture_tests.cpp)
+        target_link_libraries(xrfg_ngx_guide_capture_tests PRIVATE
+            xrfg_ngx_guide_capture d3d12 dxgi)
+        target_compile_features(xrfg_ngx_guide_capture_tests PRIVATE cxx_std_20)
+        if(MSVC)
+            target_compile_options(xrfg_ngx_guide_capture_tests PRIVATE /W4 /permissive- /EHsc)
+            target_compile_definitions(xrfg_ngx_guide_capture_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        endif()
+        add_dependencies(xrfg_ngx_guide_capture_tests xrfg_fake_nvngx_dlss)
+        add_test(
+            NAME xrfg_ngx_guide_capture
+            COMMAND xrfg_ngx_guide_capture_tests $<TARGET_FILE:xrfg_fake_nvngx_dlss>)
 
         add_executable(xrfg_layer_call_chain tests/layer_call_chain.cpp)
         target_include_directories(xrfg_layer_call_chain PRIVATE
@@ -985,6 +1089,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 WIN32_LEAN_AND_MEAN)
         endif()
         add_test(NAME xrfg_d3d12_history_tests COMMAND xrfg_d3d12_history_tests)
+        add_test(NAME xrfg_d3d12_hybrid_composition COMMAND xrfg_d3d12_history_tests hybrid)
 
         add_executable(xrfg_vertical_fov_tests tests/vertical_fov_tests.cpp)
         target_include_directories(xrfg_vertical_fov_tests PRIVATE include)

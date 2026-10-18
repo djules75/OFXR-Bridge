@@ -108,6 +108,31 @@ matches. The FidelityFX backend retains its single packed-stereo dispatch. The
 full SDK package, programming guide, samples and license agreement are
 development inputs and are not bridge release artifacts.
 
+## NVIDIA DLSS SDK headers
+
+The layer's NGX guide capture (`src/layer/ngx_guide_capture.cpp`, V497)
+detours the game's own `NVSDK_NGX_D3D12_CreateFeature`, `EvaluateFeature` and
+`ReleaseFeature` calls to read the DLSS motion vectors it already supplies.
+It compiles against the public DLSS SDK headers from
+<https://github.com/NVIDIA/DLSS> (`nvsdk_ngx.h`, `nvsdk_ngx_defs.h`,
+`nvsdk_ngx_params.h`), placed under `external/DLSS/include` as
+`docs/BUILDING.md` describes and intentionally not committed. Only the
+parameter interface and the entry-point signatures are taken from them: no
+NVIDIA library is linked, no NVIDIA binary is redistributed, and the capture
+only ever calls the DLSS the game loaded itself.
+
+## safetyhook and Zydis
+
+The detours are made with [safetyhook](https://github.com/cursey/safetyhook)
+at commit `c3f3f306a0f12d1811c0b713ad2ed2a8ddc6cf55`, fetched by CMake at
+configure time and statically linked into the layer DLL. safetyhook is
+licensed under the Boost Software License 1.0; its notice is preserved in
+`licenses/safetyhook-BSL-1.0.txt`. It disassembles the detoured prologues with
+[Zydis](https://github.com/zyantific/zydis) `v4.1.0` (with its Zycore
+dependency), fetched the same way and also statically linked; Zydis is MIT
+licensed and its notice is preserved in `licenses/Zydis-MIT.txt`. Both ship
+with the release archive.
+
 ## Candidate: Khronos OpenXR-SDK-Source API layer scaffold
 
 Not copied. `XRFG-V001` through `XRFG-V003` follow the public loader/API-layer

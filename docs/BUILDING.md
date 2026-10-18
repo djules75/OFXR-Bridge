@@ -35,6 +35,23 @@ external/FidelityFX-SDK-v1.1.4/sdk/bin/ffx_sdk/ffx_opticalflow_x64.lib
 The pinned FidelityFX commit is
 `c6efa6bf7f2027b3ec94f28578bb5965eabb9e55`.
 
+### NVIDIA DLSS SDK headers and safetyhook (V497)
+
+The layer's NGX guide capture reads the game's DLSS motion vectors from its
+NGX calls. It compiles against the public DLSS SDK headers, which are not
+committed: copy the `include/` directory of
+<https://github.com/NVIDIA/DLSS> (any release from 3.7 on; the build uses
+`nvsdk_ngx.h`, `nvsdk_ngx_defs.h` and `nvsdk_ngx_params.h`) to
+`external/DLSS/include`, or point `XRFG_DLSS_SDK_INCLUDE_DIR` at it. Only
+headers are used: no NVIDIA library is linked and no NVIDIA binary ships.
+
+The exports are detoured with [safetyhook](https://github.com/cursey/safetyhook)
+(Boost Software License), which CMake fetches at configure time at the
+pinned commit `c3f3f306a0f12d1811c0b713ad2ed2a8ddc6cf55` together with its
+disassembler [Zydis](https://github.com/zyantific/zydis) `v4.1.0` (MIT), so the
+first configure needs network access. Both are statically linked into the
+layer DLL; their notices are in `licenses/`.
+
 ## Build and test
 
 ```powershell

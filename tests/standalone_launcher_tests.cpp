@@ -102,6 +102,8 @@ int main() {
         release_defaults.nvidia_bidirectional || release_defaults.diagnostics ||
         !release_defaults.deep_pipeline ||
         release_defaults.triple_frame_gen ||
+        release_defaults.hybrid ||
+        !contains(default_runtime_ini, "hybrid=0") ||
         release_defaults.excluded_processes != "PimaxHome-Win64-Shipping.exe" ||
         !contains(default_runtime_ini, "excluded_processes=PimaxHome-Win64-Shipping.exe") ||
         !release_defaults.single_swapchain_rings ||
@@ -149,6 +151,7 @@ int main() {
     settings.nvidia_bidirectional = true;
     settings.deep_pipeline = false;
     settings.triple_frame_gen = true;
+    settings.hybrid = true;
     settings.excluded_processes = "Home.exe; Other-Shipping.exe";
     settings.single_swapchain_rings = false;
     settings.vulkan_session_bridge = false;
@@ -165,7 +168,7 @@ int main() {
         parsed.nvidia_preset != NvidiaPerformancePreset::slow ||
         parsed.nvidia_input_scale != NvidiaInputScale::quarter ||
         !parsed.nvidia_bidirectional || parsed.deep_pipeline ||
-        !parsed.triple_frame_gen ||
+        !parsed.triple_frame_gen || !parsed.hybrid ||
         parsed.excluded_processes != "Home.exe; Other-Shipping.exe" ||
         parsed.single_swapchain_rings || parsed.vulkan_session_bridge ||
         parsed.vulkan_support || parsed.d3d11_bridge ||
@@ -256,6 +259,7 @@ int main() {
         !contains(runtime_ini, "nvidia_bidirectional=1") ||
         !contains(runtime_ini, "deep_pipeline=0") ||
         !contains(runtime_ini, "triple_frame_gen=1") ||
+        !contains(runtime_ini, "hybrid=1") ||
         !contains(runtime_ini, "excluded_processes=Home.exe; Other-Shipping.exe") ||
         !contains(runtime_ini, "single_swapchain_rings=0") ||
         !contains(runtime_ini, "vulkan_session_bridge=0") ||

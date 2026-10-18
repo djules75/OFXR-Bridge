@@ -68,6 +68,7 @@ enum MenuCommand : UINT {
     nvidia_scale_quarter = 129,
     toggle_deep_pipeline = 118,
     toggle_lower_vram = 126,
+    toggle_hybrid = 141,
     reset_defaults = 127,
     toggle_diagnostics = 120,
     overlay_off = 121,
@@ -112,14 +113,15 @@ struct AppState {
     HICON disarmed_icon{};
     UINT taskbar_created_message{};
     bool armed{};
-    // The live tuning window for edge ghosting reduction: hidden rather
-    // than destroyed on close so it keeps its position, and the shared block
-    // it writes (xrfg::live_tuning). The block lives as long as the tray, so
-    // values set once hold for every game started after them.
+    // The live tuning window for the pattern lock and the hybrid
+    // composition: hidden rather than destroyed on close so it keeps its
+    // position, and the shared block it writes (xrfg::live_tuning). The
+    // block lives as long as the tray, so values set once hold for every
+    // game started after them.
     HWND tuning_window{};
-    std::array<HWND, 2> tuning_switches{};
-    std::array<HWND, 8> tuning_sliders{};
-    std::array<HWND, 8> tuning_labels{};
+    std::array<HWND, 1> tuning_switches{};
+    std::array<HWND, 4> tuning_sliders{};
+    std::array<HWND, 4> tuning_labels{};
     HANDLE tuning_mapping{};
     xrfg::live_tuning::Block* tuning_block{};
 };
@@ -630,6 +632,9 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     } else if (state.settings.deep_pipeline) {
         tooltip += L" - prefer FPS";
     }
+    if (state.settings.hybrid) {
+        tooltip += L" - hybrid";
+    }
     if (state.settings.vulkan_support) {
         tooltip += L" - Vulkan";
     }
@@ -1057,56 +1062,47 @@ struct TuningSlider {
     double display_scale;    // shown value per slider step
     const wchar_t* unit;
     const wchar_t* hint;
+    // A heading drawn above this slider, opening a section of the window.
+    const wchar_t* section;
 };
 
-constexpr std::array<TuningSlider, 8> kTuningSliders{{
-    {L"Search reach", 1, 5, &xrfg::live_tuning::Block::search_rings, 1U, 1.0,
-     L"", L"farther finds faster objects (wings)"},
-    {L"Search survivors", 1, 3, &xrfg::live_tuning::Block::survivor_limit, 1U, 1.0,
-     L"", L"candidates compared at full resolution: the costly step"},
-    {L"Search trigger: flow spread", 0, 40,
-     &xrfg::live_tuning::Block::spread_trigger_centipixels, 25U, 0.25, L" px",
-     L"lower = more edge pixels search (cost)"},
-    {L"Search trigger: endpoint error", 0, 64,
-     &xrfg::live_tuning::Block::error_trigger_255ths, 1U, 1.0, L"/255",
-     L"lower = more mismatching pixels search (cost)"},
-    {L"Survivor margin", 0, 16, &xrfg::live_tuning::Block::survivor_margin_255ths,
-     1U, 1.0, L"/255", L"how much better a found vector must match to win"},
-    {L"Lands-on-itself tolerance", 0, 40,
-     &xrfg::live_tuning::Block::fixed_point_base_centipixels, 25U, 0.25, L" px",
-     L"higher = more candidates accepted, more risk"},
-    {L"Lands-on-itself, per px of speed", 0, 50,
-     &xrfg::live_tuning::Block::fixed_point_speed_permille, 10U, 0.01, L"",
-     L"extra allowance for fast motion"},
+constexpr std::array<TuningSlider, 4> kTuningSliders{{
     {L"Pattern lock margin", 0, 32,
      &xrfg::live_tuning::Block::pattern_lock_margin_255ths, 1U, 1.0, L"/255",
-     L"higher = steadier patterns, risk of blur on slow movers"},
+     L"higher = steadier patterns, risk of blur on slow movers", nullptr},
+    {L"Agree threshold", 0, 62,
+     &xrfg::live_tuning::Block::hybrid_agree_threshold_255ths, 1U, 1.0, L"/255",
+     L"below it the vectors are taken as they are and the flow is skipped (cost)",
+     L"Hybrid: game motion vectors + optical flow (DLSS games, Hybrid on)"},
+    {L"Choice slope", 1, 15,
+     &xrfg::live_tuning::Block::hybrid_choice_slope, 1U, 1.0, L"",
+     L"how sharply the better branch wins: 1 soft blend, 15 hard pick", nullptr},
+    {L"Vectors slope", 1, 15,
+     &xrfg::live_tuning::Block::hybrid_vectors_slope, 1U, 1.0, L"",
+     L"how fast a vectors mismatch falls back to the pose-only blend", nullptr},
 }};
 
-// Unticked, each is off, for an A/B in the same scene: without both, the
-// composition is V476's.
+// Unticked, off, for an A/B in the same scene.
 struct TuningSwitch {
     const wchar_t* label;
     std::uint32_t xrfg::live_tuning::Block::*field;
 };
 
-constexpr std::array<TuningSwitch, 2> kTuningSwitches{{
-    {L"Edge ghosting reduction",
-     &xrfg::live_tuning::Block::edge_ghosting_reduction},
+constexpr std::array<TuningSwitch, 1> kTuningSwitches{{
     {L"Repeating-pattern lock",
      &xrfg::live_tuning::Block::pattern_lock},
 }};
+static_assert(kTuningSliders.size() == std::tuple_size_v<decltype(AppState::tuning_sliders)>);
+static_assert(kTuningSwitches.size() == std::tuple_size_v<decltype(AppState::tuning_switches)>);
 
 constexpr int kTuningSwitchBaseId = 2101;
 constexpr int kTuningResetId = 2120;
 
 [[nodiscard]] std::wstring tuning_slider_text(const TuningSlider& slider, int position) {
     wchar_t text[240]{};
-    if (slider.field == &xrfg::live_tuning::Block::search_rings) {
-        // Ring n of the shader's candidate table lies this many cells out.
-        constexpr std::array<int, 6> kRingCells{0, 1, 2, 4, 6, 8};
-        swprintf_s(text, L"%s: %d cells  -  %s", slider.name,
-            kRingCells[static_cast<std::size_t>(std::clamp(position, 1, 5))], slider.hint);
+    if (slider.display_scale == 1.0) {
+        swprintf_s(text, L"%s: %d%s  -  %s", slider.name, position, slider.unit,
+            slider.hint);
     } else {
         swprintf_s(text, L"%s: %.2f%s  -  %s", slider.name,
             static_cast<double>(position) * slider.display_scale, slider.unit,
@@ -1202,7 +1198,6 @@ LRESULT CALLBACK tuning_procedure(
     // Values first, then the header that makes the block valid.
     xrfg::live_tuning::Block values = xrfg::live_tuning::kDefaults;
     values.magic = 0;
-    values.edge_ghosting_reduction = state.settings.edge_ghosting_reduction ? 1U : 0U;
     values.pattern_lock = state.settings.repeating_pattern_lock ? 1U : 0U;
     *state.tuning_block = values;
     MemoryBarrier();
@@ -1231,10 +1226,21 @@ void show_tuning_window(AppState& state) {
         static_cast<void>(InitCommonControlsEx(&controls));
         constexpr int kSwitchHeight = 26;
         constexpr int kRowHeight = 52;
+        constexpr int kSectionHeight = 30;
         const int sliders_top =
             12 + static_cast<int>(kTuningSwitches.size()) * kSwitchHeight + 8;
-        const int client_height = sliders_top +
-            static_cast<int>(kTuningSliders.size()) * kRowHeight + 44;
+        // Each slider's row, with a section heading's height above the
+        // sliders that open one.
+        std::array<int, kTuningSliders.size()> slider_tops{};
+        int next_top = sliders_top;
+        for (std::size_t index = 0; index < kTuningSliders.size(); ++index) {
+            if (kTuningSliders[index].section != nullptr) {
+                next_top += kSectionHeight;
+            }
+            slider_tops[index] = next_top;
+            next_top += kRowHeight;
+        }
+        const int client_height = next_top + 44;
         RECT frame{0, 0, 600, client_height};
         AdjustWindowRectEx(&frame, WS_CAPTION | WS_SYSMENU, FALSE,
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW);
@@ -1263,7 +1269,14 @@ void show_tuning_window(AppState& state) {
                 reinterpret_cast<WPARAM>(font), TRUE);
         }
         for (std::size_t index = 0; index < kTuningSliders.size(); ++index) {
-            const int top = sliders_top + static_cast<int>(index) * kRowHeight;
+            const int top = slider_tops[index];
+            if (kTuningSliders[index].section != nullptr) {
+                const HWND heading = CreateWindowExW(
+                    0, L"STATIC", kTuningSliders[index].section, WS_CHILD | WS_VISIBLE,
+                    14, top - kSectionHeight + 8, 570, 18,
+                    state.tuning_window, nullptr, instance, nullptr);
+                SendMessageW(heading, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            }
             state.tuning_labels[index] = CreateWindowExW(
                 0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
                 14, top, 570, 18,
@@ -1483,6 +1496,11 @@ void show_context_menu(AppState& state) {
         MF_STRING | (state.settings.single_swapchain_rings ? MF_CHECKED : MF_UNCHECKED),
         toggle_lower_vram,
         L"Lower VRAM (may cause stuttering)");
+    AppendMenuW(
+        menu,
+        MF_STRING | (state.settings.hybrid ? MF_CHECKED : MF_UNCHECKED),
+        toggle_hybrid,
+        L"Hybrid: game motion vectors + optical flow (DLSS games)");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(
         menu,
@@ -1631,6 +1649,18 @@ void handle_command(AppState& state, UINT command) {
             xrfg::standalone::NvidiaInputScale::quarter;
         update_runtime_options(state);
         break;
+    case toggle_hybrid:
+        state.settings.hybrid = !state.settings.hybrid;
+        update_runtime_options(state);
+        show_balloon(
+            state,
+            state.settings.hybrid ? L"Hybrid: on" : L"Hybrid: off",
+            L"In a D3D12 game that runs DLSS, the game's own motion vectors are "
+            L"composed pixel by pixel with the optical flow: each pixel takes "
+            L"whichever explains the two frames better. Games without DLSS, "
+            L"and D3D11 and Vulkan games, are unchanged. Takes effect the next "
+            L"time the game starts.");
+        break;
     case toggle_deep_pipeline:
         if (state.settings.triple_frame_gen) {
             break;
@@ -1670,8 +1700,8 @@ void handle_command(AppState& state, UINT command) {
                 L"Optical flow: NVIDIA Medium at 50%, bidirectional "
                 L"consistency off. Prefer FPS over latency: on. Frame Gen "
                 L"multiplier: 2X. Lower VRAM: on. FPS overlay: upper right, big, latency shown. Bridge "
-                L"flight recorder: off. Pause key: Ctrl + Alt + F7. Edge "
-                L"ghosting reduction: off. Repeating-pattern lock: on. Settings "
+                L"flight recorder: off. Pause key: Ctrl + Alt + F7. Hybrid: off. "
+                L"Repeating-pattern lock: on. Settings "
                 L"only reachable in tray.ini go back to their defaults too.\n\n"
                 L"The FPS overlay, the flight recorder and the Frame Gen multiplier change "
                 L"in running games at once; the rest applies the next time the "

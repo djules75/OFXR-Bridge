@@ -2986,6 +2986,202 @@ void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
     xrfg::retire_dlss_motion_vector_stream(303);
 }
 
+// A swapchain per eye, each the size of a DLSS output (V497, from 0.3): with
+// its eye known, a one-slice image takes its own eye's evaluation, whether
+// the game runs two DLSS features or one for both eyes.
+void test_dlss_motion_vector_per_eye_swapchains(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    constexpr UINT width = 64;
+    constexpr UINT height = 32;
+    const auto create_texture = [&](UINT texture_width, UINT texture_height) {
+        D3D12_RESOURCE_DESC description =
+            stereo_texture_description(texture_width, texture_height);
+        description.DepthOrArraySize = 1;
+        description.Flags = D3D12_RESOURCE_FLAG_NONE;
+        const D3D12_HEAP_PROPERTIES properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        ComPtr<ID3D12Resource> texture;
+        require_hresult(fixture.device()->CreateCommittedResource(
+            &properties, D3D12_HEAP_FLAG_NONE, &description,
+            D3D12_RESOURCE_STATE_COMMON, nullptr,
+            IID_PPV_ARGS(texture.GetAddressOf())),
+            "create per-eye DLSS texture");
+        return texture;
+    };
+    const auto left_output = create_texture(width, height);
+    const auto right_output = create_texture(width, height);
+    const auto motion = create_texture(width, height / 2);
+    const auto left_xr = create_texture(width, height);
+    const auto right_xr = create_texture(width, height);
+    const auto publish = [&](std::uint64_t stream, ID3D12Resource* eye_output, UINT motion_x = 0) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* command_list) {
+            xrfg::publish_dlss_motion_vectors({
+                stream, eye_output, motion.Get(), fixture.queue(), 0, 0, width, height,
+                motion_x, 0, width / 2, height / 2, 1.0F, 1.0F, 0.0F, 0.0F,
+                D3D12_RESOURCE_STATE_COMMON, false, false, command_list});
+        });
+    };
+
+    // Right-eye first discovery: input offsets override first-seen order.
+    for (int frame = 0; frame < 2; ++frame) {
+        publish(622, right_output.Get(), width / 2);
+        publish(611, left_output.Get());
+    }
+    const auto left = xrfg::resolve_dlss_motion_vectors(left_xr.Get(), fixture.queue(), 0);
+    const auto right = xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue(), 1);
+    require(left && right && left->eye_count == 1 && right->eye_count == 1 &&
+            left->eyes[0]->stream == 611 && right->eyes[0]->stream == 622 &&
+            left->eyes[0]->serial == 2 && right->eyes[0]->serial == 2,
+        "per-eye swapchains did not each take their own eye's DLSS evaluation");
+    require(right->eyes[0]->motion_x == width / 2,
+        "eye ordering changed the right eye's vector rectangle");
+    // The right eye evaluated first this frame: the eyes stay put.
+    publish(622, right_output.Get(), width / 2);
+    publish(611, left_output.Get());
+    const auto left_again = xrfg::resolve_dlss_motion_vectors(left_xr.Get(), fixture.queue(), 0);
+    const auto right_again = xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue(), 1);
+    require(left_again && right_again && left_again->eyes[0]->stream == 611 &&
+            right_again->eyes[0]->stream == 622 && left_again->eyes[0]->serial == 3 &&
+            right_again->eyes[0]->serial == 3,
+        "per-eye swapchains swapped eyes with this frame's evaluation order");
+    // Without the eye, the newest as before.
+    const auto unknown = xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue());
+    require(unknown && unknown->eyes[0]->stream == 611,
+        "an image of unknown eye no longer took the newest evaluation");
+    // An evaluation written straight into the image is that image's.
+    publish(611, left_xr.Get());
+    publish(622, right_output.Get(), width / 2);
+    const auto direct = xrfg::resolve_dlss_motion_vectors(left_xr.Get(), fixture.queue(), 1);
+    require(direct && direct->eyes[0]->stream == 611 && direct->eyes[0]->serial == 4,
+        "an evaluation whose output is the image did not go to that image");
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_dlss_motion_vector_stream(611);
+    xrfg::retire_dlss_motion_vector_stream(622);
+    xrfg::configure_dlss_motion_vector_tracking(true);
+
+    // One DLSS feature for both eyes, evaluated left then right: each eye
+    // sees every other serial.
+    publish(633, left_output.Get());
+    require(!xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue(), 1),
+        "first left evaluation was incorrectly borrowed by the right eye");
+    const auto first_left = xrfg::resolve_dlss_motion_vectors(left_xr.Get(), fixture.queue(), 0);
+    require(first_left && first_left->eyes[0]->serial == 1,
+        "the left eye did not take the first evaluation of one shared stream");
+    publish(633, right_output.Get(), width / 2);
+    publish(633, left_output.Get());
+    const auto half = xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue(), 1);
+    require(!half, "the right eye took the previous frame's evaluation of a shared stream");
+    publish(633, right_output.Get(), width / 2);
+    const auto shared_left = xrfg::resolve_dlss_motion_vectors(left_xr.Get(), fixture.queue(), 0);
+    const auto shared_right = xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue(), 1);
+    require(shared_left && shared_right && shared_left->eyes[0]->serial == 3 &&
+            shared_right->eyes[0]->serial == 4 &&
+            shared_left->eyes[0]->previous_serial == 1 &&
+            shared_right->eyes[0]->previous_serial == 2,
+        "one shared DLSS stream did not give each eye its own evaluation");
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_dlss_motion_vector_stream(633);
+}
+
+// The release-bound join (V497, from 0.3's R15): each eye's guide is the
+// newest evaluation at its own colour release, so a game that evaluates the
+// right eye first, or both eyes before either release, still gives each eye
+// its own.
+void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    const auto texture = [&](UINT width) {
+        auto description = stereo_texture_description(width, 32);
+        description.DepthOrArraySize = 1;
+        description.Flags = D3D12_RESOURCE_FLAG_NONE;
+        const auto properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        ComPtr<ID3D12Resource> resource;
+        require_hresult(fixture.device()->CreateCommittedResource(&properties,
+            D3D12_HEAP_FLAG_NONE, &description, D3D12_RESOURCE_STATE_COMMON,
+            nullptr, IID_PPV_ARGS(resource.GetAddressOf())), "release-bound texture");
+        return resource;
+    };
+    const auto color = texture(64), xr_color = texture(64), motion = texture(64);
+    const auto spectator = texture(128);
+    const auto publish = [&](std::uint64_t stream, ID3D12Resource* output, bool reset = false) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            xrfg::DlssMotionVectorPublication p{};
+            p.stream = stream;
+            p.output = output;
+            p.motion_vectors = motion.Get();
+            p.output_width = static_cast<UINT>(output->GetDesc().Width);
+            p.output_height = 32;
+            p.motion_width = 64;
+            p.motion_height = 32;
+            p.producer_queue = fixture.queue();
+            p.producer_command_list = list;
+            p.resource_state = D3D12_RESOURCE_STATE_COMMON;
+            p.reset = reset;
+            const auto before = xrfg::dlss_motion_vector_publications();
+            xrfg::publish_dlss_motion_vectors(p);
+            require(xrfg::dlss_motion_vector_publications() == before + 1,
+                "release-bound publication failed");
+        });
+        return xrfg::dlss_motion_vector_publications();
+    };
+    const auto resolve = [&](int eye, std::uint64_t release, std::uint64_t other) {
+        return xrfg::resolve_dlss_motion_vectors(xr_color.Get(), fixture.queue(), eye, release, other);
+    };
+    publish(755, color.Get()); // same-size stream retained from start-up
+    publish(744, spectator.Get());
+    publish(733, color.Get()); // capture begins on the RIGHT eye, serial 1
+    std::uint64_t left_release{}, right_release{};
+    for (int frame = 0; frame < 3; ++frame) {
+        left_release = publish(733, color.Get());
+        right_release = publish(733, color.Get());
+    }
+    const auto left = resolve(0, left_release, right_release);
+    const auto right = resolve(1, right_release, left_release);
+    require(left && right && left->eyes[0]->stream == 733 && right->eyes[0]->stream == 733 &&
+            left->eyes[0]->serial == 6 && right->eyes[0]->serial == 7 &&
+            left->eyes[0]->previous_serial == 4 && right->eyes[0]->previous_serial == 5 &&
+            left->eyes[0]->publication <= left_release && right->eyes[0]->publication <= right_release,
+        "right-first shared stream did not follow each colour release");
+    // Without a watermark the eye path refuses this half-updated pair.
+    require(!xrfg::resolve_dlss_motion_vectors(xr_color.Get(), fixture.queue(), 0),
+        "the eye path without a watermark accepted a stale stream");
+    publish(733, color.Get());
+    publish(733, color.Get());
+    const auto both = xrfg::dlss_motion_vector_publications();
+    const auto first = resolve(0, both, both), second = resolve(1, both, both);
+    require(first && second && first->eyes[0]->serial == 8 && second->eyes[0]->serial == 9,
+        "both evaluated before the releases did not use left-first evaluation order");
+    require(!resolve(0, left_release > 10 ? left_release - 10 : 1,
+                right_release > 10 ? right_release - 10 : 1),
+        "a newer guide was borrowed for an evicted release");
+    publish(733, color.Get(), true);
+    const auto after_reset = xrfg::dlss_motion_vector_publications();
+    require(!resolve(0, after_reset, after_reset),
+        "an opposite-eye guide was borrowed across a reset");
+    xrfg::retire_dlss_motion_vector_stream(733);
+    xrfg::retire_dlss_motion_vector_stream(744);
+    xrfg::retire_dlss_motion_vector_stream(755);
+
+    // Separate streams with identical input rectangles: first discovery is
+    // right-first. Release order, rather than that discovery order, wins.
+    for (int frame = 0; frame < 2; ++frame) {
+        right_release = publish(722, color.Get());
+        left_release = publish(711, color.Get());
+    }
+    const auto separate_left = resolve(0, left_release, right_release);
+    const auto separate_right = resolve(1, right_release, left_release);
+    require(separate_left && separate_right && separate_left->eyes[0]->stream == 711 &&
+            separate_right->eyes[0]->stream == 722,
+        "separate streams followed discovery order rather than the releases");
+    const auto legacy_left = xrfg::resolve_dlss_motion_vectors(xr_color.Get(), fixture.queue(), 0);
+    require(legacy_left && legacy_left->eyes[0]->stream == 722,
+        "without a watermark two equal streams no longer follow discovery order");
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_dlss_motion_vector_stream(711);
+    xrfg::retire_dlss_motion_vector_stream(722);
+}
+
 void test_dlss_motion_vector_gpu_ingress(
     D3D12WarpFixture& fixture,
     xrfg::D3D12OpticalFlowBackend backend =
@@ -4094,7 +4290,172 @@ void test_nvidia_serialized_eye_context_stress(
 
 }  // namespace
 
-int main() {
+// The hybrid composition on WARP: the game's vectors describe a moving
+// object over a moving background (occlusion), a static overlay the vectors
+// wrongly say moves with the background (overlay - a HUD drawn after DLSS),
+// and a brightness fade the vectors describe exactly (fade). With FidelityFX
+// flow beside the vectors, the pixels at the object's edges and across the
+// overlay must come out closer to the true in-between frame than a
+// same-pixel blend of the two frames does, which is what a composition with
+// no motion at all would show.
+enum class HybridScene { occlusion, overlay, fade };
+
+void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind) {
+    constexpr UINT width = 256, height = 128;
+    constexpr int object_left = 72, object_width = 80, object_top = 32, object_bottom = 96;
+    constexpr int background_motion = 6;
+    const bool overlay = kind == HybridScene::overlay, fade = kind == HybridScene::fade;
+    const int object_motion = overlay ? 0 : fade ? background_motion : 20;
+    const char* const name = fade ? "fade" : overlay ? "overlay" : "occlusion";
+    const auto make_scene = [&](int background_shift, int object_shift, float brightness = 1.0F) {
+        StereoPattern pattern;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            auto& bytes = pattern[eye];
+            bytes.resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
+            for (UINT y = 0; y < height; ++y) {
+                for (UINT x = 0; x < width; ++x) {
+                    const int ox = static_cast<int>(x) - object_shift;
+                    const bool object = static_cast<int>(y) >= object_top &&
+                        static_cast<int>(y) < object_bottom && ox >= object_left &&
+                        ox < object_left + object_width;
+                    const int bx = static_cast<int>(x) - background_shift + 64;
+                    const RgbaBytes color = object
+                        ? ((ox / 5) % 2 ? RgbaBytes{240, 210, 40, 255} : RgbaBytes{30, 60, 200, 255})
+                        : RgbaBytes{static_cast<std::uint8_t>(40 + (bx * 13 + static_cast<int>(y) * 5) % 160),
+                                    static_cast<std::uint8_t>(60 + ((bx / 3) % 7) * 20 + eye * 9),
+                                    static_cast<std::uint8_t>(90 + (bx * 7) % 120), 255};
+                    const RgbaBytes lit{static_cast<std::uint8_t>(std::lround(color[0] * brightness)),
+                                        static_cast<std::uint8_t>(std::lround(color[1] * brightness)),
+                                        static_cast<std::uint8_t>(std::lround(color[2] * brightness)), 255};
+                    std::copy(lit.begin(), lit.end(), bytes.begin() +
+                        (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel);
+                }
+            }
+        }
+        return pattern;
+    };
+    const StereoPattern previous = make_scene(0, 0);
+    const StereoPattern current = make_scene(background_motion, object_motion, fade ? 0.6F : 1.0F);
+    const StereoPattern expected =
+        make_scene(background_motion / 2, object_motion / 2, fade ? 0.8F : 1.0F);
+    // The game's B-to-A vectors, in render pixels: the background's motion
+    // everywhere, the object's where the object is in B. The overlay scene's
+    // vectors claim the object moved with the background.
+    auto game_motion = create_and_upload_game_motion_field(
+        fixture, width, height, [&](UINT, UINT x, UINT y) {
+            const int ox = static_cast<int>(x) - object_motion;
+            const bool object = static_cast<int>(y) >= object_top &&
+                static_cast<int>(y) < object_bottom && ox >= object_left &&
+                ox < object_left + object_width;
+            return std::array<float, 2>{
+                static_cast<float>(-(object && !overlay ? object_motion : background_motion)), 0.0F};
+        });
+    std::array<ComPtr<ID3D12Resource>, 2> sources{
+        create_source_texture(fixture, width, height),
+        create_source_texture(fixture, width, height)};
+    std::array<ComPtr<ID3D12Resource>, 2> current_destinations{
+        create_source_texture(fixture, width, height),
+        create_source_texture(fixture, width, height)};
+    std::array<ComPtr<ID3D12Resource>, 1> synthetic_destinations{
+        create_source_texture(fixture, width, height)};
+    upload_pattern(fixture, sources[0].Get(), previous);
+    upload_pattern(fixture, sources[1].Get(), current);
+    std::array<ID3D12Resource*, 2> source_pointers{sources[0].Get(), sources[1].Get()};
+    std::array<ID3D12Resource*, 2> current_pointers{
+        current_destinations[0].Get(), current_destinations[1].Get()};
+    std::array<ID3D12Resource*, 1> synthetic_pointers{synthetic_destinations[0].Get()};
+    auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
+    require(operation_succeeded(history->initialize(fixture.device(), fixture.queue(),
+                source_pointers, D3D12_RESOURCE_STATE_RENDER_TARGET)),
+        "hybrid history initialization failed");
+    xrfg::D3D12FrameSynthesizer synthesizer;
+    xrfg::D3D12NvidiaOpticalFlowOptions options;
+    options.hybrid = true;
+    require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(),
+                history, current_pointers, synthetic_pointers, kFormat,
+                D3D12_RESOURCE_STATE_RENDER_TARGET, xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+                options)),
+        "hybrid synthesizer initialization failed");
+    const auto guides = [&](std::uint64_t serial) {
+        auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
+        set->eye_count = kEyeCount;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            auto frame = std::make_shared<xrfg::DlssMotionVectorFrame>();
+            frame->stream = 311 + eye;
+            frame->epoch = 3;
+            frame->serial = serial;
+            frame->previous_serial = serial - 1;
+            frame->motion_vectors = game_motion;
+            frame->producer_queue = fixture.queue();
+            frame->output_width = frame->motion_width = width;
+            frame->output_height = frame->motion_height = height;
+            frame->motion_slice = frame->output_slice = eye;
+            frame->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            set->eyes[eye] = frame;
+        }
+        return set;
+    };
+    const ReprojectionViews views = make_reprojection_views();
+    xrfg::D3D12HistoryCaptureTicket capture_a{}, capture_b{};
+    require(operation_succeeded(history->capture(0, &capture_a)) &&
+            operation_succeeded(history->commit(capture_a)),
+        "hybrid capture A failed");
+    xrfg::D3D12FrameSynthesisTicket prime{}, pair{};
+    require(operation_succeeded(synthesizer.submit_prime(capture_a, views, 0, &prime, guides(1))),
+        "hybrid prime failed");
+    require_frame_start_gate(synthesizer, "hybrid frame-start gate");
+    require(operation_succeeded(history->capture(1, &capture_b)) &&
+            operation_succeeded(history->commit(capture_b)),
+        "hybrid capture B failed");
+    const auto statistics_before = xrfg::dlss_motion_vector_statistics();
+    require(operation_succeeded(synthesizer.submit_pair(capture_b, views, views, 0, 1, &pair,
+                std::nullopt, guides(2))),
+        "hybrid pair failed");
+    fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+    const auto statistics_after = xrfg::dlss_motion_vector_statistics();
+    require(statistics_after.hybrid_used == statistics_before.hybrid_used + 1 &&
+            statistics_after.used == statistics_before.used + 1,
+        "the pair was not composed by the hybrid");
+    const StereoPattern actual = readback_pattern(fixture, synthetic_destinations[0].Get(),
+        D3D12_RESOURCE_STATE_RENDER_TARGET);
+    const auto blend = midpoint_pattern(previous, current);
+    // The bands either side of each edge of the object at the midpoint; the
+    // overlay is measured whole, the fade everywhere but the borders.
+    const int left = object_left + object_motion / 2, right = left + object_width;
+    for (UINT eye = 0; eye < kEyeCount; ++eye) {
+        double total = 0, blend_total = 0;
+        std::size_t count = 0;
+        for (int y = object_top + 2; y < object_bottom - 2; ++y) {
+            for (int x = 0; x < static_cast<int>(width); ++x) {
+                if (fade ? x < 16 || x >= static_cast<int>(width) - 16
+                    : overlay ? x < left - 2 || x >= right + 2
+                              : std::abs(x - left) >= 12 && std::abs(x - right) >= 12) continue;
+                const std::size_t offset =
+                    (static_cast<std::size_t>(y) * width + static_cast<UINT>(x)) * kBytesPerPixel;
+                for (UINT c = 0; c < 3; ++c, ++count) {
+                    blend_total += std::abs(static_cast<int>(blend[eye][offset + c]) -
+                                            static_cast<int>(expected[eye][offset + c]));
+                    total += std::abs(static_cast<int>(actual[eye][offset + c]) -
+                                      static_cast<int>(expected[eye][offset + c]));
+                }
+            }
+        }
+        const double edge_error = total / static_cast<double>(count);
+        const double blend_error = blend_total / static_cast<double>(count);
+        std::cout << "hybrid " << name << " eye=" << eye << " edge_mae=" << edge_error
+                  << " blend_mae=" << blend_error << '\n';
+        // The overlay's blend is exact (nothing moved), so it is held to an
+        // absolute bound; the moving scenes must beat the blend.
+        require(overlay ? edge_error <= 12.0 : edge_error < blend_error,
+            std::string("hybrid ") + name + " did not beat the same-pixel blend for eye " +
+                std::to_string(eye) + ": " + std::to_string(edge_error) + " vs " +
+                std::to_string(blend_error));
+    }
+    require(operation_succeeded(synthesizer.wait_for_idle()), "hybrid final drain failed");
+    require(operation_succeeded(history->invalidate()), "hybrid history invalidate failed");
+}
+
+int main(int argc, char** argv) {
     const bool trace_test = std::getenv("XRFG_TEST_GPU_TRACE") != nullptr;
     const auto trace_dir = std::filesystem::temp_directory_path() /
         ("xrfg-v073-gpu-" + std::to_string(GetCurrentProcessId()));
@@ -4109,6 +4470,14 @@ int main() {
             run_nvidia_fast_controls();
             return 0;
         }
+        if (argc > 1 && std::string_view(argv[1]) == "hybrid") {
+            D3D12WarpFixture hybrid_fixture;
+            for (const auto scene : {HybridScene::occlusion, HybridScene::overlay, HybridScene::fade}) {
+                test_hybrid_composition(hybrid_fixture, scene);
+            }
+            hybrid_fixture.require_no_debug_errors();
+            return 0;
+        }
         D3D12WarpFixture fixture;
         test_stereo_capture_ring(fixture);
         test_capture_is_async_and_consumer_fence_blocks_reuse(fixture);
@@ -4120,6 +4489,8 @@ int main() {
         test_double_wide_single_slice_views(fixture);
         test_stereo_motion_synthesis_beats_same_pixel_blend(fixture);
         test_dlss_motion_vector_stereo_stream_pairing(fixture);
+        test_dlss_motion_vector_per_eye_swapchains(fixture);
+        test_release_bound_dlss_guides(fixture);
         test_dlss_motion_vector_gpu_ingress(fixture);
         test_dlss_motion_vector_strafe_rejects_double_edges(fixture);
         test_rotation_aware_synthesis_beats_uncompensated_flow(fixture);

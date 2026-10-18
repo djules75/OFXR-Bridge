@@ -32,6 +32,7 @@ struct Control {
         wchar_t motion[16]{};
         GetPrivateProfileStringW(L"ofxr", L"motion_vectors", L"off", motion, 16, ini().c_str());
         settings.motion_vectors = _wcsicmp(motion, L"dlss") == 0 ? 1 : 0;
+        settings.hybrid = GetPrivateProfileIntW(L"ofxr", L"hybrid", 0, ini().c_str()) != 0;
     }
 };
 Control& control() { static Control state; return state; }
@@ -68,6 +69,7 @@ bool request(Settings s) {
     if (old.scale != s.scale) ok &= write(L"ofxr", L"nvidia_input_scale", scales[s.scale]);
     if (old.backward != s.backward) ok &= write(L"ofxr", L"nvidia_bidirectional", s.backward ? L"1" : L"0");
     if (old.motion_vectors != s.motion_vectors) ok &= write(L"ofxr", L"motion_vectors", s.motion_vectors ? L"dlss" : L"off");
+    if (old.hybrid != s.hybrid) ok &= write(L"ofxr", L"hybrid", s.hybrid ? L"1" : L"0");
     if (old != s) { c.settings = s; ++c.revision; }
     return ok;
 }
