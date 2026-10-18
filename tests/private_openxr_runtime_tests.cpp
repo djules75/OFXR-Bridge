@@ -1,4 +1,5 @@
 #include "xrfg/private_openxr_runtime.hpp"
+#include "xrfg/private_delivery_queue.hpp"
 #include <wrl/client.h>
 #include <dxgi1_4.h>
 #include <array>
@@ -74,7 +75,11 @@ struct Fixture {
             ok(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device12)),"actual D3D12 device");
             D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
             ok(device12->CreateCommandQueue(&desc,IID_PPV_ARGS(&queue)),"queue");
-            if(split)ok(device12->CreateCommandQueue(&desc,IID_PPV_ARGS(&delivery_queue)),"independent delivery queue");
+            if(split) {
+                D3D12_FEATURE_DATA_COMMAND_QUEUE_PRIORITY priority{desc.Type,D3D12_COMMAND_QUEUE_PRIORITY_HIGH,FALSE};
+                const bool high=SUCCEEDED(device12->CheckFeatureSupport(D3D12_FEATURE_COMMAND_QUEUE_PRIORITY,&priority,sizeof(priority))) && priority.PriorityForTypeIsSupported;
+                ok(xrfg::create_private_delivery_queue(desc,high,[&](const D3D12_COMMAND_QUEUE_DESC& requested){return device12->CreateCommandQueue(&requested,IID_PPV_ARGS(delivery_queue.ReleaseAndGetAddressOf()));}),"independent priority delivery queue");
+            }
             ok(device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence)),"test fence");
             ok(device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate)),"GPU gate");
         } else {
@@ -342,5 +347,24 @@ void adaptive_source_refill(bool d12) {
     for(unsigned i=1;i<f.handoffs.size();++i)check(f.handoffs[i]-f.handoffs[i-1]>=period,"adaptive source refill must not catch up with a burst");
     std::printf("%s automatic source refill retains all finite irregular input, bounded3slots, strict cadence PASS\n",d12?"D3D12":"D3D11");
 }
+void queue_priority_policy() {
+    D3D12_COMMAND_QUEUE_DESC original{};original.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;original.NodeMask=1;
+    std::vector<int> attempts;
+    auto create=[&](bool reject_high,bool reject_all) {
+        attempts.clear();return xrfg::create_private_delivery_queue(original,true,[&](const D3D12_COMMAND_QUEUE_DESC& desc)->HRESULT {
+            check(desc.Type==original.Type && desc.Flags==original.Flags && desc.NodeMask==original.NodeMask,"priority choice preserves binding queue descriptor");
+            attempts.push_back(desc.Priority);
+            return reject_all || (reject_high && desc.Priority==D3D12_COMMAND_QUEUE_PRIORITY_HIGH)?E_FAIL:S_OK;
+        });
+    };
+    ok(create(false,false),"supported priority queue");check(attempts==std::vector<int>{100},"deadline delivery requests HIGH once");
+    ok(create(true,false),"rejected priority fallback");check(attempts==std::vector<int>({100,0}),"priority rejection retries original dedicated queue");
+    check(FAILED(create(true,true)) && attempts==std::vector<int>({100,0}),"both queue failures propagate rather than alias producer queue");
+    attempts.clear();ok(xrfg::create_private_delivery_queue(original,false,[&](const D3D12_COMMAND_QUEUE_DESC& desc)->HRESULT{attempts.push_back(desc.Priority);return S_OK;}),"unsupported priority uses original descriptor");
+    check(attempts==std::vector<int>{0},"unsupported HIGH is not requested");
+    original.Priority=D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME;
+    ok(create(false,false),"retain already higher priority");check(attempts==std::vector<int>{10000},"never lower inherited priority or introduce realtime from normal");
+    std::puts("Final delivery priority: supported HIGH, descriptor preservation, original dedicated fallback, failure propagation PASS");
 }
-int main(int argc,char** argv){if(argc>1){if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);return 0;}
+}
+int main(int argc,char** argv){if(argc>1){if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);return 0;}

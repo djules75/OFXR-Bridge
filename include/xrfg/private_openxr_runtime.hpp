@@ -58,6 +58,9 @@ public:
         // already complete at dequeue. Stage11: underrun refill, QPC ns and
         // exact margin retained after the late frame for subsequent deliveries.
         // A real-chain backlog never triggers a refill.
+        // Stages12/13/14: targets acquired/waited, copy submitted/signalled,
+        // and copy-fence completion observed. F9-only CPU QPC observations,
+        // not GPU execution timestamps. Real release finishes at stage5.
         std::function<void(int,std::uint64_t,std::int64_t,std::int64_t)> trace;
     };
     explicit PrivateOpenXrRuntime(Options);

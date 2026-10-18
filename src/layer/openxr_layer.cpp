@@ -45,6 +45,7 @@
 #include "xrfg/openxr_fps_overlay.hpp"
 #include "xrfg/steamvr_delivery.hpp"
 #include "xrfg/private_openxr_runtime.hpp"
+#include "xrfg/private_delivery_queue.hpp"
 
 #include <windows.h>
 #include <psapi.h>
@@ -5524,9 +5525,18 @@ XrResult layer_create_session_impl(
         if(binding->type==XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
             delivery_binding=*reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(binding);
             auto description=delivery_binding.queue->GetDesc();
-            const auto made=state->d3d12_device->CreateCommandQueue(&description,
-                IID_PPV_ARGS(&state->private_delivery_queue));
+            D3D12_FEATURE_DATA_COMMAND_QUEUE_PRIORITY priority{description.Type,D3D12_COMMAND_QUEUE_PRIORITY_HIGH,FALSE};
+            const bool supported=SUCCEEDED(state->d3d12_device->CheckFeatureSupport(
+                D3D12_FEATURE_COMMAND_QUEUE_PRIORITY,&priority,sizeof(priority))) && priority.PriorityForTypeIsSupported;
+            const auto made=xrfg::create_private_delivery_queue(description,supported,
+                [&](const D3D12_COMMAND_QUEUE_DESC& requested) {
+                    return state->d3d12_device->CreateCommandQueue(&requested,
+                        IID_PPV_ARGS(state->private_delivery_queue.ReleaseAndGetAddressOf()));
+                });
             if(FAILED(made))return XR_ERROR_INITIALIZATION_FAILED;
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::steamvr_queue_configuration,
+                586,static_cast<std::uint64_t>(description.Priority),
+                static_cast<std::uint64_t>(state->private_delivery_queue->GetDesc().Priority),supported?1:0);
             state->private_delivery_queue->SetName(L"OFXR real OpenXR delivery only");
             delivery_binding.queue=state->private_delivery_queue.Get();
             // forwarded_info may already refer to substituted_info.

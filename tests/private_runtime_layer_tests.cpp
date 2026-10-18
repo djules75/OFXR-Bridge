@@ -41,6 +41,13 @@ int main(int argc,char** argv) {
         f.transport=created->private_runtime; // fixture teardown owns a valid stopped endpoint
         check(created->private_delivery_queue.Get()==f.delivery_queue.Get() &&
               created->private_delivery_queue.Get()!=runtime_queue(*created),"raw binding and private preparation queues are distinct");
+        D3D12_FEATURE_DATA_COMMAND_QUEUE_PRIORITY priority{D3D12_COMMAND_LIST_TYPE_DIRECT,D3D12_COMMAND_QUEUE_PRIORITY_HIGH,FALSE};
+        if(SUCCEEDED(f.device12->CheckFeatureSupport(D3D12_FEATURE_COMMAND_QUEUE_PRIORITY,&priority,sizeof(priority))) && priority.PriorityForTypeIsSupported) {
+            auto desc=binding.queue->GetDesc();desc.Priority=D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+            ComPtr<ID3D12CommandQueue> probe;
+            if(SUCCEEDED(f.device12->CreateCommandQueue(&desc,IID_PPV_ARGS(&probe))))
+                check(f.delivery_queue->GetDesc().Priority==D3D12_COMMAND_QUEUE_PRIORITY_HIGH,"shipping final binding must use supported HIGH rather than normal priority behind synthesis");
+        }
         check(binding.queue==f.queue.Get() && info.next==&binding,"application binding metadata remains owned by application");
         xr_ok(layer_destroy_session_impl(handle),"shipping private delivery session cleanup");
         {std::scoped_lock lock(g_state_mutex);g_instances.clear();}

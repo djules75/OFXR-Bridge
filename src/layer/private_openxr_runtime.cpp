@@ -228,6 +228,7 @@ struct PrivateOpenXrRuntime::Impl {
         return true;
     }
     XrResult publish(Packet& packet) {
+        const bool diagnostic=tracing();
         struct Target {Lease* lease;unsigned index;bool waited{},released{};};
         std::vector<Target> targets;targets.reserve(packet.copies_needed.size());
         XrResult result=XR_SUCCESS;
@@ -239,6 +240,7 @@ struct PrivateOpenXrRuntime::Impl {
             result=options.real.wait_image(lease.chain->handle,&wait);if(XR_FAILED(result))break;
             targets.back().waited=true;
         }
+        if(diagnostic)trace(12,packet.sequence);
         if(XR_SUCCEEDED(result) && !targets.empty()) {
             std::scoped_lock gpu(copy_mutex);
             HRESULT copied=S_OK;
@@ -258,6 +260,7 @@ struct PrivateOpenXrRuntime::Impl {
                 }
                 if(SUCCEEDED(copied))copied=list->Close();
                 if(SUCCEEDED(copied)){ID3D12CommandList* lists[]={list.Get()};queue12->ExecuteCommandLists(1,lists);copied=queue12->Signal(copy12.Get(),copy_serial+1);if(SUCCEEDED(copied))++copy_serial;}
+                if(diagnostic)trace(13,packet.sequence);
                 if(SUCCEEDED(copied))copied=await(copy12.Get(),copy_serial,false);
             } else {
                 for(auto& target:targets) {
@@ -266,8 +269,10 @@ struct PrivateOpenXrRuntime::Impl {
                     context11->CopyResource(chain.real11[target.index].Get(),chain.images[target.lease->image].d11.Get());
                 }
                 if(SUCCEEDED(copied)){copied=context11->Signal(copy11.Get(),copy_serial+1);if(SUCCEEDED(copied))++copy_serial;}
-                context11->Flush();if(SUCCEEDED(copied))copied=await(copy11.Get(),copy_serial,false);
+                context11->Flush();if(diagnostic)trace(13,packet.sequence);
+                if(SUCCEEDED(copied))copied=await(copy11.Get(),copy_serial,false);
             }
+            if(diagnostic)trace(14,packet.sequence);
             result=xr(copied);
         }
         for(auto& target:targets)if(target.waited) {

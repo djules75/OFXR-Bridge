@@ -1,3 +1,11 @@
+## V586: final SteamVR delivery priority
+
+Request supported HIGH priority for the existing dedicated D3D12 delivery
+queue, matching synthesis. Preserve independent preparation, cadence, refill
+and swapchain count. F9-only substages separate preparation waits.33focused
+checks pass; headset improvement remains pending.
+See [details](docs/V586_DELIVERY_PRIORITY.md).
+
 ## V585: automatic presentation margin
 
 Retains V584 independent preparation. Genuine late input builds a retained
