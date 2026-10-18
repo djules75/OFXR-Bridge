@@ -2201,6 +2201,100 @@ void test_synthesis_on_a_dedicated_queue(D3D12WarpFixture& fixture) {
     // crashed six call-chain tests at process teardown.
 }
 
+// True when everything queued on `queue` so far completes within the timeout.
+bool queue_drains_within(D3D12WarpFixture& fixture, ID3D12CommandQueue* queue, DWORD milliseconds) {
+    ComPtr<ID3D12Fence> fence;
+    require_hresult(fixture.device()->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+        IID_PPV_ARGS(fence.GetAddressOf())), "drain fence creation");
+    require_hresult(queue->Signal(fence.Get(), 1), "drain fence signal");
+    if (fence->GetCompletedValue() >= 1) return true;
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    require(event != nullptr, "drain event creation");
+    require_hresult(fence->SetEventOnCompletion(1, event), "drain event");
+    const bool done = WaitForSingleObject(event, milliseconds) == WAIT_OBJECT_0;
+    CloseHandle(event);
+    return done;
+}
+
+// A setting switched while a game runs rebuilds the synthesizer (V499). Pairs
+// already handed out still carry their fence values: the presenter joins the
+// runtime's queue on them and flushes held-back copies against them after the
+// rebuild. A rebuilt synthesizer that started its fence from zero left those
+// joins waiting for values it would reach only minutes later, and the game
+// froze with its queue parked. The rebuild has to continue the same fences.
+void test_reconfigure_keeps_fence_values_in_flight(D3D12WarpFixture& fixture) {
+    D3D12_COMMAND_QUEUE_DESC queue_description{};
+    queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    ComPtr<ID3D12CommandQueue> synthesis_queue;
+    require_hresult(fixture.device()->CreateCommandQueue(
+        &queue_description, IID_PPV_ARGS(synthesis_queue.GetAddressOf())),
+        "reconfigure test queue creation");
+    std::array<ComPtr<ID3D12Resource>, 3> sources{
+        create_source_texture(fixture), create_source_texture(fixture), create_source_texture(fixture)};
+    std::array<ComPtr<ID3D12Resource>, 2> current_destinations{
+        create_source_texture(fixture), create_source_texture(fixture)};
+    std::array<ComPtr<ID3D12Resource>, 2> synthetic_destinations{
+        create_source_texture(fixture), create_source_texture(fixture)};
+    std::array<ID3D12Resource*, 3> source_pointers{sources[0].Get(), sources[1].Get(), sources[2].Get()};
+    std::array<ID3D12Resource*, 2> current_pointers{current_destinations[0].Get(), current_destinations[1].Get()};
+    std::array<ID3D12Resource*, 2> synthetic_pointers{synthetic_destinations[0].Get(), synthetic_destinations[1].Get()};
+    auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
+    require(operation_succeeded(history->initialize(fixture.device(), fixture.queue(),
+        std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
+        D3D12_RESOURCE_STATE_RENDER_TARGET)), "reconfigure test history initialization");
+    xrfg::D3D12FrameSynthesizer synthesizer;
+    require(operation_succeeded(synthesizer.initialize(fixture.device(), synthesis_queue.Get(), history,
+        std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
+        std::span<ID3D12Resource* const>(synthetic_pointers.data(), synthetic_pointers.size()),
+        kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET)), "reconfigure test synthesizer initialization");
+    const ReprojectionViews views = make_reprojection_views();
+
+    // Several deferred pairs, so the values in flight are well above where a
+    // fresh fence would start.
+    xrfg::D3D12FrameSynthesisTicket pair_ticket{};
+    for (std::uint32_t frame = 0; frame < 4; ++frame) {
+        xrfg::D3D12HistoryCaptureTicket capture{};
+        require(operation_succeeded(history->capture(frame % 2, &capture)) &&
+            operation_succeeded(history->commit(capture)), "reconfigure test capture");
+        if (frame == 0) {
+            xrfg::D3D12FrameSynthesisTicket prime{};
+            require(operation_succeeded(synthesizer.submit_prime(capture, views, 0, &prime)),
+                "reconfigure test prime");
+        } else {
+            require(operation_succeeded(synthesizer.submit_pair(capture, views, views, 0, 1,
+                &pair_ticket, std::nullopt, {}, true)), "reconfigure test pair");
+            if (frame < 3)
+                require(operation_succeeded(synthesizer.flush_current_copy(
+                    fixture.queue(), pair_ticket.fence_value)), "reconfigure test copy flush");
+        }
+        require(operation_succeeded(synthesizer.wait_for_previous_submission(500)),
+            "reconfigure test submission");
+    }
+    require(pair_ticket.fence_value > 2, "reconfigure test reached no fence values worth testing");
+
+    // The switch, with the last pair's copy still held back.
+    require(operation_succeeded(synthesizer.reconfigure(
+        xrfg::D3D12OpticalFlowBackend::fidelity_fx, xrfg::D3D12NvidiaOpticalFlowOptions{})),
+        "reconfigure failed");
+
+    // What the presenter does next frame with the pair it still holds.
+    static_cast<void>(synthesizer.synchronize_consumer_queue(fixture.queue(), pair_ticket));
+    static_cast<void>(synthesizer.flush_current_copy(fixture.queue(), pair_ticket.fence_value));
+    require(queue_drains_within(fixture, fixture.queue(), 2000),
+        "the runtime's queue parked on a fence value from before the rebuild");
+
+    // And the rebuilt synthesizer goes on from there.
+    xrfg::D3D12HistoryCaptureTicket capture{};
+    require(operation_succeeded(history->capture(0, &capture)) &&
+        operation_succeeded(history->commit(capture)), "capture after the rebuild");
+    xrfg::D3D12FrameSynthesisTicket prime{};
+    require(operation_succeeded(synthesizer.submit_prime(capture, views, 0, &prime)),
+        "prime after the rebuild");
+    require(operation_succeeded(synthesizer.wait_for_idle()), "idle after the rebuild");
+    require(prime.fence_value == 0 || prime.fence_value > pair_ticket.fence_value,
+        "the rebuilt synthesizer restarted its fence values");
+}
+
 void test_rolling_frame_synthesizer(D3D12WarpFixture& fixture) {
     std::array<ComPtr<ID3D12Resource>, 3> sources{
         create_source_texture(fixture),
@@ -4486,6 +4580,7 @@ int main(int argc, char** argv) {
         test_depth_private_history_allows_shader_resource_views(fixture);
         test_rolling_frame_synthesizer(fixture);
         test_synthesis_on_a_dedicated_queue(fixture);
+        test_reconfigure_keeps_fence_values_in_flight(fixture);
         test_double_wide_single_slice_views(fixture);
         test_stereo_motion_synthesis_beats_same_pixel_blend(fixture);
         test_dlss_motion_vector_stereo_stream_pairing(fixture);

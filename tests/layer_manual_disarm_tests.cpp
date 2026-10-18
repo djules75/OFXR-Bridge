@@ -2,6 +2,7 @@
 #include "layer_call_chain.cpp"
 #undef main
 #include "xrfg/implicit_layer.hpp"
+#include "xrfg/provider_api.hpp"
 #include <filesystem>
 
 // Read the runtime-facing D3D11 textures, after publication/retirement, not the
@@ -93,6 +94,10 @@ int main(int argc, char** argv) {
     // presenter and generation carry on through them.
     const bool overlay_test = argc == 4 && std::string(argv[3]) == "overlay";
     if (overlay_test && mode != "steamvr") return 1;
+    // "inline reload": the tray changes the backend while the game runs; the
+    // game's next XR session takes it, and the one after takes the next.
+    const bool reload_test = argc == 4 && std::string(argv[3]) == "reload";
+    if (reload_test && mode != "inline") return 1;
     g_overlay_swapchain_mode = overlay_test;
     // "frame-loop <runtime> <single|split|handoff> [paused]": that on Virtual
     // Desktop a single-threaded session takes the presenter at its first
@@ -117,7 +122,7 @@ int main(int argc, char** argv) {
     else if (loop_runtime == "other") g_runtime_name_override = "XRFG fake runtime";
     else if (frame_loop_test) return 1;
     const std::string marker_mode =
-        argc == 4 && !pause_test && !overlay_test && !frame_loop_test ? argv[3] : "";
+        argc == 4 && !pause_test && !overlay_test && !reload_test && !frame_loop_test ? argv[3] : "";
     if (!marker_mode.empty() && (mode != "d3d11" ||
         (marker_mode != "on" && marker_mode != "off" && marker_mode != "hidden"))) return 1;
     g_flight_simulator_mode = mode == "flight";
@@ -201,6 +206,22 @@ int main(int argc, char** argv) {
         }
         module = LoadLibraryW(dll.c_str());
         require(module != nullptr, "load exact candidate DLL");
+        using GetControl = int (*)(OFXR_ControlSnapshotV1*) noexcept;
+        const auto get_control = reinterpret_cast<GetControl>(
+            GetProcAddress(module, "OFXR_GetControlSnapshotV1"));
+        const auto control_backend = [&] {
+            OFXR_ControlSnapshotV1 snapshot{};
+            require(get_control != nullptr && get_control(&snapshot) != 0, "control snapshot");
+            return snapshot.desired.backend;
+        };
+        const auto write_backend = [&](const wchar_t* backend) {
+            require(WritePrivateProfileStringW(L"ofxr", L"backend", backend,
+                (root / L"ofxr_bridge.ini").c_str()) != FALSE, "write the backend");
+        };
+        if (reload_test) {
+            require(control_backend() == 0, "FidelityFX as the ini has it when the layer loads");
+            write_backend(L"nvidia");
+        }
         const auto negotiate = reinterpret_cast<PFN_xrNegotiateLoaderApiLayerInterface>(
             GetProcAddress(module, "xrNegotiateLoaderApiLayerInterface"));
         require(negotiate != nullptr, "negotiation export");
@@ -260,6 +281,8 @@ int main(int argc, char** argv) {
         XrSessionBeginInfo begin_info{XR_TYPE_SESSION_BEGIN_INFO};
         begin_info.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         require(XR_SUCCEEDED(begin_session(session, &begin_info)), "begin session");
+        if (reload_test)
+            require(control_backend() == 1, "the session takes NVIDIA, written after the layer loaded");
         XrSwapchainCreateInfo sc{XR_TYPE_SWAPCHAIN_CREATE_INFO};
         sc.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
         sc.format = DXGI_FORMAT_R8G8B8A8_UNORM; sc.sampleCount = 1;
@@ -703,6 +726,37 @@ int main(int argc, char** argv) {
             else require(XR_SUCCEEDED(wait(session, nullptr, &current)), "warmup wait");
         }
         require(g_synthetic_release_calls.load() > 0, "generation active before Disarm");
+        if (reload_test) {
+            // The tray switches the backend while the game plays: the session
+            // applies it within a quarter of a second, and generation goes on.
+            write_backend(L"fidelityfx");
+            Sleep(300);
+            const auto synthetic_before = g_synthetic_release_calls.load();
+            for (int i = 0; i < 6; ++i) {
+                require(XR_SUCCEEDED(begin(session, nullptr)), "begin after the switch");
+                capture(); submit(current.predictedDisplayTime);
+                require(wait_for_queue_idle(), "GPU retirement after the switch");
+                require(XR_SUCCEEDED(wait(session, nullptr, &current)), "wait after the switch");
+            }
+            OFXR_ControlSnapshotV1 snapshot{};
+            require(get_control(&snapshot) != 0, "control snapshot after the switch");
+            require(snapshot.desired.backend == 0, "the running session follows the ini");
+            require(snapshot.sessions == 1 && snapshot.ready == 1 && snapshot.pending == 0 &&
+                snapshot.errors == 0, "the running session applied the switch");
+            require(g_synthetic_release_calls.load() > synthetic_before,
+                "generation carries on after the switch");
+            // Leaving VR and coming back: the new session reads the ini again.
+            write_backend(L"nvidia");
+            require(XR_SUCCEEDED(destroy_swapchain(swapchain)), "destroy the swapchain");
+            swapchain = XR_NULL_HANDLE;
+            require(XR_SUCCEEDED(end_session(session)) && XR_SUCCEEDED(destroy_session(session)),
+                "leave VR");
+            session = XR_NULL_HANDLE;
+            require(XR_SUCCEEDED(create_session(instance, &session_info, &session)), "enter VR again");
+            require(control_backend() == 1, "the next session takes NVIDIA");
+            result = 0;
+            throw FinishedEarly{};
+        }
         if (g_steamvr_presenter_mode || g_flight_simulator_mode)
             require(current.predictedDisplayPeriod == kFakeDisplayPeriod * 2, "presenter active before Disarm");
         if (overlay_test) {

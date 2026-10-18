@@ -4952,7 +4952,7 @@ XrResult layer_create_session_impl(
     }
 
     auto state = std::make_shared<SessionState>(dispatch);
-    const auto initial_control = xrfg::embedded::snapshot();
+    const auto initial_control = xrfg::embedded::reload();
     state->optical_flow_backend = static_cast<xrfg::D3D12OpticalFlowBackend>(initial_control.desired.backend);
     state->nvidia_options = {
         static_cast<xrfg::D3D12NvidiaPerformancePreset>(initial_control.desired.preset),
@@ -5223,14 +5223,18 @@ XrResult layer_create_session_impl(
         state->frames_per_application_frame,
         state->deep_pipeline ? 1u : 0u,
         triple_requested ? 1u : 0u);
-    // The game's own DLSS vectors, for the vectors-only and the hybrid
-    // compositions: captured from its NGX calls on a native D3D12 session.
-    // A bridged session's game renders in D3D11 or Vulkan, whose NGX the
-    // capture does not detour; a provider (an OFXR-aware OptiScaler) can
-    // still publish there.
+    // The game's own DLSS vectors for the hybrid composition: captured from
+    // its NGX calls on a native D3D12 session. A bridged session's game
+    // renders in D3D11 or Vulkan, whose NGX the capture does not detour; a
+    // provider (an OFXR-aware OptiScaler) can still publish there.
+    //
+    // Hybrid only. The tray always writes motion_vectors=dlss, which before
+    // the capture existed meant only a provider's vectors; with the capture
+    // running for it, Hybrid off composed MSFS from the game's vectors alone
+    // instead of the optical flow (V499).
     const bool ngx_capture = state->graphics_binding == SessionGraphicsBinding::d3d12 &&
         !state->d3d11_bridge && !state->vulkan_bridge && state->d3d12_queue &&
-        state->dlss_motion_vectors;
+        initial_control.desired.hybrid;
     if (ngx_capture) {
         xrfg::configure_ngx_guide_capture(state->d3d12_queue.Get(), true);
     }
@@ -12476,6 +12480,7 @@ void consume_application_frame(
 void apply_embedded_control(
     const std::shared_ptr<SessionState>& state,
     bool use_continuous_presenter) {
+    xrfg::embedded::follow_ini();
     const auto control = xrfg::embedded::snapshot();
     const bool paused = state->manual_control.pause_requested();
     const bool recording = xrfg::bridge_flight_logger().enabled();
@@ -12512,12 +12517,24 @@ void apply_embedded_control(
         options.hybrid != state->nvidia_options.hybrid;
     // Enumeration is excluded by frame_call_mutex, so newly created contexts
     // also see this tuple. A partial failure remains bypass, never mixed flow.
+    const bool hybrid_changed = options.hybrid != state->nvidia_options.hybrid;
     state->optical_flow_backend = backend;
     state->nvidia_options = options;
     state->dlss_motion_vectors = control.desired.motion_vectors == 1 || control.desired.hybrid;
-    if (state->dlss_motion_vectors && state->graphics_binding == SessionGraphicsBinding::d3d12 &&
-        !state->d3d11_bridge && !state->vulkan_bridge && state->d3d12_queue) {
-        xrfg::configure_ngx_guide_capture(state->d3d12_queue.Get(), true);
+    const bool ngx_capture = state->graphics_binding == SessionGraphicsBinding::d3d12 &&
+        !state->d3d11_bridge && !state->vulkan_bridge && state->d3d12_queue;
+    // Hybrid switched off in the tray stops the capture's copies as well; the
+    // hooks stay, and switching it back on resumes them (V499). As at session
+    // creation, the capture serves the hybrid only.
+    if (ngx_capture)
+        xrfg::configure_ngx_guide_capture(state->d3d12_queue.Get(), options.hybrid);
+    if (hybrid_changed) {
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::presenter_transition,
+            702,
+            options.hybrid ? 1u : 0u,
+            state->dlss_motion_vectors ? 1u : 0u,
+            ngx_capture && options.hybrid ? 1u : 0u);
     }
     for (const auto& chain : swapchains) {
         std::unique_lock lock(chain->mutex);

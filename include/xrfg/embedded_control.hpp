@@ -23,6 +23,11 @@ struct Snapshot {
     long last_error{};
 };
 Snapshot snapshot();
+// Follows the INI the tray writes: a changed backend, preset, flow resolution
+// or Hybrid becomes a new revision. Throttled to four looks a second unless
+// forced; reload() forces it for a session being created.
+void follow_ini(bool force = false) noexcept;
+Snapshot reload();
 bool request(Settings settings); // persists only owned keys; false means INI write failed
 std::uint64_t attach();
 void detach(std::uint64_t id);

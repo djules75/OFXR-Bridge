@@ -5297,6 +5297,21 @@ struct D3D12FrameSynthesizer::Impl {
         return S_OK;
     }
 
+    // A rebuild for a setting switched mid-session (V499) goes on signalling
+    // the old pipeline's fences from where it stopped. Pairs handed out before
+    // it still carry their values: the presenter joins the runtime's queue on
+    // them and flushes held-back copies against them afterwards. On a fresh
+    // fence those values lay minutes ahead, the runtime's queue parked on
+    // them, and the game froze. Call after `old` has gone idle.
+    void continue_fences_of(const Impl& old) noexcept {
+        fence = old.fence;
+        next_fence_value = old.next_fence_value;
+        last_submitted_fence_value = old.last_submitted_fence_value;
+        acquire_fence = old.acquire_fence;
+        // `old`'s destructor drains its queue on the next acquire value.
+        next_acquire_fence_value = old.next_acquire_fence_value + 1;
+    }
+
     [[nodiscard]] HRESULT wait_for_idle() noexcept {
         // last_submitted_fence_value is the value a deferred copy will signal,
         // so waiting for it without submitting that copy would never return.
@@ -5397,6 +5412,7 @@ HRESULT D3D12FrameSynthesizer::reconfigure(D3D12OpticalFlowBackend backend,
             impl_->history, current, synthetic, impl_->view_format, impl_->release_state,
             backend, options, impl_->nvidia_gpu_timing_enabled);
         if (FAILED(result)) return result;
+        candidate->continue_fences_of(*impl_);
         impl_ = std::move(candidate);
         return S_OK;
     } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
@@ -5417,6 +5433,7 @@ HRESULT D3D12FrameSynthesizer::reconfigure_gpu_timing(bool enabled) noexcept {
             impl_->history, current, synthetic, impl_->view_format, impl_->release_state,
             impl_->backend, impl_->nvidia_options, enabled);
         if (FAILED(result)) return result;
+        candidate->continue_fences_of(*impl_);
         impl_ = std::move(candidate);
         return S_OK;
     } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }

@@ -829,7 +829,8 @@ void update_runtime_options(
             L"OFXR options saved",
             running_message != nullptr
                 ? running_message
-                : L"The new optical-flow settings will be used by the next OpenXR session.");
+                : L"A running game switches to the new optical-flow settings within a "
+                  L"second, after a short pause in generated frames.");
     }
 }
 
@@ -1658,8 +1659,8 @@ void handle_command(AppState& state, UINT command) {
             L"In a D3D12 game that runs DLSS, the game's own motion vectors are "
             L"composed pixel by pixel with the optical flow: each pixel takes "
             L"whichever explains the two frames better. Games without DLSS, "
-            L"and D3D11 and Vulkan games, are unchanged. Takes effect the next "
-            L"time the game starts.");
+            L"and D3D11 and Vulkan games, are unchanged. A running game "
+            L"switches within a second.");
         break;
     case toggle_deep_pipeline:
         if (state.settings.triple_frame_gen) {
@@ -1703,9 +1704,9 @@ void handle_command(AppState& state, UINT command) {
                 L"flight recorder: off. Pause key: Ctrl + Alt + F7. Hybrid: off. "
                 L"Repeating-pattern lock: on. Settings "
                 L"only reachable in tray.ini go back to their defaults too.\n\n"
-                L"The FPS overlay, the flight recorder and the Frame Gen multiplier change "
-                L"in running games at once; the rest applies the next time the "
-                L"game starts.",
+                L"The FPS overlay, the flight recorder, the Frame Gen multiplier, "
+                L"the optical flow and Hybrid change in running games at once; "
+                L"the rest applies the next time the game starts.",
                 L"OFXR Bridge - reset to default",
                 MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_SETFOREGROUND |
                     MB_TOPMOST) != IDYES) {

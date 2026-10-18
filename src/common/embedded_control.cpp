@@ -1,6 +1,7 @@
 #include "xrfg/embedded_control.hpp"
 #include "xrfg/implicit_layer.hpp"
 #include <windows.h>
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <algorithm>
@@ -17,23 +18,33 @@ std::filesystem::path directory() {
 }
 const std::filesystem::path& ini() { static auto path = directory() / L"ofxr_bridge.ini"; return path; }
 struct Receipt { std::uint64_t revision{}; bool enabled{}; long error{}; };
+Settings read_settings() {
+    Settings settings;
+    const auto options = implicit_layer::read_nvidia_options(directory());
+    settings.backend = static_cast<int>(implicit_layer::read_flow_backend(directory()));
+    settings.preset = static_cast<int>(options.preset);
+    settings.scale = static_cast<int>(options.input_scale);
+    settings.backward = options.bidirectional;
+    settings.enabled = GetPrivateProfileIntW(L"ofxr", L"enabled", 1, ini().c_str()) != 0;
+    wchar_t motion[16]{};
+    GetPrivateProfileStringW(L"ofxr", L"motion_vectors", L"off", motion, 16, ini().c_str());
+    settings.motion_vectors = _wcsicmp(motion, L"dlss") == 0 ? 1 : 0;
+    settings.hybrid = GetPrivateProfileIntW(L"ofxr", L"hybrid", 0, ini().c_str()) != 0;
+    return settings;
+}
+std::uint64_t ini_stamp() {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!GetFileAttributesExW(ini().c_str(), GetFileExInfoStandard, &data)) return 0;
+    return (static_cast<std::uint64_t>(data.ftLastWriteTime.dwHighDateTime) << 32) |
+        data.ftLastWriteTime.dwLowDateTime;
+}
 struct Control {
     std::mutex mutex;
-    Settings settings;
+    std::uint64_t stamp{ini_stamp()};
+    Settings settings{read_settings()};
     std::uint64_t revision{1}, next_id{1};
     std::map<std::uint64_t, Receipt> sessions;
-    Control() {
-        const auto options = implicit_layer::read_nvidia_options(directory());
-        settings.backend = static_cast<int>(implicit_layer::read_flow_backend(directory()));
-        settings.preset = static_cast<int>(options.preset);
-        settings.scale = static_cast<int>(options.input_scale);
-        settings.backward = options.bidirectional;
-        settings.enabled = GetPrivateProfileIntW(L"ofxr", L"enabled", 1, ini().c_str()) != 0;
-        wchar_t motion[16]{};
-        GetPrivateProfileStringW(L"ofxr", L"motion_vectors", L"off", motion, 16, ini().c_str());
-        settings.motion_vectors = _wcsicmp(motion, L"dlss") == 0 ? 1 : 0;
-        settings.hybrid = GetPrivateProfileIntW(L"ofxr", L"hybrid", 0, ini().c_str()) != 0;
-    }
+    std::atomic<std::uint64_t> next_check{};
 };
 Control& control() { static Control state; return state; }
 bool write(const wchar_t* section, const wchar_t* key, const wchar_t* value) {
@@ -52,6 +63,32 @@ Snapshot snapshot() {
         else ++s.bypass;
     }
     return s;
+}
+// The tray rewrites the ini while a game runs (V499). Its write time is looked
+// at four times a second; when the backend, its preset, the flow resolution or
+// Hybrid differ from what the layer holds, that is a new revision, and every
+// running session applies it at its next frame, as it does a menu request.
+void follow_ini(bool force) noexcept {
+    try {
+        auto& c = control();
+        const auto now = GetTickCount64();
+        if (!force && now < c.next_check.load(std::memory_order_relaxed)) return;
+        c.next_check.store(now + 250, std::memory_order_relaxed);
+        const auto stamp = ini_stamp();
+        {
+            std::scoped_lock lock(c.mutex);
+            if (stamp == c.stamp) return;
+        }
+        const auto settings = read_settings();
+        std::scoped_lock lock(c.mutex);
+        c.stamp = stamp;
+        if (settings != c.settings) { c.settings = settings; ++c.revision; }
+    } catch (...) {
+    }
+}
+Snapshot reload() {
+    follow_ini(true);
+    return snapshot();
 }
 bool request(Settings s) {
     if (s.backend < 0 || s.backend > 1 || s.preset < 0 || s.preset > 2 ||

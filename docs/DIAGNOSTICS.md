@@ -30,10 +30,13 @@ crash dump. Game logs and crash dumps remain useful when available.
 
 ## Records added by V497 (hybrid composition and NGX guide capture)
 
-`presenter_transition` result 702, once per session after 700: `a` whether
+`presenter_transition` result 702, once per session after 700 and again
+when Hybrid is switched while the session runs (V499): `a` whether
 Hybrid was on, `b` whether the game's DLSS vectors were asked for (Hybrid, or
 `motion_vectors=dlss`), `c` whether the NGX guide capture started, which it
-does only for a native D3D12 session.
+does only for a native D3D12 session with Hybrid on (V499: before, it also ran
+for `motion_vectors=dlss`, which the tray always writes, and Hybrid off then
+composed from the game's vectors alone).
 
 `embedded_configuration` results:
 
