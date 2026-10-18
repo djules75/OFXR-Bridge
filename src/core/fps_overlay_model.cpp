@@ -135,6 +135,8 @@ std::array<unsigned, 7> glyph(char c) noexcept {
     case '8': return {14,17,17,14,17,17,14};
     case '9': return {14,17,17,15,1,1,14};
     case 'p': return {27,27,27,27,27,27,27}; // pause: two vertical bars
+    case 'm': return {0,0,26,21,21,21,21};
+    case 's': return {0,0,15,16,14,1,30};
     default: return {};
     }
 }
@@ -161,25 +163,44 @@ std::vector<std::uint32_t> rasterize_fps_overlay(
         static_cast<int>(std::clamp(rate, 0.0f, 999.0f) + 0.5f)));
     // The tray's pause symbol is the same orange.
     const auto pause = color(255, 150, 0);
-    // One glyph pixel's side in texture pixels; fractional below big, where
-    // each texture pixel takes the glyph pixel under its centre.
+    // One centred line of glyphs, each glyph pixel `cell` texture pixels on a
+    // side; fractional below big, where each texture pixel takes the glyph
+    // pixel under its centre. Returns the row below the line.
+    const auto draw = [&](const char* line, unsigned count, float cell, unsigned top) {
+        const auto line_width = static_cast<unsigned>(std::ceil((count * 6 - 1) * cell));
+        const auto line_height = static_cast<unsigned>(std::ceil(7 * cell));
+        const unsigned left = (width - line_width) / 2;
+        for (unsigned py = top; py < top + line_height && py < height; ++py) {
+            const auto y = static_cast<unsigned>((py - top + 0.5f) / cell);
+            if (y >= 7) continue;
+            for (unsigned px = left; px < left + line_width && px < width; ++px) {
+                const auto cell_column = static_cast<unsigned>((px - left + 0.5f) / cell);
+                const unsigned index = cell_column / 6, column = cell_column % 6;
+                if (index >= count || column == 5) continue;
+                if ((glyph(line[index])[y] & (1u << (4 - column))) == 0) continue;
+                pixels[static_cast<std::size_t>(py) * width + px] =
+                    line[index] == 'p' ? pause : status;
+            }
+        }
+        return top + line_height;
+    };
     const float cell = std::max(1.0f, static_cast<float>(scale) *
         (size == FpsOverlaySize::little ? 1.0f / 3.0f
          : size == FpsOverlaySize::medium ? 0.5f : 1.0f));
-    const auto text_width = static_cast<unsigned>(std::ceil((length * 6 - 1) * cell));
+    // The number keeps the 12-row grid's centre in a taller image too.
+    const unsigned band = height >= 16 * scale ? 12 * scale : height;
     const auto text_height = static_cast<unsigned>(std::ceil(7 * cell));
-    const unsigned left = (width - text_width) / 2;
-    const unsigned top = (height - text_height) / 2;
-    for (unsigned py = top; py < top + text_height && py < height; ++py) {
-        const auto y = static_cast<unsigned>((py - top + 0.5f) / cell);
-        if (y >= 7) continue;
-        for (unsigned px = left; px < left + text_width && px < width; ++px) {
-            const auto cell_column = static_cast<unsigned>((px - left + 0.5f) / cell);
-            const unsigned index = cell_column / 6, column = cell_column % 6;
-            if (index >= length || column == 5) continue;
-            if ((glyph(text[index])[y] & (1u << (4 - column))) == 0) continue;
-            pixels[static_cast<std::size_t>(py) * width + px] =
-                text[index] == 'p' ? pause : status;
+    const unsigned below = draw(text, length, cell, (band - text_height) / 2);
+    if (snapshot.latency_ms >= 0) {
+        char latency[8]{};
+        const auto latency_length = static_cast<unsigned>(std::snprintf(
+            latency, sizeof(latency), "%dms", std::min(snapshot.latency_ms, 999)));
+        // Half the number's size, one of its own glyph pixels below it.
+        const float latency_cell = std::max(1.0f, cell * 0.5f);
+        const unsigned latency_top =
+            below + static_cast<unsigned>(std::ceil(latency_cell));
+        if (latency_top + static_cast<unsigned>(std::ceil(7 * latency_cell)) <= height) {
+            draw(latency, latency_length, latency_cell, latency_top);
         }
     }
     return pixels;

@@ -157,6 +157,7 @@ int main() {
     settings.diagnostics = true;
     settings.pause_hotkey = "shift+scrolllock";
     settings.overlay_size = xrfg::FpsOverlaySize::little;
+    settings.overlay_latency = false;
     const std::string serialized = serialize_settings(settings);
     const LauncherSettings parsed = parse_settings(serialized);
     if (parsed.backend != FlowBackend::fidelity_fx ||
@@ -168,8 +169,9 @@ int main() {
         parsed.single_swapchain_rings || parsed.vulkan_session_bridge ||
         parsed.vulkan_support || parsed.d3d11_bridge ||
         parsed.capture_at_end_frame || !parsed.diagnostics ||
-        parsed.overlay_size != xrfg::FpsOverlaySize::little ||
-        !contains(build_runtime_ini(parsed), "\r\n[overlay]\r\nposition=upper_right\r\nsize=small\r\n") ||
+        parsed.overlay_size != xrfg::FpsOverlaySize::little || parsed.overlay_latency ||
+        !contains(build_runtime_ini(parsed),
+                  "\r\n[overlay]\r\nposition=upper_right\r\nsize=small\r\nlatency=0\r\n") ||
         !contains(build_runtime_ini(parsed), "capture_at_end_frame=0")) {
         std::cerr << "standalone settings round-trip failed\n";
         return 1;

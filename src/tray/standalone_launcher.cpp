@@ -242,6 +242,9 @@ LauncherSettings parse_settings(std::string_view text) {
                     settings.overlay_position = parse_overlay_position(lower_ascii(value));
                 } else if (key == "overlay_size") {
                     settings.overlay_size = parse_overlay_size(lower_ascii(value));
+                } else if (key == "overlay_latency") {
+                    settings.overlay_latency = value == "1" ||
+                                               lower_ascii(value) == "true";
                 } else if (key == "diagnostics") {
                     settings.diagnostics = value == "1" ||
                                            lower_ascii(value) == "true";
@@ -356,6 +359,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\ndiagnostics=" + (settings.diagnostics ? "1" : "0") +
            "\r\noverlay_position=" + overlay_position_name(settings.overlay_position) +
            "\r\noverlay_size=" + overlay_size_name(settings.overlay_size) +
+           "\r\noverlay_latency=" + (settings.overlay_latency ? "1" : "0") +
            "\r\npause_hotkey=" + settings.pause_hotkey +
            "\r\nedge_ghosting_reduction=" +
            (settings.edge_ghosting_reduction ? "1" : "0") +
@@ -604,7 +608,8 @@ std::string build_runtime_ini(
            "\r\nmax_file_mb=" + std::to_string(max_file_mb) +
            "\r\nflush_each_event=" + (flush_each_event ? "1" : "0") + "\r\n"
            "\r\n[overlay]\r\nposition=" + overlay_position_name(settings.overlay_position) +
-           "\r\nsize=" + overlay_size_name(settings.overlay_size) + "\r\n";
+           "\r\nsize=" + overlay_size_name(settings.overlay_size) +
+           "\r\nlatency=" + (settings.overlay_latency ? "1" : "0") + "\r\n";
 }
 
 std::filesystem::path runtime_version_directory(

@@ -79,6 +79,7 @@ enum MenuCommand : UINT {
     overlay_size_big = 131,
     overlay_size_medium = 132,
     overlay_size_small = 133,
+    toggle_overlay_latency = 134,
     donate_creator = 138,
     donate_maintainer = 139,
     show_about = 140,
@@ -1500,6 +1501,10 @@ void show_context_menu(AppState& state) {
                 entry.command, entry.text);
         }
         AppendMenuW(overlay_menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(overlay_menu, MF_STRING |
+            (state.settings.overlay_latency ? MF_CHECKED : MF_UNCHECKED),
+            toggle_overlay_latency, L"Show latency");
+        AppendMenuW(overlay_menu, MF_SEPARATOR, 0, nullptr);
         const struct { UINT command; xrfg::FpsOverlayPosition position; const wchar_t* text; } entries[]{
             {overlay_upper_left, xrfg::FpsOverlayPosition::upper_left, L"Upper left"},
             {overlay_upper_right, xrfg::FpsOverlayPosition::upper_right, L"Upper right"},
@@ -1664,7 +1669,7 @@ void handle_command(AppState& state, UINT command) {
                 L"Reset every OFXR setting to its factory default?\n\n"
                 L"Optical flow: NVIDIA Medium at 50%, bidirectional "
                 L"consistency off. Prefer FPS over latency: on. Frame Gen "
-                L"multiplier: 2X. Lower VRAM: on. FPS overlay: upper right, big. Bridge "
+                L"multiplier: 2X. Lower VRAM: on. FPS overlay: upper right, big, latency shown. Bridge "
                 L"flight recorder: off. Pause key: Ctrl + Alt + F7. Edge "
                 L"ghosting reduction: off. Repeating-pattern lock: on. Settings "
                 L"only reachable in tray.ini go back to their defaults too.\n\n"
@@ -1744,6 +1749,11 @@ void handle_command(AppState& state, UINT command) {
             : xrfg::FpsOverlaySize::big;
         update_runtime_options(
             state, L"The FPS overlay size updates in running applications.");
+        break;
+    case toggle_overlay_latency:
+        state.settings.overlay_latency = !state.settings.overlay_latency;
+        update_runtime_options(
+            state, L"The latency below the FPS number updates in running applications.");
         break;
     case toggle_diagnostics:
         state.settings.diagnostics = !state.settings.diagnostics;

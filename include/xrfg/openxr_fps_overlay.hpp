@@ -40,6 +40,10 @@ public:
     // draw the refresh rate for a rate within 2% of it (displayed_rate). Any
     // thread; 0 clears it.
     void set_display_period(std::int64_t period_ns) noexcept;
+    // One real frame's added latency: the display time it went out with less
+    // that of the first slot it could have taken. Any thread; the overlay
+    // draws the mean of about the last second below the number.
+    void add_latency_sample(std::int64_t latency_ns) noexcept;
     // Terminal for this session. Keep resources alive until normal teardown;
     // stop adding the quad or uploading textures immediately.
     void suspend() noexcept;

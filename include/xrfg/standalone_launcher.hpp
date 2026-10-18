@@ -81,6 +81,8 @@ struct LauncherSettings {
     bool diagnostics{};
     FpsOverlayPosition overlay_position{FpsOverlayPosition::upper_right};
     FpsOverlaySize overlay_size{FpsOverlaySize::big};
+    // "Show latency": the latency the layer adds, below the number.
+    bool overlay_latency{true};
     // The system-wide key for "Pause frame generation" while armed, in
     // parse_hotkey's form. No menu entry; edit tray.ini. Empty, "off" or
     // anything parse_hotkey refuses means no key.

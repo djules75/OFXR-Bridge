@@ -580,6 +580,16 @@ struct PresenterSubmission {
     // app_release_counter at the application's xrEndFrame for this frame;
     // see join_runtime_queue_to_application.
     std::uint64_t app_release_value{};
+    // The real frame of a pair only: when the application's xrEndFrame for it
+    // began, which the FPS overlay's added latency counts from. See
+    // observe_added_latency.
+    std::chrono::steady_clock::time_point latency_from{};
+};
+// One presenter cycle: when it decided what to submit, and the display time
+// it submitted for. See observe_added_latency.
+struct PresenterSlot {
+    std::chrono::steady_clock::time_point decided_at{};
+    XrTime display_time{};
 };
 
 struct ProjectionLayerSnapshot {
@@ -1310,6 +1320,16 @@ struct SessionState {
     // move nothing: a start-up burst once put the ceiling at zero and cost
     // the first forty seconds of a session. Guarded by presenter_mutex.
     std::chrono::nanoseconds triple_release_delay{0};
+    // The presenter's recent cycles, for the FPS overlay's added latency.
+    // Presenter thread only.
+    std::array<PresenterSlot, 16> presenter_slots{};
+    std::size_t presenter_slot_count{};
+    // The added latency's 803 window. The presenter and the inline path both
+    // record into it, so it has a lock of its own.
+    std::mutex added_latency_mutex;
+    XrDuration added_latency_sum{};
+    XrDuration added_latency_max{};
+    std::uint32_t added_latency_samples{};
     // Negative until the first window sets it to two periods: the
     // application needs the third to render in.
     std::chrono::nanoseconds triple_release_ceiling{-1};
@@ -7842,6 +7862,74 @@ struct TripleReleaseReport {
         synthetic_output_ready(*front->owned_frame);
 }
 
+// One real frame's added latency: to the FPS overlay, and once every 30 to the
+// flight log. 803: a the mean in microseconds, b the largest, c the frames
+// in the window (30).
+void record_added_latency(SessionState& state, XrDuration added) noexcept {
+    if (added < 0 || added >= 1'000'000'000) return;
+    if (state.fps_overlay) state.fps_overlay->add_latency_sample(added);
+    XrDuration sum = 0;
+    XrDuration largest = 0;
+    std::uint32_t samples = 0;
+    {
+        std::scoped_lock lock(state.added_latency_mutex);
+        state.added_latency_sum += added;
+        state.added_latency_max = std::max(state.added_latency_max, added);
+        if (++state.added_latency_samples < 30) return;
+        sum = state.added_latency_sum;
+        largest = state.added_latency_max;
+        samples = state.added_latency_samples;
+        state.added_latency_sum = 0;
+        state.added_latency_max = 0;
+        state.added_latency_samples = 0;
+    }
+    xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::presenter_transition,
+        803,
+        static_cast<std::uint64_t>(sum / samples / 1000),
+        static_cast<std::uint64_t>(largest / 1000),
+        samples);
+}
+
+// The latency the layer adds to a real frame, for the FPS overlay: the display
+// time it goes out with, less that of the first presenter slot decided after
+// the application's xrEndFrame for it began - the slot it could have taken
+// had it been passed straight through. The synthetics ahead of it, the deeper
+// pipeline's hold and anything queued in front of it count; the game's own
+// render time does not. About a display period in 2X, two in 3X, one more
+// with the deeper pipeline. Presenter thread only, at every pop decision.
+void observe_added_latency(
+    SessionState& state,
+    std::chrono::steady_clock::time_point decided_at,
+    XrTime display_time,
+    const PresenterSubmission* request) noexcept {
+    auto& slots = state.presenter_slots;
+    slots[state.presenter_slot_count % slots.size()] = {decided_at, display_time};
+    ++state.presenter_slot_count;
+    if (request == nullptr || !request->owned_frame ||
+        request->owned_frame->synthetic ||
+        request->latency_from == std::chrono::steady_clock::time_point{}) {
+        return;
+    }
+    // Newest first; the earliest slot at or after latency_from is the
+    // reference, and the ring must reach back past it to be sure.
+    const auto available =
+        std::min<std::size_t>(state.presenter_slot_count, slots.size());
+    const PresenterSlot* first = nullptr;
+    bool covered = false;
+    for (std::size_t back = 0; back < available; ++back) {
+        const auto& slot =
+            slots[(state.presenter_slot_count - 1 - back) % slots.size()];
+        if (slot.decided_at < request->latency_from) {
+            covered = true;
+            break;
+        }
+        first = &slot;
+    }
+    if (!covered || first == nullptr) return;
+    record_added_latency(state, display_time - first->display_time);
+}
+
 // One observation for the 3X release delay, and the step when a window of
 // them closes. presenter_mutex held; the report is for the caller to record
 // once it has let go.
@@ -8817,6 +8905,8 @@ void continuous_presenter_main(
             if (hold_waits_for_pop) {
                 state->presenter_condition.notify_all();
             }
+            observe_added_latency(
+                *state, pop_now, frame_state.predictedDisplayTime, request.get());
             // Recorded outside presenter_mutex, which the application waits
             // on. result=400: a synthetic held for the pipeline's depth;
             // 401: held because its output had not been written yet; 402: one
@@ -10386,7 +10476,8 @@ enqueue_presenter_submission(
     const std::shared_ptr<SessionState>& state,
     std::shared_ptr<GeneratedFrameEndInfo> synthetic,
     std::shared_ptr<GeneratedFrameEndInfo> extra_synthetic,
-    std::shared_ptr<GeneratedFrameEndInfo> current) noexcept {
+    std::shared_ptr<GeneratedFrameEndInfo> current,
+    std::chrono::steady_clock::time_point application_end_at) noexcept {
     try {
         std::scoped_lock lock(state->presenter_mutex);
         if (!state->presenter_active || state->presenter_stop_requested ||
@@ -10423,6 +10514,7 @@ enqueue_presenter_submission(
         second->owned_frame = std::move(current);
         second->queued_at = queued_at;
         second->app_release_value = app_release_value;
+        second->latency_from = application_end_at;
         if (second->owned_frame) {
             second->owned_frame->app_release_value = app_release_value;
         }
@@ -11889,7 +11981,10 @@ struct InternalCycleResult {
     std::optional<XrFrameState> adopted_frame_state = std::nullopt,
     // The frame is a synthetic: 3X runs one cycle for its second synthetic
     // before the one for the real frame.
-    bool synthetic = false) {
+    bool synthetic = false,
+    // The real frame only: the display time of the slot the pair's first
+    // synthetic took, which the FPS overlay's added latency counts from.
+    XrTime latency_reference = 0) {
     InternalCycleResult output{};
     if (state->dispatch->wait_frame == nullptr ||
         state->dispatch->begin_frame == nullptr ||
@@ -11982,6 +12077,11 @@ struct InternalCycleResult {
     }
 
     output.completed = true;
+    // Inline, the added latency is the real frame's display time less that of
+    // the application's own wait, which the first synthetic went out on.
+    if (!synthetic && latency_reference != 0) {
+        record_added_latency(*state, submitted.displayTime - latency_reference);
+    }
     return output;
 }
 
@@ -13486,7 +13586,8 @@ XrResult layer_end_frame_impl(
                 state,
                 presenter_first_frame,
                 presenter_extra_frame,
-                presenter_current_frame);
+                presenter_current_frame,
+                application_end_now);
             if (XR_FAILED(result)) {
                 // Refused before anything was queued, so nothing else will
                 // ever release these.
@@ -13771,6 +13872,13 @@ XrResult layer_end_frame_impl(
                 pending.fence_value));
         }
     }
+    // The slot the first synthetic just took: the application's own wait,
+    // except where the cycles adopt an outstanding one and the application's
+    // label is all there is.
+    const XrTime latency_reference =
+        !adopt_outstanding_wait && state->last_inline_frame_state_valid
+            ? state->last_inline_frame_state.predictedDisplayTime
+            : first_generated.info.displayTime;
     // 3X: the second synthetic takes a cycle of its own first, and the
     // runtime's held wait with it where there is one.
     bool extra_cycle_completed = true;
@@ -13791,7 +13899,9 @@ XrResult layer_end_frame_impl(
         current_generated.info,
         adopt_outstanding_wait && !extra_ready
             ? std::optional<XrFrameState>(state->last_inline_frame_state)
-            : std::nullopt);
+            : std::nullopt,
+        false,
+        latency_reference);
     if (adopt_outstanding_wait) {
         // frame_call_mutex is held on the inline path, so these are seen in
         // order by the application's next begin.

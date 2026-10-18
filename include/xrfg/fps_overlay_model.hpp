@@ -29,6 +29,9 @@ struct FpsSnapshot {
     // Generation paused from the tray: drawn as a pause symbol before the
     // number.
     bool paused{};
+    // The latency the layer adds to the game's frames, in whole
+    // milliseconds, drawn as "11ms" below the number; negative draws nothing.
+    int latency_ms{-1};
 };
 
 // The compositor's delivered rate, less the share of it that was repeats.
@@ -95,6 +98,9 @@ struct OverlayPlacement {
 [[nodiscard]] OverlayPlacement overlay_placement(
     FpsOverlayPosition position, float left, float right, float down, float up) noexcept;
 [[nodiscard]] std::uint32_t overlay_texture_width(std::uint32_t eye_width) noexcept;
+// The number is centred in a 24x12 grid; an image 16 rows of that grid tall
+// keeps the number where the 12-row one has it and draws the latency, at half
+// the number's size, in the rows below.
 [[nodiscard]] std::vector<std::uint32_t> rasterize_fps_overlay(
     std::uint32_t width, std::uint32_t height, const FpsSnapshot& snapshot, bool bgra,
     FpsOverlaySize size = FpsOverlaySize::big);

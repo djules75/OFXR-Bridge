@@ -189,6 +189,28 @@ int main(int argc, char** argv) {
         for (auto size : {FpsOverlaySize::big, FpsOverlaySize::medium, FpsOverlaySize::little})
             require(parse_overlay_size(overlay_size_name(size)) == size, "size name round trip");
         require(parse_overlay_size("") == FpsOverlaySize::big, "size defaults to big");
+        // The latency line: a 24x16 image keeps the number exactly where the
+        // 24x12 one has it and draws "11ms" at half size in the rows below.
+        auto with_latency = snapshot;
+        with_latency.latency_ms = 11;
+        const auto tall_plain = rasterize_fps_overlay(240, 160, snapshot, false);
+        const auto tall_latency = rasterize_fps_overlay(240, 160, with_latency, false);
+        require(std::equal(green.begin(), green.end(), tall_plain.begin()) &&
+                std::all_of(tall_plain.begin() + 240 * 120, tall_plain.end(),
+                            [](std::uint32_t p) { return p == 0; }),
+                "taller image keeps the number in place");
+        require(std::equal(green.begin(), green.begin() + 240 * 100, tall_latency.begin()),
+                "latency leaves the number as it was");
+        std::size_t latency_ink = 0;
+        for (std::size_t i = 240 * 100; i < tall_latency.size(); ++i) {
+            require(tall_latency[i] == 0 || tall_latency[i] == 0xff70eb40u, "latency in the number's colour");
+            latency_ink += tall_latency[i] != 0;
+        }
+        require(latency_ink > 0 && std::all_of(tall_latency.begin() + 240 * 136, tall_latency.end(),
+                    [](std::uint32_t p) { return p == 0; }),
+                "latency drawn below the number, at half its size");
+        require(rasterize_fps_overlay(240, 120, with_latency, false) == green,
+                "no room, no latency");
         // Optional visual artifact, not a live image or runtime dependency.
         if (argc > 1) {
             std::ofstream file(argv[1], std::ios::binary);

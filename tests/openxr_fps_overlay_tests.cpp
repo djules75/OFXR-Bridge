@@ -124,7 +124,11 @@ XrResult XRAPI_CALL end(XrSession, const XrFrameEndInfo* info) {
         check(releases > 0 && quad->subImage.imageRect.extent.width == static_cast<int>(width), "unreleased overlay image");
         check(quad->layerFlags == XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
               "overlay must blend premultiplied source alpha");
-        check(width == height * 2, "numeric overlay aspect ratio");
+        // 24x16 of the number's grid: the number's 24x12 and the latency
+        // line below it, and the quad has the texture's shape.
+        check(width * 2 == height * 3, "numeric overlay aspect ratio");
+        check(std::abs(quad->size.width * 2.0f - quad->size.height * 3.0f) < 1.0e-5f,
+              "overlay quad matches its texture");
         last_pose = quad->pose;
     }
     if (fail_end) { fail_end = false; return XR_ERROR_RUNTIME_FAILURE; }
@@ -246,8 +250,11 @@ int main(int argc, char** argv) {
             check(pixel_count(0) > static_cast<std::size_t>(width) * height / 2,
                   "numeric overlay background must be transparent on GPU");
             check(last_pose.position.x > 0 && last_pose.position.y > 0, "default quadrant");
+            // The number's centre is at y 0.78; the quad reaches a third of
+            // its 0.096 panel further down for the latency line, so its own
+            // centre sits 0.016 lower.
             check(last_pose.position.x > 0.879f && last_pose.position.x < 0.881f &&
-                  last_pose.position.y > 0.779f && last_pose.position.y < 0.781f,
+                  last_pose.position.y > 0.763f && last_pose.position.y < 0.765f,
                   "runtime quad must move left and down without changing quadrant");
             const unsigned release_count = releases;
             overlay.application_frame(&info);

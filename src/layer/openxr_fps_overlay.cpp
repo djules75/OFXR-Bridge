@@ -54,6 +54,15 @@ struct OpenXrFpsOverlay::Impl {
     FpsCounter synthetic_counter;
     FpsOverlayPosition position{FpsOverlayPosition::upper_right};
     FpsOverlaySize size{FpsOverlaySize::big};
+    bool show_latency{true};
+    // Added-latency samples from whichever thread submits the real frame,
+    // drained into a window at every redraw; the figure is the mean of the
+    // last four windows, about a second.
+    std::atomic<std::int64_t> latency_sum_ns{0};
+    std::atomic<std::int64_t> latency_samples{0};
+    std::array<std::int64_t, 4> latency_window_sum{};
+    std::array<std::int64_t, 4> latency_window_count{};
+    std::size_t latency_window{};
     std::int64_t next_refresh{};
     bool attempted{}, initialized{}, image_valid{}, acquired{}, waited{}, disabled{};
     bool paused{};
@@ -134,7 +143,9 @@ struct OpenXrFpsOverlay::Impl {
         }
         if (format == DXGI_FORMAT_UNKNOWN) return false;
         width = overlay_texture_width(eye_width);
-        height = width / 2;
+        // 24x16 of the number's grid: its 24x12 and four rows below for the
+        // latency (rasterize_fps_overlay).
+        height = width * 2 / 3;
         if (width > properties.graphicsProperties.maxSwapchainImageWidth ||
             height > properties.graphicsProperties.maxSwapchainImageHeight) return false;
         XrReferenceSpaceCreateInfo space_info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
@@ -287,6 +298,11 @@ struct OpenXrFpsOverlay::Impl {
         application_counter.submitted(now, false, true);
         if (now < next_refresh) return;
         next_refresh = now + 250'000'000;
+        latency_window = (latency_window + 1) % latency_window_sum.size();
+        latency_window_sum[latency_window] =
+            latency_sum_ns.exchange(0, std::memory_order_relaxed);
+        latency_window_count[latency_window] =
+            latency_samples.exchange(0, std::memory_order_relaxed);
         std::array<wchar_t, 32> setting{};
         GetPrivateProfileStringW(L"overlay", L"position", L"upper_right",
             setting.data(), static_cast<DWORD>(setting.size()), ini.c_str());
@@ -298,6 +314,7 @@ struct OpenXrFpsOverlay::Impl {
         value.clear();
         for (wchar_t c : setting) { if (!c) break; value += c < 128 ? static_cast<char>(c) : '?'; }
         size = parse_overlay_size(value);
+        show_latency = GetPrivateProfileIntW(L"overlay", L"latency", 1, ini.c_str()) != 0;
         if (position == FpsOverlayPosition::off || disabled || !info->layerCount || !info->layers) return;
         float left = -1, right = 1, down = -1, up = 1;
         std::uint32_t eye_width = 0;
@@ -338,11 +355,34 @@ struct OpenXrFpsOverlay::Impl {
         // head turns enough to move it off. Reproduced in Callisto Protocol,
         // and reported as the counter vanishing, so rule it out before
         // suspecting the upload path.
-        quad.pose.position = {placement.x, placement.y, placement.z};
-        quad.size = {placement.width, placement.height};
+        // The texture is a third taller than the number's panel, the extra
+        // below it, so the number stays where the placement puts it.
+        quad.pose.position = {placement.x, placement.y - placement.height / 6.0f, placement.z};
+        quad.size = {placement.width, placement.height * 4.0f / 3.0f};
         auto snapshot = displayed_snapshot(now);
         snapshot.paused = paused;
+        // Only while generation runs: nothing beside a red or paused number.
+        snapshot.latency_ms = show_latency && snapshot.active && !paused
+            ? latency_ms() : -1;
         upload(snapshot);
+    }
+
+    int latency_ms() const {
+        std::int64_t sum = 0, count = 0;
+        for (std::size_t i = 0; i < latency_window_sum.size(); ++i) {
+            sum += latency_window_sum[i];
+            count += latency_window_count[i];
+        }
+        return count > 0 && sum >= 0
+            ? static_cast<int>((sum / count + 500'000) / 1'000'000)
+            : -1;
+    }
+
+    void clear_latency() {
+        latency_sum_ns.store(0, std::memory_order_relaxed);
+        latency_samples.store(0, std::memory_order_relaxed);
+        latency_window_sum.fill(0);
+        latency_window_count.fill(0);
     }
 
     // The figure the overlay draws: what the headset received where SteamVR
@@ -384,6 +424,7 @@ void OpenXrFpsOverlay::reset_metrics() noexcept {
     impl_->counter.reset();
     impl_->application_counter.reset();
     impl_->synthetic_counter.reset();
+    impl_->clear_latency();
     impl_->image_valid = false;
     impl_->next_refresh = 0;
     impl_->placement_valid = false;
@@ -391,6 +432,11 @@ void OpenXrFpsOverlay::reset_metrics() noexcept {
 
 void OpenXrFpsOverlay::set_display_period(std::int64_t period_ns) noexcept {
     impl_->display_period_ns.store(period_ns > 0 ? period_ns : 0, std::memory_order_relaxed);
+}
+
+void OpenXrFpsOverlay::add_latency_sample(std::int64_t latency_ns) noexcept {
+    impl_->latency_sum_ns.fetch_add(latency_ns, std::memory_order_relaxed);
+    impl_->latency_samples.fetch_add(1, std::memory_order_relaxed);
 }
 
 void OpenXrFpsOverlay::set_paused(bool paused) noexcept {
@@ -407,6 +453,7 @@ void OpenXrFpsOverlay::suspend() noexcept {
     impl_->counter.reset();
     impl_->application_counter.reset();
     impl_->synthetic_counter.reset();
+    impl_->clear_latency();
 }
 
 FpsSnapshot OpenXrFpsOverlay::metrics() const noexcept {
