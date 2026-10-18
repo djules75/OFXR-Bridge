@@ -1,3 +1,11 @@
+## V581: desktop preset refresh
+
+Fix a cached empty/stale DLSS-G game target while desktop settings remain open.
+Manual Refresh resolves the remembered game again; visible desktop controls
+also detect target changes once per UI second. Profile edits remain explicit.
+Based on V579; V580 early-handoff experiment excluded for a separate comparison.
+See [details](docs/V581_OFFLINE_PRESET_REFRESH.md). Owner desktop test pending.
+
 ## V579: fresh single INI and gaming defaults
 
 One user `ofxr-bridge.ini`, fresh defaults without legacy import. Offline native

@@ -18,6 +18,7 @@ struct SettingsWidgetState {
     bool dlssg_profile_loaded{};
     bool dlssg_target_saved{};
     unsigned dlssg_observed_pid{};
+    double dlssg_target_refresh_at{};
     std::filesystem::path dlssg_executable;
     int dlssg_model{}; // 0 driver default, 1 A, 2 C; driver writes are explicit only
     std::string dlssg_profile_status;

@@ -90,6 +90,15 @@ void dlssg_preset(SettingsWidgetState& ui, const Snapshot& state, bool compact) 
     using namespace xrfg::standalone;
     const auto selection_file = configuration_path();
     if (!state.connected) ui.dlssg_observed_pid=0;
+    const auto resolve_target = [&] {
+        auto path = compact ? process_executable() :
+            state.connected ? game_executable(state.runtime.process_id) : std::filesystem::path{};
+        if (!compact && path.empty()) path = last_dlssg_game(selection_file);
+        if (path == ui.dlssg_executable) return false;
+        ui.dlssg_executable = path;
+        ui.dlssg_target_saved = false;
+        return true;
+    };
     const auto refresh = [&] {
         DlssgProfile profile; std::wstring error;
         const bool read = !ui.dlssg_executable.empty() && read_dlssg_profile(ui.dlssg_executable, profile, error);
@@ -100,11 +109,15 @@ void dlssg_preset(SettingsWidgetState& ui, const Snapshot& state, bool compact) 
         ui.dlssg_profile_loaded = true;
     };
     if (!ui.dlssg_profile_loaded) {
-        if (compact) ui.dlssg_executable = process_executable();
-        else {
-            ui.dlssg_executable = last_dlssg_game(selection_file);
-        }
+        resolve_target();
         refresh();
+        ui.dlssg_target_refresh_at = ImGui::GetTime()+1.;
+    } else if (!compact && ImGui::GetTime() >= ui.dlssg_target_refresh_at) {
+        // The tray can learn a game while this window is already open, even
+        // if it exits before the DLSS-G controls are visited again. Re-read
+        // the local target once per UI second; query NVAPI only if it changed.
+        ui.dlssg_target_refresh_at = ImGui::GetTime()+1.;
+        if (resolve_target()) refresh();
     }
     if ((compact && !ui.dlssg_target_saved) ||
         (!compact && state.connected && ui.dlssg_observed_pid != state.runtime.process_id)) {
@@ -129,7 +142,11 @@ void dlssg_preset(SettingsWidgetState& ui, const Snapshot& state, bool compact) 
         } else ui.dlssg_profile_status = utf8(error);
     }
     ImGui::EndDisabled();
-    if (ImGui::Button("Refresh preset profile")) refresh();
+    if (ImGui::Button("Refresh preset profile")) {
+        resolve_target();
+        refresh();
+        ui.dlssg_target_refresh_at = ImGui::GetTime()+1.;
+    }
     ImGui::TextWrapped("%s", ui.dlssg_profile_status.c_str());
     ImGui::TextWrapped("C uses Lite blending; A uses Full quality. If the driver rejects C, OFXR tries A. A saved request does not verify the model loaded by NVIDIA; global overrides may still apply.");
 }

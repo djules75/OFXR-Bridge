@@ -358,7 +358,21 @@ void offline_preset() {
     auto desired=snapshot().desired;select_generation(desired,2,desired.backend);
     require(request(desired),"select native DLSS-G for offline profile editing");
     const auto selection=configuration_path();
+    require(write_configuration_sections(selection,"[dlssg]\nexecutable=\n"),"start without a remembered game");
+    Context already_open({900,1100},false);already_open.draw();already_open.draw();
+    require(already_open.widgets.dlssg_executable.empty(),"desktop starts with no target");
     require(remember_dlssg_game(selection,process_executable()),"remember the game without changing its NVIDIA profile");
+    already_open.activate("/Generation_","Refresh preset profile");already_open.draw();already_open.draw();
+    require(already_open.widgets.dlssg_executable==process_executable(),
+        "Refresh resolves a game learned after this settings window was opened");
+    require(write_configuration_sections(selection,"[dlssg]\nexecutable=\n"),"reset target for automatic refresh fixture");
+    Context learned_later({900,1100},false);learned_later.draw();learned_later.draw();
+    require(learned_later.widgets.dlssg_executable.empty(),"automatic refresh fixture starts empty");
+    require(remember_dlssg_game(selection,process_executable()),"tray learns target while desktop remains open");
+    ImGui::SetCurrentContext(learned_later.context);ImGui::GetIO().DeltaTime=1.1F;
+    learned_later.draw();
+    require(learned_later.widgets.dlssg_executable==process_executable(),
+        "open desktop automatically discovers the target after the game closed");
     Context desktop({900,1100},false);desktop.draw();desktop.draw(true);
     require(!snapshot().connected && desktop.widgets.dlssg_executable==process_executable(),
         "cold desktop settings restore last game while disconnected");

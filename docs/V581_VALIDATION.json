@@ -1,0 +1,30 @@
+{
+  "version": "V581",
+  "base": "832705c577eb7e0158a522f9245ae8b5f2891db4",
+  "status": "runtime-pending",
+  "passed": 4,
+  "failed": 0,
+  "ctest_seconds": 1.6103364,
+  "ctest_passed": [
+    "xrfg_layer_call_chain",
+    "xrfg_single_configuration_tests",
+    "xrfg_dlssg_profile_tests",
+    "xrfg_settings_widgets_tests"
+  ],
+  "scope": "Desktop DLSS-G preset target refresh: resolve the remembered/current game on manual Refresh and once per UI second while the desktop controls are visible; re-read the driver profile only if the target changes. Fix cached empty/stale target after the tray learns a game.",
+  "headset_validation": "Owner desktop result pending. Source based on V579, deliberately excludes the separate V580 early-handoff experiment so preset testing does not confound that comparison.",
+  "presentation_pacing_changed": false,
+  "afw_math_changed": false,
+  "interpolation_math_changed": false,
+  "ipc_abi": 57701,
+  "provider_abi": 45601,
+  "pushed": false,
+  "live_installed": false,
+  "test_logs": [
+    "v581-final-tests.log",
+    "v581-final-junit.xml"
+  ],
+  "reproduction": "New real ImGui fixture fails on V579: initial empty target, tray remembers game while desktop stays open, manual Refresh does not discover it. Fixed checks exercise manual refresh, automatic discovery after simulated UI time, cold offline restore and actual popup opening without a connected game. Tests never write NVIDIA profiles.",
+  "limitations": "A game must have been discovered once to identify its per-game NVIDIA profile; no EXE picker or global driver override is added. Reopening game remains necessary after a preset change. No native profile write occurs merely on refresh/discovery.",
+  "inherited": "V579 fresh single ofxr-bridge.ini, diagnostic/benchmark gates and explicit C rejection fallback unchanged."
+}
