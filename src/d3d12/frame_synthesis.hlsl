@@ -1193,20 +1193,6 @@ float occluder_error(float2 a, float4 a_color, float2 surface) {
     }
     return error;
 }
-
-// B's surface at `pixel` followed back to A by its own vector: the error
-// between the two, or 1 off the image. Small when that surface is one the
-// vectors track - the occluder that covers what A showed there.
-float tracked_surface_error(float2 pixel, float4 b_color) {
-    float error = 1.0;
-    MappedCoordinate then = map_source_to_target(
-        pixel + game_motion_for_pixel(pixel, Slice, ViewIndex), PreviousMappings[ViewIndex]);
-    if (then.valid >= 0.5) {
-        CameraSample a = sample_previous_target(then.coordinate, Slice, ViewIndex);
-        if (a.valid >= 0.5) error = rgb_error(a.color, b_color);
-    }
-    return error;
-}
 #endif
 
 float4 synthesize_midpoint(
@@ -1588,10 +1574,15 @@ float4 synthesize_midpoint(
                                 last_vectors_case = 1u;
 #endif
 #ifdef XRFG_HYBRID
-                                // B shows the occluder at the pixel; if the
-                                // vectors track it, A's sample stands.
-                                explained = min(explained,
-                                    tracked_surface_error(pixel, current_fallback.color));
+                                // No surface of B reaches the pixel: the
+                                // clearest occlusion the vectors find, and A
+                                // alone shows what is there. The hybrid keeps
+                                // it (V504). Checked by the occluder tracking
+                                // its own vector (V500), it failed in DI2, the
+                                // optical flow took the covering edge - the
+                                // tint showed it red - and its smear was the
+                                // ghost in front of the building.
+                                explained = 0.0;
 #endif
                             }
                         } else if (!camera_explains && disagreement > 0.1 && repeated_capture_flag() == 0) {
