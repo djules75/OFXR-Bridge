@@ -75,6 +75,11 @@ public:
         // Stage17: exact native-margin deficit retained in the output phase.
         // Stage18: native Wait entry QPC and worker thread ID; a is the
         // per-start accepted-input ordinal (0 for the seed), not packet ID.
+        // V593: ordinal0 also identifies unsubmitted native-clock renewals.
+        // Stage23: packet ID, expired raw prediction converted to QPC, planned
+        // handoff QPC. Stage24: final raw prediction QPC and renewed-cycle count.
+        // Renewals keep the same owned packet; only the old native Begin is
+        // discarded through OpenXR's XR_FRAME_DISCARDED transition, without End.
         std::function<void(int,std::uint64_t,std::int64_t,std::int64_t)> trace;
     };
     explicit PrivateOpenXrRuntime(Options);

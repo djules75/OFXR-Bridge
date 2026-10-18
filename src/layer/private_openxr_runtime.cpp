@@ -405,20 +405,25 @@ struct PrivateOpenXrRuntime::Impl {
             changed.notify_all();
         }
     }
-    XrTime display_time(const XrFrameState& prediction) {
-        auto result=prediction.predictedDisplayTime;
+    std::optional<std::int64_t> prediction_qpc(const XrFrameState& prediction) {
         if(options.real.to_qpc) {
             LARGE_INTEGER target{},frequency{};QueryPerformanceFrequency(&frequency);
-            if(XR_SUCCEEDED(options.real.to_qpc(options.real.instance,result,&target))) {
-                const auto at=target.QuadPart/frequency.QuadPart*1'000'000'000LL+
+            if(XR_SUCCEEDED(options.real.to_qpc(options.real.instance,prediction.predictedDisplayTime,&target))) {
+                return target.QuadPart/frequency.QuadPart*1'000'000'000LL+
                     target.QuadPart%frequency.QuadPart*1'000'000'000LL/frequency.QuadPart;
-                const auto deficit=clock_ns()+PrivateOutputSchedule::preparation_lead-at;
-                // An overlapped Wait may survive a long previous End. Retain
-                // its runtime phase, advancing whole physical display periods
-                // only when that prediction has actually expired.
-                if(deficit>0) {const auto step=period(prediction.predictedDisplayPeriod);
-                    result+=(deficit+step-1)/step*step;}
             }
+        }
+        return {};
+    }
+    XrTime display_time(const XrFrameState& prediction) {
+        auto result=prediction.predictedDisplayTime;
+        if(auto at=prediction_qpc(prediction)) {
+            const auto deficit=clock_ns()+PrivateOutputSchedule::preparation_lead-*at;
+            // Cleanup/late-CPU fallback only. Content delivery renews expired
+            // native cycles before posting lookahead; changing this timestamp
+            // alone cannot renew a SteamVR cycle after an input gap.
+            if(deficit>0) {const auto step=period(prediction.predictedDisplayPeriod);
+                result+=(deficit+step-1)/step*step;}
         }
         return result;
     }
@@ -464,7 +469,7 @@ struct PrivateOpenXrRuntime::Impl {
                 const bool diagnostic=tracing();
                 auto clock=take_wait();if(!clock)break;
                 prediction=clock->prediction;result=clock->result;
-                const auto wait_enter=clock->entered,wait_leave=clock->returned;
+                auto wait_enter=clock->entered,wait_leave=clock->returned;
                 const auto begin_enter=clock_ns();
                 if(XR_SUCCEEDED(result)) {
                     waited=true;
@@ -473,7 +478,7 @@ struct PrivateOpenXrRuntime::Impl {
                     if(XR_SUCCEEDED(result)){waited=false;begun=true;}
                 }
                 if(XR_FAILED(result)){fail(result);break;}
-                const auto begun_at=clock_ns();
+                auto begun_at=clock_ns();
                 std::shared_ptr<Packet> packet;
                 {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping || !prepared.empty();});
                  if(stopping)break;packet=std::move(prepared.front());prepared.pop_front();}
@@ -487,11 +492,7 @@ struct PrivateOpenXrRuntime::Impl {
                 // Do not charge the prepared-FIFO wait to native work. Starting
                 // native entry earlier changes neither producer nor End cadence.
                 runtime_budget.observe(wait_leave-wait_enter+begun_at-begin_enter+release_leave-release_enter,physical);
-                if(diagnostic) {
-                    options.trace(7,packet->sequence,wait_enter,0);options.trace(6,packet->sequence,wait_leave,0);
-                    options.trace(15,packet->sequence,release_enter,release_leave-release_enter);
-                    options.trace(16,packet->sequence,begun_at,runtime_budget.lead(physical));
-                }
+                if(diagnostic)options.trace(15,packet->sequence,release_enter,release_leave-release_enter);
                 // Only fully prepared packets reach this thread. Arrival time,
                 // not a rounded refresh slot, supplies the exact late hold.
                 const auto refill=slots.valid()?0:schedule.input_ready(packet->source_ready_at,options.capacity);
@@ -514,6 +515,51 @@ struct PrivateOpenXrRuntime::Impl {
                         options.trace(21,packet->sequence,packet->work_ns,added);
                     }
                 } else deadline=schedule.deadline();
+                // After sparse inputs SteamVR can complete Wait with an already
+                // expired native cycle. Advancing only End.displayTime does not
+                // advance that cycle: the runtime can supersede its submission.
+                // Keep the SAME owned FIFO packet and renew only the unsubmitted
+                // native clock. Begin without a prior End is the OpenXR-defined
+                // XR_FRAME_DISCARDED path; no source frame or layer is discarded.
+                // Do this before posting lookahead, so the worker remains the
+                // sole Wait caller and Begin/End stay serialized here.
+                unsigned renewed{};
+                while(!stopping && prediction.shouldRender) {
+                    const auto at=prediction_qpc(prediction);
+                    if(!at || *at>std::max(clock_ns(),deadline)+PrivateOutputSchedule::preparation_lead)break;
+                    if(diagnostic)options.trace(23,packet->sequence,*at,deadline);
+                    if(renewed && renewed%8==0 && !sleep_until(clock_ns()+physical,1'250'000))break;
+                    if(!post_wait(0,false)){result=XR_ERROR_CALL_ORDER_INVALID;break;}
+                    auto fresh=take_wait();
+                    if(!fresh){result=XR_ERROR_SESSION_NOT_RUNNING;break;}
+                    result=fresh->result;if(XR_FAILED(result))break;
+                    prediction=fresh->prediction;waited=true;
+                    wait_enter=fresh->entered;wait_leave=fresh->returned;
+                    const auto entered=clock_ns();
+                    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+                    result=options.real.begin(options.real.session,&begin);
+                    if(XR_FAILED(result))break;
+                    waited=false;begun=true;begun_at=clock_ns();++renewed;
+                    runtime_budget.observe(wait_leave-wait_enter+begun_at-entered,physical);
+                    if(slots.valid()) {
+                        if(options.physical_clock)if(auto c=options.physical_clock())slots.clock(*c);
+                        deadline=slots.claim(packet->accepted_at,packet->prepared_at,begun_at,
+                            clock_ns(),PrivateRuntimeBudget::presentation_margin);
+                    } else {
+                        schedule.runtime_ready(begun_at,PrivateRuntimeBudget::presentation_margin);
+                        deadline=schedule.deadline();
+                    }
+                }
+                if(stopping || XR_FAILED(result)) {
+                    if(!stopping)fail(result);
+                    retire(packet);fifo->retire();break;
+                }
+                if(diagnostic) {
+                    options.trace(7,packet->sequence,wait_enter,0);options.trace(6,packet->sequence,wait_leave,0);
+                    options.trace(16,packet->sequence,begun_at,runtime_budget.lead(physical));
+                    if(slots.valid())options.trace(20,packet->sequence,deadline,static_cast<std::int64_t>(slots.slot()));
+                    options.trace(24,packet->sequence,prediction_qpc(prediction).value_or(0),renewed);
+                }
                 // Wait for the next cycle may overlap this frame's handoff.
                 // Begin/End remain exclusively serialized on this consumer;
                 // the worker needs accepted owned input before entering Wait,

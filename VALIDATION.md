@@ -1,3 +1,10 @@
+## V593: native cycle freshness
+
+33focused checks pass. ExactV592 fails the new native-cycle assertion. Actual
+SteamVR paired15Hz content comparison:282/361versus361/361unique submissions
+shown, all361matched in each run. Full Valhalla/Luke acceptance pending;
+sporadic losses at higher rates remain. [Evidence](docs/V593_VALIDATION.json).
+
 ## V592 — physical clock and packet eligibility
 
 33focused checks pass. ExactV591 fails the new actual-GPU/mocked-XR phase

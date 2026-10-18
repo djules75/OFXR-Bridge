@@ -902,8 +902,9 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_instance_extension_properties(
     const char*, std::uint32_t capacity, std::uint32_t* count,
     XrExtensionProperties* properties) {
     constexpr const char* names[] = {XR_KHR_D3D12_ENABLE_EXTENSION_NAME,
-                                   XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME};
-    *count = 2;
+                                   XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME,
+                                   XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME};
+    *count = static_cast<std::uint32_t>(std::size(names));
     if (capacity == 0 || properties == nullptr) return XR_SUCCESS;
     if (capacity < *count) return XR_ERROR_SIZE_INSUFFICIENT;
     for (std::uint32_t index = 0; index < *count; ++index) {
@@ -963,9 +964,14 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_proc_addr(
 }
 
 XRAPI_ATTR XrResult XRAPI_CALL fake_create_api_layer_instance(
-    const XrInstanceCreateInfo*,
+    const XrInstanceCreateInfo* info,
     const XrApiLayerCreateInfo*,
     XrInstance* instance) {
+    unsigned clock_extensions{};
+    for(std::uint32_t n=0;n<info->enabledExtensionCount;++n)
+        clock_extensions+=std::strcmp(info->enabledExtensionNames[n],
+            XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME)==0;
+    if(clock_extensions!=1){std::cerr<<"advertised director clock must be enabled exactly once\n";return XR_ERROR_INITIALIZATION_FAILED;}
     *instance = g_instance;
     return XR_SUCCESS;
 }
@@ -1320,7 +1326,7 @@ int main(int argc, char** argv) {
         }
         const auto enumerate = reinterpret_cast<PFN_xrEnumerateInstanceExtensionProperties>(probe);
         std::uint32_t count = 0;
-        std::array<XrExtensionProperties, 2> extensions{};
+        std::array<XrExtensionProperties, 3> extensions{};
         for (auto& extension : extensions) extension.type = XR_TYPE_EXTENSION_PROPERTIES;
         if (XR_FAILED(enumerate(nullptr, 0, &count, nullptr)) || count != extensions.size() ||
             XR_FAILED(enumerate(nullptr, static_cast<std::uint32_t>(extensions.size()), &count, extensions.data())) ||

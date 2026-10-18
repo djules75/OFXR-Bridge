@@ -4901,13 +4901,15 @@ XrResult layer_create_api_layer_instance_impl(
 
     auto dispatch = std::make_shared<Dispatch>();
     dispatch->get_instance_proc_addr = next_get_instance_proc_addr;
-    // Diagnostic-only capability negotiation. Enable the advertised clock
-    // extension before creation; never guess the origin of XrTime or call an
-    // extension which wasn't enabled. Unsupported runtimes are logged as such.
+    // The SteamVR director needs clock conversion even with diagnostics off.
+    // Runtime identity is known only after instance creation, so negotiate this
+    // advertised capability here for any Windows runtime. Other runtimes do not
+    // acquire the SteamVR director or its renewal policy. Never guess XrTime's
+    // epoch or call an extension which was not enabled.
     XrInstanceCreateInfo diagnostic_create = *create_info;
     std::vector<const char*> diagnostic_extensions;
     bool bridge_enabled_clock = false;
-    if (xrfg::bridge_flight_logger().ram_enabled()) {
+    {
         bool requested = false;
         for (std::uint32_t index = 0; index < create_info->enabledExtensionCount; ++index)
             requested |= std::strcmp(create_info->enabledExtensionNames[index],

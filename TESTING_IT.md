@@ -1,3 +1,12 @@
+## V593: prova della consegna SteamVR, anche Luke Ross
+
+Corregge il ciclo nativo scaduto mantenendo lo stesso frame in FIFO.
+Prova controllata sul runtime reale:282/361frame mostrati con V592,361/361
+con V593. Valhalla e Luke Ross restano da verificare nel gioco; alle frequenze
+alte restano perdite sporadiche nelle sonde. Stessa scena Valhalla,0.3.0 2X,
+LowerVRAM/Neural spenti,F9 nel livello20secondi,poi chiudere. Nessun F8 o
+benchmark. La correzione opera anche con diagnostica spenta.
+
 ## V592 — verifica del director con osservatore esterno
 
 Scadenze agganciate al vsync fisico; il ritardo di preparazione si applica

@@ -1,3 +1,9 @@
+## V593: refresh stale SteamVR native cycles
+
+The common director retains source frames while renewing an expired native
+clock. Real-runtime paired15Hz test:282/361shown before,361/361after. Luke
+Ross is included; full game acceptance pending. [Details](docs/V593_NATIVE_CYCLE_REFRESH.md).
+
 ## V592: physical headset slots and packet buffering
 
 Use the actual headset-vsync phase, keep late packets in FIFO and apply retained
