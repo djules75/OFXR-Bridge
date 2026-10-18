@@ -1,3 +1,10 @@
+## V575: precisione della consegna
+
+Riavvia tray e gioco. Stesso punto/risoluzione Ghostwire,Neural spento,2X,F9:
+circa15secondi Disabled,15secondi0.2.1 e15Fidelity. Il timer si sveglia prima;
+l'ultima finestra e controllata dal consumer conQPC, senza anticipare i frame.
+Il test GPU passa da85.993 a89.981FPS; risultato nel gioco da verificare.
+
 ## V574: preparazione dentro il periodo di refresh
 
 Riavvia tray e gioco. Stesso punto e risoluzione Ghostwire, Neural spento,2X,F9:

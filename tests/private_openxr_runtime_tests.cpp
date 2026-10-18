@@ -247,5 +247,16 @@ void future_work_dependency(bool split) {
     check(f.pixels==std::vector<unsigned>{77},"independent delivery preserves the exact completed image");
     std::printf("Ready-head future dependency: split=%d independent=%d PASS\n",split,independent);
 }
+void cadence_precision(bool d12) {
+    Fixture f(d12);f.unblock();f.throttled=false;f.slow_image_wait_ms=4;
+    auto chain=f.make_chain();
+    for(unsigned n=1;n<=48;++n){f.write(chain,n*4);f.begin_virtual();xr_ok(f.submit(chain,float(n)),"precision cadence packet");}
+    f.wait_count(48);xr_ok(f.transport->drain(),"precision cadence drain");
+    const auto average=(f.handoffs.back()-f.handoffs.front())/(f.handoffs.size()-1);
+    for(unsigned n=1;n<f.handoffs.size();++n)check(f.handoffs[n]-f.handoffs[n-1]>=period,"precision must never send before a physical interval");
+    std::fprintf(stderr,"%s precision mean interval%.6fms (%.3ffps)\n",d12?"D3D12":"D3D11",average/1e6,1e9/average);
+    check(average<period+250'000,"timer overshoot must not impose a common sub-refresh FPS ceiling");
+    check(f.pixels.size()==48 && f.pixels.front()==4 && f.pixels.back()==192,"precision wait preserves FIFO images");
 }
-int main(int argc,char** argv){if(argc>1){preparation_overlap(true);preparation_overlap(false);return 0;}ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);return 0;}
+}
+int main(int argc,char** argv){if(argc>1){cadence_precision(true);cadence_precision(false);return 0;}ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);return 0;}

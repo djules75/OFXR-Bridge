@@ -120,13 +120,16 @@ struct PrivateOpenXrRuntime::Impl {
         }
         return fence->GetCompletedValue()==UINT64_MAX?DXGI_ERROR_DEVICE_REMOVED:S_OK;
     }
-    bool sleep_until(std::int64_t target) {
+    bool sleep_until(std::int64_t target,std::int64_t fine_window) {
         for(;;) {
             if(stopping)return false;
             auto left=target-clock_ns();if(left<=0)return true;
-            // Short cancellable timer waits, never spin and never hold a GPU,
-            // runtime-entry or producer lock while pacing the consumer.
-            left=std::min<std::int64_t>(left,5'000'000);
+            // Let the timer do the long wait, waking before the deadline.
+            // Its positive wakeup jitter must not be added to EVERY period.
+            // The final bounded window uses QPC/pause on this consumer only;
+            // no producer, GPU or runtime-entry lock is held here.
+            if(left<=fine_window){YieldProcessor();continue;}
+            left=std::min<std::int64_t>(left-fine_window,5'000'000);
             LARGE_INTEGER due{};due.QuadPart=-std::max<std::int64_t>(1,(left+99)/100);
             if(timer && SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE))WaitForSingleObject(timer,10);
             else {std::unique_lock lock(mutex);changed.wait_for(lock,std::chrono::nanoseconds(left));}
@@ -301,17 +304,22 @@ struct PrivateOpenXrRuntime::Impl {
                 schedule.ready(clock_ns());
                 // Only the residual time remains. A late completed copy moves
                 // the phase by its exact overrun; it never causes a catch-up burst.
-                if(sleep_until(schedule.deadline())) {
+                // A2us edge guard covers QPC quantization and the final native
+                // function-call boundary; it is not a borrowed display slot.
+                if(sleep_until(schedule.deadline()+2'000,std::min<std::int64_t>(1'250'000,physical/8))) {
                     trace(8,packet->sequence);
                     auto end=packet->info;
                     // Let the runtime select the display time. CPU cadence is
                     // not a reason to invent a different XR prediction.
                     end.displayTime=prediction.predictedDisplayTime;
                     if(!prediction.shouldRender){end.layerCount=0;end.layers=nullptr;}
+                    // Log before marking the actual handoff edge. Logger work
+                    // between that edge and the native call would corrupt the
+                    // minimum-spacing measurement at sub-microsecond precision.
+                    if(options.trace)options.trace(3,packet->sequence,end.displayTime,prediction.predictedDisplayTime);
                     const auto at_end=clock_ns();
                     if(!schedule.delivered(at_end)){result=XR_ERROR_RUNTIME_FAILURE;}
                     else {
-                        if(options.trace)options.trace(3,packet->sequence,end.displayTime,prediction.predictedDisplayTime);
                         result=options.real.end(options.real.session,&end);begun=false;
                         if(XR_SUCCEEDED(result))trace(2,packet->sequence,schedule.delay());
                     }

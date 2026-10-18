@@ -1,3 +1,10 @@
+## V575 local: precise final delivery wakeup
+
+The common SteamVR consumer wakes its timer early and checks the final bounded
+deadline window with QPC. This removes accumulated timer overshoot while keeping
+physical minimum spacing and raw OpenXR predictions. Headset result pending.
+See [precision evidence](docs/V575_PRECISE_DELIVERY_WAKEUP.md).
+
 ## V574 local: prepare during the refresh interval
 
 The common SteamVR consumer now prepares the next output before the deadline

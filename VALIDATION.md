@@ -1,3 +1,12 @@
+## V575 engineering validation
+
+35 focused checks pass in26.30seconds. The ready-queue precision fixture moves
+from85.993FPS on exactV574 to89.981FPSD3D12/D3D11 onV575, preserving strict
+physical minimum spacing, real GPU pixels, raw OpenXR time and queue isolation.
+DownstreamXR is mocked; headset recovery is pending. Initial call-edge spacing
+failures were fixed without relaxing assertions. See
+[V575_VALIDATION.json](docs/V575_VALIDATION.json).
+
 ## V574 engineering validation
 
 35 focused checks pass in25.33seconds. A precise4ms preparation fixture fails
