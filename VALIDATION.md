@@ -1,3 +1,11 @@
+## V584: independent SteamVR preparation
+
+Real-image acquisition/copy/GPU waits move to a separate preparer; the physical
+clock consumes completed packets. Same bounded3credits and strict refresh
+spacing, no extra XR swapchains, immutable overlays shared. VDXR/AFW/presets
+unchanged. Headset FPS result pending.
+See [details](docs/V584_INDEPENDENT_PREPARATION.md).
+
 ## V583: selected-preset benchmark, A initial preference
 
 Complete tests keep the startup preset instead of forcing C or requesting a

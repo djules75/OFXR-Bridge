@@ -38,6 +38,7 @@ struct Fixture {
     std::uint64_t serial{};
     HANDLE event{CreateEventW(nullptr,FALSE,FALSE,nullptr)};
     HANDLE preparation_timer{CreateWaitableTimerExW(nullptr,nullptr,0x2,TIMER_ALL_ACCESS)}; // high resolution
+    HANDLE frame_wait_timer{CreateWaitableTimerExW(nullptr,nullptr,0x2,TIMER_ALL_ACCESS)};
     ComPtr<ID3D11Device> device11;
     ComPtr<ID3D11DeviceContext> context;
     std::unordered_map<XrSwapchain,Chain> chains;
@@ -49,10 +50,13 @@ struct Fixture {
     bool cycle_waited{},cycle_begun{};
     bool throttled{true},real_common{};
     std::atomic_int slow_image_wait_ms{};
+    std::atomic_int slow_frame_wait_ms{};
+    std::atomic<DWORD> preparation_thread{},delivery_thread{};
     std::atomic_uint empty_ends{};
     unsigned expected_views{1};
     std::function<XrResult(XrSwapchain,unsigned)> release_callback;
     std::function<void()> after_head_ready;
+    std::function<void(std::uint64_t)> preparation_callback;
     std::function<D3D12_RESOURCE_STATES()> create_state;
     std::vector<unsigned> pixels;
     std::vector<float> positions;
@@ -77,11 +81,11 @@ struct Fixture {
         options.real={reinterpret_cast<XrInstance>(1),reinterpret_cast<XrSession>(2),wait,begin,end,create,destroy,enumerate,acquire,wait_image,release,to_qpc};
         options.device12=device12.Get();options.queue12=delivery_queue?delivery_queue.Get():queue.Get();options.producer_queue12=queue.Get();options.device11=device11.Get();options.context11=context.Get();
         options.physical_period=[]{return period;};options.capacity=3;
-        options.trace=[this](int stage,std::uint64_t,std::int64_t,std::int64_t){if(stage==4 && after_head_ready)after_head_ready();};
+        options.trace=[this](int stage,std::uint64_t seq,std::int64_t,std::int64_t){if(stage==4) {preparation_thread=GetCurrentThreadId();if(after_head_ready)after_head_ready();if(preparation_callback)preparation_callback(seq);}};
         transport=std::make_shared<xrfg::PrivateOpenXrRuntime>(std::move(options));
         ok(transport->initialize(),"initialize actual private endpoint");xr_ok(transport->start(),"start endpoint");
     }
-    ~Fixture(){block_end=false;changed.notify_all();if(gate)gate->Signal(1);transport->stop();transport.reset();CloseHandle(event);if(preparation_timer)CloseHandle(preparation_timer);current=nullptr;}
+    ~Fixture(){block_end=false;changed.notify_all();if(gate)gate->Signal(1);transport->stop();transport.reset();CloseHandle(event);if(preparation_timer)CloseHandle(preparation_timer);if(frame_wait_timer)CloseHandle(frame_wait_timer);current=nullptr;}
     void gpu_wait(ID3D12CommandQueue* target=nullptr){if(!target)target=queue.Get();ok(target->Signal(fence.Get(),++serial),"test signal");ok(fence->SetEventOnCompletion(serial,event),"test event");check(WaitForSingleObject(event,5000)==WAIT_OBJECT_0,"test GPU complete");}
     template<class Record> void commands(Record record,ID3D12CommandQueue* target=nullptr) {
         if(!target)target=queue.Get();
@@ -92,6 +96,7 @@ struct Fixture {
     }
     static XrResult XRAPI_CALL wait(XrSession,const XrFrameWaitInfo*,XrFrameState* output) {
         auto& f=*current;const auto n=++f.real_waits;
+        if(const auto delay=f.slow_frame_wait_ms.load()){LARGE_INTEGER due{};due.QuadPart=-delay*10'000LL;check(f.frame_wait_timer && SetWaitableTimer(f.frame_wait_timer,&due,0,nullptr,nullptr,FALSE),"precise runtime delay");check(WaitForSingleObject(f.frame_wait_timer,1000)==WAIT_OBJECT_0,"runtime delay completed");}
         check(!f.cycle_waited && !f.cycle_begun,"one real Wait per cycle");f.cycle_waited=true;
         // Vary the runtime horizon while retaining the monotonic prediction
         // required by OpenXR. XR time deliberately has another epoch than QPC.
@@ -100,10 +105,13 @@ struct Fixture {
     }
     static XrResult XRAPI_CALL begin(XrSession,const XrFrameBeginInfo*){auto& f=*current;check(f.cycle_waited && !f.cycle_begun,"real Begin follows real Wait");f.cycle_waited=false;f.cycle_begun=true;++f.real_begins;return XR_SUCCESS;}
     static XrResult XRAPI_CALL end(XrSession,const XrFrameEndInfo* info) {
+        // Timestamp native entry before fixture validation/bookkeeping, so its
+        // work cannot masquerade as an early subsequent runtime handoff.
+        const auto start=ns();
         auto& f=*current;
         check(f.cycle_begun && !f.cycle_waited,"real End follows real Begin");f.cycle_begun=false;
-        const auto start=ns();
         if(!info->layerCount){++f.empty_ends;return XR_SUCCESS;}
+        f.delivery_thread=GetCurrentThreadId();
         if(info->layerCount){std::unique_lock lock(f.mutex);f.end_entered=true;f.changed.notify_all();f.changed.wait(lock,[&]{return !f.block_end.load();});}
         check(info->displayTime==f.raw_prediction,"End must retain this cycle's exact runtime prediction");
         unsigned color{};float position{};
@@ -148,7 +156,7 @@ struct Fixture {
         auto& f=*current;auto& chain=f.chains.at(handle);*count=2;if(!capacity)return XR_SUCCESS;if(capacity<2)return XR_ERROR_SIZE_INSUFFICIENT;
         for(unsigned i=0;i<2;++i)if(f.native12)reinterpret_cast<XrSwapchainImageD3D12KHR*>(images)[i].texture=chain.d12[i].Get();else reinterpret_cast<XrSwapchainImageD3D11KHR*>(images)[i].texture=chain.d11[i].Get();return XR_SUCCESS;
     }
-    static XrResult XRAPI_CALL acquire(XrSwapchain h,const XrSwapchainImageAcquireInfo*,std::uint32_t* index){auto& f=*current;check(f.cycle_begun,"real image preparation belongs after Begin");auto& c=f.chains.at(h);check(!c.owned,"physical image ownership");c.acquired=(c.released+1)%2;c.owned=true;c.waited=false;*index=c.acquired;++f.real_acquires;return XR_SUCCESS;}
+    static XrResult XRAPI_CALL acquire(XrSwapchain h,const XrSwapchainImageAcquireInfo*,std::uint32_t* index){auto& f=*current;auto& c=f.chains.at(h);check(!c.owned,"physical image ownership");c.acquired=(c.released+1)%2;c.owned=true;c.waited=false;*index=c.acquired;++f.real_acquires;return XR_SUCCESS;}
     static XrResult XRAPI_CALL wait_image(XrSwapchain h,const XrSwapchainImageWaitInfo*){auto& f=*current;auto& c=f.chains.at(h);check(c.owned,"physical wait after acquire");if(const auto delay=f.slow_image_wait_ms.load()){LARGE_INTEGER due{};due.QuadPart=-delay*10'000LL;check(f.preparation_timer && SetWaitableTimer(f.preparation_timer,&due,0,nullptr,nullptr,FALSE),"precise preparation delay");check(WaitForSingleObject(f.preparation_timer,1000)==WAIT_OBJECT_0,"preparation delay completed");}c.waited=true;return XR_SUCCESS;}
     static XrResult XRAPI_CALL release(XrSwapchain h,const XrSwapchainImageReleaseInfo*){auto& c=current->chains.at(h);check(c.owned && c.waited,"physical release after wait");c.released=c.acquired;c.owned=false;return XR_SUCCESS;}
     static XrResult XRAPI_CALL to_qpc(XrInstance,XrTime t,LARGE_INTEGER* q){LARGE_INTEGER f{};QueryPerformanceFrequency(&f);const auto n=t-epoch;q->QuadPart=n/1'000'000'000LL*f.QuadPart+n%1'000'000'000LL*f.QuadPart/1'000'000'000LL;return XR_SUCCESS;}
@@ -172,10 +180,12 @@ struct Fixture {
         XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};xr_ok(release_callback?release_callback(handle,index):transport->release_image(handle,&release_info),"private release");
     }
     void begin_virtual(){XrFrameState state{XR_TYPE_FRAME_STATE};xr_ok(transport->wait_frame(nullptr,&state),"virtual wait");check(state.predictedDisplayPeriod==period,"physical period despite throttled runtime prediction");xr_ok(transport->begin_frame(nullptr),"virtual begin");}
-    XrResult submit(XrSwapchain handle,float identity) {
+    XrResult submit(XrSwapchain handle,float identity,XrSwapchain overlay=XR_NULL_HANDLE) {
         XrCompositionLayerProjectionView view{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};view.pose.orientation.w=1;view.pose.position.x=identity;view.subImage.swapchain=handle;view.subImage.imageRect.extent={1,1};
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=1;projection.views=&view;
-        auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};info.displayTime=epoch+ns();info.layerCount=1;info.layers=&layer;info.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};quad.space=reinterpret_cast<XrSpace>(9);quad.pose.orientation.w=1;quad.size={1,1};quad.subImage.swapchain=overlay;quad.subImage.imageRect.extent={1,1};
+        std::array<const XrCompositionLayerBaseHeader*,2> layers={reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
+        XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};info.displayTime=epoch+ns();info.layerCount=overlay?2:1;info.layers=layers.data();info.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         auto result=transport->end_frame(&info);view.pose.position.x=-999;view.subImage.swapchain=XR_NULL_HANDLE;return result;
     }
     void unblock(){block_end=false;changed.notify_all();}
@@ -191,7 +201,7 @@ void ownership(bool d12) {
     f.unblock();check(blocked.wait_for(3s)==std::future_status::ready,"slot retirement wakes producer");xr_ok(blocked.get(),"fourth accepted");f.wait_count(4);xr_ok(f.transport->drain(),"drain");
     const std::vector<unsigned> expected{40,80,120,120};check(f.pixels==expected,"FIFO pixels survive producer advance without overwrite");check(f.positions==std::vector<float>({1,2,3,4}),"projection metadata copied before producer stack mutation");
     for(unsigned i=1;i<4;++i){check(f.handoffs[i]-f.handoffs[i-1]>=period,"strict one physical refresh between real handoffs including long End");check(f.targets[i]>f.targets[i-1],"monotonic runtime target across variable horizon");}
-    check(f.real_acquires==4,"no real acquisition on producer");xr_ok(f.transport->destroy_swapchain(chain),"destroy drained image");
+    check(f.real_acquires>=3 && f.real_acquires<=4,"private immutable repeat may share the prepared real image; no producer acquisition");xr_ok(f.transport->destroy_swapchain(chain),"destroy drained image");
     std::printf("%s private End handoff, bounded FIFO/backpressure, immutable pixels/metadata, physical cadence and XR/QPC target PASS\n",d12?"D3D12":"D3D11");
 }
 void stop_wakeup() {
@@ -213,7 +223,7 @@ void pending_gpu() {
     Fixture f(true);f.unblock();auto chain=f.make_chain();f.write(chain,77);
     ok(f.queue->Wait(f.gate.Get(),1),"independently hold producer GPU");f.begin_virtual();
     xr_ok(f.submit(chain,1),"accept while producer GPU is pending");std::this_thread::sleep_for(20ms);
-    check(f.real_begins==f.empty_ends && f.real_acquires==0,"no content cycle before FIFO head GPU completion (startup empty clock cycle is allowed)");
+    check(f.real_ends==0 && f.real_acquires==0,"no image write/content delivery before source GPU completion; runtime clock may overlap preparation");
     ok(f.gate->Signal(1),"release GPU independently of XR");f.wait_count(1);xr_ok(f.transport->drain(),"GPU pending drain");check(f.pixels==std::vector<unsigned>{77},"pending frame retains actual source");
     f.transport->stop();check(!f.cycle_waited && !f.cycle_begun,"stop closes the real frame cycle");
     xr_ok(f.transport->start(),"restart same session endpoint");f.begin_virtual();xr_ok(f.submit(chain,2),"same endpoint works after restart");f.wait_count(2);xr_ok(f.transport->drain(),"restart drain");
@@ -258,5 +268,41 @@ void cadence_precision(bool d12) {
     check(average<period+250'000,"timer overshoot must not impose a common sub-refresh FPS ceiling");
     check(f.pixels.size()==48 && f.pixels.front()==4 && f.pixels.back()==192,"precision wait preserves FIFO images");
 }
+void preparation_independence(bool d12) {
+    Fixture f(d12);f.unblock();f.throttled=false;
+    f.slow_frame_wait_ms=5;f.slow_image_wait_ms=8;
+    auto chain=f.make_chain();
+    for(unsigned n=1;n<=24;++n){f.write(chain,n*8);f.begin_virtual();xr_ok(f.submit(chain,float(n)),"parallel preparation input");}
+    f.wait_count(24);xr_ok(f.transport->drain(),"parallel preparation drain");
+    const auto average=(f.handoffs.back()-f.handoffs.front())/(f.handoffs.size()-1);
+    std::fprintf(stderr,"%s independent preparation measured%.6fms\n",d12?"D3D12":"D3D11",average/1e6);
+    check(f.preparation_thread && f.delivery_thread && f.preparation_thread!=f.delivery_thread,"GPU preparation must not execute on the delivery thread");
+    for(unsigned n=1;n<f.handoffs.size();++n)check(f.handoffs[n]-f.handoffs[n-1]>=period,"independent preparer cannot cause a short output interval");
+    check(average<period+1'000'000,"5ms runtime wait and8ms preparation must overlap, not add to13ms per frame");
+    check(f.pixels.size()==24 && f.pixels.front()==8 && f.pixels.back()==192,"independent delivery retains every accepted image");
+    std::printf("%s independent5ms runtime+8ms preparation, interval%.3fms PASS\n",d12?"D3D12":"D3D11",average/1e6);
 }
-int main(int argc,char** argv){if(argc>1){cadence_precision(true);cadence_precision(false);return 0;}ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);return 0;}
+void stalled_preparer() {
+    Fixture f(true);f.unblock();auto a=f.make_chain(),b=f.make_chain(),c=f.make_chain();
+    std::promise<void> entered,release;auto seen=entered.get_future();auto gate=release.get_future();
+    f.preparation_callback=[&](std::uint64_t seq){if(seq==3){entered.set_value();gate.wait();}};
+    for(auto h:{a,b,c}){f.write(h,unsigned(h==a?40:h==b?80:120));f.begin_virtual();xr_ok(f.submit(h,1),"independent-chain input");}
+    check(seen.wait_for(3s)==std::future_status::ready,"third preparation held independently");
+    f.wait_count(2);check(f.real_ends==2,"ready outputs must be delivered while later preparation is blocked");
+    release.set_value();f.wait_count(3);xr_ok(f.transport->drain(),"stalled preparation drain");
+    check(f.pixels==std::vector<unsigned>({40,80,120}),"late third frame must not overwrite/drop the earlier pair");
+    std::puts("Delivery consumes ready pair while third preparation is blocked PASS");
+}
+void unchanged_overlay() {
+    Fixture f(true);auto a=f.make_chain(),b=f.make_chain(),overlay=f.make_chain();
+    f.write(overlay,33);f.write(a,40);f.begin_virtual();xr_ok(f.submit(a,1,overlay),"first overlay frame");f.wait_entered();
+    std::promise<void> ready;auto seen=ready.get_future();f.preparation_callback=[&](std::uint64_t seq){if(seq==2)ready.set_value();};
+    f.write(b,80);f.begin_virtual();xr_ok(f.submit(b,2,overlay),"second unchanged-overlay frame");
+    check(seen.wait_for(3s)==std::future_status::ready,"unchanged overlay must not serialize another frame's preparation");
+    check(f.real_acquires==3,"second frame reuses the same immutable overlay contents without an additional XR chain/copy");
+    f.unblock();f.wait_count(2);xr_ok(f.transport->drain(),"unchanged overlay drain");
+    check(f.pixels==std::vector<unsigned>({40,80}),"shared overlay must not replace either scene image");
+    std::puts("Immutable overlay sharing preserves lookahead without extra swapchains PASS");
+}
+}
+int main(int argc,char** argv){if(argc>1){cadence_precision(true);cadence_precision(false);return 0;}ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();return 0;}

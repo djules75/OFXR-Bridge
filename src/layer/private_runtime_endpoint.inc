@@ -77,6 +77,7 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
             stage<0?5719:5710+stage,sequence,at,hold);
     };
+    options.trace_enabled=[]{return xrfg::bridge_flight_logger().enabled();};
     auto transport=std::make_shared<xrfg::PrivateOpenXrRuntime>(std::move(options));
     auto result=transport->initialize();if(FAILED(result))return result;
     auto dispatch=std::make_shared<Dispatch>(*original);

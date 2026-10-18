@@ -52,7 +52,8 @@ public:
 
 // A slot is reserved BEFORE its producer records/writes the private image.
 // Accepted entries and reservations both occupy capacity. pop() transfers a
-// slot to the consumer; only retire() makes it writable by a producer again.
+// slot to the preparation/presentation pipeline; only retire() after delivery
+// makes it writable by a producer again.
 // Thus dequeue never authorizes overwrite of an image still being copied.
 template<class T> class PrivateOutputFifo {
     mutable std::mutex mutex_;

@@ -156,7 +156,10 @@ int main(int argc,char** argv) {
     auto generated=count>0 && f.real_ends>=(switching?10:12);
     std::printf("%s physical outputs=%u generation state=%u\n",route.c_str(),f.real_ends.load(),unsigned(state->generation_status.load()));
     check(generated,"actual generator must produce beyond eight real inputs");
-    for(unsigned i=1;i<f.handoffs.size();++i)check(f.handoffs[i]-f.handoffs[i-1]>=period,"all route outputs obey common physical cadence");
+    for(unsigned i=1;i<f.handoffs.size();++i) {
+        if(f.handoffs[i]-f.handoffs[i-1]<period)std::fprintf(stderr,"handoff interval%lldns required%lldns\n",f.handoffs[i]-f.handoffs[i-1],period);
+        check(f.handoffs[i]-f.handoffs[i-1]>=period,"all route outputs obey common physical cadence");
+    }
     f.transport->stop();
     for(auto& c:find_swapchains(state)){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
     xr_ok(layer_destroy_swapchain_impl(chain),"shipping destroy");

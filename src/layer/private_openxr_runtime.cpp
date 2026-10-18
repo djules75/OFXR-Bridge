@@ -58,6 +58,8 @@ struct PrivateOpenXrRuntime::Impl {
         std::optional<unsigned> released;
         unsigned cursor{};
         bool destroying{};
+        unsigned prepared_users{};
+        std::optional<unsigned> prepared_source;
         D3D12_RESOURCE_STATES image_state{D3D12_RESOURCE_STATE_RENDER_TARGET};
     };
     struct Lease {std::shared_ptr<Chain> chain;unsigned image{};};
@@ -66,14 +68,18 @@ struct PrivateOpenXrRuntime::Impl {
         std::vector<LayerCopy> copies;
         std::vector<const XrCompositionLayerBaseHeader*> layers;
         std::vector<Lease> leases;
+        std::vector<std::shared_ptr<Chain>> prepared_chains;
+        std::vector<Lease> copies_needed;
         std::uint64_t sequence{},ready{};
+        std::int64_t prepared_at{};
     };
     Options options;
     std::mutex mutex,accept_mutex,copy_mutex,stop_mutex;
     std::condition_variable changed;
     std::unordered_map<XrSwapchain,std::shared_ptr<Chain>> chains;
     std::unique_ptr<PrivateOutputFifo<std::shared_ptr<Packet>>> fifo;
-    std::thread consumer;
+    std::thread consumer,preparer;
+    std::deque<std::shared_ptr<Packet>> prepared;
     std::atomic_bool stopping{true};
     XrResult failure{XR_SUCCESS};
     XrFrameState anchor{XR_TYPE_FRAME_STATE};
@@ -103,8 +109,9 @@ struct PrivateOpenXrRuntime::Impl {
             std::clamp<std::int64_t>(fallback,2'000'000,50'000'000);
     }
     void trace(int stage,std::uint64_t seq,std::int64_t hold=0) {
-        if(options.trace)options.trace(stage,seq,clock_ns(),hold);
+        if(tracing())options.trace(stage,seq,clock_ns(),hold);
     }
+    bool tracing() const {return options.trace && (!options.trace_enabled || options.trace_enabled());}
     template<class Fence> HRESULT await(Fence* fence,std::uint64_t value,bool interruptible=true) {
         if(!value)return S_OK;
         auto completed=fence->GetCompletedValue();
@@ -144,6 +151,8 @@ struct PrivateOpenXrRuntime::Impl {
         {std::scoped_lock lock(mutex);
          for(auto& lease:packet->leases)if(lease.chain->images[lease.image].readers)
              --lease.chain->images[lease.image].readers;
+         for(auto& chain:packet->prepared_chains)if(chain->prepared_users && !--chain->prepared_users)
+             chain->prepared_source.reset();
          if(pending)--pending;}
         changed.notify_all();
     }
@@ -200,12 +209,29 @@ struct PrivateOpenXrRuntime::Impl {
         }
         packet.info.layers=packet.layers.data();return XR_SUCCESS;
     }
-    // Only the consumer ever touches REAL swapchain acquisition or frame calls.
+    // Only the preparer touches real image acquisition/copies. A real chain
+    // cannot be overwritten until every queued presentation using its current
+    // contents has completed EndFrame. Repeated immutable private images can
+    // share those contents (e.g. an unchanged overlay) without another copy.
+    bool reserve_preparation(Packet& packet) {
+        std::unique_lock lock(mutex);
+        for(auto& lease:packet.leases) {
+            auto chain=lease.chain;
+            changed.wait(lock,[&]{return stopping || !chain->prepared_users || chain->prepared_source==lease.image;});
+            if(stopping)return false;
+            if(!chain->prepared_users) {
+                chain->prepared_source=lease.image;
+                packet.copies_needed.push_back(lease);
+            }
+            ++chain->prepared_users;packet.prepared_chains.push_back(std::move(chain));
+        }
+        return true;
+    }
     XrResult publish(Packet& packet) {
         struct Target {Lease* lease;unsigned index;bool waited{},released{};};
-        std::vector<Target> targets;targets.reserve(packet.leases.size());
+        std::vector<Target> targets;targets.reserve(packet.copies_needed.size());
         XrResult result=XR_SUCCESS;
-        for(auto& lease:packet.leases) {
+        for(auto& lease:packet.copies_needed) {
             unsigned index{};XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
             result=options.real.acquire(lease.chain->handle,&acquire,&index);if(XR_FAILED(result))break;
             targets.push_back({&lease,index});
@@ -251,6 +277,25 @@ struct PrivateOpenXrRuntime::Impl {
         }
         return result;
     }
+    void prepare() noexcept {
+        try {
+            while(!stopping) {
+                auto entry=fifo->pop();if(!entry)break;auto packet=std::move(*entry);
+                const auto ready=d12()?await(ready12.Get(),packet->ready):await(ready11.Get(),packet->ready);
+                if(FAILED(ready) || !reserve_preparation(*packet)) {
+                    if(!stopping)fail(XR_ERROR_RUNTIME_FAILURE);
+                    retire(packet);fifo->retire();break;
+                }
+                trace(4,packet->sequence);
+                const auto result=publish(*packet);
+                if(XR_FAILED(result)) {fail(result);retire(packet);fifo->retire();break;}
+                trace(5,packet->sequence);
+                packet->prepared_at=clock_ns();
+                {std::scoped_lock lock(mutex);prepared.push_back(std::move(packet));}
+                changed.notify_all();
+            }
+        } catch(...) {fail(XR_ERROR_RUNTIME_FAILURE);}
+    }
     XrResult real_wait(XrFrameState& prediction) {
         XrFrameWaitInfo wait{XR_TYPE_FRAME_WAIT_INFO};
         auto result=options.real.wait(options.real.session,&wait,&prediction);
@@ -280,28 +325,30 @@ struct PrivateOpenXrRuntime::Impl {
             }
             if(XR_FAILED(result))fail(result);
             while(!stopping) {
-                auto entry=fifo->pop();if(!entry)break;auto packet=std::move(*entry);
-                HRESULT ready=d12()?await(ready12.Get(),packet->ready):await(ready11.Get(),packet->ready);
-                if(FAILED(ready)){retire(packet);fifo->retire();if(!stopping)fail(XR_ERROR_RUNTIME_FAILURE);break;}
-                trace(4,packet->sequence);
-                // Prepare the next output DURING the refresh interval. Waiting
-                // the whole period first would add Wait/Begin/copy cost to every
-                // interval and cap even an always-ready producer below refresh.
+                // Start the runtime clock as soon as owned input exists. Image
+                // acquisition/copy/GPU waits run on the independent preparer,
+                // concurrently with WaitFrame and the physical cadence clock.
+                {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping || pending;});if(stopping)break;}
                 const auto physical=period(prediction.predictedDisplayPeriod);
                 schedule.period(physical);
-                trace(7,packet->sequence);
+                const bool diagnostic=tracing();
+                const auto wait_enter=diagnostic?clock_ns():0;
                 result=real_wait(prediction);
+                const auto wait_leave=diagnostic?clock_ns():0;
                 if(XR_SUCCEEDED(result)) {
-                    waited=true;trace(6,packet->sequence);
+                    waited=true;
                     XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
                     result=options.real.begin(options.real.session,&begin);
                     if(XR_SUCCEEDED(result)){waited=false;begun=true;}
                 }
-                if(XR_FAILED(result)){retire(packet);fifo->retire();fail(result);break;}
-                result=publish(*packet);
-                if(XR_FAILED(result)){retire(packet);fifo->retire();fail(result);break;}
-                trace(5,packet->sequence);
-                schedule.ready(clock_ns());
+                if(XR_FAILED(result)){fail(result);break;}
+                std::shared_ptr<Packet> packet;
+                {std::unique_lock lock(mutex);changed.wait(lock,[&]{return stopping || !prepared.empty();});
+                 if(stopping)break;packet=std::move(prepared.front());prepared.pop_front();}
+                if(diagnostic) {options.trace(7,packet->sequence,wait_enter,0);options.trace(6,packet->sequence,wait_leave,0);}
+                // Only fully prepared packets reach this thread. Arrival time,
+                // not a rounded refresh slot, supplies the exact late hold.
+                schedule.ready(packet->prepared_at);
                 // Only the residual time remains. A late completed copy moves
                 // the phase by its exact overrun; it never causes a catch-up burst.
                 // Prepare the final call 100us ahead. The physical deadline
@@ -378,21 +425,23 @@ XrResult PrivateOpenXrRuntime::start() {
     auto& s=*impl_;std::scoped_lock lock(s.mutex);
     if(s.running)return XR_ERROR_SESSION_RUNNING;
     s.fifo=std::make_unique<PrivateOutputFifo<std::shared_ptr<Impl::Packet>>>(s.options.capacity);
+    s.prepared.clear();
     s.failure=XR_SUCCESS;s.stopping=false;s.seeded=false;s.running=true;s.waits=s.begun=0;s.virtual_time=0;
+    s.preparer=std::thread([&s]{s.prepare();});
     s.consumer=std::thread([&s]{s.run();});return XR_SUCCESS;
 }
 void PrivateOpenXrRuntime::stop() {
     auto& s=*impl_;
     std::scoped_lock serial_stop(s.stop_mutex);
     {std::scoped_lock lock(s.mutex);s.stopping=true;if(s.fifo)s.fifo->stop();}
-    s.changed.notify_all();if(s.consumer.joinable())s.consumer.join();
+    s.changed.notify_all();if(s.consumer.joinable())s.consumer.join();if(s.preparer.joinable())s.preparer.join();
     std::scoped_lock accept(s.accept_mutex);
     // An interrupted GPU wait never authorizes reuse/free. Drain submitted
     // reads before dropping the pending packet leases and command allocator.
     if(s.copy_serial) {if(s.d12())s.await(s.copy12.Get(),s.copy_serial,false);else s.await(s.copy11.Get(),s.copy_serial,false);}
     if(s.ready_serial) {if(s.d12())s.await(s.ready12.Get(),s.ready_serial,false);else s.await(s.ready11.Get(),s.ready_serial,false);}
-    {std::scoped_lock lock(s.mutex);s.fifo.reset();s.pending=0;s.running=false;
-     for(auto& [h,c]:s.chains)for(auto& image:c->images)image.readers=0;}
+    {std::scoped_lock lock(s.mutex);s.fifo.reset();s.prepared.clear();s.pending=0;s.running=false;
+     for(auto& [h,c]:s.chains) {c->prepared_users=0;c->prepared_source.reset();for(auto& image:c->images)image.readers=0;}}
     s.changed.notify_all();
 }
 XrResult PrivateOpenXrRuntime::drain() {
@@ -444,7 +493,7 @@ XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info) {
     s.ready_serial=packet->ready;
     {std::scoped_lock lock(s.mutex);++s.pending;reservation.counted=true;}
     if(!s.fifo->accept(packet))return XR_ERROR_SESSION_NOT_RUNNING;
-    reservation.accepted=true;{std::scoped_lock lock(s.mutex);s.begun=0;}
+    reservation.accepted=true;{std::scoped_lock lock(s.mutex);s.begun=0;}s.changed.notify_all();
     s.trace(1,packet->sequence);return XR_SUCCESS;
 }
 XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* info,XrSwapchain* output,D3D12_RESOURCE_STATES image_state,std::uint32_t image_count) {
