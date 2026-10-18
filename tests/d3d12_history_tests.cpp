@@ -4396,7 +4396,11 @@ void test_nvidia_serialized_eye_context_stress(
 // vectors, two thirds of the output (DI2 renders 2782 for a 4172 output).
 enum class HybridScene { occlusion, overlay, fade, occlusion_low_res };
 
-void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind) {
+// backend nvidia: real OFA on the NVIDIA GPU ("hybrid nvidia"), measured
+// only - the bounds below are FidelityFX's on WARP.
+void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
+    xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx) {
+    const bool measure_only = backend == xrfg::D3D12OpticalFlowBackend::nvidia;
     constexpr UINT width = 256, height = 128;
     constexpr int object_left = 72, object_width = 80, object_top = 32, object_bottom = 96;
     constexpr int background_motion = 6;
@@ -4480,7 +4484,7 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind) {
     options.hybrid = true;
     require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(),
                 history, current_pointers, synthetic_pointers, kFormat,
-                D3D12_RESOURCE_STATE_RENDER_TARGET, xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+                D3D12_RESOURCE_STATE_RENDER_TARGET, backend,
                 options)),
         "hybrid synthesizer initialization failed");
     const auto guides = [&](std::uint64_t serial) {
@@ -4574,13 +4578,14 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind) {
         }
         // The overlay's blend is exact (nothing moved), so it is held to an
         // absolute bound; the moving scenes must beat the blend.
-        require(overlay ? edge_error <= 12.0 : edge_error < blend_error,
+        require(measure_only || (overlay ? edge_error <= 12.0 : edge_error < blend_error),
             std::string("hybrid ") + name + " did not beat the same-pixel blend for eye " +
                 std::to_string(eye) + ": " + std::to_string(edge_error) + " vs " +
                 std::to_string(blend_error));
         // V500: the vectors keep the edges they explain as an occlusion
         // (2.4 before, when the flow took them; 0.7 after).
-        require(kind != HybridScene::occlusion || edge_error <= 1.2,
+        // V503: render-resolution vectors held to the same bound.
+        require(measure_only || !occluding || edge_error <= 1.2,
             std::string("hybrid occlusion edges went back to the flow for eye ") +
                 std::to_string(eye) + ": " + std::to_string(edge_error));
     }
@@ -4793,6 +4798,15 @@ int main(int argc, char** argv) {
     try {
         if (GetEnvironmentVariableA("XRFG_TEST_NVIDIA_QUALITY", nullptr, 0)) {
             run_nvidia_fast_controls();
+            return 0;
+        }
+        if (argc > 2 && std::string_view(argv[1]) == "hybrid" &&
+            std::string_view(argv[2]) == "nvidia") {
+            D3D12WarpFixture nvidia_fixture(true);
+            for (const auto scene : {HybridScene::occlusion, HybridScene::overlay, HybridScene::fade,
+                                     HybridScene::occlusion_low_res}) {
+                test_hybrid_composition(nvidia_fixture, scene, xrfg::D3D12OpticalFlowBackend::nvidia);
+            }
             return 0;
         }
         if (argc > 1 && std::string_view(argv[1]) == "hybrid") {

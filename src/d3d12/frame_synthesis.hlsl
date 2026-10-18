@@ -97,6 +97,12 @@ bool live_tuning_present() {
 // a little, and lerped toward the pose-only blend's own disagreement where it
 // fell back to that: what the hybrid chooses by. 1 where it had no samples.
 static float last_disagreement = 1.0;
+#ifdef XRFG_HYBRID_TINT
+// Diagnostic tint: what the vectors branch did with the last pixel. 0 plain
+// vectors, 1 covered background (A alone), 2 revealed background (B alone),
+// 3 other edge handling (unverified edge, second surface, camera alone).
+static uint last_vectors_case = 0u;
+#endif
 
 float hybrid_agree_threshold() {
     uint value = (SynthesisFlags >> 2u) & 0x3fu;
@@ -687,6 +693,22 @@ float2 game_motion_for_pixel(float2 pixel, uint slice, uint view_index) {
         GameMotionVectors.Load(int4(bottom_right, 0, 0)),
         fraction.x);
     float2 raw = lerp(top, bottom, fraction.y);
+    // DLSS vectors are at render resolution (DI2: 2782 for a 4172 output).
+    // Across a motion edge the blend of a building's vector and the
+    // background's is a motion neither surface has, and the solve misplaces
+    // the strip the edge covers or reveals with it. Where the four texels
+    // differ by more than a pixel, the nearest one is taken (V503): render-
+    // resolution vectors then measure as full-resolution ones do.
+    float2 t00 = GameMotionVectors.Load(int4(top_left, 0, 0));
+    float2 t10 = GameMotionVectors.Load(int4(bottom_right.x, top_left.y, 0, 0));
+    float2 t01 = GameMotionVectors.Load(int4(top_left.x, bottom_right.y, 0, 0));
+    float2 t11 = GameMotionVectors.Load(int4(bottom_right, 0, 0));
+    float2 lowest = min(min(t00, t10), min(t01, t11));
+    float2 highest = max(max(t00, t10), max(t01, t11));
+    if (length((highest - lowest) * GameMotionScale) > 1.0) {
+        raw = fraction.y < 0.5 ? (fraction.x < 0.5 ? t00 : t10)
+                               : (fraction.x < 0.5 ? t01 : t11);
+    }
     float2 result = raw * GameMotionScale + GameMotionJitterDelta;
     float magnitude = length(result);
     return magnitude > 512.0 ? result * (512.0 / magnitude) : result;
@@ -1202,6 +1224,9 @@ float4 synthesize_midpoint(
     float4 output_color = float4(0.0, 0.0, 0.0, 1.0);
 #ifdef XRFG_HYBRID
     last_disagreement = 1.0;
+#ifdef XRFG_HYBRID_TINT
+    last_vectors_case = 0u;
+#endif
 #endif
     uint2 integer_pixel = uint2(input.position.xy);
     bool in_bounds = integer_pixel.x < Width && integer_pixel.y < Height &&
@@ -1538,6 +1563,9 @@ float4 synthesize_midpoint(
                         // whose shading changed - a fade, a flash - and their
                         // motion-compensated blend is the frame between.
                         output_color = saturate(camera_explains ? stable_midpoint : flow_midpoint);
+#ifdef XRFG_HYBRID_TINT
+                        last_vectors_case = camera_explains ? 3u : 0u;
+#endif
 #ifdef XRFG_HYBRID
                         // The error of the answer given (V500): never above
                         // the warped samples', lower where an occlusion the
@@ -1556,6 +1584,9 @@ float4 synthesize_midpoint(
                                 pixel + synthesis_fraction() * last_displacement, Slice, ViewIndex);
                             if (covered.valid >= 0.5) {
                                 output_color = saturate(covered.color);
+#ifdef XRFG_HYBRID_TINT
+                                last_vectors_case = 1u;
+#endif
 #ifdef XRFG_HYBRID
                                 // B shows the occluder at the pixel; if the
                                 // vectors track it, A's sample stands.
@@ -1603,6 +1634,9 @@ float4 synthesize_midpoint(
 #ifdef XRFG_HYBRID
                                 // A's sample is that surface: B's alone is the
                                 // background, and the vectors explain the pair.
+#ifdef XRFG_HYBRID_TINT
+                                last_vectors_case = revealed < 0.05 ? 2u : 3u;
+#endif
                                 if (revealed < 0.05) {
                                     output_color = saturate(current_sample.color);
                                     explained = min(explained, revealed);
@@ -1635,6 +1669,9 @@ float4 synthesize_midpoint(
                                             output_color = saturate(lerp(a, b, synthesis_fraction()));
 #ifdef XRFG_HYBRID
                                             explained = rgb_error(a, b);
+#ifdef XRFG_HYBRID_TINT
+                                            last_vectors_case = 3u;
+#endif
 #endif
                                             done = true;
                                         }
@@ -1682,14 +1719,40 @@ float4 synthesize_hybrid(
     bool input_pose_compensated) {
     float4 vectors = synthesize_midpoint(input, 1.0, false, false, false, true, false);
     float vectors_disagreement = last_disagreement;
+#ifdef XRFG_HYBRID_TINT
+    const uint vectors_case = last_vectors_case;
+    float vectors_weight = 1.0;
+#endif
     float4 result = vectors;
     [branch] if (vectors_disagreement >= hybrid_agree_threshold()) {
         float4 flow = synthesize_midpoint(
             input, flow_value_scale, use_nvidia_cost, use_nvidia_bidirectional,
             validate_fast, false, input_pose_compensated);
-        result = lerp(flow, vectors, saturate(
-            1.0 + (last_disagreement - vectors_disagreement) * hybrid_choice_slope()));
+        float weight = saturate(
+            1.0 + (last_disagreement - vectors_disagreement) * hybrid_choice_slope());
+        result = lerp(flow, vectors, weight);
+#ifdef XRFG_HYBRID_TINT
+        vectors_weight = weight;
+#endif
     }
+#ifdef XRFG_HYBRID_TINT
+    // Generated frames only: red the flow, yellow a mix, then by the
+    // vectors' case - blue covered, cyan revealed, orange other edge work.
+    float3 tint = float3(0.0, 0.0, 0.0);
+    float amount = 0.0;
+    if (vectors_weight < 0.05) {
+        tint = float3(1.0, 0.0, 0.0); amount = 0.45;
+    } else if (vectors_weight < 0.95) {
+        tint = float3(1.0, 1.0, 0.0); amount = 0.45;
+    } else if (vectors_case == 1u) {
+        tint = float3(0.0, 0.25, 1.0); amount = 0.45;
+    } else if (vectors_case == 2u) {
+        tint = float3(0.0, 1.0, 1.0); amount = 0.45;
+    } else if (vectors_case == 3u) {
+        tint = float3(1.0, 0.5, 0.0); amount = 0.45;
+    }
+    result.rgb = lerp(result.rgb, tint, amount);
+#endif
     return result;
 }
 
