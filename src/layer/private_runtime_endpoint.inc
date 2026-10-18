@@ -73,6 +73,16 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
         if(auto s=weak.lock())if(s->steamvr_delivery)if(auto p=s->steamvr_delivery->cached_display_period())return p->count();
         return 0;
     };
+    options.physical_clock=[weak]() -> std::optional<xrfg::PrivatePhysicalClock> {
+        if(auto s=weak.lock())if(s->steamvr_delivery) {
+            const auto anchor=s->steamvr_delivery->cached_vsync_anchor();
+            const auto period=s->steamvr_delivery->cached_display_period();
+            if(anchor && period)return xrfg::PrivatePhysicalClock{
+                std::chrono::duration_cast<std::chrono::nanoseconds>(anchor->at.time_since_epoch()).count(),
+                period->count(),anchor->frame_counter};
+        }
+        return {};
+    };
     options.trace=[](int stage,std::uint64_t sequence,std::int64_t at,std::int64_t hold) {
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
             stage<0?5719:5710+stage,sequence,at,hold);

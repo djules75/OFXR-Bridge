@@ -1,3 +1,11 @@
+## V592 — verifica del director con osservatore esterno
+
+Scadenze agganciate al vsync fisico; il ritardo di preparazione si applica
+ai pacchetti, entro i tre slot esistenti. Stessa scena Valhalla,0.3.0 2X,
+LowerVRAM e Neural spenti. F9 solo nel livello per20secondi, poi spegnerlo
+e chiudere il gioco. Nessun benchmark/F8. Il conteggio esterno dei frame
+presentati resta la verifica necessaria;33test tecnici passati.
+
 ## V591 — confronto Valhalla
 
 Corretto il margine di1,1ms aggiunto dopo le copie tardive anche con OpenXR

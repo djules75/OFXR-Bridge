@@ -31,6 +31,34 @@ int main(){try {
     require(!margin.eligible(31*ms) && margin.delivered(32*ms),"native margin changed the minimum physical period");
     require(margin.runtime_ready(40*ms,2*ms)==0 && margin.deadline()==43*ms,"retained native margin unnecessarily grew on early input");
     require(margin.delivered(43*ms) && margin.delay()==1*ms,"native margin was lost on the following cycle");
+    xrfg::PrivatePhysicalSchedule grid;
+    require(grid.clock({20*ms,11*ms,100}),"physical anchor rejected");
+    require(grid.observe_work(3*ms,3)==3*ms && grid.delay()==3*ms,"private latency is not applied as packet eligibility");
+    require(grid.claim(24*ms,27*ms,25*ms,27*ms,1*ms)==31*ms && grid.slot()==101,"first physical slot not anchored to headset");
+    require(grid.delivered(31*ms+20'000),"physical first output");
+    require(grid.claim(27*ms,30*ms,39*ms,40*ms,1*ms)==42*ms && grid.slot()==102,"late CPU entry permanently moved the physical phase");
+    require(grid.delivered(42*ms),"next absolute slot did not recover the same clock phase");
+    require(grid.observe_work(8*ms,3)==5*ms && grid.delay()==8*ms,"late GPU work did not add only its exact missing buffered time");
+    require(grid.claim(47*ms,55*ms,50*ms,55*ms,1*ms)==64*ms && grid.slot()==104,"late prepared packet moved phase instead of skipping an expired display slot");
+    require(grid.delivered(64*ms),"late GPU packet was discarded");
+    require(grid.observe_work(2*ms,3)==0 && grid.delay()==8*ms,"buffered GPU time was lost or charged again");
+    require(grid.claim(57*ms,60*ms,65*ms,65*ms,1*ms)==75*ms && grid.slot()==105,"retained buffer did not apply to next packet on the same grid");
+    require(grid.delivered(75*ms),"buffered following output");
+    require(grid.observe_work(10'000*ms,3)==14*ms && grid.delay()==22*ms,"pause created unbounded replay latency");
+    for(const auto p:{8'333'333LL,11'111'111LL,13'333'333LL}) {
+        xrfg::PrivatePhysicalSchedule c;const std::int64_t base=1'000'000'000;
+        require(c.clock({base,p,1000}),"variable physical clock");
+        std::int64_t last{};std::uint64_t slot{};
+        for(int n=0;n<1000;++n) {
+            // Irregular75fps input, bounded late-copy service, no assumed90fps.
+            const auto source=base+std::int64_t(n)*13'333'333;
+            const auto work=(n%17==0?7:2)*ms;
+            c.observe_work(work,3);const auto at=c.claim(source,source+work,source,source+work,100'000);
+            require((at-base)%p==0 && c.slot()>slot && at>=source+c.delay(),"output left physical grid, reused a slot or bypassed held packet latency");
+            if(n)require(at-last>=p,"fixed slots ran faster than headset");
+            require(c.delivered(at),"finite irregular input was lost");last=at;slot=c.slot();
+        }
+    }
     xrfg::PrivateOutputSchedule clock;
     clock.period(11*ms);clock.ready(20*ms);
     require(clock.eligible(20*ms) && clock.delivered(20*ms),"first output");

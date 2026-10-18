@@ -168,6 +168,8 @@ struct SteamVrDelivery::Impl {
     // The physical director must not take mutex: optional compositor polling
     // holds it across OpenVR calls, which can stall inside the runtime.
     std::atomic<std::int64_t> display_period_snapshot{};
+    std::atomic<std::uint64_t> vsync_version{},vsync_counter{};
+    std::atomic<std::int64_t> vsync_at_ns{};
     AttachRoute route{AttachRoute::none};
     bool owns_context{};
     ScenePresentationRate scene_receipts;
@@ -461,12 +463,13 @@ std::optional<float> SteamVrDelivery::delivered_fps(std::int64_t now) noexcept {
 }
 
 std::optional<SteamVrDelivery::VsyncAnchor>
-SteamVrDelivery::vsync_anchor() noexcept {
+SteamVrDelivery::vsync_anchor(bool nonblocking) noexcept {
     try {
         if (!impl_) {
             return std::nullopt;
         }
-        std::scoped_lock lock(impl_->mutex);
+        std::unique_lock lock(impl_->mutex,std::defer_lock);
+        if(nonblocking){if(!lock.try_lock())return std::nullopt;}else lock.lock();
         if (!impl_->established) {
             return std::nullopt;
         }
@@ -496,10 +499,28 @@ SteamVrDelivery::vsync_anchor() noexcept {
         anchor.frame_counter = counter;
         anchor.cost = std::chrono::duration_cast<std::chrono::microseconds>(
             now - entered);
+        impl_->vsync_version.fetch_add(1,std::memory_order_acq_rel);
+        impl_->vsync_counter.store(counter,std::memory_order_relaxed);
+        impl_->vsync_at_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(anchor.at.time_since_epoch()).count(),std::memory_order_relaxed);
+        impl_->vsync_version.fetch_add(1,std::memory_order_release);
         return anchor;
     } catch (...) {
         return std::nullopt;
     }
+}
+
+std::optional<SteamVrDelivery::VsyncAnchor> SteamVrDelivery::cached_vsync_anchor() const noexcept {
+    if(!impl_)return {};
+    for(unsigned attempt=0;attempt<3;++attempt) {
+        const auto before=impl_->vsync_version.load(std::memory_order_acquire);
+        if(before&1)continue;
+        const auto at=impl_->vsync_at_ns.load(std::memory_order_relaxed);
+        const auto counter=impl_->vsync_counter.load(std::memory_order_relaxed);
+        if(before!=impl_->vsync_version.load(std::memory_order_acquire))continue;
+        if(at<=0 || !counter)return {};
+        VsyncAnchor result;result.at=std::chrono::steady_clock::time_point(std::chrono::nanoseconds(at));result.frame_counter=counter;return result;
+    }
+    return {};
 }
 
 std::optional<std::chrono::nanoseconds>

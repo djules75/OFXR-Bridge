@@ -725,6 +725,7 @@ struct SessionState {
     std::unordered_map<XrSwapchain, std::array<std::optional<std::array<std::uint64_t, 3>>, 4>> logged_view_rects;
     std::unique_ptr<xrfg::SteamVrDelivery> steamvr_delivery;
     std::chrono::steady_clock::time_point compositor_diagnostic_next_poll{};
+    std::atomic<std::int64_t> private_clock_next_poll_ns{};
     std::uint64_t benchmark_command_revision{};
     std::uint32_t application_frames_submitted{};
     // The D3D11 bridge. The application bound D3D11; the runtime was handed
@@ -1714,8 +1715,15 @@ void log_compositor_delivery(SessionState& state) noexcept {
     // path, including F9/UI-off operation. A busy observer lock returns its
     // cache; the independent physical director never calls OpenVR or waits
     // for that lock merely to read a known headset frequency.
-    if(state.private_runtime && state.steamvr_delivery)
-        static_cast<void>(state.steamvr_delivery->display_period());
+    if(state.private_runtime && state.steamvr_delivery) {
+        const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        auto next=state.private_clock_next_poll_ns.load(std::memory_order_relaxed);
+        if(now>=next && state.private_clock_next_poll_ns.compare_exchange_strong(next,now+250'000'000)) {
+            static_cast<void>(state.steamvr_delivery->display_period());
+            static_cast<void>(state.steamvr_delivery->vsync_anchor(true));
+        }
+    }
     if (state.fps_overlay) {
         std::scoped_lock lock(state.presenter_mutex);
         state.fps_overlay->set_display_period(state.presenter_active ? state.presenter_display_period : state.minimum_runtime_display_period);

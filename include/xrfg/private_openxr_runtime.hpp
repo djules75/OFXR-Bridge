@@ -8,6 +8,7 @@
 #include <d3d12.h>
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+#include "xrfg/private_output_distributor.hpp"
 
 namespace xrfg {
 // Downstream functions are the REAL runtime, never the layer intercepts.
@@ -47,6 +48,9 @@ public:
         ID3D11DeviceContext* context11{};
         std::size_t capacity{3};
         std::function<std::int64_t()> physical_period;
+        // Cached physical vsync only. Must not call a runtime, lock an observer
+        // or wait from the consumer. Empty until the session clock is known.
+        std::function<std::optional<PrivatePhysicalClock>()> physical_clock;
         std::function<bool()> trace_enabled;
         // stage: 1 accepted, 2 accepted by real runtime, -1 failed; sequence,
         // QPC ns and accumulated phase displacement (not a latency meter).

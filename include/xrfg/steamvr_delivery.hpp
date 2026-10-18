@@ -103,7 +103,8 @@ public:
         // this is the number that says whether it belongs there.
         std::chrono::microseconds cost{};
     };
-    [[nodiscard]] std::optional<VsyncAnchor> vsync_anchor() noexcept;
+    [[nodiscard]] std::optional<VsyncAnchor> vsync_anchor(bool nonblocking=false) noexcept;
+    [[nodiscard]] std::optional<VsyncAnchor> cached_vsync_anchor() const noexcept;
 
     // Whether the compositor's most recent frame went out on the vsync it was
     // predicted for. mispresented > 0 means it landed on another vsync;

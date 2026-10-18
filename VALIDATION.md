@@ -1,3 +1,10 @@
+## V592 — physical clock and packet eligibility
+
+33focused checks pass. ExactV591 fails the new actual-GPU/mocked-XR phase
+contract. D11/D12 preserve exact FIFO pixels; late physical-clock activation
+is covered. V591 external audit confirms28/200worst-window losses. V592
+headset comparison pending. [Evidence](docs/V592_VALIDATION.json).
+
 ## V591 — native margin scope
 
 33focused checks pass, including new D3D11/D3D12 late-preparation and late-native

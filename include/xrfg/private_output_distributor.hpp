@@ -106,6 +106,64 @@ public:
     }
 };
 
+struct PrivatePhysicalClock {
+    std::int64_t at{},period{};
+    std::uint64_t counter{};
+};
+
+// Absolute display slots, rather than a new period measured from every actual
+// End. Buffer eligibility belongs to each accepted packet. A late copy cannot
+// move the headset clock or discard the FIFO head.
+class PrivatePhysicalSchedule {
+    PrivatePhysicalClock clock_{};
+    std::int64_t latency_{},due_{},last_at_{};
+    std::uint64_t slot_{},last_slot_{};
+    bool valid_{},delivered_{};
+public:
+    bool clock(PrivatePhysicalClock value) noexcept {
+        if(value.at<=0 || !value.counter || value.period<2'000'000 || value.period>50'000'000)return false;
+        if(valid_ && value.counter<clock_.counter)return true; // retain the newer observation
+        clock_=value;valid_=true;return true;
+    }
+    [[nodiscard]] bool valid() const noexcept {return valid_;}
+    [[nodiscard]] std::int64_t delay() const noexcept {return latency_;}
+    [[nodiscard]] std::int64_t deadline() const noexcept {return due_;}
+    [[nodiscard]] std::uint64_t slot() const noexcept {return slot_;}
+    void adopt_handoff(std::int64_t at) noexcept {if(!delivered_)last_at_=std::max(last_at_,at);}
+    // Only unfinished-source work and actual private-copy service enter here.
+    // FIFO/real-image lease waits are not GPU service and cannot inflate hold.
+    std::int64_t observe_work(std::int64_t work,std::size_t capacity) noexcept {
+        if(!valid_)return 0;
+        const auto limit=clock_.period*static_cast<std::int64_t>(capacity?capacity-1:0);
+        const auto next=std::max(latency_,std::clamp(work,std::int64_t{},limit));
+        const auto added=next-latency_;latency_=next;return added;
+    }
+    std::int64_t claim(std::int64_t accepted,std::int64_t available,std::int64_t native_ready,
+                       std::int64_t now,std::int64_t native_margin) noexcept {
+        if(!valid_)return 0;
+        auto earliest=std::max({accepted+latency_,available,native_ready+native_margin,
+            now+PrivateOutputSchedule::preparation_lead});
+        if(!delivered_ && last_at_)earliest=std::max(earliest,last_at_+clock_.period);
+        auto steps=std::max(std::int64_t{},earliest-clock_.at);
+        steps=(steps+clock_.period-1)/clock_.period;
+        slot_=clock_.counter+static_cast<std::uint64_t>(steps);
+        if(delivered_ && slot_<=last_slot_)slot_=last_slot_+1;
+        due_=clock_.at+static_cast<std::int64_t>(slot_-clock_.counter)*clock_.period;
+        if(delivered_) {
+            // Bounded correction of late CPU entry on the next absolute slot.
+            // The grid itself always advances by exactly P. At90Hz this floor
+            // remains >11ms; no interval-minus-margin oscillator or catch-up.
+            const auto correction=std::min<std::int64_t>(100'000,clock_.period/100);
+            due_=std::max(due_,last_at_+clock_.period-correction);
+        }
+        return due_;
+    }
+    bool delivered(std::int64_t at) noexcept {
+        if(!valid_ || at<due_ || (delivered_ && slot_<=last_slot_))return false;
+        last_at_=at;last_slot_=slot_;delivered_=true;return true;
+    }
+};
+
 // A slot is reserved BEFORE its producer records/writes the private image.
 // Accepted entries and reservations both occupy capacity. pop() transfers a
 // slot to the preparation/presentation pipeline; only retire() after delivery

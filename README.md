@@ -1,3 +1,10 @@
+## V592: physical headset slots and packet buffering
+
+Use the actual headset-vsync phase, keep late packets in FIFO and apply retained
+preparation time to each packet.33focused checks pass; headset improvement
+requires the same independent SteamVR receipt comparison used to auditV591.
+See [details](docs/V592_PHYSICAL_CLOCK_BUFFER.md).
+
 ## V591: native headroom without a repeated post-copy pause
 
 Correct a V590 Valhalla regression: native headroom starts at Begin completion,
