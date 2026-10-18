@@ -1,11 +1,11 @@
-## V595: clock indipendente dalla diagnostica
+## V595: diagnostica senza ricampionare il clock
 
-La diagnostica legge la cache vsync del director e non aggiunge un secondo
-campionamento. Clock e rinnovi restano attivi con F9 spento. Nuovi controlli
-D11/D12 verificano la consegna esatta con diagnostica disabilitata. Restano
-drop reali anche con F9 spento: questa correzione non li dichiara risolti.
-Priorità alla modalità normale 2X; Lower VRAM e 3X rimandati. Non serve
-un altro benchmark completo per questa sola modifica.
+F9 legge la cache vsync del director senza aggiornarla con una chiamata
+aggiuntiva. Clock e rinnovi rimangono attivi con logging spento.33 controlli
+passati, inclusi D11/D12 con diagnostica disabilitata. Il costo ordinario del
+logging rimane; i drop osservati con F9 spento non sono dichiarati risolti.
+Per la prossima prova usa la modalità normale 2X con Lower VRAM spento.
+Lower VRAM e3X rimandati come richiesto. Nessun F8 o benchmark completo necessario.
 
 ## V594: consegna SteamVR, rinnovo preventivo limitato
 

@@ -1,10 +1,10 @@
 ## V595: diagnostic clock independence
 
-32 of 33 focused checks pass; fallback cadence precision remains unresolved.
-Targeted clock checks pass, including new D11/D12 native renewal and exact FIFO
-delivery with diagnostic callbacks disabled. Private-runtime policy is unchanged
-from V594. Caller diagnostics now read the phase cache. Owner game validation
-pending; residual losses with F9 off remain. [Evidence](docs/V595_VALIDATION.json).
+33 focused checks pass, including D11/D12 native renewal and exact FIFO pixels
+with optional diagnostic tracing off. Two earlier fallback cadence failures are
+preserved; exact-V594 baseline, isolated current cadence and the subsequent full
+current suite pass without a timing/threshold change. Private-runtime policy is
+unchanged from V594. Owner game validation pending. [Evidence](docs/V595_VALIDATION.json).
 
 ## V594: bounded preventive native renewal
 

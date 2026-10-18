@@ -16,7 +16,7 @@ diagnostic record's query-cost is zero: reading the cache issues no clock call.
 The V594 private runtime implementation is unchanged. Clock conversion, source
 and copy completion times, native-service budgeting, slot selection and both
 native renewal policies remain active with F9 off. New D11/D12 GPU fixtures
-disable diagnostic callbacks and still require native renewal, all six exact
+disable optional diagnostic tracing and still require native renewal, all six exact
 FIFO images, current native cycles and balanced Begin/End ownership.
 
 ## Remaining normal-2X delivery issue
@@ -37,14 +37,20 @@ unshown frames have no such overlap at their handoff. No new copy queue, GPU
 wait or producer delay is introduced. Residual drops also exist with logging
 off, so this cache-observer correction is not presented as their solution.
 
-32 of 33 focused checks pass. The existing D12 fallback cadence-precision check
-fails twice, at 12.421953ms and 11.501114ms against its unchanged 250us tolerance.
-The specific clock-mode run passes all 8 cases, including D11/D12 logging-off
-delivery. The complete private-runtime harness has not passed, so V595 is not
-packaged, tagged or presented as ready. No thresholds are relaxed and no further
-full-suite retry is made without a new reason. Gameplay acceptance remains pending. Keep the normal
-2X route with Lower VRAM off as the owner's current priority; Lower VRAM and
-3X failures are explicitly deferred. No AFW/vector/interpolation, meter-formula,
+33 focused checks pass. Two earlier full runs failed the existing D12 fallback
+cadence-precision assertion, at 12.421953ms and 11.501114ms against its unchanged
+P+250us tolerance. The sequential same-host control then passes the complete
+exact-V594 harness (D12 precision 11.121604ms, D11 11.115551ms), and the current
+isolated cadence check passes (D12 11.122340ms,D11 11.113617ms). The full current
+suite subsequently passes 33/33. Both failed outputs are retained; no runtime
+pacing change or test-threshold relaxation was made. The cause of the earlier
+timing variation is not established. Targeted clock checks also pass all 8 cases,
+including D11/D12 logging-off delivery. This is not owner game acceptance.
+
+Keep normal 2X with Lower VRAM off as the current priority; Lower VRAM and 3X
+failures are explicitly deferred. No AFW/vector/interpolation, meter-formula,
 VDXR pacing, private image/credit or XR swapchain budget change is involved.
-No new INI setting or always-on diagnostic is added. Keep candidates local
-until owner acceptance. No additional full benchmark is requested by this fix.
+No new INI setting or always-on diagnostic is added. Keep the candidate local
+until owner acceptance. F9 can now record a normal 2X run without adding another
+native phase sample to the director cache. Ordinary logging overhead remains;
+this correction does not promise identical FPS or repair the F9-off drops.

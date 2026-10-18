@@ -1,16 +1,14 @@
 {
   "version": "V595",
   "base": "c968ba40d5e6d8063a46a78c8e980d765d9294b8",
-  "status": "checks-incomplete-not-packaged",
-  "passed": 32,
-  "failed": 1,
-  "failed_checks": [
-    "xrfg_private_openxr_runtime_gpu"
-  ],
-  "packaged": false,
-  "ctest_seconds": 37.36304570000001,
+  "status": "runtime-pending",
+  "passed": 33,
+  "failed": 0,
+  "failed_checks": [],
+  "ctest_seconds": 48.29315939999999,
   "ctest_passed": [
     "xrfg_private_output_distributor_tests",
+    "xrfg_private_openxr_runtime_gpu",
     "xrfg_tray_lifecycle_tests",
     "xrfg_private_runtime_ref_gpu",
     "xrfg_private_runtime_new_gpu",
@@ -48,8 +46,8 @@
   "headset_validation": "V594 owner reaches full maximum FPS but retains short presentation losses. That is improved, not final acceptance. New V595 owner gameplay comparison pending. This diagnostic-only correction is not claimed to solve losses observed with F9 off.",
   "finding": "Before this change, mandatory clock refresh ran independently of logging, but F9 additionally called vsync_anchor(), which wrote the same live phase cache used by the director. Now private sessions log cached_vsync_anchor() only. Cached diagnostic query-cost is zero because this read performs no query. Non-private sessions retain their prior diagnostic observer behavior.",
   "functional_audit": "Advertised Windows clock conversion is negotiated without F9 (V593). Physical period/vsync refresh runs before the diagnostic return gate. Required source/copy completion times, Wait/Begin/Release costs, physical slot selection, hard-expiry recovery and bounded preventive renewal are unconditional. The V594 production private runtime source is unchanged.",
-  "validation": "New D11/D12 actual-GPU fixtures disable diagnostic callbacks, require native clock discards to occur, and check six exact FIFO images, current native cycles and balanced ownership. Existing route/flag/switch/image/overlay/INI/benchmark checks pass. Full harness32/33; fallback cadence precision fails and blocks packaging. The caller diagnostic-cache change is verified by code review; no fake end-to-end OpenVR query-count claim.",
-  "first_check_failure": "Initial32/33: existing D12 cadence precision test measured12.421953ms, above its unchanged250us tolerance; both new logging-off tests passed. The initial test fixture installed a logging-enabled callback in all old cases. Limit that fixture override to the new quiet cases only and retain the old default execution order. The following full run also fails the same existing D12 check, at11.501114ms. This does not establish the cause. Both failed outputs preserved; no threshold weakened, no further full-suite retry or package.",
+  "validation": "All33 focused checks pass, including new D11/D12 actual-GPU tests with optional diagnostic tracing disabled. They require native renewal, six exact FIFO pixels, current native cycles and balanced ownership. The complete exact-V594 baseline harness and isolated current cadence test also pass in a sequential same-host control. Caller diagnostics read the cached clock; code review verifies no additional native query for a private session. No fake end-to-end OpenVR query-count claim.",
+  "first_check_failure": "Two earlier full runs failed the existing D12 fallback cadence precision test at12.421953ms and11.501114ms, versus unchanged P+250us tolerance. Preserve both logs. After isolating the check, the complete exact-V594 baseline passes (D12 precision11.121604ms,D11 11.115551ms), and the current isolated check passes (D12 11.122340ms,D11 11.113617ms). The subsequent full current suite passes33/33. No runtime timing change or threshold relaxation was made to obtain that result; the earlier timing variation is not assigned a proven cause.",
   "owner_evidence": {
     "version": "V594",
     "owner_verdict": "Improved maximum FPS fully reached, but residual presentation drops remain. Produced counts stable. Not final loss-free acceptance.",
@@ -87,5 +85,25 @@
   "ipc_abi": 57701,
   "provider_abi": 45601,
   "pushed": false,
-  "live_installed": false
+  "live_installed": false,
+  "baseline_control": [
+    {
+      "name": "V594_exact_full",
+      "returncode": 0,
+      "seconds": 24.955610999983037
+    },
+    {
+      "name": "V595_precision",
+      "returncode": 0,
+      "seconds": 1.3713710999873001
+    }
+  ],
+  "test_logs": [
+    "v595-first-tests.log",
+    "v595-second-tests.log",
+    "v595-final-tests.log",
+    "v595-final-junit.xml",
+    "v595-quiet-clock-check.log",
+    "v595-baseline-control/RESULTS.json"
+  ]
 }

@@ -1,9 +1,9 @@
 ## V595: read-only diagnostic clock observation
 
-F9 now observes the private director's existing vsync cache instead of updating
-it through an additional native query. Required clocks and renewal remain active
-with logging off. Residual delivery losses are still under investigation; this
-is not their declared fix. The candidate is not packaged: a cadence check remains unresolved. [Details](docs/V595_LOGGING_CLOCK_INDEPENDENCE.md).
+F9 observes the private director's existing vsync cache instead of updating it
+through an additional native query. Required clocks and renewal stay active
+with logging off.33 focused checks pass. Residual delivery drops remain under
+investigation; this is not their declared fix. [Details](docs/V595_LOGGING_CLOCK_INDEPENDENCE.md).
 
 ## V594: bounded native-window renewal
 
