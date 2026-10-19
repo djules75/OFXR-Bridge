@@ -189,9 +189,17 @@ Then:
   anchor's and the eye measurement's patches are read at the output's origin
   on the eye image (dlss_inset_origin), so they compare the same picture.
   858, the first eight placements: `a` the eye `<< 32` or the stream's low
-  bits; `b` the output's width `<< 32` or height, as placed (the window's);
-  `c` the placed vector rectangle (x, y, width, height in eighths of a
-  texel, 16 bits each).
+  bits, bit 63 placed in the middle without a camera (V534); `b` the
+  output's width `<< 32` or height, as placed (the window's); `c` the placed
+  vector rectangle (x, y, width, height in eighths of a texel, 16 bits each).
+- V534: without a camera (Kingdom Come calls NGX directly: output 3776 x
+  3088, eyes 3679 x 3088), an alternating-eye stream at most 6% larger per
+  axis than the eye image, the eye's field symmetric, is placed on the eye
+  image's middle at the output's scale, as Ghost of Tsushima's camera
+  measured its window. 859, once per reason, a stream refused that window:
+  `a` 1 not alternating eyes, 2 the eye's field not symmetric, 3 the output
+  too large, 4 smaller than the eye image. The eye measurement (851) reads
+  around the same middle: its correlations say whether the guess holds.
 - 845, an eye's choice when a stream is shared without the anchor: `a` eye << 32
   | publication; `b` the two cameras' sides; `c` method (1 cameras apart, 2
   equal, 3 unknown) - the evaluation order decides, the cameras never.

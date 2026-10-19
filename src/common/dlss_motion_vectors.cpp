@@ -1058,6 +1058,77 @@ void anchor_dlss_alternating_eyes(
     }
 }
 
+// V534: an eye image that is the middle window of a slightly larger DLSS
+// output, without a camera to say so. R.E.A.L. VR's Kingdom Come renders
+// 3776 x 3088 and submits each eye on 3679 x 3088 swapchains with no
+// Streamline: the window Ghost of Tsushima's camera measured (V533) was its
+// output's exact middle at the output's scale, and this is placed the same
+// way. Only for alternating-eye streams (configure_dlss_alternating_eyes),
+// a symmetric eye field, and an output at most kCentredWindowMargin larger
+// per axis; otherwise null, the reason recorded once each (859: a 1 not
+// alternating, 2 the field not symmetric, 3 the output too large, 4 smaller).
+constexpr double kCentredWindowMargin = 0.06;
+
+std::shared_ptr<const DlssMotionVectorFrame> place_centred_window(
+    const DlssMotionVectorFrame& frame, const DlssEyeView& view) noexcept {
+    try {
+        const auto refuse = [](std::uint64_t reason) {
+            static std::array<std::atomic_bool, 5> recorded{};
+            if (reason < recorded.size() && !recorded[reason].exchange(true)) {
+                try {
+                    bridge_flight_logger().event(
+                        BridgeFlightOperation::embedded_configuration, 859, reason);
+                } catch (...) {
+                }
+            }
+            return std::shared_ptr<const DlssMotionVectorFrame>{};
+        };
+        if (!g_alternating_eyes.load(std::memory_order_acquire)) return refuse(1);
+        const double width = static_cast<double>(view.tan_right) - view.tan_left;
+        const double height = static_cast<double>(view.tan_up) - view.tan_down;
+        if (!(width > 0.0) || !(height > 0.0) ||
+            !(std::fabs(static_cast<double>(view.tan_left) + view.tan_right) <= 0.01 * width) ||
+            !(std::fabs(static_cast<double>(view.tan_up) + view.tan_down) <= 0.01 * height)) {
+            return refuse(2);
+        }
+        if (view.x < 0 || view.y < 0 || view.width == 0 || view.height == 0 ||
+            frame.output_x != 0 || frame.output_y != 0 ||
+            frame.motion_width == 0 || frame.motion_height == 0) {
+            return {};
+        }
+        if (frame.output_width < view.width || frame.output_height < view.height) return refuse(4);
+        if (frame.output_width - view.width > kCentredWindowMargin * view.width ||
+            frame.output_height - view.height > kCentredWindowMargin * view.height) {
+            return refuse(3);
+        }
+        const double per_x = static_cast<double>(frame.motion_width) / frame.output_width;
+        const double per_y = static_cast<double>(frame.motion_height) / frame.output_height;
+        const double x0 = (static_cast<double>(frame.output_width) - view.width) / 2.0;
+        const double y0 = (static_cast<double>(frame.output_height) - view.height) / 2.0;
+        auto placed = std::make_shared<DlssMotionVectorFrame>(frame);
+        placed->output_x = static_cast<std::uint32_t>(view.x);
+        placed->output_y = static_cast<std::uint32_t>(view.y);
+        placed->output_width = view.width;
+        placed->output_height = view.height;
+        placed->placed = true;
+        placed->placed_motion_rect = {
+            static_cast<float>(frame.motion_x + x0 * per_x),
+            static_cast<float>(frame.motion_y + y0 * per_y),
+            static_cast<float>(view.width * per_x),
+            static_cast<float>(view.height * per_y)};
+        return placed;
+    } catch (...) {
+        return {};
+    }
+}
+
+// The eye's window of `frame`: by its camera (V533), else in its middle (V534).
+std::shared_ptr<const DlssMotionVectorFrame> place_on_eye_window(
+    const DlssMotionVectorFrame& frame, const DlssEyeView& view) noexcept {
+    if (frame.view.known) return place_guide_in_view(frame, view);
+    return place_centred_window(frame, view);
+}
+
 void set_dlss_eye_view(std::uint32_t eye, const DlssEyeView& view) noexcept {
     try {
         if (eye >= kDlssMotionVectorEyeCount) return;
@@ -1080,8 +1151,19 @@ bool dlss_inset_origin(std::uint64_t stream, std::uint32_t eye,
         if (found == state.streams.end() || !found->second.latest ||
             !state.eye_view_known[eye]) return false;
         const DlssMotionVectorFrame& frame = *found->second.latest;
+        if (frame.output_width == 0 || frame.output_height == 0) return false;
+        if (!frame.view.known) {
+            // V534: the middle window, at the output's scale.
+            const DlssEyeView& view = state.eye_views[eye];
+            if (!place_centred_window(frame, view)) return false;
+            *x = static_cast<std::int32_t>(std::lround(
+                view.x - (static_cast<double>(frame.output_width) - view.width) / 2.0));
+            *y = static_cast<std::int32_t>(std::lround(
+                view.y - (static_cast<double>(frame.output_height) - view.height) / 2.0));
+            return true;
+        }
         const auto placed = place_guide_in_view(frame, state.eye_views[eye]);
-        if (!placed || frame.output_width == 0 || frame.output_height == 0) return false;
+        if (!placed) return false;
         // The output's edges on the eye image, as place_guide_in_view finds
         // them, and its pixels' size there.
         const DlssEyeView& view = state.eye_views[eye];
@@ -1192,15 +1274,17 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             return eye_view && frame.output_x == 0 && frame.output_y == 0 &&
                 frame.output_width >= description.Width &&
                 frame.output_height >= description.Height &&
-                place_guide_in_view(frame, state.eye_views[static_cast<std::size_t>(eye)]) != nullptr;
+                place_on_eye_window(frame, state.eye_views[static_cast<std::size_t>(eye)]) != nullptr;
         };
         // 858, the first eight placements: a the eye << 32 | the stream's low
-        // bits, b the output's width << 32 | height, c the placed vector
-        // rectangle (x, y, width, height in eighths of a texel, 16 bits each).
+        // bits | bit 63 placed in the middle without a camera (V534), b the
+        // output's width << 32 | height, c the placed vector rectangle (x, y,
+        // width, height in eighths of a texel, 16 bits each).
         const auto place_inset = [&](DlssMotionVectorFrame& frame) {
             if (!eye_view || fits_image(frame)) return;
+            const bool centred = !frame.view.known;
             const auto placed =
-                place_guide_in_view(frame, state.eye_views[static_cast<std::size_t>(eye)]);
+                place_on_eye_window(frame, state.eye_views[static_cast<std::size_t>(eye)]);
             if (!placed) return;
             frame = *placed;
             if (state.statistics.inset_placed++ < 8) {
@@ -1209,7 +1293,8 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 };
                 try {
                     bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 858,
-                        (static_cast<std::uint64_t>(eye) << 32U) | (frame.stream & 0xFFFFFFFFULL),
+                        (static_cast<std::uint64_t>(eye) << 32U) | (frame.stream & 0xFFFFFFFFULL) |
+                            (centred ? 1ULL << 63U : 0ULL),
                         (static_cast<std::uint64_t>(frame.output_width) << 32U) | frame.output_height,
                         eighths(frame.placed_motion_rect[0]) | (eighths(frame.placed_motion_rect[1]) << 16U) |
                             (eighths(frame.placed_motion_rect[2]) << 32U) |

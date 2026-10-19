@@ -3481,6 +3481,58 @@ void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
         require(!resolve_wide(0), "a stream whose camera misses the eye's field guided it");
         for (std::uint32_t eye = 0; eye < 2; ++eye) xrfg::set_dlss_eye_view(eye, {});
         xrfg::retire_dlss_motion_vector_stream(833);
+
+        // V534: Kingdom Come, no camera. The same 61 of 64 is placed in the
+        // middle for a symmetric eye field, and refused for a lopsided one.
+        const auto publish_plain = [&]() {
+            fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+                xrfg::DlssMotionVectorPublication p{};
+                p.stream = 834;
+                p.output = color.Get();
+                p.motion_vectors = motion.Get();
+                p.output_width = 64;
+                p.output_height = 32;
+                p.motion_width = 32;
+                p.motion_height = 16;
+                p.producer_queue = fixture.queue();
+                p.producer_command_list = list;
+                p.resource_state = D3D12_RESOURCE_STATE_COMMON;
+                xrfg::publish_dlss_motion_vectors(p);
+            });
+            return xrfg::dlss_motion_vector_publications();
+        };
+        for (int frame = 0; frame < 2; ++frame) {
+            publish_plain();
+            wide_release = publish_plain();
+        }
+        xrfg::anchor_dlss_alternating_eyes(
+            834, xrfg::dlss_motion_vector_stream_position(834).epoch, 1);
+        const auto resolve_plain = [&](int eye) {
+            return xrfg::resolve_dlss_motion_vectors(
+                window.Get(), fixture.queue(), eye, wide_release, wide_release);
+        };
+        require(!resolve_plain(0), "a stream without a camera guided an eye whose view is unknown");
+        for (std::uint32_t eye = 0; eye < 2; ++eye) {
+            xrfg::set_dlss_eye_view(eye, {-kEyeTan, kEyeTan, 0.9656F, -0.9656F, 0, 0, 61, 32});
+        }
+        const auto centred = resolve_plain(0);
+        require(centred && centred->eyes[0] && centred->eyes[0]->placed &&
+                centred->eyes[0]->output_width == 61 &&
+                std::fabs(centred->eyes[0]->placed_motion_rect[0] - 0.75F) < 0.01F &&
+                std::fabs(centred->eyes[0]->placed_motion_rect[2] - 30.5F) < 0.01F &&
+                std::fabs(centred->eyes[0]->placed_motion_rect[1]) < 0.01F &&
+                std::fabs(centred->eyes[0]->placed_motion_rect[3] - 16.0F) < 0.01F,
+            "a stream without a camera was not placed on the eye image's middle");
+        std::int32_t centre_x = 0, centre_y = 0;
+        require(xrfg::dlss_inset_origin(834, 0, &centre_x, &centre_y) &&
+                (centre_x == -2 || centre_x == -1) && centre_y == 0,
+            "the middle window was not reported for the anchor");
+        for (std::uint32_t eye = 0; eye < 2; ++eye) {
+            xrfg::set_dlss_eye_view(eye, {-1.2F, 1.0F, 0.9656F, -0.9656F, 0, 0, 61, 32});
+        }
+        require(!resolve_plain(0), "a lopsided eye field took a stream's middle");
+        for (std::uint32_t eye = 0; eye < 2; ++eye) xrfg::set_dlss_eye_view(eye, {});
+        xrfg::retire_dlss_motion_vector_stream(834);
     }
     xrfg::configure_dlss_alternating_eyes(false);
     xrfg::configure_dlss_motion_vector_tracking(false);
