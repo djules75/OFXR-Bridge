@@ -12366,6 +12366,13 @@ void prepare_panel_generation(
             before->second + 1 == serial;
         const bool request_pair =
             prepared->kind == PreparedGenerationKind::pair && continuous;
+        {
+            // Its composition follows the content beside a still pixel (V510).
+            std::scoped_lock lock(swapchain->mutex);
+            if (swapchain->frame_generation && swapchain->frame_generation->synthesizer) {
+                swapchain->frame_generation->synthesizer->set_flat_panel(true);
+            }
+        }
         xrfg::D3D12ReprojectionView view{};
         view.fov = {-0.785398F, 0.785398F, 0.785398F, -0.785398F};
         view.image_rect = {0, 0, width, height};

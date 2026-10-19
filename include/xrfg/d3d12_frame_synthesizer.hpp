@@ -7,6 +7,7 @@
 
 #include <d3d12.h>
 
+#include <atomic>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -294,11 +295,18 @@ public:
 
     [[nodiscard]] bool initialized() const noexcept;
 
+    // The images are a flat panel's (V510): a HUD quad whose transparent
+    // parts carry nothing, so the composition looks for the motion of the
+    // content beside a pixel the flow left still. Set by the layer before
+    // each of the panel's submissions; it outlives a reconfigure.
+    void set_flat_panel(bool flat_panel) noexcept;
+
 private:
     struct Impl;
 
     mutable std::mutex mutex_;
     std::unique_ptr<Impl> impl_;
+    std::atomic<bool> flat_panel_{false};
 };
 
 // The composition's edge ghosting reduction as the ini sets it, for every

@@ -67,6 +67,11 @@ uint repeated_capture_flag() {
     return SynthesisFlags & 1u;
 }
 
+// The images are a flat panel's (V510): see choose_midpoint_motion.
+bool flat_panel() {
+    return (SynthesisFlags & 4u) != 0u;
+}
+
 // The tray's live tuning window (xrfg::live_tuning), for the hybrid
 // composition only since V507 (the built-in values below are
 // live_tuning::kDefaults, the user's DI2 set of 2026-10-19): the synthesizer uploads its block, header and
@@ -988,6 +993,15 @@ void sample_midpoint_endpoints(
         pixel - residual * (1.0 - t), Slice, ViewIndex);
 }
 
+// A flat panel's endpoints disagree in opacity as well as colour (V510).
+float panel_endpoint_error(MidpointMotion motion) {
+    return motion.previous_sample.valid >= 0.5 &&
+            motion.current_sample.valid >= 0.5
+        ? max(rgb_error(motion.previous_sample.color, motion.current_sample.color),
+              abs(motion.previous_sample.color.a - motion.current_sample.color.a))
+        : 1.0e6;
+}
+
 float midpoint_endpoint_error(MidpointMotion motion) {
     return motion.previous_sample.valid >= 0.5 &&
             motion.current_sample.valid >= 0.5
@@ -1084,6 +1098,61 @@ MidpointMotion choose_midpoint_motion(
         }
     }
 #endif
+    // Flat panels (V510). A HUD quad's transparent parts carry nothing for
+    // the flow to follow, so beside a moving icon it reads still: the strip
+    // the icon moves into and the strip it leaves both blended the two
+    // frames there, half the icon at half its opacity. The icon's own motion
+    // is in the flow over the icon, so where the two endpoints disagree -
+    // colour or opacity - the vectors read around the pixel are tried and the
+    // one whose endpoints agree best is kept: on the leading strip both land
+    // on the icon, on the trailing strip both land on the clear background.
+    // Pixels whose endpoints already agree, the still and the clear parts of
+    // the panel, skip it.
+    [branch] if (flat_panel() && repeated_capture_flag() == 0) {
+        float panel_error = panel_endpoint_error(best);
+        [branch] if (panel_error > 2.0 / 255.0) {
+            MidpointMotion still = best;
+            still.origin = pixel;
+            sample_midpoint_endpoints(pixel, float2(0.0, 0.0), still);
+            float still_error = panel_endpoint_error(still);
+            if (still_error + 1.0 / 255.0 < panel_error) {
+                best = still;
+                panel_error = still_error;
+            }
+            static const float2 kPanelDirections[8] = {
+                float2(1.0, 0.0), float2(-1.0, 0.0), float2(0.0, 1.0), float2(0.0, -1.0),
+                float2(0.7071, 0.7071), float2(-0.7071, 0.7071),
+                float2(0.7071, -0.7071), float2(-0.7071, -0.7071)};
+            static const float kPanelReach[4] = {6.0, 12.0, 24.0, 40.0};
+            float2 tried[3] = {best.residual, float2(0.0, 0.0), float2(1.0e6, 1.0e6)};
+            for (uint ring = 0; ring < 4 && panel_error > 2.0 / 255.0; ++ring) {
+                for (uint direction = 0; direction < 8; ++direction) {
+                    float2 candidate = float2(0.0, 0.0);
+                    bool available = residual_flow_at(
+                        pixel + kPanelDirections[direction] * kPanelReach[ring],
+                        value_scale,
+                        input_pose_compensated,
+                        candidate);
+                    bool fresh = available && length(candidate) >= 0.5 &&
+                        length(candidate - tried[0]) >= 0.5 &&
+                        length(candidate - tried[1]) >= 0.5 &&
+                        length(candidate - tried[2]) >= 0.5;
+                    [branch] if (fresh) {
+                        tried[2] = tried[1];
+                        tried[1] = candidate;
+                        MidpointMotion trial = best;
+                        trial.origin = pixel - candidate * (1.0 - t);
+                        sample_midpoint_endpoints(pixel, candidate, trial);
+                        float error = panel_endpoint_error(trial);
+                        if (error + 1.0 / 255.0 < panel_error) {
+                            best = trial;
+                            panel_error = error;
+                        }
+                    }
+                }
+            }
+        }
+    }
     return best;
 }
 

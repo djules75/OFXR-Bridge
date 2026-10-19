@@ -327,6 +327,9 @@ constexpr UINT kEncodeSrgbFlowInputFlag = 2U;
            format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
 }
 
+// A flat panel's composition (V510): the shader's flat_panel().
+constexpr UINT kFlatPanelFlag = 4U;
+
 // The flag bits every pack dispatch carries; the composition ignores them.
 [[nodiscard]] constexpr UINT pack_input_flags(DXGI_FORMAT view_format) noexcept {
     return srgb_view_format(view_format) ? kEncodeSrgbFlowInputFlag : 0U;
@@ -977,6 +980,9 @@ struct D3D12FrameSynthesizer::Impl {
     std::uint32_t next_work_slot{};
     std::uint32_t next_timing_slot{};
     D3D12OpticalFlowBackend backend{D3D12OpticalFlowBackend::fidelity_fx};
+    // A flat panel's images (V510), copied in from the outer object at each
+    // pair.
+    bool flat_panel{};
     D3D12NvidiaOpticalFlowOptions nvidia_options{};
     bool synthesis_enabled{};
     bool completion_unknown{};
@@ -3801,7 +3807,7 @@ struct D3D12FrameSynthesizer::Impl {
 
         SynthesisParameters parameters{};
         parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
-            pack_input_flags(view_format);
+            pack_input_flags(view_format) | (flat_panel ? kFlatPanelFlag : 0U);
         apply_live_composition_tuning(slot.tuning_mapped,
             guides != nullptr ? CompositionLayout::hybrid : CompositionLayout::flow);
         parameters.width = static_cast<UINT>(image_description.Width);
@@ -4319,7 +4325,7 @@ struct D3D12FrameSynthesizer::Impl {
 
         SynthesisParameters parameters{};
         parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
-            pack_input_flags(view_format);
+            pack_input_flags(view_format) | (flat_panel ? kFlatPanelFlag : 0U);
         apply_live_composition_tuning(slot.tuning_mapped,
             guides != nullptr ? CompositionLayout::hybrid : CompositionLayout::flow);
         parameters.width = static_cast<UINT>(image_description.Width);
@@ -5640,6 +5646,7 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
             }
             return E_UNEXPECTED;
         }
+        impl_->flat_panel = flat_panel_.load(std::memory_order_relaxed);
         return impl_->submit_pair(
             current,
             current_source_views,
@@ -5658,6 +5665,10 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
         }
         return E_FAIL;
     }
+}
+
+void D3D12FrameSynthesizer::set_flat_panel(bool flat_panel) noexcept {
+    flat_panel_.store(flat_panel, std::memory_order_relaxed);
 }
 
 HRESULT D3D12FrameSynthesizer::flush_current_copy(

@@ -5002,13 +5002,14 @@ void test_flat_panel_marker_synthesis(
     D3D12WarpFixture& fixture,
     xrfg::D3D12OpticalFlowBackend backend,
     bool hybrid,
-    bool require_motion) {
+    bool require_motion,
+    UINT move = 16) {
     constexpr UINT kPanelWidth = 1024;
     constexpr UINT kPanelHeight = 512;
     constexpr UINT kMarker = 64;
     constexpr UINT kMarkerY = kPanelHeight / 2 - kMarker / 2;
     constexpr UINT kPreviousX = 256;
-    constexpr UINT kCurrentX = 272;
+    const UINT kCurrentX = kPreviousX + move;
     const auto panel_image = [&](UINT marker_x) {
         std::vector<std::uint8_t> bytes(
             static_cast<std::size_t>(kPanelWidth) * kPanelHeight * kBytesPerPixel, 0);
@@ -5058,6 +5059,8 @@ void test_flat_panel_marker_synthesis(
                 std::span<ID3D12Resource* const>(synthetic_pointers.data(), synthetic_pointers.size()),
                 kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET, backend, options)),
         "flat panel synthesizer initialization failed");
+    // As the layer marks a panel's synthesizer (V510).
+    synthesizer.set_flat_panel(true);
     // The layer's panel view (prepare_panel_generation).
     std::array<xrfg::D3D12ReprojectionView, 1> view{};
     view[0].fov = {-0.785398F, 0.785398F, 0.785398F, -0.785398F};
@@ -5114,16 +5117,17 @@ void test_flat_panel_marker_synthesis(
     const double expected = (kPreviousX + kCurrentX) * 0.5 + kMarker * 0.5;
     const double area = static_cast<double>(kMarker) * kMarker;
     std::cout << "flat panel marker backend=" << static_cast<int>(backend)
-              << (hybrid ? " hybrid" : "") << ": opaque=" << opaque << "/" << area
+              << (hybrid ? " hybrid" : "") << " move=" << move << ": opaque=" << opaque << "/" << area
               << " centroid=" << centroid << " expected=" << expected << " stray=" << stray
               << " synthetic_mae=" << synthetic_error << " blend_mae=" << blend_error << '\n';
     require(stray == 0, "flat panel background is no longer transparent");
     require(std::abs(centroid - expected) <= 3.0,
         "flat panel marker is not between the frames");
     if (require_motion) {
-        require(static_cast<double>(opaque) >= 0.8 * area,
+        // V510: the icon's edge strips follow the icon too.
+        require(static_cast<double>(opaque) >= 0.97 * area,
             "flat panel marker is doubled or faded, not moved");
-        require(synthetic_error < blend_error * 0.6,
+        require(synthetic_error < blend_error * 0.2,
             "flat panel synthetic is no closer to the midpoint than a blend");
     }
     require(operation_succeeded(history->invalidate()), "flat panel history invalidate failed");
@@ -5162,6 +5166,7 @@ int main(int argc, char** argv) {
                                        xrfg::D3D12OpticalFlowBackend::nvidia}) {
                 test_flat_panel_marker_synthesis(gpu_fixture, backend, false, true);
                 test_flat_panel_marker_synthesis(gpu_fixture, backend, true, true);
+                test_flat_panel_marker_synthesis(gpu_fixture, backend, false, true, 32);
             }
             gpu_fixture.require_no_debug_errors();
             return 0;
