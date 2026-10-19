@@ -826,6 +826,13 @@ struct SessionState {
     std::vector<PanelPose> panel_poses_current;
     std::vector<PanelPose> panel_poses_previous;
     std::vector<XrSwapchain> panels_recorded;
+    // V509: application end frames counted, and the frame each flat panel's
+    // swapchain last had its own generated images prepared at, so a panel
+    // pairs only straight after a frame that primed or paired it. Panels
+    // already recorded as 762. frame_call_mutex.
+    std::uint64_t panel_frame_serial{};
+    std::vector<std::pair<XrSwapchain, std::uint64_t>> panel_generated;
+    std::vector<XrSwapchain> panels_generated_recorded;
     // Whether the flight recorder was writing when apply_embedded_control
     // last ran. A change rebuilds each synthesizer with or without its GPU
     // timing, so a log switched on in a running session has the timings.
@@ -11199,6 +11206,9 @@ build_reprojection_views(
 struct ProjectionResourceDestination {
     XrSwapchain application_swapchain{XR_NULL_HANDLE};
     XrSwapchain destination_swapchain{XR_NULL_HANDLE};
+    // A flat panel's swapchain (V509): swapped in quad and cylinder layers,
+    // never in projection views.
+    bool panel{};
 };
 
 // A flat panel's place in one frame: quad and cylinder layers carry a pose
@@ -11259,17 +11269,29 @@ void note_panel_poses(const XrFrameEndInfo* info, std::vector<PanelPose>* poses)
 // recorded once, as presenter_transition 760: a its layer type | 1 << 32
 // where it moved, b its swapchain, c how far it moved between the two
 // frames, micrometres | microradians << 32.
+//
+// A panel whose image the frame already carries a generated copy of (V509)
+// names that copy's swapchain: `destinations` maps it back to the
+// application's, and its adjusted layer is moved in place.
 void place_panels_between(
     SessionState& state,
     std::span<const PanelPose> previous,
     float fraction,
+    std::span<const ProjectionResourceDestination> destinations,
     GeneratedFrameEndInfo* output) {
     if (previous.empty() || !(fraction > 0.0F && fraction < 1.0F)) return;
-    output->adjusted_layers.reserve(output->layer_pointers.size());
+    // The same reservation build_generated_frame_end_info made, so nothing
+    // already pointing into it moves.
+    output->adjusted_layers.reserve(2 * output->layer_pointers.size());
     for (std::size_t index = 0; index < output->layer_pointers.size(); ++index) {
         const XrCompositionLayerBaseHeader* layer = output->layer_pointers[index];
-        const auto now = panel_pose(layer);
+        auto now = panel_pose(layer);
         if (!now) continue;
+        for (const ProjectionResourceDestination& destination : destinations) {
+            if (destination.panel && destination.destination_swapchain == now->swapchain) {
+                now->swapchain = destination.application_swapchain;
+            }
+        }
         const auto before = std::find_if(previous.begin(), previous.end(),
             [&](const PanelPose& candidate) {
                 return candidate.type == now->type && candidate.swapchain == now->swapchain &&
@@ -11301,6 +11323,18 @@ void place_panels_between(
         }
         if (!moved) continue;
         const XrPosef between = pose_between(before->pose, now->pose, fraction);
+        OwnedCompositionLayer* owned = nullptr;
+        for (OwnedCompositionLayer& candidate : output->adjusted_layers) {
+            if (composition_layer_header(candidate) == layer) owned = &candidate;
+        }
+        if (owned != nullptr) {
+            if (auto* quad = std::get_if<XrCompositionLayerQuad>(owned)) {
+                quad->pose = between;
+            } else if (auto* cylinder = std::get_if<XrCompositionLayerCylinderKHR>(owned)) {
+                cylinder->pose = between;
+            }
+            continue;
+        }
         if (layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
             XrCompositionLayerQuad copy = *reinterpret_cast<const XrCompositionLayerQuad*>(layer);
             copy.pose = between;
@@ -11333,6 +11367,10 @@ void place_panels_between(
         source->layers,
         source->layers + source->layerCount);
     output->projections.reserve(current_snapshot.layers.size());
+    // Room for every flat panel twice - its generated image here, its pose
+    // between the frames (place_panels_between) - so no pointer into it
+    // moves once taken.
+    output->adjusted_layers.reserve(2 * output->layer_pointers.size());
 
     for (std::size_t projection_index = 0;
          projection_index < current_snapshot.layers.size();
@@ -11385,6 +11423,41 @@ void place_panels_between(
         const auto* stored_header =
             reinterpret_cast<const XrCompositionLayerBaseHeader*>(&stored.layer);
         output->layer_pointers[metadata.layer_index] = stored_header;
+    }
+    // Flat panels with generated images of their own (V509) name them in
+    // place of the application's swapchain; a panel without one this frame
+    // keeps the application's image.
+    for (std::size_t index = 0; index < output->layer_pointers.size(); ++index) {
+        const XrCompositionLayerBaseHeader* layer = output->layer_pointers[index];
+        if (layer == nullptr ||
+            (layer->type != XR_TYPE_COMPOSITION_LAYER_QUAD &&
+             layer->type != XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR)) {
+            continue;
+        }
+        const XrSwapchain application = layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD
+            ? reinterpret_cast<const XrCompositionLayerQuad*>(layer)->subImage.swapchain
+            : reinterpret_cast<const XrCompositionLayerCylinderKHR*>(layer)->subImage.swapchain;
+        const auto destination = std::find_if(
+            destinations.begin(),
+            destinations.end(),
+            [&](const ProjectionResourceDestination& candidate) {
+                return candidate.panel && candidate.application_swapchain == application;
+            });
+        if (destination == destinations.end() ||
+            destination->destination_swapchain == XR_NULL_HANDLE) {
+            continue;
+        }
+        if (layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+            XrCompositionLayerQuad copy = *reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+            copy.subImage.swapchain = destination->destination_swapchain;
+            output->adjusted_layers.emplace_back(copy);
+        } else {
+            XrCompositionLayerCylinderKHR copy =
+                *reinterpret_cast<const XrCompositionLayerCylinderKHR*>(layer);
+            copy.subImage.swapchain = destination->destination_swapchain;
+            output->adjusted_layers.emplace_back(copy);
+        }
+        output->layer_pointers[index] = composition_layer_header(output->adjusted_layers.back());
     }
     output->info.layerCount =
         static_cast<std::uint32_t>(output->layer_pointers.size());
@@ -11546,6 +11619,9 @@ struct PreparedGeneration {
 struct PreparedProjectionResource {
     XrSwapchain application_swapchain{XR_NULL_HANDLE};
     PreparedGeneration generation;
+    // A flat panel's (V509): carried beside the eye images, never deciding
+    // the frame's kind or whether it has a second synthetic.
+    bool panel{};
 };
 
 struct PreparedProjectionFrame {
@@ -11563,7 +11639,10 @@ struct PreparedProjectionFrame {
     float interpolation_fraction,
     // Where a second synthetic belongs, for a session that makes one.
     std::optional<float> extra_interpolation_fraction,
-    bool release_at_handover_requested) noexcept {
+    bool release_at_handover_requested,
+    // A flat panel's image (V509): the overlay's diagnostic square belongs
+    // in the eye images only.
+    bool panel = false) noexcept {
     PreparedGeneration output{};
     try {
         const auto state = find_swapchain(application_swapchain);
@@ -11731,7 +11810,8 @@ struct PreparedProjectionFrame {
         const bool defer_current_copy = generation->interop == nullptr &&
             !state->session->deep_pipeline;
         xrfg::D3D12FrameSynthesisTicket ticket{};
-        const auto debug_marker = request_pair && xrfg::bridge_flight_logger().enabled() &&
+        const auto debug_marker = !panel && request_pair &&
+                xrfg::bridge_flight_logger().enabled() &&
                 state->session->fps_overlay
             ? state->session->fps_overlay->marker_placement()
             : std::nullopt;
@@ -12102,6 +12182,224 @@ struct PreparedProjectionFrame {
         output.reason = GenerationPrepareReason::exception;
         return output;
     }
+}
+
+// Frame generation for flat panels (V509). A quad or cylinder layer is an
+// image the application draws once per frame and the compositor places in
+// the world; V508 moves the panel itself between two frames, but anything
+// the application draws at a new spot inside the image every frame - UEVR's
+// quest and location markers, which follow the world while the HUD follows
+// the head - still sat at the current frame's spot in every generated frame
+// and doubled whenever the view moved. Such a panel's swapchain gets
+// generated images of its own, made from its two captures as the eye images
+// are: one view over the whole image with the same identity camera in both
+// frames, so the camera mapping is the identity and the optical flow moves
+// what moved inside the image. Native D3D12 sessions only, at most two
+// panels, and a panel never decides whether the frame generates: one that
+// cannot be generated this frame shows the application's image, as before.
+struct PanelSource {
+    XrSwapchain swapchain{XR_NULL_HANDLE};
+    std::uint32_t array_slice{};
+};
+
+constexpr std::size_t kMaxGeneratedPanels = 2;
+
+[[nodiscard]] bool panel_generation_supported(const SessionState& state) noexcept {
+    const bool native = state.graphics_binding == SessionGraphicsBinding::d3d12 &&
+        !state.d3d11_bridge && !state.vulkan_bridge && state.d3d12_queue;
+    return native;
+}
+
+// The frame's flat panels on swapchains of their own: not one the
+// projection uses, and one array slice per swapchain.
+[[nodiscard]] std::vector<PanelSource> panel_sources(
+    const XrFrameEndInfo* info,
+    std::span<const ProjectionResourceMapping> mappings) {
+    std::vector<PanelSource> sources;
+    std::vector<XrSwapchain> conflicted;
+    if (info == nullptr || info->layers == nullptr) return sources;
+    for (std::uint32_t index = 0; index < info->layerCount; ++index) {
+        const XrCompositionLayerBaseHeader* layer = info->layers[index];
+        if (layer == nullptr) continue;
+        XrSwapchainSubImage sub_image{};
+        if (layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+            sub_image = reinterpret_cast<const XrCompositionLayerQuad*>(layer)->subImage;
+        } else if (layer->type == XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR) {
+            sub_image = reinterpret_cast<const XrCompositionLayerCylinderKHR*>(layer)->subImage;
+        } else {
+            continue;
+        }
+        if (sub_image.swapchain == XR_NULL_HANDLE) continue;
+        const bool projection = std::any_of(mappings.begin(), mappings.end(),
+            [&](const ProjectionResourceMapping& mapping) {
+                return mapping.application_swapchain == sub_image.swapchain;
+            });
+        if (projection) continue;
+        const auto existing = std::find_if(sources.begin(), sources.end(),
+            [&](const PanelSource& source) { return source.swapchain == sub_image.swapchain; });
+        if (existing != sources.end()) {
+            if (existing->array_slice != sub_image.imageArrayIndex) {
+                conflicted.push_back(sub_image.swapchain);
+            }
+            continue;
+        }
+        if (sources.size() >= kMaxGeneratedPanels) continue;
+        sources.push_back({sub_image.swapchain, sub_image.imageArrayIndex});
+    }
+    std::erase_if(sources, [&](const PanelSource& source) {
+        return std::find(conflicted.begin(), conflicted.end(), source.swapchain) !=
+            conflicted.end();
+    });
+    return sources;
+}
+
+[[nodiscard]] bool projection_generation_armed(
+    std::span<const ProjectionResourceMapping> mappings) noexcept {
+    try {
+        if (mappings.empty()) return false;
+        for (const ProjectionResourceMapping& mapping : mappings) {
+            const auto swapchain = find_swapchain(mapping.application_swapchain);
+            if (!swapchain) return false;
+            std::scoped_lock lock(swapchain->mutex);
+            if (!swapchain->frame_generation) return false;
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+[[nodiscard]] bool panel_generation_pending(
+    const std::shared_ptr<SessionState>& state,
+    std::span<const PanelSource> sources) noexcept {
+    try {
+        if (!state || state->generation_budget_exhausted.load(std::memory_order_acquire)) {
+            return false;
+        }
+        for (const PanelSource& source : sources) {
+            const auto swapchain = find_swapchain(source.swapchain);
+            if (!swapchain) continue;
+            std::scoped_lock call_lock(swapchain->call_mutex);
+            if (swapchain->generation_eligible_pending && !swapchain->generation_declined) {
+                return true;
+            }
+        }
+        return false;
+    } catch (...) {
+        return false;
+    }
+}
+
+// Gives each pending panel its private swapchains and synthesizer, after the
+// frame naming it has gone down, as the eye images' arming does. A refusal
+// declines that panel alone: the session's eye images keep theirs, and the
+// panel shows the application's image. Each attempt is recorded as
+// presenter_transition 761: a 1 armed, 0 declined; b the swapchain; c its
+// width | height << 32.
+void arm_panel_generation(
+    const std::shared_ptr<SessionState>& state,
+    std::span<const PanelSource> sources) noexcept {
+    try {
+        if (!state || state->generation_budget_exhausted.load(std::memory_order_acquire)) {
+            return;
+        }
+        for (const PanelSource& source : sources) {
+            const auto swapchain = find_swapchain(source.swapchain);
+            if (!swapchain) continue;
+            {
+                std::scoped_lock call_lock(swapchain->call_mutex);
+                if (!swapchain->generation_eligible_pending || swapchain->generation_declined) {
+                    continue;
+                }
+            }
+            static_cast<void>(ensure_frame_generation(swapchain));
+            bool armed = false;
+            {
+                std::scoped_lock lock(swapchain->mutex);
+                armed = swapchain->frame_generation != nullptr;
+            }
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::presenter_transition,
+                761,
+                armed ? 1u : 0u,
+                handle_value(source.swapchain),
+                static_cast<std::uint64_t>(swapchain->create_info.width) |
+                    (static_cast<std::uint64_t>(swapchain->create_info.height) << 32U));
+        }
+    } catch (...) {
+    }
+}
+
+// This frame's generated images for each armed panel, appended to the eye
+// images' resources. A panel pairs only when the eye images pair and it was
+// primed or paired at the frame before; otherwise it primes, and a panel
+// that fails shows the application's image. Each panel's first pair is
+// recorded as presenter_transition 762: b the swapchain, c its width |
+// height << 32.
+void prepare_panel_generation(
+    SessionState& state,
+    std::span<const PanelSource> sources,
+    PreparedProjectionFrame* prepared,
+    float interpolation_fraction,
+    std::optional<float> extra_interpolation_fraction,
+    bool release_at_handover) {
+    const std::uint64_t serial = state.panel_frame_serial;
+    std::vector<std::pair<XrSwapchain, std::uint64_t>> generated;
+    for (const PanelSource& source : sources) {
+        const auto swapchain = find_swapchain(source.swapchain);
+        if (!swapchain) continue;
+        bool has_generation = false;
+        {
+            std::scoped_lock lock(swapchain->mutex);
+            has_generation = swapchain->frame_generation != nullptr;
+        }
+        const std::uint32_t width = swapchain->create_info.width;
+        const std::uint32_t height = swapchain->create_info.height;
+        if (!has_generation || width == 0 || height == 0 ||
+            source.array_slice >= swapchain->create_info.arraySize) {
+            continue;
+        }
+        const auto before = std::find_if(state.panel_generated.begin(),
+            state.panel_generated.end(),
+            [&](const auto& entry) { return entry.first == source.swapchain; });
+        const bool continuous = before != state.panel_generated.end() &&
+            before->second + 1 == serial;
+        const bool request_pair =
+            prepared->kind == PreparedGenerationKind::pair && continuous;
+        xrfg::D3D12ReprojectionView view{};
+        view.fov = {-0.785398F, 0.785398F, 0.785398F, -0.785398F};
+        view.image_rect = {0, 0, width, height};
+        view.array_slice = source.array_slice;
+        PreparedGeneration generation = prepare_frame_generation(
+            source.swapchain,
+            request_pair,
+            std::span<const xrfg::D3D12ReprojectionView>(&view, 1),
+            interpolation_fraction,
+            extra_interpolation_fraction,
+            release_at_handover,
+            true);
+        if (generation.kind == PreparedGenerationKind::none) continue;
+        generated.push_back({source.swapchain, serial});
+        if (generation.kind == PreparedGenerationKind::pair &&
+            std::find(state.panels_generated_recorded.begin(),
+                state.panels_generated_recorded.end(), source.swapchain) ==
+                state.panels_generated_recorded.end() &&
+            state.panels_generated_recorded.size() < 8) {
+            state.panels_generated_recorded.push_back(source.swapchain);
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::presenter_transition,
+                762,
+                0,
+                handle_value(source.swapchain),
+                static_cast<std::uint64_t>(width) | (static_cast<std::uint64_t>(height) << 32U));
+        }
+        PreparedProjectionResource resource{};
+        resource.application_swapchain = source.swapchain;
+        resource.generation = std::move(generation);
+        resource.panel = true;
+        prepared->resources.push_back(std::move(resource));
+    }
+    state.panel_generated = std::move(generated);
 }
 
 [[nodiscard]] std::optional<XrDuration> latest_pending_application_period(
@@ -13237,6 +13535,7 @@ XrResult layer_end_frame_impl(
     // frames between the two (V508).
     state->panel_poses_previous.swap(state->panel_poses_current);
     note_panel_poses(end_info, &state->panel_poses_current);
+    ++state->panel_frame_serial;
     state->application_end_thread_id = GetCurrentThreadId();
     state->application_end_thread.store(
         state->application_end_thread_id, std::memory_order_relaxed);
@@ -13523,7 +13822,17 @@ XrResult layer_end_frame_impl(
     const bool generation_arming_pending =
         resource_mappings.ready() &&
         projection_frame_generation_pending(state, projection_mappings);
-    if (!resource_mappings.ready() || generation_arming_pending) {
+    // Flat panels on swapchains of their own (V509), armed the same way: the
+    // frame that first names one passes through and the panel is armed after
+    // its submission, once per panel swapchain for the session.
+    std::vector<PanelSource> panels;
+    if (resource_mappings.ready() && panel_generation_supported(*state)) {
+        panels = panel_sources(end_info, projection_mappings);
+    }
+    const bool panel_arming_pending = !panels.empty() && !generation_arming_pending &&
+        panel_generation_pending(state, panels) &&
+        projection_generation_armed(projection_mappings);
+    if (!resource_mappings.ready() || generation_arming_pending || panel_arming_pending) {
         clear_generation_continuity(state);
         if (!resource_mappings.ready() &&
             resource_mappings.reason !=
@@ -13536,12 +13845,20 @@ XrResult layer_end_frame_impl(
         }
         const XrResult passthrough_result =
             bypass_generation(GenerationPrepareReason::empty_mappings);
+        if (!generation_arming_pending && !panel_arming_pending) {
+            return passthrough_result;
+        }
         if (!generation_arming_pending) {
+            arm_panel_generation(state, panels);
             return passthrough_result;
         }
         // The application's frame is already downstream; nothing this costs is
         // on its deadline any more.
-        if (!ensure_projection_frame_generation(state, projection_mappings)) {
+        if (ensure_projection_frame_generation(state, projection_mappings)) {
+            if (projection_generation_armed(projection_mappings)) {
+                arm_panel_generation(state, panels);
+            }
+        } else {
             // A refusal means the runtime has no swapchains left for the
             // application either. A queued submission names a private
             // swapchain, so the presenter must be idle and its content lock
@@ -13688,6 +14005,18 @@ XrResult layer_end_frame_impl(
         // pair while this one's real frame is still to be handed over, so
         // joined here that pair's synthesis wait would sit in front of it.
         use_continuous_presenter && state->binding_queue != nullptr);
+    // The flat panels' own generated images (V509), once the eye images have
+    // theirs; the frame's kind stays the eye images'.
+    if (!panels.empty() && (prepared.kind == PreparedGenerationKind::prime ||
+                            prepared.kind == PreparedGenerationKind::pair)) {
+        prepare_panel_generation(
+            *state,
+            panels,
+            &prepared,
+            interpolation_fraction,
+            extra_interpolation_fraction,
+            use_continuous_presenter && state->binding_queue != nullptr);
+    }
     // Collected before anything below can reset `prepared`, so every image
     // left acquired is accounted for on every path out of this call.
     PrivateReleaseBatch synthetic_releases;
@@ -13770,19 +14099,24 @@ XrResult layer_end_frame_impl(
     synthetic_destinations.reserve(prepared.resources.size());
     extra_destinations.reserve(prepared.resources.size());
     for (const PreparedProjectionResource& resource : prepared.resources) {
-        extra_ready = extra_ready &&
-            resource.generation.extra_synthetic_handle != XR_NULL_HANDLE;
+        // A panel without a second synthetic shows the application's image
+        // in that frame; the eye images decide whether there is one.
+        extra_ready = extra_ready && (resource.panel ||
+            resource.generation.extra_synthetic_handle != XR_NULL_HANDLE);
         extra_destinations.push_back({
             resource.application_swapchain,
             resource.generation.extra_synthetic_handle,
+            resource.panel,
         });
         current_destinations.push_back({
             resource.application_swapchain,
             resource.generation.current_handle,
+            resource.panel,
         });
         synthetic_destinations.push_back({
             resource.application_swapchain,
             resource.generation.synthetic_handle,
+            resource.panel,
         });
     }
     if (prepared.kind == PreparedGenerationKind::prime) {
@@ -13831,10 +14165,16 @@ XrResult layer_end_frame_impl(
                 return fraction > 0.05F && fraction < 0.95F ? fraction : 0.5F;
             };
             place_panels_between(*state, state->panel_poses_previous,
-                usable_fraction(interpolation_fraction), &first_generated);
+                usable_fraction(interpolation_fraction),
+                std::span<const ProjectionResourceDestination>(
+                    synthetic_destinations.data(), synthetic_destinations.size()),
+                &first_generated);
             if (extra_ready && extra_interpolation_fraction) {
                 place_panels_between(*state, state->panel_poses_previous,
-                    usable_fraction(*extra_interpolation_fraction), &extra_generated);
+                    usable_fraction(*extra_interpolation_fraction),
+                    std::span<const ProjectionResourceDestination>(
+                        extra_destinations.data(), extra_destinations.size()),
+                    &extra_generated);
             }
             // The synthetic frame owns the deferred copies: they must reach
             // the queue after it has been handed to the runtime.

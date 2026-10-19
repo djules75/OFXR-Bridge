@@ -85,6 +85,23 @@ that moves (UEVR's HUD follows the head) is placed between its two positions
 in each generated frame, at the moment the generated image shows; one that
 does not is left as it is.
 
+### Generated images for flat panels (V509)
+
+A flat panel on a swapchain of its own (not one a projection view uses),
+in a native D3D12 session, at most two per frame, gets generated images of
+its own, so what the application draws at a new place inside the panel
+every frame (UEVR's quest markers) moves between the frames as well.
+
+- `presenter_transition` 761, once per panel swapchain when it is armed
+  (after the frame that first names it passes through): `a` 1 armed, 0
+  declined; `b` the swapchain; `c` its width | height << 32.
+- `presenter_transition` 762, once per panel swapchain at its first
+  generated pair: `b` the swapchain; `c` its width | height << 32.
+
+A panel's own `synthesis_prime`/`synthesis_pair` records carry its
+swapchain in `a`, next to the eye images'. Its GPU timing records
+(`nvidia_gpu_stages`) say one eye.
+
 ### Per-eye guides and capture diagnostics
 
 `presenter_transition` result 751, per eye after xrEndFrame's mapping, for

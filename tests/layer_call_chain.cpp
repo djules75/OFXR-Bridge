@@ -130,6 +130,9 @@ XrTime paced_runtime_wait() {
     return 1'000'000'000LL + (slot + 2) * kFakeDisplayPeriod;
 }
 bool g_split_eye_mode = false;
+// V509: the split-eye runtime's second swapchain carries a HUD quad, and
+// the projection's two views share the first.
+bool g_hud_panel_mode = false;
 // Whether the layer under test runs the deeper pipeline. Read from the same
 // ofxr_bridge.ini the layer reads, beside the layer DLL, so the fake runtime
 // expects the ring sizes the layer will actually ask for: one synthetic slot
@@ -338,6 +341,8 @@ struct EndFrameRecord {
         std::numeric_limits<std::uint32_t>::max()};
     // The quad's x, which the flight scenario moves every frame (V508).
     float quad_x{};
+    // The swapchain the quad names (V509).
+    XrSwapchain quad_swapchain{XR_NULL_HANDLE};
 };
 
 struct LocateViewsRecord {
@@ -763,6 +768,8 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_end_frame(
                 record.quad_layer_index = layer_index;
                 record.quad_x =
                     reinterpret_cast<const XrCompositionLayerQuad*>(layer)->pose.position.x;
+                record.quad_swapchain =
+                    reinterpret_cast<const XrCompositionLayerQuad*>(layer)->subImage.swapchain;
             }
             if (layer == nullptr || layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
                 continue;
@@ -2277,8 +2284,10 @@ int main(int argc, char** argv) {
     g_double_wide_mode = argc == 4 &&
         (std::strcmp(argv[3], "double-wide") == 0 ||
          d3d11_double_wide_mode || g_uevr_pipelined_display_time_mode);
+    g_hud_panel_mode = argc == 4 && std::strcmp(argv[3], "hud-panel") == 0;
     g_split_eye_mode = argc == 4 &&
-        (std::strcmp(argv[3], "split-eye") == 0 || g_cropped_subimage_mode);
+        (std::strcmp(argv[3], "split-eye") == 0 || g_cropped_subimage_mode ||
+         g_hud_panel_mode);
     {
         std::filesystem::path ini = std::filesystem::path(argv[1]).parent_path() /
             L"ofxr_bridge.ini";
@@ -2530,6 +2539,167 @@ int main(int argc, char** argv) {
     swapchain_info.arraySize =
         (g_split_eye_mode || g_double_wide_mode) ? 1 : 2;
     swapchain_info.mipCount = (g_d3d11_interop_mode || g_vulkan_application) ? 3 : 1;
+
+    if (g_hud_panel_mode) {
+        // V509: a HUD quad on a swapchain of its own beside the projection.
+        // The first frame arms the eye images and the panel and passes
+        // through; the second primes both; the third pairs both, so its
+        // synthetic names the panel's synthetic swapchain and its real frame
+        // the panel's current one - the HUD's own generated images, where it
+        // used to name the application's image in every frame.
+        XrSwapchain eye_swapchain = XR_NULL_HANDLE;
+        XrSwapchain hud_swapchain = XR_NULL_HANDLE;
+        std::array<XrSwapchainImageD3D12KHR, 3> enumerated_images{};
+        for (auto& image : enumerated_images) {
+            image.type = XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR;
+        }
+        auto enumerate_application_images = [&](XrSwapchain handle) {
+            std::uint32_t count = 0;
+            return XR_SUCCEEDED(enumerate_images(
+                       handle,
+                       static_cast<std::uint32_t>(enumerated_images.size()),
+                       &count,
+                       reinterpret_cast<XrSwapchainImageBaseHeader*>(
+                           enumerated_images.data()))) &&
+                   count == enumerated_images.size();
+        };
+        if (XR_FAILED(create_swapchain(session, &swapchain_info, &eye_swapchain)) ||
+            eye_swapchain != g_application_swapchain ||
+            !enumerate_application_images(eye_swapchain) ||
+            XR_FAILED(create_swapchain(session, &swapchain_info, &hud_swapchain)) ||
+            hud_swapchain != g_application_swapchain_right ||
+            !enumerate_application_images(hud_swapchain)) {
+            return EXIT_FAILURE;
+        }
+        XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        XrSwapchainImageWaitInfo image_wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        image_wait_info.timeout = XR_INFINITE_DURATION;
+        XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        auto capture_application_image = [&](XrSwapchain handle) {
+            std::uint32_t index = 0;
+            return XR_SUCCEEDED(acquire_image(handle, &acquire_info, &index)) &&
+                   index == 2 &&
+                   XR_SUCCEEDED(wait_image(handle, &image_wait_info)) &&
+                   XR_SUCCEEDED(release_image(handle, &release_info));
+        };
+        std::array<XrCompositionLayerProjectionView, 2> projection_views{};
+        for (std::uint32_t index = 0; index < projection_views.size(); ++index) {
+            auto& view = projection_views[index];
+            view.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+            view.pose.orientation.w = 1.0F;
+            view.subImage.swapchain = eye_swapchain;
+            view.subImage.imageRect.offset = {static_cast<std::int32_t>(index * 2U), 0};
+            view.subImage.imageRect.extent = {2, 4};
+            view.subImage.imageArrayIndex = 0;
+        }
+        XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        projection.space = g_space;
+        projection.viewCount = static_cast<std::uint32_t>(projection_views.size());
+        projection.views = projection_views.data();
+        XrCompositionLayerQuad hud{XR_TYPE_COMPOSITION_LAYER_QUAD};
+        hud.space = g_space;
+        hud.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        hud.pose.orientation.w = 1.0F;
+        hud.pose.position.z = -1.0F;
+        hud.size = {1.0F, 1.0F};
+        hud.subImage.swapchain = hud_swapchain;
+        hud.subImage.imageRect.extent = {4, 4};
+        const XrCompositionLayerBaseHeader* layers[] = {
+            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
+            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&hud),
+        };
+        auto submit_frame = [&](XrTime display_time) {
+            XrViewLocateInfo locate_info{XR_TYPE_VIEW_LOCATE_INFO};
+            locate_info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+            locate_info.displayTime = display_time;
+            locate_info.space = g_space;
+            XrViewState view_state{XR_TYPE_VIEW_STATE};
+            std::array<XrView, 2> views{{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
+            std::uint32_t view_count = 0;
+            if (XR_FAILED(locate_views(session, &locate_info, &view_state,
+                    static_cast<std::uint32_t>(views.size()), &view_count, views.data())) ||
+                view_count != views.size()) {
+                return false;
+            }
+            for (std::uint32_t index = 0; index < projection_views.size(); ++index) {
+                const XrView submitted = fake_submitted_view_for_time(display_time, index);
+                projection_views[index].pose = submitted.pose;
+                projection_views[index].fov = submitted.fov;
+            }
+            XrFrameEndInfo frame_end_info{XR_TYPE_FRAME_END_INFO};
+            frame_end_info.displayTime = display_time;
+            frame_end_info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+            frame_end_info.layerCount = static_cast<std::uint32_t>(std::size(layers));
+            frame_end_info.layers = layers;
+            return XR_SUCCEEDED(end_frame(session, &frame_end_info));
+        };
+        XrFrameWaitInfo frame_wait_info{XR_TYPE_FRAME_WAIT_INFO};
+        XrFrameBeginInfo frame_begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+        bool frame_sequence_succeeded = true;
+        for (XrTime expected = 100; expected <= 300 && frame_sequence_succeeded; expected += 100) {
+            XrFrameState frame{XR_TYPE_FRAME_STATE};
+            frame_sequence_succeeded =
+                XR_SUCCEEDED(wait_frame(session, &frame_wait_info, &frame)) &&
+                frame.predictedDisplayTime == expected &&
+                XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
+                capture_application_image(eye_swapchain) &&
+                capture_application_image(hud_swapchain) &&
+                submit_frame(frame.predictedDisplayTime) &&
+                wait_for_queue_idle();
+        }
+        const bool teardown_succeeded =
+            XR_SUCCEEDED(end_session(session)) &&
+            XR_SUCCEEDED(destroy_swapchain(eye_swapchain)) &&
+            XR_SUCCEEDED(destroy_swapchain(hud_swapchain)) &&
+            XR_SUCCEEDED(destroy_session(session)) &&
+            XR_SUCCEEDED(destroy_instance(instance));
+        FreeLibrary(module);
+        std::vector<EndFrameRecord> end_records;
+        {
+            std::scoped_lock lock(g_end_records_mutex);
+            end_records = g_end_records;
+        }
+        const auto hud_current = [](XrSwapchain handle) {
+            return handle == g_current_swapchain_right || handle == g_current_swapchain_right_b;
+        };
+        const auto hud_synthetic = [](XrSwapchain handle) {
+            return handle == g_synthetic_swapchain_right ||
+                handle == g_synthetic_swapchain_right_b;
+        };
+        const auto record_ok = [&](std::size_t index, SubmittedTarget target, auto quad_ok) {
+            return index < end_records.size() && end_records[index].target == target &&
+                end_records[index].layer_count == 2 &&
+                end_records[index].quad_layer_count == 1 &&
+                end_records[index].quad_layer_index == 1 &&
+                quad_ok(end_records[index].quad_swapchain);
+        };
+        const bool valid = frame_sequence_succeeded && teardown_succeeded &&
+            end_records.size() == 4 &&
+            record_ok(0, SubmittedTarget::original,
+                [&](XrSwapchain handle) { return handle == hud_swapchain; }) &&
+            record_ok(1, SubmittedTarget::current, hud_current) &&
+            record_ok(2, SubmittedTarget::synthetic, hud_synthetic) &&
+            record_ok(3, SubmittedTarget::current, hud_current) &&
+            g_destroy_swapchain_calls.load(std::memory_order_relaxed) ==
+                g_create_swapchain_calls.load(std::memory_order_relaxed);
+        if (!valid) {
+            std::cerr << "HUD panel: sequence=" << frame_sequence_succeeded
+                      << " teardown=" << teardown_succeeded
+                      << " records=" << end_records.size() << '\n';
+            for (const EndFrameRecord& record : end_records) {
+                std::cerr << "  time=" << record.display_time
+                          << " target=" << static_cast<int>(record.target)
+                          << " layers=" << record.layer_count
+                          << " quad=" << std::hex
+                          << reinterpret_cast<std::uintptr_t>(record.quad_swapchain)
+                          << std::dec << '\n';
+            }
+            return EXIT_FAILURE;
+        }
+        std::cout << "OpenXR HUD panel fake-runtime call-chain test passed: "
+                     "the panel's own images in the generated frames\n";
+        return EXIT_SUCCESS;
+    }
 
     if (g_split_eye_mode) {
         XrSwapchain left_swapchain = XR_NULL_HANDLE;

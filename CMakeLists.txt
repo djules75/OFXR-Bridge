@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.508.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.509.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -757,6 +757,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
                 "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-split-eye-call-chain-test.log"
                 split-eye)
+
+        # V509: a HUD quad on a swapchain of its own gets generated images.
+        add_test(
+            NAME xrfg_layer_hud_panel_call_chain
+            COMMAND xrfg_layer_call_chain
+                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
+                "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-hud-panel-call-chain-test.log"
+                hud-panel)
 
         add_test(
             NAME xrfg_layer_cropped_split_eye_call_chain
