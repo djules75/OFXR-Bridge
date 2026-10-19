@@ -11,6 +11,9 @@
 
 #include "fullscreen_vertex_shader.hpp"
 #include "game_motion_synthesize_midpoint_pixel_shader.hpp"
+#include "guide_compose_clear_shader.hpp"
+#include "guide_compose_measure_shader.hpp"
+#include "guide_compose_shader.hpp"
 #include "hybrid_synthesize_midpoint_pixel_shader.hpp"
 #include "hybrid_nvidia_synthesize_midpoint_pixel_shader.hpp"
 #include "hybrid_nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp"
@@ -90,6 +93,13 @@ constexpr UINT kDescriptorBlockSize =
     kSrvDescriptorCount + kUavDescriptorCount;
 constexpr UINT kDescriptorCount =
     kDescriptorBlockSize * kMaxReprojectionViews;
+// V516: a block per eye after them for the inset composition's dispatches,
+// written while the pair's own blocks still wait for the GPU.
+constexpr UINT kComposeDescriptorBase = kDescriptorCount;
+constexpr UINT kSlotDescriptorCount =
+    kDescriptorCount + kDescriptorBlockSize * kMaxReprojectionViews;
+// The composition's per-eye verdict words (guide_compose.hlsl): four each.
+constexpr UINT kComposeVerdictBytes = 256;
 constexpr UINT kNvidiaTimestampCount = 5;
 constexpr UINT kNvidiaTimestampPackBegin = 0;
 constexpr UINT kNvidiaTimestampPackEnd = 1;
@@ -467,6 +477,28 @@ static_assert(offsetof(SynthesisParameters, previous_mappings) == sizeof(UINT) *
 static_assert(offsetof(SynthesisParameters, slice) == sizeof(UINT) * 60U);
 static_assert(kSynthesisConstantCount + 2U <= 64U);
 
+// V516: guide_compose.hlsl's root constants, in the synthesis' slot.
+struct ComposeConstants {
+    UINT field_width{};
+    UINT field_height{};
+    UINT slice{};
+    UINT flags{};
+    std::array<float, 4> eye_rect{};
+    std::array<float, 4> periphery_motion_rect{};
+    std::array<float, 2> periphery_scale{};
+    std::array<float, 2> inset_vector_scale{};
+    std::array<float, 4> inset_rect{};
+    std::array<float, 4> inset_previous_rect{};
+    std::array<float, 4> inset_motion_rect{};
+    std::array<float, 2> inset_output_size{};
+    float inset_margin{};
+    UINT verdict_base{};
+};
+constexpr UINT kComposeConstantCount =
+    static_cast<UINT>(sizeof(ComposeConstants) / sizeof(UINT));
+static_assert(sizeof(ComposeConstants) == sizeof(UINT) * 32U);
+static_assert(kComposeConstantCount <= kSynthesisConstantCount);
+
 [[nodiscard]] bool finite(float value) noexcept {
     return std::isfinite(value);
 }
@@ -839,6 +871,13 @@ struct D3D12FrameSynthesizer::Impl {
         // has finished on the GPU by then (reset_work_slot).
         ComPtr<ID3D12Resource> tuning_buffer;
         void* tuning_mapped{};
+        // V516: the inset composition's verdict words, copied back for the
+        // log, and the composed guides this slot's draws read, held until
+        // the slot's work has finished (reset_work_slot).
+        ComPtr<ID3D12Resource> compose_readback;
+        std::shared_ptr<const DlssMotionVectorSet> composed_guides;
+        bool compose_pending{};
+        std::array<float, kMaxReprojectionViews> compose_shift{};
         std::array<NvidiaEyeResources, kMaxReprojectionViews> nvidia_eyes;
         D3D12NvidiaGpuTiming timing_metadata{};
         D3D12NvidiaGpuTiming cached_timing{};
@@ -893,6 +932,18 @@ struct D3D12FrameSynthesizer::Impl {
     ComPtr<ID3D12PipelineState> hybrid_nvidia_bidirectional_graphics_pipeline;
     // Set by record_pair when the pair it recorded composed with the hybrid.
     bool last_pair_hybrid{};
+    // V516: MSFS 2024's foveated inset composed into one field per eye
+    // (guide_compose.hlsl), hybrid only. Half the eye's resolution, both eyes
+    // as slices; the verdict buffer holds the per-eye readings' errors.
+    ComPtr<ID3D12PipelineState> compose_clear_pipeline;
+    ComPtr<ID3D12PipelineState> compose_measure_pipeline;
+    ComPtr<ID3D12PipelineState> compose_pipeline;
+    ComPtr<ID3D12Resource> composed_vectors;
+    ComPtr<ID3D12Resource> composed_depth;
+    UINT composed_width{};
+    UINT composed_height{};
+    D3D12_RESOURCE_STATES composed_state{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+    ComPtr<ID3D12Resource> compose_verdict;
     ComPtr<ID3D12PipelineState> nvidia_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_luma_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_graphics_pipeline;
@@ -1175,6 +1226,28 @@ struct D3D12FrameSynthesizer::Impl {
             IID_PPV_ARGS(nvidia_luma_pack_pipeline.GetAddressOf()));
         if (FAILED(result)) {
             return result;
+        }
+
+        if (nvidia_options.hybrid) {
+            // V516: the foveated inset's composition.
+            const std::array<std::pair<D3D12_SHADER_BYTECODE, ComPtr<ID3D12PipelineState>*>, 3>
+                compose{{
+                    {{g_xrfg_guide_compose_clear_shader, sizeof(g_xrfg_guide_compose_clear_shader)},
+                        &compose_clear_pipeline},
+                    {{g_xrfg_guide_compose_measure_shader,
+                         sizeof(g_xrfg_guide_compose_measure_shader)},
+                        &compose_measure_pipeline},
+                    {{g_xrfg_guide_compose_shader, sizeof(g_xrfg_guide_compose_shader)},
+                        &compose_pipeline},
+                }};
+            for (const auto& [code, pipeline] : compose) {
+                compute_description.CS = code;
+                result = device->CreateComputePipelineState(
+                    &compute_description, IID_PPV_ARGS(pipeline->GetAddressOf()));
+                if (FAILED(result)) {
+                    return result;
+                }
+            }
         }
 
         D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics_description{};
@@ -1931,6 +2004,17 @@ struct D3D12FrameSynthesizer::Impl {
                     return result;
                 }
                 std::memset(slot.tuning_mapped, 0, kTuningBufferBytes);
+                // V516: the inset composition's verdict, read back.
+                D3D12_HEAP_PROPERTIES readback = upload;
+                readback.Type = D3D12_HEAP_TYPE_READBACK;
+                buffer.Width = kComposeVerdictBytes;
+                result = device->CreateCommittedResource(
+                    &readback, D3D12_HEAP_FLAG_NONE, &buffer,
+                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                    IID_PPV_ARGS(slot.compose_readback.GetAddressOf()));
+                if (FAILED(result)) {
+                    return result;
+                }
             }
             if (backend == D3D12OpticalFlowBackend::nvidia) {
                 result = device->CreateCommandAllocator(
@@ -1981,7 +2065,7 @@ struct D3D12FrameSynthesizer::Impl {
 
             D3D12_DESCRIPTOR_HEAP_DESC descriptor_description{};
             descriptor_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-            descriptor_description.NumDescriptors = kDescriptorCount;
+            descriptor_description.NumDescriptors = kSlotDescriptorCount;
             descriptor_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
             descriptor_description.NodeMask = node_mask;
             result = device->CreateDescriptorHeap(
@@ -3532,6 +3616,10 @@ struct D3D12FrameSynthesizer::Impl {
     }
 
     [[nodiscard]] HRESULT reset_work_slot(WorkSlot& slot) noexcept {
+        // The slot's previous pair has finished: its inset verdict is
+        // readable and its composed guides no longer read (V516).
+        log_compose_verdict(slot);
+        slot.composed_guides.reset();
         HRESULT result = slot.allocator->Reset();
         if (FAILED(result)) {
             synthesis_enabled = false;
@@ -4193,6 +4281,386 @@ struct D3D12FrameSynthesizer::Impl {
         return S_OK;
     }
 
+    // V516: MSFS 2024's foveated inset, composed with the periphery into one
+    // guide per eye (guide_compose.hlsl) before the pair's draws read it.
+    [[nodiscard]] static bool has_inset_guides(const DlssMotionVectorSet& guides) noexcept {
+        for (UINT eye = 0; eye < guides.eye_count && eye < kDlssMotionVectorEyeCount; ++eye) {
+            if (guides.eyes[eye] && guides.eyes[eye]->placed && guides.eyes[eye]->inset) return true;
+        }
+        return false;
+    }
+
+    // The composed fields: R16G16 vectors in image pixels and R32 depth, a
+    // slice per eye. Textures an earlier pair still reads stay alive in that
+    // slot's composed guides until its work has finished.
+    [[nodiscard]] HRESULT ensure_composed_targets(UINT width, UINT height, UINT slices) noexcept {
+        if (composed_vectors && composed_width >= width && composed_height >= height &&
+            composed_vectors->GetDesc().DepthOrArraySize >= slices && compose_verdict) {
+            return S_OK;
+        }
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        heap.CreationNodeMask = 1;
+        heap.VisibleNodeMask = 1;
+        D3D12_RESOURCE_DESC texture{};
+        texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        texture.Width = width;
+        texture.Height = height;
+        texture.DepthOrArraySize = static_cast<UINT16>(slices);
+        texture.MipLevels = 1;
+        texture.Format = DXGI_FORMAT_R16G16_FLOAT;
+        texture.SampleDesc.Count = 1;
+        texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        ComPtr<ID3D12Resource> vectors, depth;
+        HRESULT result = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texture,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(vectors.GetAddressOf()));
+        if (FAILED(result)) return result;
+        texture.Format = DXGI_FORMAT_R32_FLOAT;
+        result = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texture,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(depth.GetAddressOf()));
+        if (FAILED(result)) return result;
+        if (!compose_verdict) {
+            D3D12_RESOURCE_DESC buffer{};
+            buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            buffer.Width = kComposeVerdictBytes;
+            buffer.Height = 1;
+            buffer.DepthOrArraySize = 1;
+            buffer.MipLevels = 1;
+            buffer.SampleDesc.Count = 1;
+            buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            buffer.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            result = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                IID_PPV_ARGS(compose_verdict.GetAddressOf()));
+            if (FAILED(result)) return result;
+            compose_verdict->SetName(L"OFXR Inset Verdict");
+        }
+        vectors->SetName(L"OFXR Composed Guide");
+        depth->SetName(L"OFXR Composed Guide Depth");
+        composed_vectors = std::move(vectors);
+        composed_depth = std::move(depth);
+        composed_width = width;
+        composed_height = height;
+        composed_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        return S_OK;
+    }
+
+    // 837: the inset composition's verdict, read once the slot's work has
+    // finished, for the first sixteen compositions and every 500th after: a
+    // the left eye's reading A error | reading B's << 32, b the right eye's
+    // (each summed over the samples in sixteenths of a pixel, an error
+    // capped at 32), c the samples, left | right << 16, and the insets'
+    // moves since their previous evaluation in eighths of a pixel, left
+    // << 32 | right << 48. A below B: the inset's vectors lead into the
+    // previous frame's inset, and the composition read them so.
+    void log_compose_verdict(WorkSlot& slot) noexcept {
+        if (!slot.compose_pending) return;
+        slot.compose_pending = false;
+        static std::atomic<std::uint64_t> compositions{0};
+        const std::uint64_t index = compositions.fetch_add(1, std::memory_order_relaxed);
+        if ((index >= 16 && index % 500 != 0) || !slot.compose_readback) return;
+        void* mapped = nullptr;
+        const D3D12_RANGE read{0, 32};
+        if (FAILED(slot.compose_readback->Map(0, &read, &mapped)) || mapped == nullptr) return;
+        std::array<UINT, 8> words{};
+        std::memcpy(words.data(), mapped, sizeof(words));
+        const D3D12_RANGE none{0, 0};
+        slot.compose_readback->Unmap(0, &none);
+        const auto eighths = [](float value) {
+            return static_cast<std::uint64_t>(std::clamp(value * 8.0F, 0.0F, 65535.0F)) & 0xFFFFU;
+        };
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::embedded_configuration, 837,
+            words[0] | (static_cast<std::uint64_t>(words[1]) << 32U),
+            words[4] | (static_cast<std::uint64_t>(words[5]) << 32U),
+            (words[2] & 0xFFFFU) | ((static_cast<std::uint64_t>(words[6]) & 0xFFFFU) << 16U) |
+                (eighths(slot.compose_shift[0]) << 32U) | (eighths(slot.compose_shift[1]) << 48U));
+    }
+
+    [[nodiscard]] HRESULT compose_inset_guides(
+        WorkSlot& slot,
+        const DlssMotionVectorSet& guides,
+        std::shared_ptr<const DlssMotionVectorSet>* composed) noexcept {
+        *composed = nullptr;
+        if (!compose_pipeline || !compose_measure_pipeline || !compose_clear_pipeline ||
+            !slot.compose_readback || guides.eye_count == 0 ||
+            guides.eye_count > kMaxReprojectionViews) {
+            return E_INVALIDARG;
+        }
+        // Half each eye's image rectangle: the inset's two image pixels a
+        // vector (MSFS: 892 render columns for a 1783-pixel inset).
+        UINT width = 0, height = 0;
+        for (UINT eye = 0; eye < guides.eye_count; ++eye) {
+            const auto& guide = guides.eyes[eye];
+            if (!guide || !guide->placed || !guide->motion_vectors ||
+                !same_device(device.Get(), guide->motion_vectors.Get()) ||
+                guide->placed_motion_rect[2] <= 0.0F || guide->placed_motion_rect[3] <= 0.0F) {
+                return E_INVALIDARG;
+            }
+            const auto& inset = guide->inset;
+            if (inset && (!inset->motion_vectors ||
+                    !same_device(device.Get(), inset->motion_vectors.Get()) ||
+                    inset->motion_width == 0 || inset->motion_height == 0 ||
+                    inset->output_width == 0 || inset->output_height == 0)) {
+                return E_INVALIDARG;
+            }
+            width = std::max(width, (guide->output_width + 1U) / 2U);
+            height = std::max(height, (guide->output_height + 1U) / 2U);
+        }
+        HRESULT result = ensure_composed_targets(width, height, guides.eye_count);
+        if (FAILED(result)) return result;
+
+        const D3D12_CPU_DESCRIPTOR_HANDLE cpu_start =
+            slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+        const D3D12_GPU_DESCRIPTOR_HANDLE gpu_start =
+            slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+        D3D12_SHADER_RESOURCE_VIEW_DESC null_view{};
+        null_view.Format = DXGI_FORMAT_R32_FLOAT;
+        null_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        null_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        null_view.Texture2DArray.MipLevels = 1;
+        null_view.Texture2DArray.ArraySize = 1;
+        // A vector or depth view of one slice, or a null one.
+        const auto write_view = [&](UINT index, ID3D12Resource* resource, DXGI_FORMAT format,
+                                    UINT slice) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC view = null_view;
+            if (resource != nullptr && format != DXGI_FORMAT_UNKNOWN) {
+                view.Format = format;
+                view.Texture2DArray.FirstArraySlice =
+                    slice < resource->GetDesc().DepthOrArraySize ? slice : 0U;
+            } else {
+                resource = nullptr;
+            }
+            device->CreateShaderResourceView(resource, &view,
+                offset_cpu_handle(cpu_start, index, descriptor_increment));
+        };
+        std::array<ComposeConstants, kMaxReprojectionViews> constants{};
+        std::array<bool, kMaxReprojectionViews> periphery_depth{};
+        for (UINT eye = 0; eye < guides.eye_count; ++eye) {
+            const auto& guide = *guides.eyes[eye];
+            const auto* inset = guide.inset.get();
+            const UINT base = kComposeDescriptorBase + eye * kDescriptorBlockSize;
+            periphery_depth[eye] = usable_guide_depth(guide) && same_device(device.Get(), guide.depth.Get());
+            const bool inset_depth = inset != nullptr && usable_guide_depth(*inset) &&
+                same_device(device.Get(), inset->depth.Get());
+            write_view(base + 0U, guide.motion_vectors.Get(),
+                motion_vector_view_format(guide.motion_vectors->GetDesc().Format), guide.motion_slice);
+            write_view(base + 1U, periphery_depth[eye] ? guide.depth.Get() : nullptr,
+                periphery_depth[eye] ? depth_view_format(guide.depth->GetDesc().Format)
+                                     : DXGI_FORMAT_UNKNOWN,
+                guide.motion_slice);
+            write_view(base + 2U, inset != nullptr ? inset->motion_vectors.Get() : nullptr,
+                inset != nullptr ? motion_vector_view_format(inset->motion_vectors->GetDesc().Format)
+                                 : DXGI_FORMAT_UNKNOWN,
+                inset != nullptr ? inset->motion_slice : 0U);
+            write_view(base + 3U, inset_depth ? inset->depth.Get() : nullptr,
+                inset_depth ? depth_view_format(inset->depth->GetDesc().Format) : DXGI_FORMAT_UNKNOWN,
+                inset != nullptr ? inset->motion_slice : 0U);
+            for (UINT index = 4; index < kSrvDescriptorCount; ++index) {
+                write_view(base + index, nullptr, DXGI_FORMAT_UNKNOWN, 0);
+            }
+            D3D12_UNORDERED_ACCESS_VIEW_DESC target{};
+            target.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+            target.Texture2DArray.ArraySize = composed_vectors->GetDesc().DepthOrArraySize;
+            target.Format = DXGI_FORMAT_R16G16_FLOAT;
+            device->CreateUnorderedAccessView(composed_vectors.Get(), nullptr, &target,
+                offset_cpu_handle(cpu_start, base + kSrvDescriptorCount, descriptor_increment));
+            target.Format = DXGI_FORMAT_R32_FLOAT;
+            device->CreateUnorderedAccessView(composed_depth.Get(), nullptr, &target,
+                offset_cpu_handle(cpu_start, base + kSrvDescriptorCount + 1U, descriptor_increment));
+            D3D12_UNORDERED_ACCESS_VIEW_DESC verdict{};
+            verdict.Format = DXGI_FORMAT_R32_TYPELESS;
+            verdict.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            verdict.Buffer.NumElements = kComposeVerdictBytes / 4U;
+            verdict.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+            device->CreateUnorderedAccessView(compose_verdict.Get(), nullptr, &verdict,
+                offset_cpu_handle(cpu_start, base + kSrvDescriptorCount + 2U, descriptor_increment));
+
+            ComposeConstants& c = constants[eye];
+            c.field_width = (guide.output_width + 1U) / 2U;
+            c.field_height = (guide.output_height + 1U) / 2U;
+            c.slice = eye;
+            c.flags = periphery_depth[eye] ? 4U : 0U;
+            c.eye_rect = {static_cast<float>(guide.output_x), static_cast<float>(guide.output_y),
+                static_cast<float>(guide.output_width), static_cast<float>(guide.output_height)};
+            c.periphery_motion_rect = guide.placed_motion_rect;
+            c.periphery_scale = {
+                guide.scale_x * static_cast<float>(guide.output_width) / guide.placed_motion_rect[2],
+                guide.scale_y * static_cast<float>(guide.output_height) / guide.placed_motion_rect[3]};
+            c.verdict_base = eye * 16U;
+            slot.compose_shift[eye] = 0.0F;
+            if (inset != nullptr) {
+                c.flags |= 1U | (inset->previous_view_rect_known ? 2U : 0U) | (inset_depth ? 8U : 0U);
+                c.inset_vector_scale = {
+                    inset->scale_x * static_cast<float>(inset->output_width) /
+                        static_cast<float>(inset->motion_width),
+                    inset->scale_y * static_cast<float>(inset->output_height) /
+                        static_cast<float>(inset->motion_height)};
+                c.inset_rect = inset->view_rect;
+                c.inset_previous_rect = inset->previous_view_rect;
+                c.inset_motion_rect = {static_cast<float>(inset->motion_x),
+                    static_cast<float>(inset->motion_y), static_cast<float>(inset->motion_width),
+                    static_cast<float>(inset->motion_height)};
+                c.inset_output_size = {static_cast<float>(inset->output_width),
+                    static_cast<float>(inset->output_height)};
+                // Two of the inset's vectors in from its border, where the
+                // game blends it into the periphery.
+                c.inset_margin = 2.0F * inset->view_rect[2] / static_cast<float>(inset->motion_width);
+                slot.compose_shift[eye] = std::hypot(
+                    inset->view_rect[0] - inset->previous_view_rect[0],
+                    inset->view_rect[1] - inset->previous_view_rect[1]);
+            }
+        }
+
+        ID3D12GraphicsCommandList* const list = slot.command_list.Get();
+        dred_marker(list, "OFXR inset guide composition begin");
+        // The sources into the shader-read state for the passes and back
+        // after, once a resource; the registry's snapshots already are.
+        std::vector<std::pair<ID3D12Resource*, D3D12_RESOURCE_STATES>> sources;
+        const auto note_source = [&](ID3D12Resource* resource, D3D12_RESOURCE_STATES state) {
+            if (resource == nullptr || state == kShaderReadState) return;
+            for (const auto& [known, unused] : sources) {
+                static_cast<void>(unused);
+                if (known == resource) return;
+            }
+            sources.emplace_back(resource, state);
+        };
+        for (UINT eye = 0; eye < guides.eye_count; ++eye) {
+            const auto& guide = *guides.eyes[eye];
+            note_source(guide.motion_vectors.Get(), guide.resource_state);
+            if (periphery_depth[eye]) note_source(guide.depth.Get(), guide.depth_resource_state);
+            if (const auto* inset = guide.inset.get()) {
+                note_source(inset->motion_vectors.Get(), inset->resource_state);
+                if ((constants[eye].flags & 8U) != 0U) {
+                    note_source(inset->depth.Get(), inset->depth_resource_state);
+                }
+            }
+        }
+        std::vector<D3D12_RESOURCE_BARRIER> source_barriers;
+        for (const auto& [resource, state] : sources) {
+            source_barriers.push_back(transition_barrier(resource, state, kShaderReadState));
+        }
+        if (!source_barriers.empty()) {
+            list->ResourceBarrier(static_cast<UINT>(source_barriers.size()), source_barriers.data());
+        }
+        if (composed_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+            const std::array<D3D12_RESOURCE_BARRIER, 2> to_write{
+                transition_barrier(composed_vectors.Get(), composed_state,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+                transition_barrier(composed_depth.Get(), composed_state,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS)};
+            list->ResourceBarrier(static_cast<UINT>(to_write.size()), to_write.data());
+        }
+        ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
+        list->SetDescriptorHeaps(1, heaps);
+        list->SetComputeRootSignature(root_signature.Get());
+        const auto bind = [&](UINT eye) {
+            const UINT base = kComposeDescriptorBase + eye * kDescriptorBlockSize;
+            list->SetComputeRootDescriptorTable(0, offset_gpu_handle(gpu_start, base, descriptor_increment));
+            list->SetComputeRootDescriptorTable(1,
+                offset_gpu_handle(gpu_start, base + kSrvDescriptorCount, descriptor_increment));
+            list->SetComputeRoot32BitConstants(2, kComposeConstantCount, &constants[eye], 0);
+        };
+        D3D12_RESOURCE_BARRIER verdict_written{};
+        verdict_written.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        verdict_written.UAV.pResource = compose_verdict.Get();
+        bind(0);
+        list->SetPipelineState(compose_clear_pipeline.Get());
+        list->Dispatch(1, 1, 1);
+        list->ResourceBarrier(1, &verdict_written);
+        list->SetPipelineState(compose_measure_pipeline.Get());
+        for (UINT eye = 0; eye < guides.eye_count; ++eye) {
+            if ((constants[eye].flags & 3U) != 3U) continue;
+            bind(eye);
+            list->Dispatch(4, 4, 1);
+        }
+        list->ResourceBarrier(1, &verdict_written);
+        list->SetPipelineState(compose_pipeline.Get());
+        for (UINT eye = 0; eye < guides.eye_count; ++eye) {
+            bind(eye);
+            list->Dispatch((constants[eye].field_width + 7U) / 8U,
+                (constants[eye].field_height + 7U) / 8U, 1);
+        }
+        const std::array<D3D12_RESOURCE_BARRIER, 3> to_read{
+            transition_barrier(composed_vectors.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                kShaderReadState),
+            transition_barrier(composed_depth.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                kShaderReadState),
+            transition_barrier(compose_verdict.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_COPY_SOURCE)};
+        list->ResourceBarrier(static_cast<UINT>(to_read.size()), to_read.data());
+        list->CopyBufferRegion(slot.compose_readback.Get(), 0, compose_verdict.Get(), 0, 32);
+        const D3D12_RESOURCE_BARRIER verdict_back = transition_barrier(compose_verdict.Get(),
+            D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list->ResourceBarrier(1, &verdict_back);
+        source_barriers.clear();
+        for (const auto& [resource, state] : sources) {
+            source_barriers.push_back(transition_barrier(resource, kShaderReadState, state));
+        }
+        if (!source_barriers.empty()) {
+            list->ResourceBarrier(static_cast<UINT>(source_barriers.size()), source_barriers.data());
+        }
+        composed_state = kShaderReadState;
+        dred_marker(list, "OFXR inset guide composition complete");
+
+        // Each eye's guide, now the composed field in image pixels.
+        auto set = std::make_shared<DlssMotionVectorSet>();
+        set->eye_count = guides.eye_count;
+        for (UINT eye = 0; eye < guides.eye_count; ++eye) {
+            const auto& guide = *guides.eyes[eye];
+            auto frame = std::make_shared<DlssMotionVectorFrame>(guide);
+            const UINT field_width = constants[eye].field_width;
+            const UINT field_height = constants[eye].field_height;
+            frame->inset.reset();
+            frame->motion_vectors = composed_vectors;
+            frame->motion_slice = eye;
+            frame->motion_x = 0;
+            frame->motion_y = 0;
+            frame->motion_width = field_width;
+            frame->motion_height = field_height;
+            frame->placed = true;
+            frame->placed_motion_rect = {0.0F, 0.0F, static_cast<float>(field_width),
+                static_cast<float>(field_height)};
+            // Image pixels already: the scale into them is one.
+            frame->scale_x = static_cast<float>(field_width) / static_cast<float>(guide.output_width);
+            frame->scale_y = static_cast<float>(field_height) / static_cast<float>(guide.output_height);
+            frame->jittered = false;
+            frame->resource_state = kShaderReadState;
+            if (periphery_depth[eye]) {
+                frame->depth = composed_depth;
+                frame->depth_x = 0;
+                frame->depth_y = 0;
+                frame->depth_width = field_width;
+                frame->depth_height = field_height;
+                frame->depth_resource_state = kShaderReadState;
+            } else {
+                frame->depth.Reset();
+            }
+            set->eyes[eye] = std::move(frame);
+        }
+        // 838, the first composition: a the field width << 32 | height, b
+        // the left inset's rectangle (x, y, width, height in pixels, 16 bits
+        // each), c the left eye's flags << 32 | the right's (bit 0 inset, 1
+        // its previous field known, 2 periphery depth, 3 inset depth).
+        static std::atomic_bool first_recorded{false};
+        if (!first_recorded.exchange(true)) {
+            const auto& r = constants[0].inset_rect;
+            const auto pixels = [](float value) {
+                return static_cast<std::uint64_t>(std::clamp(value, 0.0F, 65535.0F)) & 0xFFFFU;
+            };
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::embedded_configuration, 838,
+                (static_cast<std::uint64_t>(constants[0].field_width) << 32U) | constants[0].field_height,
+                pixels(r[0]) | (pixels(r[1]) << 16U) | (pixels(r[2]) << 32U) | (pixels(r[3]) << 48U),
+                (static_cast<std::uint64_t>(constants[0].flags) << 32U) |
+                    (guides.eye_count > 1 ? constants[1].flags : 0U));
+        }
+        slot.composed_guides = set;
+        slot.compose_pending = true;
+        *composed = std::move(set);
+        return S_OK;
+    }
+
     [[nodiscard]] HRESULT record_pair(
         WorkSlot& slot,
         const RollingSource& previous_source,
@@ -4265,6 +4733,14 @@ struct D3D12FrameSynthesizer::Impl {
                     ((a ? a->serial : 0ULL) << 32U) | (b ? b->previous_serial : 0ULL),
                     ((a ? a->epoch : 0ULL) << 32U) | (b ? b->epoch : 0ULL));
             }
+        }
+        // V516: an inset beside a placed periphery (MSFS 2024's foveated
+        // rendering) is composed into one field per eye first; failing that,
+        // the periphery alone guides the pair, as in V515.
+        std::shared_ptr<const DlssMotionVectorSet> composed_guides;
+        if (guides != nullptr && has_inset_guides(*guides) &&
+            SUCCEEDED(compose_inset_guides(slot, *guides, &composed_guides)) && composed_guides) {
+            guides = composed_guides.get();
         }
         last_pair_hybrid = guides != nullptr;
         if (guides != nullptr) {

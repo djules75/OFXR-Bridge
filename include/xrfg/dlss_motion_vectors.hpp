@@ -133,6 +133,19 @@ struct DlssMotionVectorFrame {
     // periphery spreads 892 render columns over a 5092-pixel eye.
     bool placed{};
     std::array<float, 4> placed_motion_rect{};
+    // V516: the camera of the stream's previous evaluation (known = false
+    // after a reset or for a stream's first). MSFS 2024's inset follows the
+    // eyes, so its field moves from one frame to the next.
+    DlssViewGeometry previous_view{};
+    // V516: on a periphery placed by its camera, the eye's inset - the view
+    // at full density where the eye looks - evaluated for the same frame.
+    // On the inset frame itself, where its field lands in the eye image now
+    // and at its previous evaluation (x, y, width, height in image pixels,
+    // not whole).
+    std::shared_ptr<const DlssMotionVectorFrame> inset;
+    std::array<float, 4> view_rect{};
+    std::array<float, 4> previous_view_rect{};
+    bool previous_view_rect_known{};
 };
 
 constexpr std::uint32_t kDlssMotionVectorEyeCount = 2;
@@ -187,6 +200,8 @@ struct DlssMotionVectorStatistics {
     // cameras but no guide covering both eyes.
     std::uint64_t view_matched{};
     std::uint64_t view_unmatched{};
+    // V516: eye pairs joined by cameras whose insets were found too.
+    std::uint64_t inset_matched{};
     std::uint64_t last_used_publication{};
     DlssMotionVectorStatus status{DlssMotionVectorStatus::waiting_for_dlss};
 };
@@ -237,6 +252,11 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
 std::shared_ptr<const DlssMotionVectorFrame> place_guide_in_view(
     const DlssMotionVectorFrame& frame,
     const DlssEyeView& view) noexcept;
+// Where a camera's field lands in an eye's view (V516): x, y, width, height
+// in the view's image pixels, not whole; the view's tangents map linearly.
+std::array<float, 4> view_rect_in_eye(
+    const DlssViewGeometry& view,
+    const DlssEyeView& eye) noexcept;
 // Both eyes' guides from evaluations whose cameras are known (V515), for a
 // game whose DLSS outputs are views of their own rather than its eye images
 // - MSFS 2024's foveated rendering: per eye a periphery over the whole field
@@ -244,7 +264,11 @@ std::shared_ptr<const DlssMotionVectorFrame> place_guide_in_view(
 // stream whose camera covers its field and fits it best (the cameras'
 // positions decide between two that fit alike), placed scaled; the
 // evaluation is the stream's newest by the eye's release watermark. Both
-// eyes or neither, from two streams.
+// eyes or neither, from two streams. V516: each eye's periphery carries the
+// eye's inset when one is found - a recent stream whose field lies inside
+// the eye's, narrower than it, whose camera sits where the eye's periphery
+// camera does - with where its field lands now and at its previous
+// evaluation.
 std::array<std::shared_ptr<const DlssMotionVectorSet>, kDlssMotionVectorEyeCount>
 resolve_view_placed_dlss_guides(
     ID3D12CommandQueue* consumer_queue,

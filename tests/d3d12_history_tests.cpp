@@ -4399,7 +4399,16 @@ void test_nvidia_serialized_eye_context_stress(
 // camera, as MSFS 2024's foveated periphery is - its field a sixteenth wider
 // than the eye's on every side, its vectors a third of the eye's pixels
 // over that field - through place_guide_in_view as the resolver places it.
-enum class HybridScene { occlusion, overlay, fade, occlusion_low_res, occlusion_periphery };
+// occlusion_foveated* (V516): the periphery above with MSFS 2024's inset
+// beside it - a 160 x 96 field around the object at two image pixels a
+// vector, composed into one guide (guide_compose.hlsl). _moved: the inset
+// sat 8 pixels further left at its previous evaluation, and its vectors lead
+// into that previous inset (reading A); _moved_current: the same move, its
+// vectors in the current inset (reading B). The composition must find which.
+enum class HybridScene {
+    occlusion, overlay, fade, occlusion_low_res, occlusion_periphery,
+    occlusion_foveated, occlusion_foveated_moved, occlusion_foveated_moved_current
+};
 
 // backend nvidia: real OFA on the NVIDIA GPU ("hybrid nvidia"), measured
 // only - the bounds below are FidelityFX's on WARP.
@@ -4411,11 +4420,21 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
     constexpr int background_motion = 6;
     const bool overlay = kind == HybridScene::overlay, fade = kind == HybridScene::fade;
     const bool low_res = kind == HybridScene::occlusion_low_res;
-    const bool periphery = kind == HybridScene::occlusion_periphery;
+    const bool foveated = kind == HybridScene::occlusion_foveated ||
+        kind == HybridScene::occlusion_foveated_moved ||
+        kind == HybridScene::occlusion_foveated_moved_current;
+    const bool periphery = kind == HybridScene::occlusion_periphery || foveated;
+    const float inset_shift = kind == HybridScene::occlusion_foveated ? 0.0F : 8.0F;
+    const bool inset_reading_a = kind == HybridScene::occlusion_foveated_moved;
+    constexpr float inset_x = 48.0F, inset_y = 16.0F, inset_width = 160.0F, inset_height = 96.0F;
+    constexpr UINT inset_motion_width = 80, inset_motion_height = 48;
     const bool occluding = kind == HybridScene::occlusion || low_res || periphery;
     const int object_motion = overlay ? 0 : fade ? background_motion : 20;
     const char* const name = fade ? "fade" : overlay ? "overlay"
         : low_res ? "occlusion low-res vectors"
+        : kind == HybridScene::occlusion_foveated ? "occlusion foveated inset"
+        : kind == HybridScene::occlusion_foveated_moved ? "occlusion foveated inset moved (A)"
+        : kind == HybridScene::occlusion_foveated_moved_current ? "occlusion foveated inset moved (B)"
         : periphery ? "occlusion periphery vectors" : "occlusion";
     // The vectors' field in image pixels: the image itself, or for the
     // periphery 16 and 8 pixels wider each side.
@@ -4474,6 +4493,23 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
                 -scale * static_cast<float>(object && !overlay ? object_motion : background_motion),
                 0.0F};
         });
+    // The inset's vectors, in its output pixels (one an image pixel) at two
+    // output pixels a vector: the true motion, plus the inset's own move
+    // where they lead into the previous inset.
+    ComPtr<ID3D12Resource> inset_motion;
+    if (foveated) {
+        inset_motion = create_and_upload_game_motion_field(
+            fixture, inset_motion_width, inset_motion_height, [&](UINT, UINT mx, UINT my) {
+                const int x = static_cast<int>(std::floor(inset_x + (static_cast<float>(mx) + 0.5F) * 2.0F));
+                const int y = static_cast<int>(std::floor(inset_y + (static_cast<float>(my) + 0.5F) * 2.0F));
+                const int ox = x - object_motion;
+                const bool object = y >= object_top && y < object_bottom &&
+                    ox >= object_left && ox < object_left + object_width;
+                const float motion = -static_cast<float>(object ? object_motion : background_motion) +
+                    (inset_reading_a ? inset_shift : 0.0F);
+                return std::array<float, 2>{motion * 0.5F, 0.0F};
+            });
+    }
     std::array<ComPtr<ID3D12Resource>, 2> sources{
         create_source_texture(fixture, width, height),
         create_source_texture(fixture, width, height)};
@@ -4534,6 +4570,29 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
                         std::fabs(placed->placed_motion_rect[0] - 16.0F / 3.0F) < 1e-3F &&
                         std::fabs(placed->placed_motion_rect[2] - width / 3.0F) < 1e-3F,
                     "the periphery guide was not placed over the eye");
+                if (foveated) {
+                    auto inset = std::make_shared<xrfg::DlssMotionVectorFrame>();
+                    inset->stream = 331 + eye;
+                    inset->epoch = 3;
+                    inset->serial = serial;
+                    inset->previous_serial = serial - 1;
+                    inset->motion_vectors = inset_motion;
+                    inset->producer_queue = fixture.queue();
+                    inset->motion_slice = inset->output_slice = eye;
+                    inset->motion_width = inset_motion_width;
+                    inset->motion_height = inset_motion_height;
+                    inset->output_width = static_cast<std::uint32_t>(inset_width);
+                    inset->output_height = static_cast<std::uint32_t>(inset_height);
+                    inset->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                    inset->view_rect = {inset_x, inset_y, inset_width, inset_height};
+                    inset->previous_view_rect = {inset_x - inset_shift, inset_y, inset_width, inset_height};
+                    inset->previous_view_rect_known = true;
+                    auto owner = std::make_shared<xrfg::DlssMotionVectorFrame>(*placed);
+                    owner->inset = inset;
+                    set->eyes[eye] = owner;
+                    continue;
+                }
                 set->eyes[eye] = placed;
                 continue;
             }
@@ -4623,6 +4682,12 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
         // the one edge surface solve). Held at 6 so losing that solve fails.
         require(measure_only || !occluding || edge_error <= 6.0,
             std::string("hybrid occlusion edges went back to the flow for eye ") +
+                std::to_string(eye) + ": " + std::to_string(edge_error));
+        // V516: with the inset composed in, its edges are the full-density
+        // vectors' (2.8; the periphery alone 4.0, the wrong reading of a
+        // moved inset 85).
+        require(measure_only || !foveated || edge_error <= 3.3,
+            std::string("hybrid ") + name + " did not take the inset's vectors for eye " +
                 std::to_string(eye) + ": " + std::to_string(edge_error));
     }
     require(operation_succeeded(synthesizer.wait_for_idle()), "hybrid final drain failed");
@@ -5231,7 +5296,10 @@ int main(int argc, char** argv) {
             SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
             D3D12WarpFixture nvidia_fixture(true);
             for (const auto scene : {HybridScene::occlusion, HybridScene::overlay, HybridScene::fade,
-                                     HybridScene::occlusion_low_res, HybridScene::occlusion_periphery}) {
+                                     HybridScene::occlusion_low_res, HybridScene::occlusion_periphery,
+                                     HybridScene::occlusion_foveated,
+                                     HybridScene::occlusion_foveated_moved,
+                                     HybridScene::occlusion_foveated_moved_current}) {
                 test_hybrid_composition(nvidia_fixture, scene, xrfg::D3D12OpticalFlowBackend::nvidia);
             }
             return 0;
@@ -5259,7 +5327,10 @@ int main(int argc, char** argv) {
             SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
             D3D12WarpFixture hybrid_fixture;
             for (const auto scene : {HybridScene::occlusion, HybridScene::overlay, HybridScene::fade,
-                                     HybridScene::occlusion_low_res, HybridScene::occlusion_periphery}) {
+                                     HybridScene::occlusion_low_res, HybridScene::occlusion_periphery,
+                                     HybridScene::occlusion_foveated,
+                                     HybridScene::occlusion_foveated_moved,
+                                     HybridScene::occlusion_foveated_moved_current}) {
                 test_hybrid_composition(hybrid_fixture, scene);
             }
             test_hybrid_side_by_side(hybrid_fixture);

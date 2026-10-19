@@ -1022,7 +1022,21 @@ void run_streamline_views(const wchar_t* ngx_path, CreateFeature create, Evaluat
                 std::fabs(f.placed_motion_rect[1] - 72.0F * 0.05F / 2.2F * per_y) < 1e-3F &&
                 std::fabs(f.placed_motion_rect[3] - 72.0F * per_y) < 1e-3F,
             "the placed vector rectangle is not the camera's");
+        // V516: the eye's inset - the camera at the periphery's position -
+        // rides on it, with its field in the eye now and a frame before.
+        require(f.inset != nullptr && f.inset->view.viewport == 42U + eye,
+            "an eye's inset was not joined to its periphery");
+        const xrfg::DlssEyeView& eye_view = eye == 0 ? left_eye : right_eye;
+        const float inset_x = (-0.35F - eye_view.tan_left) / 2.2F * 96.0F;
+        require(std::fabs(f.inset->view_rect[0] - inset_x) < 1e-3F &&
+                std::fabs(f.inset->view_rect[2] - 0.7F / 2.2F * 96.0F) < 1e-3F &&
+                std::fabs(f.inset->view_rect[1] - 0.75F / 2.2F * 72.0F) < 1e-3F &&
+                f.inset->previous_view_rect_known &&
+                std::fabs(f.inset->previous_view_rect[0] - inset_x) < 1e-3F,
+            "the inset's field is not placed in its eye");
     }
+    require(xrfg::dlss_motion_vector_statistics().inset_matched != 0,
+        "the inset join was not counted");
     // Symmetric eyes: both peripheries fit alike, and the camera further
     // left is the left eye.
     const xrfg::DlssEyeView symmetric{-1.0F, 1.0F, 1.1F, -1.1F, 0, 0, kEyeWidth, kEyeHeight};

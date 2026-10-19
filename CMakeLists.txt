@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.515.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.516.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -138,6 +138,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     set(XRFG_HYBRID_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/hybrid_nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp")
     set(XRFG_HYBRID_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/hybrid_nvidia_fast_synthesize_midpoint_pixel_shader.hpp")
     set(XRFG_HYBRID_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/hybrid_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp")
+    # V516: MSFS 2024's foveated inset composed into one guide per eye.
+    set(XRFG_GUIDE_COMPOSE_CLEAR_HEADER "${XRFG_GENERATED_SHADER_DIR}/guide_compose_clear_shader.hpp")
+    set(XRFG_GUIDE_COMPOSE_MEASURE_HEADER "${XRFG_GENERATED_SHADER_DIR}/guide_compose_measure_shader.hpp")
+    set(XRFG_GUIDE_COMPOSE_HEADER "${XRFG_GENERATED_SHADER_DIR}/guide_compose_shader.hpp")
     add_custom_command(
         OUTPUT
             "${XRFG_PACK_INPUT_HEADER}"
@@ -155,7 +159,22 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_HYBRID_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
             "${XRFG_HYBRID_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"
             "${XRFG_HYBRID_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
+            "${XRFG_GUIDE_COMPOSE_CLEAR_HEADER}"
+            "${XRFG_GUIDE_COMPOSE_MEASURE_HEADER}"
+            "${XRFG_GUIDE_COMPOSE_HEADER}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E ClearInsetVerdict
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_GUIDE_COMPOSE_CLEAR_HEADER}" /Vn g_xrfg_guide_compose_clear_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/guide_compose.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E MeasureInsetMotion
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_GUIDE_COMPOSE_MEASURE_HEADER}" /Vn g_xrfg_guide_compose_measure_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/guide_compose.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E ComposeInsetGuide
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_GUIDE_COMPOSE_HEADER}" /Vn g_xrfg_guide_compose_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/guide_compose.hlsl"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E PackFlowInput
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_PACK_INPUT_HEADER}" /Vn g_xrfg_pack_flow_input_shader
@@ -224,6 +243,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
         DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/guide_compose.hlsl"
         VERBATIM)
 
     add_library(xrfg_d3d12_history STATIC
@@ -234,6 +254,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         src/d3d12/d3d12_frame_synthesizer.cpp
         src/common/dlss_motion_vectors.cpp
         "${XRFG_PACK_INPUT_HEADER}"
+        "${XRFG_GUIDE_COMPOSE_CLEAR_HEADER}"
+        "${XRFG_GUIDE_COMPOSE_MEASURE_HEADER}"
+        "${XRFG_GUIDE_COMPOSE_HEADER}"
         "${XRFG_GAME_MOTION_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_FULLSCREEN_VERTEX_HEADER}"
         "${XRFG_SYNTHESIZE_PIXEL_HEADER}"

@@ -177,6 +177,35 @@ inset is not used yet.
   vector rectangle placed on the eye (x, y, width, height, eighths of a texel,
   16 bits each); `c` the publication.
 
+### The foveated inset composed in (V516)
+
+The resolver also gives each eye its inset: a recent stream whose camera
+sits with that eye's periphery camera and whose field lies inside the eye's,
+narrower than it. Before a hybrid pair's draws, a compute pass writes, per
+eye, one field of vectors in image pixels at half the eye's resolution, with
+its depth: the inset's vectors (two image pixels a vector in MSFS) inside the
+inset, two vectors in from its border, the periphery's elsewhere. The inset
+follows the eyes, so its field moves between frames; the pass measures each
+frame, on a 32 x 32 grid over the inset, whether its vectors lead into the
+previous frame's inset (reading A) or stay in the current one (reading B),
+against the periphery's, and composes with the one that agrees. Without an
+inset, or if the pass cannot run, the pair keeps the periphery alone (V515).
+
+- `presenter_transition` 754, beside 753 when the eye's inset was found: `a`
+  the eye `<< 32` or the inset stream's low bits; `b` its field in the eye now,
+  `c` at its previous evaluation (x, y, width, height in pixels, 16 bits each;
+  `c` 0 when unknown).
+- `embedded_configuration` 837, the first sixteen compositions and every
+  500th: `a` the left eye's reading A error or reading B's `<< 32`, `b` the
+  right eye's (summed over the samples in sixteenths of a pixel, each capped
+  at 32); `c` the samples, left or right `<< 16`, and the insets' moves since
+  their previous evaluation in eighths of a pixel, left `<< 32`, right `<< 48`.
+  A below B: the inset's vectors include its move, and were read so.
+- 838, once: the first composition. `a` the field's width `<< 32` or height;
+  `b` the left inset's rectangle (x, y, width, height, 16 bits each); `c` the
+  left eye's flags `<< 32` or the right's (bit 0 inset, 1 its previous field
+  known, 2 periphery depth, 3 inset depth).
+
 ### Generated images for flat panels (V509)
 
 A flat panel on a swapchain of its own (not one a projection view uses),

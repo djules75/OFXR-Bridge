@@ -442,6 +442,8 @@ void publish_dlss_motion_vectors(
         frame->depth_inverted = publication.depth_inverted;
         frame->depth_infinite = publication.depth_infinite;
         frame->view = publication.view;
+        // V516: the stream's previous camera (a reset above cleared it).
+        if (stream.latest) frame->previous_view = stream.latest->view;
         stream.jitter_x = publication.jitter_x;
         stream.jitter_y = publication.jitter_y;
         if (stream.first_publication == 0) {
@@ -563,7 +565,53 @@ constexpr std::uint64_t kMaximumViewPublicationGap = 8;
         static_cast<double>(g.position[2]) * right[2];
 }
 
+[[nodiscard]] double camera_distance(const DlssViewGeometry& a, const DlssViewGeometry& b) noexcept {
+    const double x = static_cast<double>(a.position[0]) - b.position[0];
+    const double y = static_cast<double>(a.position[1]) - b.position[1];
+    const double z = static_cast<double>(a.position[2]) - b.position[2];
+    return std::sqrt(x * x + y * y + z * z);
+}
+
+// An inset's field (V516): inside the eye's, to the cover tolerance, and
+// clearly narrower than it - MSFS 2024's is FoveatedRenderingScale of it.
+[[nodiscard]] bool inside_eye_field(const DlssViewGeometry& g, const DlssEyeView& eye) noexcept {
+    const double eye_width = static_cast<double>(eye.tan_right) - eye.tan_left;
+    const double eye_height = static_cast<double>(eye.tan_up) - eye.tan_down;
+    const double width = static_cast<double>(g.tan_right) - g.tan_left;
+    const double height = static_cast<double>(g.tan_up) - g.tan_down;
+    const double slack_x = kViewCoverTolerance * eye_width;
+    const double slack_y = kViewCoverTolerance * eye_height;
+    return g.known && eye_width > 0.0 && eye_height > 0.0 && width > 0.0 && height > 0.0 &&
+        width < 0.9 * eye_width && height < 0.9 * eye_height &&
+        g.tan_left >= eye.tan_left - slack_x && g.tan_right <= eye.tan_right + slack_x &&
+        g.tan_up <= eye.tan_up + slack_y && g.tan_down >= eye.tan_down - slack_y;
+}
+
+// A stream's evaluation for an eye's release: its newest by the watermark.
+[[nodiscard]] std::shared_ptr<const DlssMotionVectorFrame> evaluation_by_release(
+    const Candidate& candidate, std::uint64_t released_at) noexcept {
+    if (released_at == 0 || candidate.frame->publication <= released_at) return candidate.frame;
+    return candidate.previous && candidate.previous->epoch == candidate.frame->epoch &&
+            candidate.previous->publication <= released_at
+        ? candidate.previous : nullptr;
+}
+
 }  // namespace
+
+std::array<float, 4> view_rect_in_eye(
+    const DlssViewGeometry& view,
+    const DlssEyeView& eye) noexcept {
+    const double eye_width = static_cast<double>(eye.tan_right) - eye.tan_left;
+    const double eye_height = static_cast<double>(eye.tan_up) - eye.tan_down;
+    if (!view.known || !(eye_width > 0.0) || !(eye_height > 0.0)) return {};
+    const double x = eye.x + (view.tan_left - eye.tan_left) / eye_width * eye.width;
+    const double width = (static_cast<double>(view.tan_right) - view.tan_left) / eye_width * eye.width;
+    const double y = eye.y + (eye.tan_up - view.tan_up) / eye_height * eye.height;
+    const double height = (static_cast<double>(view.tan_up) - view.tan_down) / eye_height * eye.height;
+    if (!std::isfinite(x) || !std::isfinite(y) || !(width > 0.0) || !(height > 0.0)) return {};
+    return {static_cast<float>(x), static_cast<float>(y), static_cast<float>(width),
+        static_cast<float>(height)};
+}
 
 std::shared_ptr<const DlssMotionVectorFrame> place_guide_in_view(
     const DlssMotionVectorFrame& frame,
@@ -714,27 +762,67 @@ resolve_view_placed_dlss_guides(
         // Each eye's evaluation: its stream's newest by the eye's release.
         std::array<std::shared_ptr<const DlssMotionVectorSet>, kDlssMotionVectorEyeCount> result{};
         const std::array<std::size_t, kDlssMotionVectorEyeCount> chosen_streams{best_left, best_right};
+        // V516: the eyes' insets. An eye's inset is the recent stream whose
+        // field lies inside the eye's, narrower than it, and whose camera
+        // sits with that eye's periphery camera - well within a quarter of
+        // the two eyes' spacing, where the other eye's is a whole spacing
+        // away. None found, the eye keeps its periphery alone (V515).
+        const double eye_spacing = camera_distance(
+            candidates[best_left].frame->view, candidates[best_right].frame->view);
+        std::uint32_t insets_found = 0;
         for (std::uint32_t eye = 0; eye < kDlssMotionVectorEyeCount; ++eye) {
             const Candidate& candidate = candidates[chosen_streams[eye]];
-            std::shared_ptr<const DlssMotionVectorFrame> chosen = candidate.frame;
-            if (released_at[eye] != 0 && chosen->publication > released_at[eye]) {
-                chosen = candidate.previous && candidate.previous->epoch == candidate.frame->epoch &&
-                        candidate.previous->publication <= released_at[eye]
-                    ? candidate.previous : nullptr;
-            }
+            const auto chosen = evaluation_by_release(candidate, released_at[eye]);
             auto placed = chosen ? place_guide_in_view(*chosen, eyes[eye]) : nullptr;
             if (!placed) {
                 ++state.statistics.resolve_stale_pairs;
                 state.statistics.status = DlssMotionVectorStatus::temporal_mismatch;
                 return none;
             }
+            std::shared_ptr<DlssMotionVectorFrame> inset;
+            if (eye_spacing > 1e-6) {
+                std::size_t nearest = candidates.size();
+                double nearest_distance = 0.25 * eye_spacing;
+                for (std::size_t index = 0; index < candidates.size(); ++index) {
+                    if (index == best_left || index == best_right ||
+                        !inside_eye_field(candidates[index].frame->view, eyes[eye])) continue;
+                    const double distance =
+                        camera_distance(candidates[index].frame->view, candidate.frame->view);
+                    if (distance < nearest_distance) {
+                        nearest_distance = distance;
+                        nearest = index;
+                    }
+                }
+                const auto evaluation = nearest < candidates.size()
+                    ? evaluation_by_release(candidates[nearest], released_at[eye]) : nullptr;
+                if (evaluation && evaluation->motion_width != 0 && evaluation->motion_height != 0 &&
+                    inside_eye_field(evaluation->view, eyes[eye])) {
+                    inset = std::make_shared<DlssMotionVectorFrame>(*evaluation);
+                    inset->view_rect = view_rect_in_eye(evaluation->view, eyes[eye]);
+                    inset->previous_view_rect_known = evaluation->previous_view.known;
+                    inset->previous_view_rect = evaluation->previous_view.known
+                        ? view_rect_in_eye(evaluation->previous_view, eyes[eye])
+                        : inset->view_rect;
+                    if (!(inset->view_rect[2] > 0.0F) || !(inset->previous_view_rect[2] > 0.0F)) {
+                        inset.reset();
+                    }
+                }
+            }
             auto set = std::make_shared<DlssMotionVectorSet>();
             set->eye_count = 1;
-            set->eyes[0] = std::move(placed);
+            if (inset) {
+                auto owner = std::make_shared<DlssMotionVectorFrame>(*placed);
+                owner->inset = std::move(inset);
+                set->eyes[0] = std::move(owner);
+                ++insets_found;
+            } else {
+                set->eyes[0] = std::move(placed);
+            }
             result[eye] = std::move(set);
         }
         state.statistics.matched += kDlssMotionVectorEyeCount;
         ++state.statistics.view_matched;
+        if (insets_found == kDlssMotionVectorEyeCount) ++state.statistics.inset_matched;
         return result;
     } catch (...) {
         return none;

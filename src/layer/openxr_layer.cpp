@@ -7580,6 +7580,28 @@ void refresh_projection_guides(
                             (eighths(frame.placed_motion_rect[2]) << 32U) |
                             (eighths(frame.placed_motion_rect[3]) << 48U),
                         frame.publication);
+                    // 754 (V516), beside 753 when the eye's inset was found:
+                    // a the eye << 32 | the inset stream's low bits, b its
+                    // field in the eye now, c at its previous evaluation (x,
+                    // y, width, height in pixels, 16 bits each; c 0 unknown).
+                    if (frame.inset) {
+                        const auto pixels = [](const std::array<float, 4>& rect) {
+                            std::uint64_t packed = 0;
+                            for (std::size_t index = 0; index < rect.size(); ++index) {
+                                packed |= (static_cast<std::uint64_t>(
+                                    std::clamp(rect[index], 0.0F, 65535.0F)) & 0xFFFFU)
+                                    << (16U * index);
+                            }
+                            return packed;
+                        };
+                        const auto& inset = *frame.inset;
+                        xrfg::bridge_flight_logger().event(
+                            xrfg::BridgeFlightOperation::presenter_transition, 754,
+                            (static_cast<std::uint64_t>(eye) << 32U) |
+                                (inset.stream & 0xFFFFFFFFULL),
+                            pixels(inset.view_rect),
+                            inset.previous_view_rect_known ? pixels(inset.previous_view_rect) : 0U);
+                    }
                 }
             }
         }
