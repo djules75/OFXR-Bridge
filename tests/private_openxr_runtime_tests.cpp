@@ -73,7 +73,9 @@ struct Fixture {
     std::function<void(std::uint64_t)> prepared_callback;
     std::function<void(XrSwapchain,unsigned)> image_wait_callback;
     std::function<D3D12_RESOURCE_STATES()> create_state;
-    std::vector<unsigned> pixels,overlay_pixels;
+    std::vector<unsigned> pixels,overlay_pixels,right_pixels;
+    std::vector<std::array<XrSwapchain,2>> stereo_handles;
+    std::size_t native_chain_limit{1000};
     std::vector<float> positions;
     std::vector<std::int64_t> handoffs,submit_receipts;
     std::int64_t simulated_submit_ns{};
@@ -194,6 +196,11 @@ struct Fixture {
             auto& chain=f.chains.at(p->views[0].subImage.swapchain);position=p->views[0].pose.position.x;
             std::scoped_lock lock(f.gpu);
             color=f.read_pixel(chain);
+            if(p->viewCount==2 && p->views[0].subImage.swapchain!=p->views[1].subImage.swapchain) {
+                check(p->views[0].subImage.imageArrayIndex==0 && p->views[1].subImage.imageArrayIndex==0,"separate eyes retain array domain");
+                f.right_pixels.push_back(f.read_pixel(f.chains.at(p->views[1].subImage.swapchain)));
+                f.stereo_handles.push_back({p->views[0].subImage.swapchain,p->views[1].subImage.swapchain});
+            }
             if(info->layerCount>1) {
                 auto* quad=reinterpret_cast<const XrCompositionLayerQuad*>(info->layers[1]);
                 check(quad->type==XR_TYPE_COMPOSITION_LAYER_QUAD,"owned overlay metadata");
@@ -204,7 +211,8 @@ struct Fixture {
         f.changed.notify_all();return f.fail_end?XR_ERROR_RUNTIME_FAILURE:XR_SUCCESS;
     }
     static XrResult XRAPI_CALL create(XrSession,const XrSwapchainCreateInfo* info,XrSwapchain* output) {
-        auto& f=*current;*output=reinterpret_cast<XrSwapchain>(f.next_handle++);auto& chain=f.chains[*output];
+        auto& f=*current;if(f.chains.size()>=f.native_chain_limit)return XR_ERROR_LIMIT_REACHED;
+        *output=reinterpret_cast<XrSwapchain>(f.next_handle++);auto& chain=f.chains[*output];
         chain.static_image=(info->createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT)!=0;
         chain.state=f.create_state?f.create_state():f.real_common?D3D12_RESOURCE_STATE_COMMON:D3D12_RESOURCE_STATE_RENDER_TARGET;
         for(unsigned i=0;i<2;++i)if(f.native12) {
@@ -235,11 +243,11 @@ struct Fixture {
         {std::scoped_lock lock(gpu);float color[]={value/255.0F,0,0,1};unsigned count{};
         if(native12) {
             std::array<XrSwapchainImageD3D12KHR,3> images;for(auto& image:images)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};xr_ok(transport->enumerate_images(handle,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),"enumerate private D12");
-            check(images[index].texture!=chains[handle].d12[0].Get() && images[index].texture!=chains[handle].d12[1].Get(),"producer never writes real XR image");
+            for(auto& [native,c]:chains)for(auto& real:c.d12)check(images[index].texture!=real.Get(),"producer never writes real XR image");
             ComPtr<ID3D12DescriptorHeap> heap;D3D12_DESCRIPTOR_HEAP_DESC desc{};desc.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;desc.NumDescriptors=1;ok(device12->CreateDescriptorHeap(&desc,IID_PPV_ARGS(&heap)),"RTV heap");device12->CreateRenderTargetView(images[index].texture,nullptr,heap->GetCPUDescriptorHandleForHeapStart());
             commands([&](ID3D12GraphicsCommandList* list){list->ClearRenderTargetView(heap->GetCPUDescriptorHandleForHeapStart(),color,0,nullptr);});
         } else {
-            std::array<XrSwapchainImageD3D11KHR,3> images;for(auto& image:images)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR};xr_ok(transport->enumerate_images(handle,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),"enumerate private D11");check(images[index].texture!=chains[handle].d11[0].Get(),"D11 producer private");ComPtr<ID3D11RenderTargetView> rtv;ok(device11->CreateRenderTargetView(images[index].texture,nullptr,&rtv),"D11 RTV");context->ClearRenderTargetView(rtv.Get(),color);
+            std::array<XrSwapchainImageD3D11KHR,3> images;for(auto& image:images)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR};xr_ok(transport->enumerate_images(handle,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),"enumerate private D11");for(auto& [native,c]:chains)for(auto& real:c.d11)check(images[index].texture!=real.Get(),"D11 producer private");ComPtr<ID3D11RenderTargetView> rtv;ok(device11->CreateRenderTargetView(images[index].texture,nullptr,&rtv),"D11 RTV");context->ClearRenderTargetView(rtv.Get(),color);
         }
         }
         XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};xr_ok(release_callback?release_callback(handle,index):transport->release_image(handle,&release_info),"private release");
@@ -747,6 +755,58 @@ void adaptive_source_refill(bool d12) {
     for(unsigned i=1;i<f.handoffs.size();++i)check(f.handoffs[i]-f.handoffs[i-1]>=period,"adaptive source refill must not catch up with a burst");
     std::printf("%s automatic source refill retains all finite irregular input, bounded3slots, strict cadence PASS\n",d12?"D3D12":"D3D11");
 }
+void pooled_publication(bool reuse=false) {
+    Fixture f(true);f.expected_views=2;f.native_chain_limit=2;f.throttled=false;f.reuse_current_real_image=reuse;
+    std::array<std::array<XrSwapchain,4>,2> outputs{};
+    XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    info.format=DXGI_FORMAT_R8G8B8A8_UNORM;info.width=info.height=info.arraySize=info.faceCount=info.mipCount=info.sampleCount=1;
+    info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    for(unsigned eye=0;eye<2;++eye)for(auto& handle:outputs[eye])
+        xr_ok(f.transport->create_swapchain(&info,&handle,D3D12_RESOURCE_STATE_RENDER_TARGET,1,reinterpret_cast<XrSwapchain>(eye+400)),"four independent private buffers fit one real sink per eye");
+    check(f.chains.size()==2,"eight generated rings consume exactly two native handles");
+    XrSwapchain incompatible{};info.width=2;
+    check(f.transport->create_swapchain(&info,&incompatible,D3D12_RESOURCE_STATE_RENDER_TARGET,1,reinterpret_cast<XrSwapchain>(400))==XR_ERROR_LIMIT_REACHED,"incompatible extent never aliases existing publication sink");
+    info.width=1;check(f.chains.size()==2,"failed extra sink leaves working pools intact");
+    auto submit=[&](unsigned slot,unsigned identity) {
+        std::array<XrCompositionLayerProjectionView,2> views;
+        for(unsigned eye=0;eye<2;++eye) {
+            views[eye]={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};views[eye].pose.orientation.w=1;
+            views[eye].pose.position.x=float(identity);views[eye].subImage.swapchain=outputs[eye][slot];views[eye].subImage.imageRect.extent={1,1};
+        }
+        XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=2;projection.views=views.data();
+        auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+        XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=epoch+ns();end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;end.layerCount=1;end.layers=&layer;
+        f.begin_virtual();return f.transport->end_frame(&end);
+    };
+    for(unsigned slot=0;slot<4;++slot){f.write(outputs[0][slot],20+slot*30);f.write(outputs[1][slot],130+slot*30);}
+    xr_ok(submit(0,1),"first pooled pair accepted");f.wait_entered();
+    xr_ok(submit(1,2),"second pooled pair accepted despite held native End");
+    xr_ok(submit(2,3),"third pooled pair accepted despite held native End");
+    auto blocked=std::async(std::launch::async,[&]{return submit(3,4);});
+    check(blocked.wait_for(40ms)==std::future_status::timeout,"pool retains original FIFO capacity/backpressure");
+    f.unblock();check(blocked.wait_for(3s)==std::future_status::ready,"pooled FIFO retirement wakes producer");xr_ok(blocked.get(),"fourth pooled pair");
+    f.wait_count(4);xr_ok(f.transport->drain(),"pooled first drain");
+    // Same slot/generation numbers across virtual buffers must never reuse
+    // another buffer's completed XR image; returning 0->1->0 tests that join.
+    for(auto slot:{0U,1U,0U}){xr_ok(submit(slot,5+slot),"pooled return/repeat accepted");}
+    f.wait_count(7);xr_ok(f.transport->drain(),"pooled return drain");
+    check(f.pixels==std::vector<unsigned>({20,50,80,110,20,50,20}),"left native pixel sequence exact across private ring changes");
+    check(f.right_pixels==std::vector<unsigned>({130,160,190,220,130,160,130}),"right eye never overwritten by left or following frame");
+    for(auto& pair:f.stereo_handles)check(pair[0]!=pair[1] && pair==f.stereo_handles.front(),"one stable native sink per separate eye");
+    for(unsigned i=1;i<f.handoffs.size();++i)check(f.handoffs[i]-f.handoffs[i-1]>=period,"pooled delivery preserves director cadence");
+    auto& left=outputs[0];for(unsigned slot=0;slot<3;++slot)xr_ok(f.transport->destroy_swapchain(left[slot]),"destroy unused pooled ring");
+    check(f.chains.size()==2,"shared publication survives other ring destruction");
+    xr_ok(f.transport->destroy_swapchain(left[3]),"last left ring retires its native sink");check(f.chains.size()==1,"one eye publication released on final owner");
+    for(auto handle:outputs[1])xr_ok(f.transport->destroy_swapchain(handle),"destroy right rings");check(f.chains.empty(),"all pooled native handles released");
+    // A fresh generation after a preset switch must not reuse a retired pool.
+    XrSwapchain rebuilt{};xr_ok(f.transport->create_swapchain(&info,&rebuilt,D3D12_RESOURCE_STATE_RENDER_TARGET,1,reinterpret_cast<XrSwapchain>(400)),"rebuild retired pool");
+    check(f.chains.size()==1,"preset rebuild creates one fresh sink");f.write(rebuilt,77);f.expected_views=1;
+    f.begin_virtual();xr_ok(f.submit(rebuilt,9),"rebuilt pool delivery");f.wait_count(8);xr_ok(f.transport->drain(),"rebuilt pool drain");check(f.pixels.back()==77,"rebuilt source copied to new native sink");
+    f.transport->stop();xr_ok(f.transport->start(),"pooled session restart");f.write(rebuilt,101);
+    f.begin_virtual();xr_ok(f.submit(rebuilt,10),"retained pool after session restart");f.wait_count(9);xr_ok(f.transport->drain(),"restarted pool drain");check(f.pixels.back()==101,"restart retains correct publication ownership");
+    xr_ok(f.transport->destroy_swapchain(rebuilt),"rebuilt pool cleanup");check(f.chains.empty(),"no native sink leak");
+    std::puts("Pooled native publication: eight private rings/two real sinks, exact stereo FIFO pixels, backpressure, stable cadence, destruction and rebuild PASS");
+}
 void queue_priority_policy() {
     D3D12_COMMAND_QUEUE_DESC original{};original.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;original.NodeMask=1;
     std::vector<int> attempts;
@@ -767,4 +827,4 @@ void queue_priority_policy() {
     std::puts("Final delivery priority: supported HIGH, descriptor preservation, original dedicated fallback, failure propagation PASS");
 }
 }
-int main(int argc,char** argv){std::setvbuf(stdout,nullptr,_IONBF,0);if(argc>1){if(std::string_view(argv[1])=="luke"){luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);}else if(std::string_view(argv[1])=="advance"){native_end_advance(true);native_end_advance(false);}else if(std::string_view(argv[1])=="source"){copied_source_reuse(true);copied_source_reuse(false);}else if(std::string_view(argv[1])=="clock"){stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);quiet_native_clock(true);quiet_native_clock(false);}else if(std::string_view(argv[1])=="phase"){physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();}else if(std::string_view(argv[1])=="margin"){native_margin_scope(true);native_margin_scope(false);}else if(std::string_view(argv[1])=="pipeline"){overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();}else if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();native_margin_scope(true);native_margin_scope(false);rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);quiet_native_clock(true);quiet_native_clock(false);copied_source_reuse(true);copied_source_reuse(false);native_end_advance(true);native_end_advance(false);luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);return 0;}
+int main(int argc,char** argv){std::setvbuf(stdout,nullptr,_IONBF,0);if(argc>1){if(std::string_view(argv[1])=="pool"){pooled_publication();pooled_publication(true);}else if(std::string_view(argv[1])=="luke"){luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);}else if(std::string_view(argv[1])=="advance"){native_end_advance(true);native_end_advance(false);}else if(std::string_view(argv[1])=="source"){copied_source_reuse(true);copied_source_reuse(false);}else if(std::string_view(argv[1])=="clock"){stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);quiet_native_clock(true);quiet_native_clock(false);}else if(std::string_view(argv[1])=="phase"){physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();}else if(std::string_view(argv[1])=="margin"){native_margin_scope(true);native_margin_scope(false);}else if(std::string_view(argv[1])=="pipeline"){overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();}else if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();native_margin_scope(true);native_margin_scope(false);rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);quiet_native_clock(true);quiet_native_clock(false);copied_source_reuse(true);copied_source_reuse(false);native_end_advance(true);native_end_advance(false);luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);return 0;}

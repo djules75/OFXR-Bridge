@@ -10,6 +10,9 @@
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    const bool pooled=route.starts_with("pooled-");if(pooled)route=route.substr(7);
+    const bool unpooled=route.starts_with("unpooled-");if(unpooled)route=route.substr(9);
+    const bool split_eyes=pooled || unpooled;
     const bool separate_queue=route.starts_with("separate-");if(separate_queue)route=route.substr(9);
     int a{},b{};if(route.size()>3 && route[route.size()-3]=='-'){a=route[route.size()-2]-'0';b=route.back()-'0';route.resize(route.size()-3);}
     const bool switching=route=="switch";if(switching)route="new";
@@ -108,7 +111,9 @@ int main(int argc,char** argv) {
     state->control_revision=xrfg::embedded::snapshot().revision;
     {std::scoped_lock lock(g_state_mutex);g_sessions[state->handle]=state;g_instances[dispatch->instance]=dispatch;}
     ok(install_private_runtime(state),"install real SteamVR private dispatch");
-    f.transport=state->private_runtime;xr_ok(f.transport->start(),"start common consumer");
+    f.transport=state->private_runtime;state->uevr_application=pooled;
+    if(pooled)f.native_chain_limit=4; // two app chains plus two physical publication sinks
+    xr_ok(f.transport->start(),"start common consumer");
     if(separate_queue) {
         ComPtr<ID3D12Fence> gate,progress;
         ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate)),"binding dependency gate");
@@ -121,11 +126,19 @@ int main(int argc,char** argv) {
         ok(wait_composition_fence(progress.Get(),1),"reacquire proof drain");
         check(SUCCEEDED(independent),"private reacquire must not join the real runtime queue");
     }
-    XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};info.width=256;info.height=128;info.arraySize=2;info.faceCount=info.mipCount=info.sampleCount=1;info.format=DXGI_FORMAT_R8G8B8A8_UNORM;info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};info.width=256;info.height=128;info.arraySize=split_eyes?1:2;info.faceCount=info.mipCount=info.sampleCount=1;info.format=DXGI_FORMAT_R8G8B8A8_UNORM;info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
     XrSwapchain chain{};xr_ok(layer_create_swapchain_impl(state->handle,&info,&chain),"shipping application swapchain");
     std::array<XrSwapchainImageD3D12KHR,3> images;for(auto& image:images)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};unsigned count{};
     if(native12)xr_ok(layer_enumerate_swapchain_images_impl(chain,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),"shipping enumerate/capture setup");
     else{std::array<XrSwapchainImageD3D11KHR,3> d11;for(auto& image:d11)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR};xr_ok(layer_enumerate_swapchain_images_impl(chain,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(d11.data())),"shipping D11 enumerate/capture setup");}
+    XrSwapchain right=chain;std::array<XrSwapchainImageD3D12KHR,3> right_images{};
+    if(split_eyes) {
+        auto saved=f.create_state;f.create_state=[]{return D3D12_RESOURCE_STATE_RENDER_TARGET;};
+        xr_ok(layer_create_swapchain_impl(state->handle,&info,&right),"separate right-eye application chain");
+        f.create_state=std::move(saved);
+        for(auto& image:right_images)image={XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
+        xr_ok(layer_enumerate_swapchain_images_impl(right,3,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(right_images.data())),"right-eye capture setup");
+    }
     ComPtr<ID3D12Resource> depth,motion;
     if(vectors) {
         D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;desc.Width=256;desc.Height=128;desc.DepthOrArraySize=2;desc.MipLevels=1;desc.SampleDesc.Count=1;desc.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
@@ -136,7 +149,23 @@ int main(int argc,char** argv) {
         auto d=views->GetCPUDescriptorHandleForHeapStart(),m=d;m.ptr+=f.device12->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);f.device12->CreateRenderTargetView(depth.Get(),nullptr,d);f.device12->CreateRenderTargetView(motion.Get(),nullptr,m);
         f.commands([&](ID3D12GraphicsCommandList* list){const float z[]={.5F,.5F,.5F,1},v[]={0,0,0,0};list->ClearRenderTargetView(d,z,0,nullptr);list->ClearRenderTargetView(m,v,0,nullptr);D3D12_RESOURCE_BARRIER b[2]{};for(auto& x:b){x.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;x.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;x.Transition.StateBefore=D3D12_RESOURCE_STATE_RENDER_TARGET;x.Transition.StateAfter=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;}b[0].Transition.pResource=depth.Get();b[1].Transition.pResource=motion.Get();list->ResourceBarrier(2,b);});
     }
-    f.release_callback=[&](XrSwapchain handle,unsigned index){auto c=find_swapchain(handle);{std::scoped_lock lock(c->mutex);c->acquired_indices.push_back(index);++c->waited_count;}XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};return layer_release_swapchain_image_impl(handle,&release);};
+    if(split_eyes && vectors)xrfg::configure_dlss_motion_vector_tracking(true);
+    f.release_callback=[&](XrSwapchain handle,unsigned index){
+        auto c=find_swapchain(handle);
+        if(split_eyes && vectors) {
+            ComPtr<ID3D12GraphicsCommandList> recorded;
+            f.commands([&](ID3D12GraphicsCommandList* list) {
+                recorded=list;xrfg::DlssMotionVectorPublication p{};
+                p.stream=handle==chain?100:200;p.output=c->enumerated_d3d12_images[index].Get();
+                p.motion_vectors=motion.Get();p.depth=depth.Get();p.producer_queue=f.queue.Get();p.producer_command_list=list;
+                p.output_width=p.motion_width=p.depth_width=256;p.output_height=p.motion_height=p.depth_height=128;
+                check(bool(xrfg::publish_dlss_motion_vectors(p)),"real per-eye release-bound guide publication");
+            });
+            ID3D12CommandList* lists[]={recorded.Get()};xrfg::report_dlss_motion_vector_submission(f.queue.Get(),1,lists);
+        }
+        {std::scoped_lock lock(c->mutex);c->acquired_indices.push_back(index);++c->waited_count;}
+        XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};return layer_release_swapchain_image_impl(handle,&release);
+    };
     for(unsigned n=1;n<=8;++n) {
         if(switching && (n==3 || n==5 || n==7)) {
             auto desired=xrfg::embedded::snapshot().desired;desired.enabled=true;desired.backend=n==3?1:n==5?3:0;
@@ -145,12 +174,12 @@ int main(int argc,char** argv) {
             ok(apply_embedded_control(state),"apply route hot handoff");check(state->private_runtime==f.transport,"route switch must retain one common distributor");
         }
         std::fprintf(stderr,"frame %u write (physical=%u)\n",n,f.real_ends.load());
-        f.write(chain,n*20);
-        if(vectors){auto c=find_swapchain(chain);auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();guides->eye_count=2;
+        f.write(chain,n*20);if(split_eyes)f.write(right,n*20+7);
+        if(vectors && !split_eyes){auto c=find_swapchain(chain);auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();guides->eye_count=2;
             for(unsigned eye=0;eye<2;++eye){auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=eye+1;g->epoch=1;g->serial=n;g->previous_serial=n-1;g->publication=2*n+eye;g->producer_queue=f.queue;g->output=images[*c->last_released_index].texture;g->output_slice=eye;g->depth=depth;g->motion_vectors=motion;g->motion_slice=eye;g->output_width=g->depth_width=g->motion_width=256;g->output_height=g->depth_height=g->motion_height=128;guides->eyes[eye]=g;}c->last_released_motion_vectors=guides;}
         XrFrameState prediction{XR_TYPE_FRAME_STATE};xr_ok(layer_wait_frame_impl(state->handle,nullptr,&prediction),"shipping virtual Wait");xr_ok(layer_begin_frame_impl(state->handle,nullptr),"shipping virtual Begin");
         std::array<XrCompositionLayerProjectionView,2> views;
-        for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=eye?.032F:-.032F;v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=chain;v.subImage.imageArrayIndex=eye;v.subImage.imageRect.extent={256,128};}
+        for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=eye?.032F:-.032F;v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=split_eyes && eye?right:chain;v.subImage.imageArrayIndex=split_eyes?0:eye;v.subImage.imageRect.extent={256,128};}
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=2;projection.views=views.data();auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
         XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=prediction.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;end.layerCount=1;end.layers=&layer;
         xr_ok(layer_end_frame_impl(state->handle,&end),"shipping OFXR End handoff");
@@ -167,9 +196,17 @@ int main(int argc,char** argv) {
         if(f.handoffs[i]-f.handoffs[i-1]<period)std::fprintf(stderr,"handoff interval%lldns required%lldns\n",f.handoffs[i]-f.handoffs[i-1],period);
         check(f.handoffs[i]-f.handoffs[i-1]>=period,"all route outputs obey common physical cadence");
     }
+    if(split_eyes) {
+        check(f.chains.size()==(pooled?4:10),"only UEVR separate eyes share native publication sinks");
+        for(auto source:{chain,right}) {
+            auto c=find_swapchain(source);check(c->pooled_publication==pooled && c->frame_generation,"both source output sets obey scoped pool admission");
+            check(!state->lower_vram && !state->separate_synthesis,"pool does not activate Lower VRAM");
+        }
+    }
     f.transport->stop();
     for(auto& c:find_swapchains(state)){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
     xr_ok(layer_destroy_swapchain_impl(chain),"shipping destroy");
+    if(split_eyes){xr_ok(layer_destroy_swapchain_impl(right),"shipping right destroy");check(f.chains.empty(),"shipping pool cleanup leaves no native handles");}
     ComPtr<ID3D12InfoQueue> messages;
     if(SUCCEEDED(f.device12.As(&messages)))for(UINT64 i=0;i<messages->GetNumStoredMessagesAllowedByRetrievalFilter();++i){SIZE_T bytes{};messages->GetMessage(i,nullptr,&bytes);std::vector<char> data(bytes);auto* message=reinterpret_cast<D3D12_MESSAGE*>(data.data());messages->GetMessage(i,message,&bytes);if(message->Severity<=D3D12_MESSAGE_SEVERITY_ERROR){std::fprintf(stderr,"D3D12: %s\n",message->pDescription);check(false,"actual generator resource state/ownership validation");}}
     {std::scoped_lock lock(g_state_mutex);g_sessions.clear();g_swapchains.clear();g_instances.clear();}

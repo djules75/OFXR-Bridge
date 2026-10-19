@@ -87,6 +87,8 @@ public:
         // and requested handoff+physical-period coverage. This is bounded to one
         // attempt per packet, separate from expired-cycle recovery. A still-current
         // replacement may retain a shorter horizon; never spin for that preference.
+        // Stage27: allocation-only publication mapping; source handle in a,
+        // virtual output handle in b and native sink in c (not QPC times).
         // Stage26: source read leases released after completed copy; packet ID,
         // QPC ns and lease count. This does not retire real targets or FIFO credits.
         std::function<void(int,std::uint64_t,std::int64_t,std::int64_t)> trace;
@@ -105,7 +107,10 @@ public:
     XrResult end_frame(const XrFrameEndInfo*);
     XrResult create_swapchain(const XrSwapchainCreateInfo*, XrSwapchain*,
         D3D12_RESOURCE_STATES image_state=D3D12_RESOURCE_STATE_RENDER_TARGET,
-        std::uint32_t image_count=3);
+        std::uint32_t image_count=3,
+        // Internal generated outputs only: compatible rings of one source eye
+        // share a native sink; the producer handle/images remain independent.
+        XrSwapchain publication_source=XR_NULL_HANDLE);
     XrResult destroy_swapchain(XrSwapchain);
     XrResult enumerate_images(XrSwapchain,std::uint32_t,std::uint32_t*,XrSwapchainImageBaseHeader*);
     XrResult acquire_image(XrSwapchain,const XrSwapchainImageAcquireInfo*,std::uint32_t*);

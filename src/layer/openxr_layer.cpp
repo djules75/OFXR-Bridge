@@ -703,6 +703,7 @@ enum class GenerationQuarantineReason : std::int64_t {
 struct CompositionImageSlot;
 
 struct SessionState {
+    bool uevr_application{}; // captured once at session creation, never inferred from game name
     bool steamvr_separate_queue{true}; // immutable session preference, tray-only
     // D25 comparison policy: SteamVR's runtime gets its own binding queue.
     // Shared non-pacing support for both advanced NVIDIA routes.
@@ -2195,6 +2196,7 @@ struct SwapchainState {
     // textures, which is what the D3D12 history captures from.
     std::shared_ptr<xrfg::D3D11BridgeSwapchain> bridge;
     bool private_depth{};
+    bool pooled_publication{}; // admitted two-source UEVR projection only
     SwapchainState(
         std::shared_ptr<SessionState> owner,
         const XrSwapchainCreateInfo& input_create_info)
@@ -2953,7 +2955,8 @@ struct CreatedPrivateSwapchain {
     const auto& dispatch = state->session->dispatch;
     XrSwapchain handle = XR_NULL_HANDLE;
     XrResult result = state->session->private_runtime
-        ? state->session->private_runtime->create_swapchain(&create_info,&handle,image_state,1)
+        ? state->session->private_runtime->create_swapchain(&create_info,&handle,image_state,1,
+            state->pooled_publication?state->handle:XR_NULL_HANDLE)
         : dispatch->create_swapchain(state->session->handle,&create_info,&handle);
     if (XR_FAILED(result) || handle == XR_NULL_HANDLE) {
         // Which error the runtime gave separates a budget it will not exceed
@@ -3847,8 +3850,19 @@ void release_session_generation_budget(
             log_swapchain_eligibility(chain,SwapchainEligibilityReason::awaiting_projection_use);
         }
     }
+    const bool separate_uevr=session->uevr_application && session->private_runtime &&
+        session->graphics_binding==SessionGraphicsBinding::d3d12 && !session->luke_afw_enabled &&
+        mappings.size()==2 && mappings[0].application_swapchain!=mappings[1].application_swapchain &&
+        mappings[0].views.size()==1 && mappings[1].views.size()==1 &&
+        mappings[0].views[0].projection_index==mappings[1].views[0].projection_index &&
+        mappings[0].views[0].view_index!=mappings[1].views[0].view_index &&
+        std::all_of(mappings.begin(),mappings.end(),[](const auto& mapping) {
+            auto chain=find_swapchain(mapping.application_swapchain);
+            return chain && chain->create_info.arraySize==1 && chain->create_info.faceCount==1;
+        });
     for (const ProjectionResourceMapping& mapping : mappings) {
         const auto swapchain = find_swapchain(mapping.application_swapchain);
+        if(swapchain)swapchain->pooled_publication=separate_uevr;
         if(swapchain && session->luke_afw_enabled && swapchain->create_info.arraySize==1)
             xrfg::configure_luke_color_origin_extent(swapchain->create_info.width,swapchain->create_info.height);
         if (!swapchain || ensure_frame_generation(swapchain)) {

@@ -9,6 +9,7 @@
 #include <deque>
 #include <mutex>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -52,6 +53,11 @@ struct PrivateOpenXrRuntime::Impl {
     };
     struct Chain {
         XrSwapchain handle{};
+        // Only generated UEVR separate-eye outputs opt into this publication
+        // owner. Application handles and every other transport retain 1:1 XR.
+        std::shared_ptr<Chain> publication;
+        XrSwapchain publication_source{};
+        unsigned publication_owners{};
         XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
         std::vector<Image> images;
         std::vector<ComPtr<ID3D12Resource>> real12;
@@ -92,6 +98,19 @@ struct PrivateOpenXrRuntime::Impl {
     std::mutex mutex,accept_mutex,copy_mutex,stop_mutex;
     std::condition_variable changed;
     std::unordered_map<XrSwapchain,std::shared_ptr<Chain>> chains;
+    std::vector<std::weak_ptr<Chain>> publication_pools;
+    static Chain& destination(Chain& chain) noexcept {
+        return chain.publication?*chain.publication:chain;
+    }
+    static bool compatible(const Chain& chain,const XrSwapchainCreateInfo& info,
+                           D3D12_RESOURCE_STATES state,XrSwapchain source) noexcept {
+        const auto& a=chain.info;
+        return chain.publication_source==source && chain.image_state==state &&
+            a.createFlags==info.createFlags && a.usageFlags==info.usageFlags &&
+            a.format==info.format && a.sampleCount==info.sampleCount &&
+            a.width==info.width && a.height==info.height && a.faceCount==info.faceCount &&
+            a.arraySize==info.arraySize && a.mipCount==info.mipCount;
+    }
     std::unique_ptr<PrivateOutputFifo<std::shared_ptr<Packet>>> fifo;
     std::thread consumer,preparer,waiter;
     std::optional<WaitJob> wait_job;
@@ -254,23 +273,47 @@ struct PrivateOpenXrRuntime::Impl {
         std::unique_lock lock(mutex);
         for(auto& lease:packet.leases) {
             auto chain=lease.chain;
-            auto reusable=[&]{return chain->latest_target && (chain->latest_target->users ||
+            auto& endpoint=destination(*chain);
+            // A simultaneous second eye/domain must never alias the same
+            // last-released XR image. Pool keys are source-specific; reject an
+            // invalid internal composition rather than silently overwrite it.
+            if(std::any_of(packet.targets.begin(),packet.targets.end(),[&](auto& target) {
+                auto owner=target->chain.lock();return owner && &destination(*owner)==&endpoint;
+            }))return false;
+            auto reusable=[&]{return endpoint.latest_target && (endpoint.latest_target->users ||
                     (chain->info.createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT)) &&
-                    chain->latest_target->source==lease.image &&
-                    chain->latest_target->source_generation==lease.generation;};
-            changed.wait(lock,[&]{return stopping || !chain->pending_target || reusable();});
+                    endpoint.latest_target->chain.lock()==chain &&
+                    endpoint.latest_target->source==lease.image &&
+                    endpoint.latest_target->source_generation==lease.generation;};
+            changed.wait(lock,[&]{return stopping || !endpoint.pending_target || reusable();});
             if(stopping)return false;
-            auto target=chain->latest_target;
+            auto target=endpoint.latest_target;
             if(!reusable()) {
                 target=std::make_shared<PreparedTarget>();target->chain=chain;target->source=lease.image;
                 target->source_generation=lease.generation;
-                chain->latest_target=chain->pending_target=target;
-                std::erase_if(chain->retained_targets,[](auto& weak){return weak.expired();});
-                chain->retained_targets.push_back(target);
+                endpoint.latest_target=endpoint.pending_target=target;
+                std::erase_if(endpoint.retained_targets,[](auto& weak){return weak.expired();});
+                endpoint.retained_targets.push_back(target);
                 packet.copies_needed.push_back(target);
             }
             ++target->users;packet.targets.push_back(std::move(target));
         }
+        if(std::none_of(packet.leases.begin(),packet.leases.end(),[](const auto& lease){return bool(lease.chain->publication);}))return true;
+        // Metadata, rectangles, slices and poses remain the owned packet's;
+        // only virtual generated handles are resolved at the native boundary.
+        auto resolve=[&](XrSwapchain& handle) {
+            const auto it=chains.find(handle);
+            if(it!=chains.end())handle=destination(*it->second).handle;
+        };
+        for(auto& copy:packet.copies)std::visit([&](auto& layer) {
+            using T=std::decay_t<decltype(layer)>;
+            if constexpr(std::is_same_v<T,XrCompositionLayerProjection>) {
+                for(auto& view:copy.views)resolve(view.subImage.swapchain);
+                for(auto& depth:copy.depths)if(depth.type==XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR)
+                    resolve(depth.subImage.swapchain);
+            } else if constexpr(std::is_same_v<T,XrCompositionLayerCubeKHR>)resolve(layer.swapchain);
+            else resolve(layer.subImage.swapchain);
+        },copy.value);
         return true;
     }
     XrResult publish(Packet& packet) {
@@ -281,18 +324,19 @@ struct PrivateOpenXrRuntime::Impl {
         for(auto& target:packet.copies_needed) {
             if(stopping){result=XR_ERROR_SESSION_NOT_RUNNING;break;}
             auto chain=target->chain.lock();if(!chain){result=XR_ERROR_HANDLE_INVALID;break;}
+            auto& endpoint=destination(*chain);
             unsigned index{};XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-            result=options.real.acquire(chain->handle,&acquire,&index);if(XR_FAILED(result))break;
+            result=options.real.acquire(endpoint.handle,&acquire,&index);if(XR_FAILED(result))break;
             target->index=index;target->acquired=true;
             XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wait.timeout=XR_INFINITE_DURATION;
-            result=options.real.wait_image(chain->handle,&wait);if(XR_FAILED(result))break;
+            result=options.real.wait_image(endpoint.handle,&wait);if(XR_FAILED(result))break;
             target->waited=true;
             // A runtime may return the same physical image that an earlier
             // released generation still needs for EndFrame (including repeats).
             // Only that actual alias waits; different real indices keep their
             // preparation independent of all older presentation leases.
             {std::unique_lock lock(mutex);
-             auto available=[&]{return std::none_of(chain->retained_targets.begin(),chain->retained_targets.end(),[&](auto& weak){
+             auto available=[&]{return std::none_of(endpoint.retained_targets.begin(),endpoint.retained_targets.end(),[&](auto& weak){
                  auto other=weak.lock();return other && other!=target && other->users && other->acquired && other->index==index;});};
              changed.wait(lock,[&]{return stopping || available();});
              if(!available()){result=XR_ERROR_SESSION_NOT_RUNNING;break;}}
@@ -312,14 +356,14 @@ struct PrivateOpenXrRuntime::Impl {
                 for(auto& target:targets) {
                     if(FAILED(copied))break;
                     auto owner=target->chain.lock();if(!owner){copied=E_INVALIDARG;break;}
-                    auto& chain=*owner;auto& image=chain.images[target->source];
-                    if(target->index>=chain.real12.size()){copied=E_INVALIDARG;break;}
+                    auto& chain=*owner;auto& endpoint=destination(chain);auto& image=chain.images[target->source];
+                    if(target->index>=endpoint.real12.size()){copied=E_INVALIDARG;break;}
                     const auto state=chain.image_state;
                     D3D12_RESOURCE_BARRIER barriers[2]{};
                     for(auto& b:barriers){b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;b.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;}
                     barriers[0].Transition.pResource=image.d12.Get();barriers[0].Transition.StateBefore=state;barriers[0].Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_SOURCE;
-                    barriers[1].Transition.pResource=chain.real12[target->index].Get();barriers[1].Transition.StateBefore=state;barriers[1].Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_DEST;
-                    list->ResourceBarrier(2,barriers);list->CopyResource(chain.real12[target->index].Get(),image.d12.Get());
+                    barriers[1].Transition.pResource=endpoint.real12[target->index].Get();barriers[1].Transition.StateBefore=state;barriers[1].Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_DEST;
+                    list->ResourceBarrier(2,barriers);list->CopyResource(endpoint.real12[target->index].Get(),image.d12.Get());
                     for(auto& b:barriers)std::swap(b.Transition.StateBefore,b.Transition.StateAfter);list->ResourceBarrier(2,barriers);
                 }
                 if(SUCCEEDED(copied))copied=list->Close();
@@ -329,9 +373,9 @@ struct PrivateOpenXrRuntime::Impl {
             } else {
                 for(auto& target:targets) {
                     auto owner=target->chain.lock();if(!owner){copied=E_INVALIDARG;break;}
-                    auto& chain=*owner;
-                    if(target->index>=chain.real11.size()){copied=E_INVALIDARG;break;}
-                    context11->CopyResource(chain.real11[target->index].Get(),chain.images[target->source].d11.Get());
+                    auto& chain=*owner;auto& endpoint=destination(chain);
+                    if(target->index>=endpoint.real11.size()){copied=E_INVALIDARG;break;}
+                    context11->CopyResource(endpoint.real11[target->index].Get(),chain.images[target->source].d11.Get());
                 }
                 if(SUCCEEDED(copied)){copied=context11->Signal(copy11.Get(),copy_serial+1);if(SUCCEEDED(copied))++copy_serial;}
                 context11->Flush();if(diagnostic)trace(13,packet.sequence);
@@ -347,10 +391,11 @@ struct PrivateOpenXrRuntime::Impl {
     XrResult release_prepared(Packet& packet) {
         for(auto& target:packet.targets)if(!target->released) {
             auto chain=target->chain.lock();if(!chain || !target->waited || !target->complete)return XR_ERROR_CALL_ORDER_INVALID;
+            auto& endpoint=destination(*chain);
             XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-            const auto result=options.real.release(chain->handle,&release);if(XR_FAILED(result))return result;
+            const auto result=options.real.release(endpoint.handle,&release);if(XR_FAILED(result))return result;
             {std::scoped_lock lock(mutex);target->released=true;
-             if(chain->pending_target==target)chain->pending_target.reset();}
+             if(endpoint.pending_target==target)endpoint.pending_target.reset();}
             changed.notify_all();
         }
         return XR_SUCCESS;
@@ -721,7 +766,8 @@ void PrivateOpenXrRuntime::stop() {
     // before a session restart or swapchain destruction can reuse that image.
     std::vector<std::shared_ptr<Impl::Chain>> owned_chains;
     {std::scoped_lock lock(s.mutex);owned_chains.reserve(s.chains.size());
-     for(auto& [h,c]:s.chains)owned_chains.push_back(c);}
+     for(auto& [h,c]:s.chains) {auto owner=c->publication?c->publication:c;
+         if(std::find(owned_chains.begin(),owned_chains.end(),owner)==owned_chains.end())owned_chains.push_back(owner);}}
     for(auto& c:owned_chains)if(auto target=c->pending_target;target && target->acquired && !target->released) {
         if(!target->waited) {
             XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wait.timeout=XR_INFINITE_DURATION;
@@ -733,13 +779,14 @@ void PrivateOpenXrRuntime::stop() {
         }
     }
     {std::scoped_lock lock(s.mutex);s.fifo.reset();s.prepared.clear();s.pending=0;s.running=false;
-     for(auto& [h,c]:s.chains) {
+     for(auto& [h,c]:s.chains) {c->consumers=0;for(auto& image:c->images)image.readers=0;}
+     for(auto& c:owned_chains) {
          // Static runtime images can be acquired/released only once for their
          // entire lifetime, including a session stop/start with retained chains.
          if(c->latest_target && (c->info.createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) &&
              c->latest_target->complete && c->latest_target->released)c->latest_target->users=0;
          else c->latest_target.reset();
-         c->pending_target.reset();c->retained_targets.clear();c->consumers=0;for(auto& image:c->images)image.readers=0;}}
+         c->pending_target.reset();c->retained_targets.clear();}}
     s.changed.notify_all();
 }
 XrResult PrivateOpenXrRuntime::drain() {
@@ -798,43 +845,82 @@ XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info) {
     reservation.accepted=true;{std::scoped_lock lock(s.mutex);s.begun=0;++s.accepted_packets;}s.changed.notify_all();
     s.trace(1,packet->sequence);return XR_SUCCESS;
 }
-XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* info,XrSwapchain* output,D3D12_RESOURCE_STATES image_state,std::uint32_t image_count) {
+XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* info,XrSwapchain* output,D3D12_RESOURCE_STATES image_state,std::uint32_t image_count,XrSwapchain publication_source) {
     if(!info || !output || info->type!=XR_TYPE_SWAPCHAIN_CREATE_INFO || image_count<1 || image_count>3)return XR_ERROR_VALIDATION_FAILURE;
-    auto& s=*impl_;auto chain=std::make_shared<Impl::Chain>();chain->info=*info;chain->info.next=nullptr;
+    const bool pooled=publication_source!=XR_NULL_HANDLE;
+    // Internal pooling accepts only plain color outputs. Unknown extension
+    // structures, static/depth/array/cube chains retain the existing path.
+    if(pooled && (info->next || info->createFlags || info->arraySize!=1 || info->faceCount!=1 ||
+        !(info->usageFlags&XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) ||
+        (info->usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)))return XR_ERROR_VALIDATION_FAILURE;
+    auto& s=*impl_;std::unique_lock lock(s.mutex);
+    auto chain=std::make_shared<Impl::Chain>();chain->info=*info;chain->info.next=nullptr;
     chain->image_state=(info->usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)?D3D12_RESOURCE_STATE_DEPTH_WRITE:image_state;
-    auto result=s.options.real.create(s.options.real.session,info,&chain->handle);if(XR_FAILED(result))return result;
-    unsigned count{};result=s.options.real.enumerate(chain->handle,0,&count,nullptr);
-    auto abandon=[&](XrResult r){s.options.real.destroy(chain->handle);return r;};
-    if(XR_FAILED(result) || !count)return abandon(XR_FAILED(result)?result:XR_ERROR_RUNTIME_FAILURE);
+    if(pooled) {
+        std::erase_if(s.publication_pools,[](auto& weak){return weak.expired();});
+        for(auto& weak:s.publication_pools)if(auto candidate=weak.lock();candidate && candidate->publication_owners &&
+            Impl::compatible(*candidate,*info,chain->image_state,publication_source)){chain->publication=candidate;break;}
+        if(!chain->publication) {
+            chain->publication=std::make_shared<Impl::Chain>();chain->publication->info=chain->info;
+            chain->publication->image_state=chain->image_state;
+            chain->publication->publication_source=publication_source;
+        }
+    }
+    auto& endpoint=Impl::destination(*chain);
+    const bool created=endpoint.handle==XR_NULL_HANDLE;
+    auto abandon=[&](XrResult r){if(created && endpoint.handle)s.options.real.destroy(endpoint.handle);return r;};
+    if(created) {
+        auto result=s.options.real.create(s.options.real.session,info,&endpoint.handle);if(XR_FAILED(result))return result;
+        unsigned count{};result=s.options.real.enumerate(endpoint.handle,0,&count,nullptr);
+        if(XR_FAILED(result) || !count)return abandon(XR_FAILED(result)?result:XR_ERROR_RUNTIME_FAILURE);
+        if(s.d12()) {
+            std::vector<XrSwapchainImageD3D12KHR> images(count,{XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
+            result=s.options.real.enumerate(endpoint.handle,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data()));
+            if(XR_FAILED(result))return abandon(result);
+            for(auto& image:images){if(!image.texture)return abandon(XR_ERROR_RUNTIME_FAILURE);endpoint.real12.emplace_back(image.texture);}
+        } else {
+            std::vector<XrSwapchainImageD3D11KHR> images(count,{XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+            result=s.options.real.enumerate(endpoint.handle,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data()));
+            if(XR_FAILED(result))return abandon(result);
+            for(auto& image:images){if(!image.texture)return abandon(XR_ERROR_RUNTIME_FAILURE);endpoint.real11.emplace_back(image.texture);}
+        }
+    }
     const unsigned private_count=(info->createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT)?1:image_count;
     chain->images.resize(private_count);HRESULT made=S_OK;
     if(s.d12()) {
-        std::vector<XrSwapchainImageD3D12KHR> images(count,{XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
-        result=s.options.real.enumerate(chain->handle,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data()));
-        if(XR_FAILED(result))return abandon(result);for(auto& image:images)chain->real12.emplace_back(image.texture);
-        auto desc=images.front().texture->GetDesc();D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
-        const auto state=chain->image_state;
+        auto desc=endpoint.real12.front()->GetDesc();D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
         for(auto& image:chain->images) {
-            made=s.device12->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,state,nullptr,IID_PPV_ARGS(&image.d12));if(FAILED(made))break;
+            made=s.device12->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,chain->image_state,nullptr,IID_PPV_ARGS(&image.d12));if(FAILED(made))break;
             image.d12->SetName(L"OFXR private distributor image");
         }
     } else {
-        std::vector<XrSwapchainImageD3D11KHR> images(count,{XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
-        result=s.options.real.enumerate(chain->handle,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data()));
-        if(XR_FAILED(result))return abandon(result);for(auto& image:images)chain->real11.emplace_back(image.texture);
-        D3D11_TEXTURE2D_DESC desc{};images.front().texture->GetDesc(&desc);
+        D3D11_TEXTURE2D_DESC desc{};endpoint.real11.front()->GetDesc(&desc);
         for(auto& image:chain->images){made=s.device11->CreateTexture2D(&desc,nullptr,&image.d11);if(FAILED(made))break;}
     }
     if(FAILED(made))return abandon(XR_ERROR_RUNTIME_FAILURE);
-    {std::scoped_lock lock(s.mutex);s.chains.emplace(chain->handle,chain);}
-    *output=chain->handle;return XR_SUCCESS;
+    if(pooled) {
+        chain->handle=reinterpret_cast<XrSwapchain>(chain.get());
+        if(s.chains.contains(chain->handle))return abandon(XR_ERROR_RUNTIME_FAILURE);
+        ++endpoint.publication_owners;
+        if(created)s.publication_pools.push_back(chain->publication);
+    }
+    s.chains.emplace(chain->handle,chain);*output=chain->handle;
+    // Allocation-only F9 witness: source, virtual buffer, actual XR sink.
+    // No per-frame query, additional sampler or delivery callback is installed.
+    if(pooled && s.tracing())s.options.trace(27,reinterpret_cast<std::uint64_t>(publication_source),
+        reinterpret_cast<std::int64_t>(chain->handle),reinterpret_cast<std::int64_t>(endpoint.handle));
+    return XR_SUCCESS;
 }
 XrResult PrivateOpenXrRuntime::destroy_swapchain(XrSwapchain handle) {
     auto& s=*impl_;std::unique_lock lock(s.mutex);auto it=s.chains.find(handle);if(it==s.chains.end())return XR_ERROR_HANDLE_INVALID;
     auto chain=it->second;chain->destroying=true;
     if(s.stopping){lock.unlock();stop();lock.lock();}
     s.changed.wait(lock,[&]{return !chain->consumers && std::none_of(chain->images.begin(),chain->images.end(),[](auto& i){return i.readers!=0;});});
-    s.chains.erase(handle);lock.unlock();return s.options.real.destroy(handle);
+    s.chains.erase(handle);
+    auto publication=chain->publication;
+    if(publication && --publication->publication_owners)return XR_SUCCESS;
+    const auto native=publication?publication->handle:handle;
+    lock.unlock();return s.options.real.destroy(native);
 }
 XrResult PrivateOpenXrRuntime::enumerate_images(XrSwapchain handle,std::uint32_t capacity,std::uint32_t* count,XrSwapchainImageBaseHeader* output) {
     auto& s=*impl_;std::scoped_lock lock(s.mutex);auto it=s.chains.find(handle);if(it==s.chains.end())return XR_ERROR_HANDLE_INVALID;
