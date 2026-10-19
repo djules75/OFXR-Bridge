@@ -3144,6 +3144,16 @@ struct D3D12FrameSynthesizer::Impl {
             kDlssMotionVectorEyeCount);
     }
 
+    // The guides a pair carries are a whole set for its views: one per eye,
+    // or (V513) one field across a single-slice image holding both eyes -
+    // No Man's Sky evaluates DLSS once for its whole side-by-side image.
+    // Each view then reads the field at its own place in it, and
+    // guides_fit_views still asks that every view lie inside the field.
+    [[nodiscard]] bool guide_eye_count_fits(UINT eye_count, UINT view_count) const noexcept {
+        return eye_count == expected_guide_eyes(view_count) ||
+            (eye_count == 1 && image_description.DepthOrArraySize == 1);
+    }
+
     [[nodiscard]] bool side_by_side_guides(
         const DlssMotionVectorSet& guides) const noexcept {
         return guides.eye_count > image_description.DepthOrArraySize;
@@ -3162,7 +3172,7 @@ struct D3D12FrameSynthesizer::Impl {
         const auto& current = current_source.motion_vectors;
         if (!previous_vectors || !current || previous_vectors->eye_count == 0 ||
             previous_vectors->eye_count != current->eye_count ||
-            current->eye_count != expected_guide_eyes(current_source.view_count) ||
+            !guide_eye_count_fits(current->eye_count, current_source.view_count) ||
             current->eye_count > kDlssMotionVectorEyeCount) {
             return false;
         }
@@ -3184,7 +3194,7 @@ struct D3D12FrameSynthesizer::Impl {
         const RollingSource& source) const noexcept {
         const auto& frames = source.motion_vectors;
         if (!frames || frames->eye_count == 0 ||
-            frames->eye_count != expected_guide_eyes(source.view_count) ||
+            !guide_eye_count_fits(frames->eye_count, source.view_count) ||
             frames->eye_count > kDlssMotionVectorEyeCount) {
             return false;
         }
@@ -3205,7 +3215,7 @@ struct D3D12FrameSynthesizer::Impl {
         const auto& current = current_source.motion_vectors;
         if (!previous_vectors || !current || previous_vectors->eye_count == 0 ||
             previous_vectors->eye_count != current->eye_count ||
-            current->eye_count != expected_guide_eyes(current_source.view_count) ||
+            !guide_eye_count_fits(current->eye_count, current_source.view_count) ||
             current->eye_count > kDlssMotionVectorEyeCount) {
             return false;
         }

@@ -510,6 +510,33 @@ void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept {
     }
 }
 
+std::shared_ptr<const DlssMotionVectorFrame> split_both_eyes_guide(
+    const DlssMotionVectorFrame& frame,
+    std::uint32_t view_width,
+    std::uint32_t view_height,
+    std::uint32_t eye) noexcept {
+    try {
+        if (eye > 1 || view_width == 0 || view_height == 0 || frame.output_x != 0 ||
+            frame.output_y != 0 || frame.output_width != view_width * 2U ||
+            frame.output_height != view_height || frame.motion_width < 2) {
+            return {};
+        }
+        auto half = std::make_shared<DlssMotionVectorFrame>(frame);
+        half->output_width = view_width;
+        const std::uint32_t motion_half = frame.motion_width / 2U;
+        half->motion_x = frame.motion_x + eye * motion_half;
+        half->motion_width = motion_half;
+        if (frame.depth && frame.depth_width >= 2) {
+            const std::uint32_t depth_half = frame.depth_width / 2U;
+            half->depth_x = frame.depth_x + eye * depth_half;
+            half->depth_width = depth_half;
+        }
+        return half;
+    } catch (...) {
+        return {};
+    }
+}
+
 std::uint64_t dlss_motion_vector_publications() noexcept {
     try {
         auto& state = registry();

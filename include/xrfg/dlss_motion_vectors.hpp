@@ -147,6 +147,17 @@ void configure_dlss_motion_vector_tracking(bool enabled) noexcept;
 // completed. A live disable intentionally retains them until this safe point.
 void retire_disabled_dlss_motion_vector_resources() noexcept;
 void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept;
+// One DLSS evaluation for both eyes side by side, each eye then in a
+// swapchain of its own at that swapchain's origin (V513, No Man's Sky): the
+// guide eye `eye` (0 left, 1 right) reads is the evaluation's half, placed at
+// the view's origin - its output the view's size, its vector and depth
+// rectangles the evaluation's matching halves. Null unless the evaluation
+// spans exactly two views of view_width x view_height side by side.
+std::shared_ptr<const DlssMotionVectorFrame> split_both_eyes_guide(
+    const DlssMotionVectorFrame& frame,
+    std::uint32_t view_width,
+    std::uint32_t view_height,
+    std::uint32_t eye) noexcept;
 // The guides for an XR image. With an array image both eyes come as a
 // stereo set. With a one-slice image (a swapchain per eye) and its eye (0 or
 // 1; -1 unknown), the set holds that eye's own evaluation: chosen by the

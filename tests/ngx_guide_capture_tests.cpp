@@ -8,6 +8,7 @@
 #include "xrfg/d3d11_d3d12_interop.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/ngx_guide_capture.hpp"
+#include "xrfg/vulkan_d3d12_interop.hpp"
 
 #include <windows.h>
 #include <d3d11_4.h>
@@ -16,6 +17,7 @@
 #include <wrl/client.h>
 
 #include <nvsdk_ngx.h>
+#include <nvsdk_ngx_defs_vk.h>
 
 #include <cmath>
 #include <cstdio>
@@ -133,6 +135,427 @@ using EvaluateFeature11 = NVSDK_NGX_Result(NVSDK_CONV*)(
 // resolver pairs the two eye streams for a side-by-side image twice an
 // output's width (UEVR's Native Stereo, Ready or Not), and the snapshot on
 // the D3D12 side holds the very vectors the game wrote in D3D11.
+using CreateFeatureVk = NVSDK_NGX_Result(NVSDK_CONV*)(
+    VkCommandBuffer, NVSDK_NGX_Feature, NVSDK_NGX_Parameter*, NVSDK_NGX_Handle**);
+using EvaluateFeatureVk = NVSDK_NGX_Result(NVSDK_CONV*)(
+    VkCommandBuffer, const NVSDK_NGX_Handle*, const NVSDK_NGX_Parameter*,
+    PFN_NVSDK_NGX_ProgressCallback);
+
+// V513: a bridged Vulkan session. The capture records the copies into the
+// game's command buffer; the Vulkan queue layer, in the chain as the tray
+// registers it, signals the shared timeline after the game submits it; the
+// snapshot copies run on the D3D12 queue at the flush. Checked: the Vulkan
+// exports are detoured; both eyes publish with depth (a packed D32S8 depth,
+// through a buffer); the D3D12 snapshots hold the cleared vectors and depth;
+// and a copy whose command buffer is never submitted is dropped at the end of
+// the frame rather than offered.
+const wchar_t* g_queue_layer_path = nullptr;
+
+int run_vulkan(HMODULE module, const wchar_t* queue_layer_path) {
+    const auto create = reinterpret_cast<CreateFeatureVk>(
+        GetProcAddress(module, "NVSDK_NGX_VULKAN_CreateFeature"));
+    const auto evaluate = reinterpret_cast<EvaluateFeatureVk>(
+        GetProcAddress(module, "NVSDK_NGX_VULKAN_EvaluateFeature"));
+    const auto release = reinterpret_cast<ReleaseFeature>(
+        GetProcAddress(module, "NVSDK_NGX_VULKAN_ReleaseFeature"));
+    require(create && evaluate && release, "the stand-in lacks a Vulkan export");
+
+    // The queue layer in this process's chain, as layer_call_chain_depth.cmake
+    // puts it there.
+    wchar_t temp[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, temp);
+    const std::wstring directory = std::wstring(temp) + L"xrfg-ngx-vk-" +
+        std::to_wstring(GetCurrentProcessId());
+    CreateDirectoryW(directory.c_str(), nullptr);
+    std::wstring library(queue_layer_path);
+    std::string escaped;
+    for (wchar_t c : library) {
+        if (c == L'\\') escaped += "\\\\";
+        else escaped += static_cast<char>(c);
+    }
+    {
+        FILE* manifest = nullptr;
+        _wfopen_s(&manifest, (directory + L"\\VK_LAYER_OFXR_queue_serialize.json").c_str(), L"wb");
+        require(manifest != nullptr, "writing the queue layer manifest");
+        std::fprintf(manifest,
+            "{\"file_format_version\":\"1.2.0\",\"layer\":{\"name\":\"VK_LAYER_OFXR_queue_serialize\","
+            "\"type\":\"GLOBAL\",\"library_path\":\"%s\",\"api_version\":\"1.3.296\","
+            "\"implementation_version\":\"1\",\"description\":\"OFXR queue layer under test\","
+            "\"functions\":{\"vkNegotiateLoaderLayerInterfaceVersion\":\"OFXR_vkNegotiateLoaderLayerInterfaceVersion\","
+            "\"vkGetInstanceProcAddr\":\"OFXR_vkGetInstanceProcAddr\",\"vkGetDeviceProcAddr\":\"OFXR_vkGetDeviceProcAddr\"}}}",
+            escaped.c_str());
+        std::fclose(manifest);
+    }
+    SetEnvironmentVariableW(L"VK_LAYER_PATH", directory.c_str());
+    SetEnvironmentVariableW(L"VK_INSTANCE_LAYERS", L"VK_LAYER_OFXR_queue_serialize");
+    // The tray's own registration of the layer, while it is armed, is an
+    // implicit layer of the same name from the build it armed: kept out, so
+    // the layer under test is the one in the chain.
+    SetEnvironmentVariableW(L"VK_LOADER_LAYERS_DISABLE", L"~implicit~");
+    HMODULE loader = LoadLibraryW(L"vulkan-1.dll");
+    if (loader == nullptr) {
+        std::cout << "SKIP: no Vulkan implementation on this machine\n";
+        return 0;
+    }
+    const auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(loader, "vkGetInstanceProcAddr"));
+    const auto create_instance = reinterpret_cast<PFN_vkCreateInstance>(gipa(nullptr, "vkCreateInstance"));
+    VkApplicationInfo application{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    application.apiVersion = VK_API_VERSION_1_2;
+    VkInstanceCreateInfo instance_info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    instance_info.pApplicationInfo = &application;
+    VkInstance instance{};
+    require(create_instance(&instance_info, nullptr, &instance) == VK_SUCCESS, "vkCreateInstance");
+    const auto enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(gipa(instance, "vkEnumeratePhysicalDevices"));
+    const auto properties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(gipa(instance, "vkGetPhysicalDeviceProperties"));
+    const auto families = reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
+        gipa(instance, "vkGetPhysicalDeviceQueueFamilyProperties"));
+    const auto create_device = reinterpret_cast<PFN_vkCreateDevice>(gipa(instance, "vkCreateDevice"));
+    const auto gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(gipa(instance, "vkGetDeviceProcAddr"));
+    std::uint32_t count = 0;
+    enumerate(instance, &count, nullptr);
+    std::vector<VkPhysicalDevice> physicals(count);
+    enumerate(instance, &count, physicals.data());
+    VkPhysicalDevice physical{};
+    for (VkPhysicalDevice candidate : physicals) {
+        VkPhysicalDeviceProperties p{};
+        properties(candidate, &p);
+        if (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) { physical = candidate; break; }
+    }
+    if (physical == VK_NULL_HANDLE && !physicals.empty()) physical = physicals.front();
+    require(physical != VK_NULL_HANDLE, "no Vulkan physical device");
+    std::uint32_t family_count = 0;
+    families(physical, &family_count, nullptr);
+    std::vector<VkQueueFamilyProperties> family_properties(family_count);
+    families(physical, &family_count, family_properties.data());
+    std::uint32_t family = UINT32_MAX;
+    for (std::uint32_t i = 0; i < family_count; ++i) {
+        if ((family_properties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) { family = i; break; }
+    }
+    require(family != UINT32_MAX, "no graphics queue family");
+    const float priority = 1.0F;
+    VkDeviceQueueCreateInfo queue_info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    queue_info.queueFamilyIndex = family;
+    queue_info.queueCount = 1;
+    queue_info.pQueuePriorities = &priority;
+    VkPhysicalDeviceVulkan12Features features12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    features12.timelineSemaphore = VK_TRUE;
+    const char* extensions[]{VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME};
+    VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    device_info.pNext = &features12;
+    device_info.queueCreateInfoCount = 1;
+    device_info.pQueueCreateInfos = &queue_info;
+    device_info.enabledExtensionCount = 2;
+    device_info.ppEnabledExtensionNames = extensions;
+    VkDevice device{};
+    require(create_device(physical, &device_info, nullptr, &device) == VK_SUCCESS, "vkCreateDevice");
+    require(GetModuleHandleW(L"OFXR_vulkan_queue_layer.dll") != nullptr,
+        "the Vulkan queue layer is not in the chain");
+    const auto load = [&](const char* name) { return gdpa(device, name); };
+    const auto get_queue = reinterpret_cast<PFN_vkGetDeviceQueue>(load("vkGetDeviceQueue"));
+    const auto create_image = reinterpret_cast<PFN_vkCreateImage>(load("vkCreateImage"));
+    const auto image_requirements = reinterpret_cast<PFN_vkGetImageMemoryRequirements>(load("vkGetImageMemoryRequirements"));
+    const auto allocate_memory = reinterpret_cast<PFN_vkAllocateMemory>(load("vkAllocateMemory"));
+    const auto bind_image = reinterpret_cast<PFN_vkBindImageMemory>(load("vkBindImageMemory"));
+    const auto create_pool = reinterpret_cast<PFN_vkCreateCommandPool>(load("vkCreateCommandPool"));
+    const auto allocate_buffers = reinterpret_cast<PFN_vkAllocateCommandBuffers>(load("vkAllocateCommandBuffers"));
+    const auto begin = reinterpret_cast<PFN_vkBeginCommandBuffer>(load("vkBeginCommandBuffer"));
+    const auto end = reinterpret_cast<PFN_vkEndCommandBuffer>(load("vkEndCommandBuffer"));
+    const auto barrier = reinterpret_cast<PFN_vkCmdPipelineBarrier>(load("vkCmdPipelineBarrier"));
+    const auto clear_color = reinterpret_cast<PFN_vkCmdClearColorImage>(load("vkCmdClearColorImage"));
+    const auto clear_depth = reinterpret_cast<PFN_vkCmdClearDepthStencilImage>(load("vkCmdClearDepthStencilImage"));
+    const auto submit = reinterpret_cast<PFN_vkQueueSubmit>(load("vkQueueSubmit"));
+    const auto wait_idle = reinterpret_cast<PFN_vkQueueWaitIdle>(load("vkQueueWaitIdle"));
+    const auto memory_properties = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+        gipa(instance, "vkGetPhysicalDeviceMemoryProperties"));
+    VkPhysicalDeviceMemoryProperties memory{};
+    memory_properties(physical, &memory);
+    VkQueue queue{};
+    get_queue(device, family, 0, &queue);
+
+    const xrfg::VulkanSessionBinding binding{instance, physical, device, family, 0};
+    ComPtr<ID3D12Device> device12;
+    ComPtr<ID3D12CommandQueue> queue12;
+    require_hresult(xrfg::create_d3d12_device_for_vulkan(binding, device12.GetAddressOf(),
+        queue12.GetAddressOf()), "create_d3d12_device_for_vulkan");
+    xrfg::configure_ngx_guide_capture_vulkan(binding, device12.Get(), queue12.Get(), true);
+    xrfg::poll_ngx_guide_capture();
+    auto statistics = xrfg::ngx_guide_capture_statistics();
+    if (!statistics.vulkan_active || statistics.vulkan_modules_hooked != 1) {
+        std::cerr << "vulkan_active=" << statistics.vulkan_active
+                  << " vulkan_modules_hooked=" << statistics.vulkan_modules_hooked
+                  << " failures=" << statistics.vulkan_transport_failures
+                  << " stage=" << statistics.vulkan_start_stage << std::endl;
+    }
+    require(statistics.vulkan_active && statistics.vulkan_modules_hooked == 1,
+        "the stand-in's Vulkan exports were not detoured, or the capture did not start");
+
+    const auto image = [&](VkFormat format, std::uint32_t width, std::uint32_t height, VkImageUsageFlags usage) {
+        VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        info.imageType = VK_IMAGE_TYPE_2D;
+        info.format = format;
+        info.extent = {width, height, 1};
+        info.mipLevels = 1;
+        info.arrayLayers = 1;
+        info.samples = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        info.usage = usage;
+        VkImage result{};
+        require(create_image(device, &info, nullptr, &result) == VK_SUCCESS, "vkCreateImage");
+        VkMemoryRequirements requirements{};
+        image_requirements(device, result, &requirements);
+        std::uint32_t type = 0;
+        for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
+            if ((requirements.memoryTypeBits & (1U << i)) != 0 &&
+                (memory.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
+                type = i;
+                break;
+            }
+        }
+        VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = type;
+        VkDeviceMemory backing{};
+        require(allocate_memory(device, &allocate, nullptr, &backing) == VK_SUCCESS, "vkAllocateMemory");
+        require(bind_image(device, result, backing, 0) == VK_SUCCESS, "vkBindImageMemory");
+        return result;
+    };
+    constexpr std::uint32_t kRenderWidth = 48, kRenderHeight = 32;
+    constexpr std::uint32_t kOutputWidth = 96, kOutputHeight = 64;
+    constexpr VkImageUsageFlags kInput = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    const VkImage motion_left = image(VK_FORMAT_R16G16_SFLOAT, kRenderWidth, kRenderHeight, kInput);
+    const VkImage motion_right = image(VK_FORMAT_R16G16_SFLOAT, kRenderWidth, kRenderHeight, kInput);
+    const VkImage depth = image(VK_FORMAT_D32_SFLOAT_S8_UINT, kRenderWidth, kRenderHeight,
+        kInput | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+    const VkImage output = image(VK_FORMAT_R8G8B8A8_UNORM, kOutputWidth, kOutputHeight,
+        kInput | VK_IMAGE_USAGE_STORAGE_BIT);
+
+    VkCommandPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    pool_info.queueFamilyIndex = family;
+    pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    VkCommandPool pool{};
+    require(create_pool(device, &pool_info, nullptr, &pool) == VK_SUCCESS, "vkCreateCommandPool");
+    VkCommandBufferAllocateInfo buffer_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    buffer_info.commandPool = pool;
+    buffer_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    buffer_info.commandBufferCount = 2;
+    std::array<VkCommandBuffer, 2> buffers{};
+    require(allocate_buffers(device, &buffer_info, buffers.data()) == VK_SUCCESS, "vkAllocateCommandBuffers");
+
+    Parameters creation;
+    creation.Set(NVSDK_NGX_Parameter_Width, kRenderWidth);
+    creation.Set(NVSDK_NGX_Parameter_Height, kRenderHeight);
+    creation.Set(NVSDK_NGX_Parameter_OutWidth, kOutputWidth);
+    creation.Set(NVSDK_NGX_Parameter_OutHeight, kOutputHeight);
+    creation.Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,
+        static_cast<int>(NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_DepthInverted));
+    NVSDK_NGX_Handle* left = nullptr;
+    NVSDK_NGX_Handle* right = nullptr;
+    VkCommandBufferBeginInfo begin_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    require(begin(buffers[0], &begin_info) == VK_SUCCESS, "vkBeginCommandBuffer");
+    require(NVSDK_NGX_SUCCEED(create(buffers[0], NVSDK_NGX_Feature_SuperSampling, &creation, &left)) && left &&
+            NVSDK_NGX_SUCCEED(create(buffers[0], NVSDK_NGX_Feature_SuperSampling, &creation, &right)) && right,
+        "Vulkan feature creation failed through the hook");
+
+    // The game's frame: clear the inputs, put them where DLSS reads them.
+    const auto transition = [&](VkCommandBuffer buffer, VkImage target, VkImageAspectFlags aspect,
+                                 VkImageLayout from, VkImageLayout to) {
+        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        b.oldLayout = from;
+        b.newLayout = to;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = target;
+        b.subresourceRange = {aspect, 0, 1, 0, 1};
+        barrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
+            0, nullptr, 0, nullptr, 1, &b);
+    };
+    const VkImageSubresourceRange color_range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    const VkImageSubresourceRange depth_range{VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
+    for (VkImage target : {motion_left, motion_right}) {
+        transition(buffers[0], target, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    }
+    transition(buffers[0], depth, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkClearColorValue left_value{};
+    left_value.float32[0] = 1.5F;
+    left_value.float32[1] = -2.0F;
+    VkClearColorValue right_value{};
+    right_value.float32[0] = 3.0F;
+    right_value.float32[1] = 0.5F;
+    clear_color(buffers[0], motion_left, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &left_value, 1, &color_range);
+    clear_color(buffers[0], motion_right, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &right_value, 1, &color_range);
+    const VkClearDepthStencilValue depth_value{0.5F, 0};
+    clear_depth(buffers[0], depth, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &depth_value, 1, &depth_range);
+    for (VkImage target : {motion_left, motion_right}) {
+        transition(buffers[0], target, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+    transition(buffers[0], depth, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    const auto resource = [](VkImage target, VkFormat format, std::uint32_t width, std::uint32_t height,
+                              VkImageAspectFlags aspect) {
+        NVSDK_NGX_Resource_VK value{};
+        value.Type = NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW;
+        value.Resource.ImageViewInfo.Image = target;
+        value.Resource.ImageViewInfo.Format = format;
+        value.Resource.ImageViewInfo.Width = width;
+        value.Resource.ImageViewInfo.Height = height;
+        value.Resource.ImageViewInfo.SubresourceRange = {aspect, 0, 1, 0, 1};
+        return value;
+    };
+    NVSDK_NGX_Resource_VK output_resource = resource(output, VK_FORMAT_R8G8B8A8_UNORM, kOutputWidth,
+        kOutputHeight, VK_IMAGE_ASPECT_COLOR_BIT);
+    NVSDK_NGX_Resource_VK left_resource = resource(motion_left, VK_FORMAT_R16G16_SFLOAT, kRenderWidth,
+        kRenderHeight, VK_IMAGE_ASPECT_COLOR_BIT);
+    NVSDK_NGX_Resource_VK right_resource = resource(motion_right, VK_FORMAT_R16G16_SFLOAT, kRenderWidth,
+        kRenderHeight, VK_IMAGE_ASPECT_COLOR_BIT);
+    NVSDK_NGX_Resource_VK depth_resource = resource(depth, VK_FORMAT_D32_SFLOAT_S8_UINT, kRenderWidth,
+        kRenderHeight, VK_IMAGE_ASPECT_DEPTH_BIT);
+    const auto evaluate_eye = [&](VkCommandBuffer buffer, NVSDK_NGX_Handle* handle,
+                                  NVSDK_NGX_Resource_VK* vectors) {
+        Parameters frame;
+        frame.Set(NVSDK_NGX_Parameter_Output, static_cast<void*>(&output_resource));
+        frame.Set(NVSDK_NGX_Parameter_MotionVectors, static_cast<void*>(vectors));
+        frame.Set(NVSDK_NGX_Parameter_Depth, static_cast<void*>(&depth_resource));
+        frame.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, kRenderWidth);
+        frame.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, kRenderHeight);
+        frame.Set(NVSDK_NGX_Parameter_Reset, 0);
+        require(NVSDK_NGX_SUCCEED(evaluate(buffer, handle, &frame, nullptr)),
+            "Vulkan evaluation failed through the hook");
+    };
+    evaluate_eye(buffers[0], left, &left_resource);
+    evaluate_eye(buffers[0], right, &right_resource);
+    require(end(buffers[0]) == VK_SUCCESS, "vkEndCommandBuffer");
+    // Recorded, not submitted: nothing is published yet, at any flush - a
+    // game recording ahead submits after the frame before ends.
+    xrfg::flush_ngx_guide_capture_vulkan(false);
+    xrfg::flush_ngx_guide_capture_vulkan(true);
+    statistics = xrfg::ngx_guide_capture_statistics();
+    require(statistics.vulkan_publications == 0 && statistics.vulkan_transport_failures == 0 &&
+            statistics.vulkan_dropped == 0,
+        "a Vulkan copy was published, or dropped, before its command buffer was submitted");
+    VkSubmitInfo submit_info{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &buffers[0];
+    require(submit(queue, 1, &submit_info, VK_NULL_HANDLE) == VK_SUCCESS, "vkQueueSubmit");
+    xrfg::flush_ngx_guide_capture_vulkan(false);
+    require(wait_idle(queue) == VK_SUCCESS, "vkQueueWaitIdle");
+    statistics = xrfg::ngx_guide_capture_statistics();
+    require(statistics.vulkan_publications == 2 && statistics.vulkan_dropped == 0,
+        "the submitted Vulkan copies were not both published at the flush");
+
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC eye_description{};
+    eye_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    eye_description.Width = kOutputWidth * 2U;
+    eye_description.Height = kOutputHeight;
+    eye_description.DepthOrArraySize = 1;
+    eye_description.MipLevels = 1;
+    eye_description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    eye_description.SampleDesc.Count = 1;
+    ComPtr<ID3D12Resource> eye_image;
+    require_hresult(device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &eye_description,
+        D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(eye_image.GetAddressOf())), "eye image");
+    const auto set = xrfg::resolve_dlss_motion_vectors(eye_image.Get(), queue12.Get());
+    require(set != nullptr && set->eye_count == 2, "no side-by-side guide set resolved from Vulkan");
+
+    ComPtr<ID3D12CommandAllocator> allocator;
+    require_hresult(device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+        IID_PPV_ARGS(allocator.GetAddressOf())), "allocator");
+    ComPtr<ID3D12GraphicsCommandList> list;
+    require_hresult(device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(),
+        nullptr, IID_PPV_ARGS(list.GetAddressOf())), "list");
+    D3D12_HEAP_PROPERTIES readback_heap{};
+    readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC buffer_description{};
+    buffer_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer_description.Width = 3U * 256U * kRenderHeight;
+    buffer_description.Height = 1;
+    buffer_description.DepthOrArraySize = 1;
+    buffer_description.MipLevels = 1;
+    buffer_description.SampleDesc.Count = 1;
+    buffer_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> readback;
+    require_hresult(device12->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE,
+        &buffer_description, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+        IID_PPV_ARGS(readback.GetAddressOf())), "readback");
+    const auto copy_out = [&](ID3D12Resource* source_resource, D3D12_RESOURCE_STATES state,
+                              DXGI_FORMAT format, unsigned slot) {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = source_resource;
+        b.Transition.StateBefore = state;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1, &b);
+        D3D12_TEXTURE_COPY_LOCATION source{};
+        source.pResource = source_resource;
+        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION destination{};
+        destination.pResource = readback.Get();
+        destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        destination.PlacedFootprint.Offset = slot * 256ULL * kRenderHeight;
+        destination.PlacedFootprint.Footprint = {format, kRenderWidth, kRenderHeight, 1, 256};
+        list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+        list->ResourceBarrier(1, &b);
+    };
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        const auto& frame = set->eyes[eye];
+        require(frame && frame->motion_vectors && frame->depth, "a Vulkan eye lacks its vectors or depth");
+        require(frame->producer_queue.Get() == queue12.Get() && frame->depth_inverted,
+            "the Vulkan frame's queue or flags were not carried");
+        copy_out(frame->motion_vectors.Get(), frame->resource_state, DXGI_FORMAT_R16G16_FLOAT, eye);
+    }
+    copy_out(set->eyes[0]->depth.Get(), set->eyes[0]->depth_resource_state, DXGI_FORMAT_R32_FLOAT, 2);
+    require_hresult(list->Close(), "Close");
+    ID3D12CommandList* lists[]{list.Get()};
+    queue12->ExecuteCommandLists(1, lists);
+    ComPtr<ID3D12Fence> fence;
+    require_hresult(device12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf())), "fence");
+    require_hresult(queue12->Signal(fence.Get(), 1), "Signal");
+    HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    require_hresult(fence->SetEventOnCompletion(1, done), "SetEventOnCompletion");
+    require(WaitForSingleObject(done, 10000) == WAIT_OBJECT_0, "the D3D12 queue did not finish");
+    CloseHandle(done);
+    std::uint32_t* mapped = nullptr;
+    require_hresult(readback->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "Map");
+    const std::uint32_t eye0 = mapped[0];
+    const std::uint32_t eye1 = mapped[256U * kRenderHeight / 4U];
+    const std::uint32_t depth_bits = mapped[2U * 256U * kRenderHeight / 4U];
+    readback->Unmap(0, nullptr);
+    constexpr std::uint32_t kLeftVector = 0x3E00U | (0xC000U << 16U);
+    constexpr std::uint32_t kRightVector = 0x4200U | (0x3800U << 16U);
+    require((eye0 == kLeftVector && eye1 == kRightVector) || (eye0 == kRightVector && eye1 == kLeftVector),
+        "the D3D12 snapshots do not hold the vectors the game cleared in Vulkan");
+    require(depth_bits == 0x3F000000U, "the D3D12 depth snapshot does not hold the game's Vulkan depth");
+
+    // Copies whose command buffer the game never submits: never published,
+    // and dropped when their slot comes round again (four slots a feature).
+    require(begin(buffers[1], &begin_info) == VK_SUCCESS, "vkBeginCommandBuffer (unsubmitted)");
+    for (int round = 0; round < 5; ++round) evaluate_eye(buffers[1], left, &left_resource);
+    require(end(buffers[1]) == VK_SUCCESS, "vkEndCommandBuffer (unsubmitted)");
+    xrfg::flush_ngx_guide_capture_vulkan(true);
+    statistics = xrfg::ngx_guide_capture_statistics();
+    require(statistics.vulkan_publications == 2 && statistics.vulkan_dropped == 1,
+        "unsubmitted Vulkan copies were published, or not dropped when their slot came round");
+
+    require(NVSDK_NGX_SUCCEED(release(left)) && NVSDK_NGX_SUCCEED(release(right)),
+        "Vulkan release failed through the hook");
+    xrfg::stop_ngx_guide_capture_vulkan(queue12.Get());
+    std::cout << "ngx guide capture Vulkan: publications=" << statistics.vulkan_publications
+              << " eye0=0x" << std::hex << eye0 << " eye1=0x" << eye1 << " depth=0x" << depth_bits
+              << std::dec << "\n";
+    return 0;
+}
+
 int run_d3d11(HMODULE module) {
     const auto create = reinterpret_cast<CreateFeature11>(
         GetProcAddress(module, "NVSDK_NGX_D3D11_CreateFeature"));
@@ -333,10 +756,35 @@ int run_d3d11(HMODULE module) {
     xrfg::stop_ngx_guide_capture_d3d11(queue12.Get());
     std::cout << "ngx guide capture D3D11: publications=" << statistics.d3d11_publications
               << " eye0=0x" << std::hex << eye0 << " eye1=0x" << eye1 << std::dec << "\n";
-    return 0;
+    return g_queue_layer_path != nullptr ? run_vulkan(module, g_queue_layer_path) : 0;
+}
+
+// V513: No Man's Sky's one evaluation for both eyes, split per eye.
+void test_split_both_eyes_guide() {
+    xrfg::DlssMotionVectorFrame frame{};
+    frame.output_width = 96;
+    frame.output_height = 64;
+    frame.motion_x = 2;
+    frame.motion_width = 48;
+    frame.motion_height = 32;
+    frame.depth_width = 48;
+    frame.depth_height = 32;
+    frame.publication = 7;
+    const auto left = xrfg::split_both_eyes_guide(frame, 48, 64, 0);
+    const auto right = xrfg::split_both_eyes_guide(frame, 48, 64, 1);
+    require(left && right, "a both-eyes evaluation was not split");
+    require(left->output_x == 0 && left->output_width == 48 && left->motion_x == 2 &&
+            left->motion_width == 24 && right->output_x == 0 && right->output_width == 48 &&
+            right->motion_x == 26 && right->motion_width == 24 && right->publication == 7,
+        "the halves are not the evaluation's left and right");
+    require(!xrfg::split_both_eyes_guide(frame, 40, 64, 0) &&
+            !xrfg::split_both_eyes_guide(frame, 48, 60, 1),
+        "an evaluation that does not span two views was split");
+    std::cout << "both-eyes guide split: right motion_x=" << right->motion_x << "\n";
 }
 
 int run(const wchar_t* module_path) {
+    test_split_both_eyes_guide();
     // WARP: the capture only records copies, which WARP executes.
     ComPtr<IDXGIFactory4> factory;
     require_hresult(CreateDXGIFactory2(0, IID_PPV_ARGS(factory.GetAddressOf())), "CreateDXGIFactory2");
@@ -385,8 +833,9 @@ int run(const wchar_t* module_path) {
     xrfg::poll_ngx_guide_capture();
     auto statistics = xrfg::ngx_guide_capture_statistics();
     require(statistics.active, "capture did not become active");
-    // Its D3D12 exports, and since V512 its D3D11 ones.
-    require(statistics.modules_hooked == 2 && statistics.d3d11_modules_hooked == 1 &&
+    // Its D3D12 exports, since V512 its D3D11 ones and since V513 its Vulkan ones.
+    require(statistics.modules_hooked == 3 && statistics.d3d11_modules_hooked == 1 &&
+            statistics.vulkan_modules_hooked == 1 &&
             statistics.modules_failed == 0,
         "the stand-in's exports were not detoured");
 
@@ -522,6 +971,8 @@ int wmain(int argc, wchar_t** argv) {
         return 2;
     }
     try {
+        // V513: with the Vulkan queue layer's path, the Vulkan phase runs too.
+        if (argc > 2) g_queue_layer_path = argv[2];
         return run(argv[1]);
     } catch (const std::exception& error) {
         std::cerr << "ngx guide capture test failed: " << error.what() << "\n";

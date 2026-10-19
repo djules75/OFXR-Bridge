@@ -5279,15 +5279,23 @@ XrResult layer_create_session_impl(
         xrfg::configure_ngx_guide_capture_d3d11(state->d3d11_bridge->device.Get(),
             state->d3d12_device.Get(), state->d3d12_queue.Get(), true);
     }
+    // And a bridged Vulkan session (V513): the copies run in the game's own
+    // command buffers, timed by the Vulkan queue layer.
+    const bool vulkan_capture = state->vulkan_bridge && state->d3d12_device &&
+        state->d3d12_queue && initial_control.desired.hybrid;
+    if (vulkan_capture) {
+        xrfg::configure_ngx_guide_capture_vulkan(state->vulkan_bridge->binding,
+            state->d3d12_device.Get(), state->d3d12_queue.Get(), true);
+    }
     // 702: the game's vectors. a the hybrid asked for, b the vectors asked
     // for, c the NGX capture started for this session: 1 native D3D12, 2 a
-    // bridged D3D11 session (V512).
+    // bridged D3D11 session (V512), 3 a bridged Vulkan session (V513).
     xrfg::bridge_flight_logger().event(
         xrfg::BridgeFlightOperation::presenter_transition,
         702,
         initial_control.desired.hybrid ? 1u : 0u,
         state->dlss_motion_vectors ? 1u : 0u,
-        ngx_capture ? 1u : d3d11_capture ? 2u : 0u);
+        ngx_capture ? 1u : d3d11_capture ? 2u : vulkan_capture ? 3u : 0u);
     if (dispatch->steamvr_runtime &&
         state->graphics_binding == SessionGraphicsBinding::d3d12 &&
         create_info != nullptr && state->d3d12_device && state->d3d12_queue) {
@@ -5457,6 +5465,7 @@ XrResult layer_destroy_session_impl(XrSession session) {
     if (state->d3d12_queue) {
         xrfg::stop_ngx_guide_capture(state->d3d12_queue.Get());
         xrfg::stop_ngx_guide_capture_d3d11(state->d3d12_queue.Get());
+        xrfg::stop_ngx_guide_capture_vulkan(state->d3d12_queue.Get());
     }
 
     const XrResult result = state->dispatch->destroy_session(session);
@@ -7004,6 +7013,12 @@ XrResult release_swapchain_image_locked(
                 *candidate_index,
                 static_cast<std::uint64_t>(static_cast<std::uint32_t>(copy_result)));
         }
+        // The game's DLSS vectors whose Vulkan copy it has submitted (V513):
+        // their snapshot copies go on the queue now, ahead of this image's
+        // history capture.
+        if (state->session->dlss_motion_vectors) {
+            xrfg::flush_ngx_guide_capture_vulkan(false);
+        }
     }
     if (bridge && candidate_index) {
         const HRESULT copy_result = bridge->release(*candidate_index);
@@ -7388,20 +7403,38 @@ void note_projection_eyes(
 // from 0.3's R15). Colour and its capture ticket stay as released. Record
 // 751 per eye for the first frames and now and then after: a the eye, b its
 // release watermark, c the chosen guide's publication (0 refused).
+//
+// One evaluation for both eyes (V513): No Man's Sky runs DLSS once into an
+// image twice an eye's width and copies each half to that eye's swapchain,
+// at its origin. The stream's newest evaluation then belongs to both eyes,
+// each reading its own half - the whole evaluation where each swapchain
+// holds the whole image and its view picks its half, split_both_eyes_guide
+// where each half sits at its swapchain's origin; the one-stream rule below
+// would give the left eye the frame before. Recorded once as 752: a the
+// evaluation's output width << 32 | height, b the view's, c 1 whole, 2 split.
 void refresh_projection_guides(
     SessionState& session,
-    const ProjectionMappingResult& mappings) noexcept {
+    const ProjectionMappingResult& mappings,
+    const ProjectionSnapshot& snapshot) noexcept {
     if (!session.dlss_motion_vectors || mappings.reason != ProjectionMappingReason::ready) {
         return;
     }
     try {
         std::array<std::shared_ptr<SwapchainState>, 2> chains{};
         std::array<std::uint64_t, 2> releases{};
+        std::array<XrRect2Di, 2> rects{};
         for (const auto& mapping : mappings.mappings) {
             const auto chain = find_swapchain(mapping.application_swapchain);
             if (!chain) continue;
             const int eye = chain->projection_eye.load(std::memory_order_relaxed);
             if (eye != 0 && eye != 1) continue;
+            if (mapping.views.size() == 1 &&
+                mapping.views[0].projection_index < snapshot.layers.size() &&
+                mapping.views[0].view_index <
+                    snapshot.layers[mapping.views[0].projection_index].views.size()) {
+                rects[eye] = snapshot.layers[mapping.views[0].projection_index]
+                                 .views[mapping.views[0].view_index].subImage.imageRect;
+            }
             std::scoped_lock lock(chain->mutex);
             if (!chain->last_released_capture || !chain->last_released_index ||
                 chain->last_released_capture->source_index != *chain->last_released_index ||
@@ -7418,6 +7451,71 @@ void refresh_projection_guides(
         std::scoped_lock gpu_lock(session.gpu_mutex);
         for (std::size_t eye = 0; eye < chains.size(); ++eye) {
             session.eye_release_publication[eye].store(releases[eye], std::memory_order_relaxed);
+        }
+        // One evaluation for both eyes: the same one for each - whole where
+        // each eye's swapchain holds the whole side-by-side image and its
+        // view picks its half (No Man's Sky: both swapchains 8344 wide, the
+        // left view at 0, the right at 4172), halved where each eye's half
+        // was copied to its swapchain's origin.
+        const bool sized = rects[0].extent.width > 0 && rects[1].extent.width > 0 &&
+            rects[0].extent.width == rects[1].extent.width &&
+            rects[0].extent.height == rects[1].extent.height;
+        if (sized && releases[0] != 0 && releases[1] != 0) {
+            std::shared_ptr<const xrfg::DlssMotionVectorSet> whole;
+            {
+                std::scoped_lock lock(chains[0]->mutex);
+                whole = xrfg::resolve_dlss_motion_vectors(
+                    chains[0]->enumerated_d3d12_images[*chains[0]->last_released_index].Get(),
+                    session.d3d12_queue.Get());
+            }
+            const auto* frame = whole && whole->eye_count == 1 ? whole->eyes[0].get() : nullptr;
+            const auto width = static_cast<std::uint32_t>(rects[0].extent.width);
+            const auto height = static_cast<std::uint32_t>(rects[0].extent.height);
+            std::array<std::shared_ptr<const xrfg::DlssMotionVectorFrame>, 2> halves{};
+            if (frame != nullptr && frame->publication <= std::min(releases[0], releases[1])) {
+                const auto inside = [&](const XrRect2Di& rect) {
+                    return rect.offset.x >= static_cast<std::int32_t>(frame->output_x) &&
+                        rect.offset.y >= static_cast<std::int32_t>(frame->output_y) &&
+                        static_cast<std::uint64_t>(rect.offset.x) + rect.extent.width <=
+                            static_cast<std::uint64_t>(frame->output_x) + frame->output_width &&
+                        static_cast<std::uint64_t>(rect.offset.y) + rect.extent.height <=
+                            static_cast<std::uint64_t>(frame->output_y) + frame->output_height;
+                };
+                const bool at_origins = rects[0].offset.x == 0 && rects[0].offset.y == 0 &&
+                    rects[1].offset.x == 0 && rects[1].offset.y == 0;
+                const bool side_by_side = rects[0].offset.y == rects[1].offset.y &&
+                    rects[1].offset.x >= rects[0].offset.x + rects[0].extent.width;
+                if (at_origins) {
+                    halves[0] = xrfg::split_both_eyes_guide(*frame, width, height, 0);
+                    halves[1] = xrfg::split_both_eyes_guide(*frame, width, height, 1);
+                } else if (side_by_side && inside(rects[0]) && inside(rects[1])) {
+                    halves[0] = whole->eyes[0];
+                    halves[1] = whole->eyes[0];
+                }
+            }
+            if (halves[0] && halves[1]) {
+                static std::atomic_bool recorded{false};
+                if (!recorded.exchange(true)) {
+                    xrfg::bridge_flight_logger().event(
+                        xrfg::BridgeFlightOperation::presenter_transition, 752,
+                        (static_cast<std::uint64_t>(frame->output_width) << 32U) | frame->output_height,
+                        (static_cast<std::uint64_t>(width) << 32U) | height,
+                        halves[0] == whole->eyes[0] ? 1U : 2U);
+                }
+                for (std::size_t eye = 0; eye < chains.size(); ++eye) {
+                    auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
+                    set->eye_count = 1;
+                    set->eyes[0] = halves[eye];
+                    std::scoped_lock lock(chains[eye]->mutex);
+                    chains[eye]->last_released_motion_vectors = set;
+                    if (log) {
+                        xrfg::bridge_flight_logger().event(
+                            xrfg::BridgeFlightOperation::presenter_transition,
+                            751, eye, releases[eye], frame->publication);
+                    }
+                }
+                return;
+            }
         }
         for (std::size_t eye = 0; eye < chains.size(); ++eye) {
             std::scoped_lock lock(chains[eye]->mutex);
@@ -12990,7 +13088,7 @@ void consume_application_frame(
 // The FPS overlay's Hybrid line (V506): -1 while Hybrid is not selected, 0
 // while it composes pairs, otherwise the first step that stopped in the last
 // half second, as the flight-log record that explains it - 702 neither a
-// native D3D12 session nor a bridged D3D11 one (V512), 820 no DLSS module hooked, 821 no DLSS evaluation (the game
+// native D3D12 session nor a bridged D3D11 (V512) or Vulkan (V513) one, 820 no DLSS module hooked, 821 no DLSS evaluation (the game
 // is not running DLSS), 824 evaluations skipped, 827 publications refused,
 // 828 vectors not matched to the eye images, 815 pairs rejected. The
 // counters are the process's; one session runs at a time.
@@ -13009,9 +13107,9 @@ int judge_hybrid_status(SessionState& state) noexcept {
     state.hybrid_status_due_ns = now_ns + 500'000'000;
     const auto& capture_before = state.hybrid_capture_before;
     const auto& guides_before = state.hybrid_guides_before;
-    // Native D3D12, or a bridged D3D11 session (V512); not Vulkan.
+    // Native D3D12, or a bridged D3D11 (V512) or Vulkan (V513) session.
     const bool native = state.graphics_binding == SessionGraphicsBinding::d3d12 &&
-        !state.vulkan_bridge && state.d3d12_queue;
+        state.d3d12_queue;
     int status = -1;
     if (!native) status = 702;
     else if (first) status = -1;  // nothing to compare with yet
@@ -13093,13 +13191,19 @@ void apply_embedded_control(
         xrfg::configure_ngx_guide_capture_d3d11(state->d3d11_bridge->device.Get(),
             state->d3d12_device.Get(), state->d3d12_queue.Get(), options.hybrid);
     }
+    const bool vulkan_capture = state->vulkan_bridge && state->d3d12_device && state->d3d12_queue;
+    if (vulkan_capture) {
+        xrfg::configure_ngx_guide_capture_vulkan(state->vulkan_bridge->binding,
+            state->d3d12_device.Get(), state->d3d12_queue.Get(), options.hybrid);
+    }
     if (hybrid_changed) {
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::presenter_transition,
             702,
             options.hybrid ? 1u : 0u,
             state->dlss_motion_vectors ? 1u : 0u,
-            !options.hybrid ? 0u : ngx_capture ? 1u : d3d11_capture ? 2u : 0u);
+            !options.hybrid ? 0u : ngx_capture ? 1u : d3d11_capture ? 2u
+                : vulkan_capture ? 3u : 0u);
     }
     for (const auto& chain : swapchains) {
         std::unique_lock lock(chain->mutex);
@@ -13630,12 +13734,21 @@ XrResult layer_end_frame_impl(
     state->application_end_thread.store(
         state->application_end_thread_id, std::memory_order_relaxed);
     const auto application_end_now = std::chrono::steady_clock::now();
+    // The end of the frame for the game's Vulkan DLSS copies (V513): what it
+    // has submitted goes to the queue, what it has not is dropped. With the
+    // capture at xrEndFrame this follows the deferred releases, below.
+    if (!state->capture_at_end_frame && state->vulkan_bridge && state->dlss_motion_vectors) {
+        xrfg::flush_ngx_guide_capture_vulkan(true);
+    }
     if (state->capture_at_end_frame) {
         // The bridged releases this frame left for here, copy and capture
         // with them, and the history captures of the native D3D12 ones;
         // before anything below reads last_released_capture or the frame
         // goes down naming those images.
         release_pending_bridge_images(state);
+        if (state->vulkan_bridge && state->dlss_motion_vectors) {
+            xrfg::flush_ngx_guide_capture_vulkan(true);
+        }
         capture_pending_end_frame_images(state);
         // Then mark the queue once more, behind those captures, so the join
         // below covers them and whatever the application submitted after
@@ -13880,7 +13993,7 @@ XrResult layer_end_frame_impl(
         resource_mappings = build_projection_resource_mappings(current_snapshot);
         log_projection_view_rects(*state, current_snapshot);
         note_projection_eyes(current_snapshot, resource_mappings);
-        refresh_projection_guides(*state, resource_mappings);
+        refresh_projection_guides(*state, resource_mappings, current_snapshot);
     } else {
         resource_mappings.reason = ProjectionMappingReason::no_projection_views;
     }

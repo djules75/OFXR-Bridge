@@ -4698,7 +4698,10 @@ void upload_single_slice(
 // drawn with the other eye's vectors misplaces its edges. UEVR crops each eye
 // inside its half (DI2: 0-3663 and 4680-8344 of 8344), so the views here are
 // cropped too, and the guides are placed as the resolver places them.
-void test_hybrid_side_by_side(D3D12WarpFixture& fixture) {
+// one_field (V513): No Man's Sky evaluates DLSS once for its whole
+// side-by-side image, so one guide spans both eyes, each view reading its
+// own half of it.
+void test_hybrid_side_by_side(D3D12WarpFixture& fixture, bool one_field = false) {
     constexpr UINT half = 256, width = half * 2U, height = 128;
     constexpr int object_left = 72, object_width = 80, object_top = 32, object_bottom = 96;
     constexpr int background_motion = 6;
@@ -4728,9 +4731,12 @@ void test_hybrid_side_by_side(D3D12WarpFixture& fixture) {
     const auto previous = make_scene(0, {0, 0});
     const auto current = make_scene(background_motion, object_motion);
     const auto expected = make_scene(background_motion / 2, {object_motion[0] / 2, object_motion[1] / 2});
-    // One render-resolution field per eye, as two slices of one texture.
+    // One render-resolution field per eye, as two slices of one texture; or
+    // one field across the whole image, in the first slice.
     auto game_motion = create_and_upload_game_motion_field(
-        fixture, half, height, [&](UINT eye, UINT x, UINT y) {
+        fixture, one_field ? width : half, height, [&](UINT field_eye, UINT field_x, UINT y) {
+            const UINT eye = one_field ? field_x / half : field_eye;
+            const UINT x = one_field ? field_x % half : field_x;
             const int ox = static_cast<int>(x) - object_motion[eye];
             const bool object = static_cast<int>(y) >= object_top &&
                 static_cast<int>(y) < object_bottom && ox >= object_left &&
@@ -4766,6 +4772,21 @@ void test_hybrid_side_by_side(D3D12WarpFixture& fixture) {
         "side-by-side synthesizer initialization failed");
     const auto guides = [&](std::uint64_t serial) {
         auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
+        if (one_field) {
+            auto frame = std::make_shared<xrfg::DlssMotionVectorFrame>();
+            frame->stream = 421;
+            frame->epoch = 3;
+            frame->serial = serial;
+            frame->previous_serial = serial - 1;
+            frame->motion_vectors = game_motion;
+            frame->producer_queue = fixture.queue();
+            frame->output_width = frame->motion_width = width;
+            frame->output_height = frame->motion_height = height;
+            frame->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            set->eye_count = 1;
+            set->eyes[0] = frame;
+            return set;
+        }
         set->eye_count = kEyeCount;
         for (UINT eye = 0; eye < kEyeCount; ++eye) {
             auto frame = std::make_shared<xrfg::DlssMotionVectorFrame>();
@@ -4830,7 +4851,8 @@ void test_hybrid_side_by_side(D3D12WarpFixture& fixture) {
         }
         const double edge_error = total / static_cast<double>(count);
         const double blend_error = blend_total / static_cast<double>(count);
-        std::cout << "hybrid side-by-side eye=" << eye << " edge_mae=" << edge_error
+        std::cout << "hybrid side-by-side" << (one_field ? " one field" : "") << " eye=" << eye
+                  << " edge_mae=" << edge_error
                   << " blend_mae=" << blend_error << '\n';
         // A half drawn with the other eye's vectors measures about 48; the
         // V507 defaults measure 2.8 (the occlusion scene's bound).
@@ -5209,6 +5231,7 @@ int main(int argc, char** argv) {
                 test_hybrid_composition(hybrid_fixture, scene);
             }
             test_hybrid_side_by_side(hybrid_fixture);
+            test_hybrid_side_by_side(hybrid_fixture, true);
             test_hybrid_bars(hybrid_fixture, false);
             // V505: with the game's depth the bars are whole in the
             // generated frame (none of them without it).

@@ -8,6 +8,7 @@
 // entry points with the SDK's own linkage, which this module defines itself.
 #include <d3d11.h>
 #include <d3d12.h>
+#include <vulkan/vulkan.h>
 #include <nvsdk_ngx_params.h>
 
 #include <atomic>
@@ -26,6 +27,7 @@ std::atomic<unsigned> g_evaluations{0};
 std::atomic<unsigned> g_c_evaluations{0};
 std::atomic<unsigned> g_releases{0};
 std::atomic<unsigned> g_d3d11_evaluations{0};
+std::atomic<unsigned> g_vulkan_evaluations{0};
 std::atomic<std::uintptr_t> g_last_list{0};
 
 }  // namespace
@@ -155,11 +157,64 @@ NVSDK_NGX_D3D11_ReleaseFeature(NVSDK_NGX_Handle* handle) {
     return NVSDK_NGX_Result_Success;
 }
 
+// The Vulkan entry points (V513).
+__declspec(dllexport) __declspec(noinline) NVSDK_NGX_Result NVSDK_CONV
+NVSDK_NGX_VULKAN_CreateFeature(
+    VkCommandBuffer buffer,
+    NVSDK_NGX_Feature feature,
+    NVSDK_NGX_Parameter* parameters,
+    NVSDK_NGX_Handle** handle) {
+    if (handle == nullptr || parameters == nullptr || buffer == VK_NULL_HANDLE) {
+        return NVSDK_NGX_Result_FAIL_InvalidParameter;
+    }
+    unsigned width = 0;
+    if (!NVSDK_NGX_SUCCEED(parameters->Get(NVSDK_NGX_Parameter_Width, &width)) || width == 0) {
+        return NVSDK_NGX_Result_FAIL_InvalidParameter;
+    }
+    auto* fake = new FakeHandle{g_next_handle.fetch_add(1) + 2000U, feature};
+    *handle = reinterpret_cast<NVSDK_NGX_Handle*>(fake);
+    g_creations.fetch_add(1);
+    return NVSDK_NGX_Result_Success;
+}
+
+__declspec(dllexport) __declspec(noinline) NVSDK_NGX_Result NVSDK_CONV
+NVSDK_NGX_VULKAN_EvaluateFeature(
+    VkCommandBuffer buffer,
+    const NVSDK_NGX_Handle* handle,
+    const NVSDK_NGX_Parameter* parameters,
+    PFN_NVSDK_NGX_ProgressCallback callback) {
+    if (handle == nullptr || parameters == nullptr || buffer == VK_NULL_HANDLE) {
+        return NVSDK_NGX_Result_FAIL_InvalidParameter;
+    }
+    void* output = nullptr;
+    if (!NVSDK_NGX_SUCCEED(parameters->Get(NVSDK_NGX_Parameter_Output, &output)) ||
+        output == nullptr) {
+        return NVSDK_NGX_Result_FAIL_InvalidParameter;
+    }
+    if (callback != nullptr) {
+        bool cancel = false;
+        callback(1.0F, cancel);
+    }
+    g_vulkan_evaluations.fetch_add(1);
+    return NVSDK_NGX_Result_Success;
+}
+
+__declspec(dllexport) __declspec(noinline) NVSDK_NGX_Result NVSDK_CONV
+NVSDK_NGX_VULKAN_ReleaseFeature(NVSDK_NGX_Handle* handle) {
+    if (handle == nullptr) {
+        return NVSDK_NGX_Result_FAIL_InvalidParameter;
+    }
+    delete reinterpret_cast<FakeHandle*>(handle);
+    g_releases.fetch_add(1);
+    return NVSDK_NGX_Result_Success;
+}
+
 // For the test: what the originals saw.
 __declspec(dllexport) unsigned fake_ngx_creations() { return g_creations.load(); }
 __declspec(dllexport) unsigned fake_ngx_evaluations() { return g_evaluations.load(); }
 __declspec(dllexport) unsigned fake_ngx_c_evaluations() { return g_c_evaluations.load(); }
 __declspec(dllexport) unsigned fake_ngx_releases() { return g_releases.load(); }
 __declspec(dllexport) unsigned fake_ngx_d3d11_evaluations() { return g_d3d11_evaluations.load(); }
+__declspec(dllexport) unsigned fake_ngx_vulkan_evaluations() { return g_vulkan_evaluations.load(); }
 
 }  // extern "C"

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.512.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.513.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -585,7 +585,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             OUTPUT_NAME nvngx_dlss
             PREFIX ""
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/fake-ngx")
-        target_include_directories(xrfg_fake_nvngx_dlss PRIVATE "${XRFG_DLSS_SDK_INCLUDE_DIR}")
+        target_include_directories(xrfg_fake_nvngx_dlss PRIVATE
+            "${XRFG_DLSS_SDK_INCLUDE_DIR}" "${XRFG_VULKAN_INCLUDE_DIR}")
+        target_compile_definitions(xrfg_fake_nvngx_dlss PRIVATE VK_NO_PROTOTYPES)
         target_compile_features(xrfg_fake_nvngx_dlss PRIVATE cxx_std_20)
         if(MSVC)
             target_compile_options(xrfg_fake_nvngx_dlss PRIVATE /W4 /permissive- /EHsc)
@@ -600,9 +602,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             target_compile_definitions(xrfg_ngx_guide_capture_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         endif()
         add_dependencies(xrfg_ngx_guide_capture_tests xrfg_fake_nvngx_dlss)
+        add_dependencies(xrfg_ngx_guide_capture_tests OFXR_vulkan_queue_layer)
         add_test(
             NAME xrfg_ngx_guide_capture
-            COMMAND xrfg_ngx_guide_capture_tests $<TARGET_FILE:xrfg_fake_nvngx_dlss>)
+            COMMAND xrfg_ngx_guide_capture_tests $<TARGET_FILE:xrfg_fake_nvngx_dlss>
+                $<TARGET_FILE:OFXR_vulkan_queue_layer>)
 
         add_executable(xrfg_layer_call_chain tests/layer_call_chain.cpp)
         target_include_directories(xrfg_layer_call_chain PRIVATE

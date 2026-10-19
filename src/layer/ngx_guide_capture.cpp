@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 
 #include <nvsdk_ngx.h>
+#include <nvsdk_ngx_defs_vk.h>
 
 #include <safetyhook.hpp>
 
@@ -43,6 +44,16 @@ using EvaluateFeature11 = NVSDK_NGX_Result(NVSDK_CONV*)(
     PFN_NVSDK_NGX_ProgressCallback);
 using EvaluateFeature11C = NVSDK_NGX_Result(NVSDK_CONV*)(
     ID3D11DeviceContext*, const NVSDK_NGX_Handle*, const NVSDK_NGX_Parameter*,
+    PFN_NVSDK_NGX_ProgressCallback_C);
+using CreateFeatureVk = NVSDK_NGX_Result(NVSDK_CONV*)(
+    VkCommandBuffer, NVSDK_NGX_Feature, NVSDK_NGX_Parameter*, NVSDK_NGX_Handle**);
+using CreateFeatureVk1 = NVSDK_NGX_Result(NVSDK_CONV*)(
+    VkDevice, VkCommandBuffer, NVSDK_NGX_Feature, NVSDK_NGX_Parameter*, NVSDK_NGX_Handle**);
+using EvaluateFeatureVk = NVSDK_NGX_Result(NVSDK_CONV*)(
+    VkCommandBuffer, const NVSDK_NGX_Handle*, const NVSDK_NGX_Parameter*,
+    PFN_NVSDK_NGX_ProgressCallback);
+using EvaluateFeatureVkC = NVSDK_NGX_Result(NVSDK_CONV*)(
+    VkCommandBuffer, const NVSDK_NGX_Handle*, const NVSDK_NGX_Parameter*,
     PFN_NVSDK_NGX_ProgressCallback_C);
 
 // The modules whose exports are detoured, in slot order.
@@ -92,7 +103,20 @@ constexpr std::int64_t kRecordHookFailed = 823;
 //   824 reasons 5 (the evaluation's D3D11 context is not the bridged
 //       session's immediate context) and 6 (the copy into the shared textures
 //       failed: c its HRESULT)
+//   831 (V513) the Vulkan path's first publication of a stream: a its low
+//       bits | bit 32 the depth came with it | bit 33 the depth's format has
+//       no route, b vectors VkFormat << 32 | depth VkFormat, c output width
+//       << 32 | height
+//   832 (V513) every 100th Vulkan copy dropped because the game had not
+//       submitted it by the end of its frame: a the drops so far
+//   824 reasons 7 (the Vulkan capture could not start: c the stage - 1 the
+//       loader, 2 the device functions, 3 the queue layer is not loaded),
+//       8 (a Vulkan evaluation's command buffer is not the session device's
+//       or a resource not an image view) and 9 (the Vulkan transport failed,
+//       c its HRESULT)
 constexpr std::int64_t kRecordD3D11Publication = 830;
+constexpr std::int64_t kRecordVulkanPublication = 831;
+constexpr std::int64_t kRecordVulkanDropped = 832;
 constexpr std::int64_t kRecordSkip = 824;
 constexpr std::int64_t kRecordShape = 825;
 constexpr std::int64_t kRecordSummary = 826;
@@ -113,6 +137,7 @@ struct Module {
 };
 
 class GuideTransport11;
+class GuideTransportVk;
 
 struct Feature {
     NVSDK_NGX_Feature type{NVSDK_NGX_Feature_SuperSampling};
@@ -126,6 +151,8 @@ struct Feature {
     // through, and a stand-in for its output on the D3D12 device.
     std::shared_ptr<GuideTransport11> transport;
     ComPtr<ID3D12Resource> output_placeholder;
+    // Vulkan (V513).
+    std::shared_ptr<GuideTransportVk> transport_vk;
 };
 
 struct Module11 {
@@ -141,6 +168,23 @@ struct Module11 {
     bool failed{};
 };
 
+struct ModuleVk {
+    SafetyHookInline create_hook;
+    SafetyHookInline create1_hook;
+    SafetyHookInline evaluate_hook;
+    SafetyHookInline evaluate_c_hook;
+    SafetyHookInline release_hook;
+    CreateFeatureVk create{};
+    CreateFeatureVk1 create1{};
+    EvaluateFeatureVk evaluate{};
+    EvaluateFeatureVkC evaluate_c{};
+    ReleaseFeature release{};
+    bool installed{};
+    bool failed{};
+};
+
+struct VulkanApi;
+
 struct Capture {
     std::mutex mutex;
     ComPtr<ID3D12CommandQueue> queue;
@@ -154,10 +198,17 @@ struct Capture {
     ComPtr<ID3D12Device> bridge_device;
     ComPtr<ID3D12CommandQueue> bridge_queue;
     std::atomic_bool d3d11_active{false};
+    // Vulkan (V513): the session device's functions, and the layer's D3D12
+    // device and queue.
+    std::array<ModuleVk, kModuleNames.size()> modules_vk{};
+    std::shared_ptr<VulkanApi> vulkan;
+    ComPtr<ID3D12Device> vulkan_d3d12_device;
+    ComPtr<ID3D12CommandQueue> vulkan_d3d12_queue;
+    std::atomic_bool vulkan_active{false};
     std::unordered_map<const NVSDK_NGX_Handle*, Feature> features;
     std::uint64_t next_stream{kStreamBase};
     NgxGuideCaptureStatistics statistics;
-    std::array<bool, 7> skip_recorded{};
+    std::array<bool, 10> skip_recorded{};
     std::uint64_t refusals_recorded{};
 };
 
@@ -1244,20 +1295,957 @@ void install11(HMODULE module) noexcept {
     }
 }
 
-// A feature's release, from either API: its stream retires, and a D3D11
-// feature's transport goes once its last snapshot copy has run.
+
+// ------------------------------------------------------------------ Vulkan
+// A bridged Vulkan session (V513). The game's DLSS runs on its Vulkan
+// device; the runtime and the synthesis on the layer's D3D12 device. At each
+// evaluation, in the game's own command buffer ahead of DLSS, the vectors are
+// copied into an image imported from a D3D12 shared texture, and the depth
+// through a buffer into another - Vulkan copies no depth aspect into a colour
+// image directly, and through a buffer the packed depth-stencil formats give
+// their 32-bit depth too. The command buffer runs whenever the game submits
+// it, which only the queue sees: the Vulkan queue layer is told, and signals
+// a timeline (a D3D12 fence imported into the game's device) right after
+// that submission. The publication is made only then, at the next flush
+// after it (an image release, the end of a frame, the feature's next
+// evaluation): No Man's Sky records its DLSS ahead of releasing the frame
+// before, so a publication made at the recording was sometimes the frame
+// after the one released, and two captures in a row took the same DLSS frame
+// and never paired (815). The snapshot copy goes to the D3D12 queue with the
+// publication, behind a wait on the timeline. A copy whose command buffer is
+// still unsubmitted when its slot comes round again is dropped, never
+// published. DLSS's inputs are taken to be in
+// VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, as NVIDIA asks of them.
+
+struct VulkanApi {
+    using Register = void (*)(VkCommandBuffer, VkSemaphore, std::uint64_t, volatile LONG64*);
+    using Forget = void (*)(VkSemaphore);
+    VulkanSessionBinding binding{};
+    VkPhysicalDeviceMemoryProperties memory{};
+    PFN_vkCreateImage create_image{};
+    PFN_vkDestroyImage destroy_image{};
+    PFN_vkGetImageMemoryRequirements image_requirements{};
+    PFN_vkAllocateMemory allocate_memory{};
+    PFN_vkFreeMemory free_memory{};
+    PFN_vkBindImageMemory bind_image_memory{};
+    PFN_vkCreateBuffer create_buffer{};
+    PFN_vkDestroyBuffer destroy_buffer{};
+    PFN_vkGetBufferMemoryRequirements buffer_requirements{};
+    PFN_vkBindBufferMemory bind_buffer_memory{};
+    PFN_vkCreateSemaphore create_semaphore{};
+    PFN_vkDestroySemaphore destroy_semaphore{};
+    PFN_vkImportSemaphoreWin32HandleKHR import_semaphore{};
+    PFN_vkCmdPipelineBarrier barrier{};
+    PFN_vkCmdCopyImage copy_image{};
+    PFN_vkCmdCopyImageToBuffer copy_image_to_buffer{};
+    PFN_vkCmdCopyBufferToImage copy_buffer_to_image{};
+    Register register_guide{};
+    Forget forget_guides{};
+
+    // 0 loaded; else the stage that failed (824 reason 7).
+    [[nodiscard]] std::uint32_t load(const VulkanSessionBinding& session) noexcept {
+        binding = session;
+        HMODULE loader = GetModuleHandleW(L"vulkan-1.dll");
+        auto gipa = loader != nullptr
+            ? reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(loader, "vkGetInstanceProcAddr"))
+            : nullptr;
+        if (gipa == nullptr || binding.instance == VK_NULL_HANDLE || binding.device == VK_NULL_HANDLE) return 1;
+        auto gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(gipa(binding.instance, "vkGetDeviceProcAddr"));
+        auto properties = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+            gipa(binding.instance, "vkGetPhysicalDeviceMemoryProperties"));
+        if (gdpa == nullptr || properties == nullptr) return 1;
+        properties(binding.physical_device, &memory);
+        const auto load = [&](auto& target, const char* name) {
+            target = reinterpret_cast<std::remove_reference_t<decltype(target)>>(gdpa(binding.device, name));
+            return target != nullptr;
+        };
+        if (!load(create_image, "vkCreateImage") || !load(destroy_image, "vkDestroyImage") ||
+            !load(image_requirements, "vkGetImageMemoryRequirements") ||
+            !load(allocate_memory, "vkAllocateMemory") || !load(free_memory, "vkFreeMemory") ||
+            !load(bind_image_memory, "vkBindImageMemory") || !load(create_buffer, "vkCreateBuffer") ||
+            !load(destroy_buffer, "vkDestroyBuffer") ||
+            !load(buffer_requirements, "vkGetBufferMemoryRequirements") ||
+            !load(bind_buffer_memory, "vkBindBufferMemory") ||
+            !load(create_semaphore, "vkCreateSemaphore") ||
+            !load(destroy_semaphore, "vkDestroySemaphore") ||
+            !load(import_semaphore, "vkImportSemaphoreWin32HandleKHR") ||
+            !load(barrier, "vkCmdPipelineBarrier") || !load(copy_image, "vkCmdCopyImage") ||
+            !load(copy_image_to_buffer, "vkCmdCopyImageToBuffer") ||
+            !load(copy_buffer_to_image, "vkCmdCopyBufferToImage")) {
+            return 2;
+        }
+        HMODULE queue_layer = GetModuleHandleW(L"OFXR_vulkan_queue_layer.dll");
+        if (queue_layer == nullptr) return 3;
+        register_guide = reinterpret_cast<Register>(
+            GetProcAddress(queue_layer, "OFXR_vkRegisterGuideSubmission"));
+        forget_guides = reinterpret_cast<Forget>(
+            GetProcAddress(queue_layer, "OFXR_vkForgetGuideSubmissions"));
+        return register_guide != nullptr && forget_guides != nullptr ? 0 : 3;
+    }
+
+    [[nodiscard]] std::uint32_t device_memory_type(std::uint32_t bits) const noexcept {
+        std::uint32_t any = UINT32_MAX;
+        for (std::uint32_t index = 0; index < memory.memoryTypeCount; ++index) {
+            if ((bits & (1U << index)) == 0) continue;
+            if ((memory.memoryTypes[index].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
+                return index;
+            }
+            if (any == UINT32_MAX) any = index;
+        }
+        return any;
+    }
+};
+
+// The D3D12 format a vector image's copy takes.
+[[nodiscard]] DXGI_FORMAT vector_dxgi_format(VkFormat format) noexcept {
+    switch (format) {
+        case VK_FORMAT_R16G16_SFLOAT: return DXGI_FORMAT_R16G16_FLOAT;
+        case VK_FORMAT_R32G32_SFLOAT: return DXGI_FORMAT_R32G32_FLOAT;
+        case VK_FORMAT_R16G16_SNORM: return DXGI_FORMAT_R16G16_SNORM;
+        case VK_FORMAT_R16G16_UNORM: return DXGI_FORMAT_R16G16_UNORM;
+        case VK_FORMAT_R16G16B16A16_SFLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        case VK_FORMAT_R32G32B32A32_SFLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+        default: return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
+// How a depth image reaches a colour copy the synthesizer reads.
+struct DepthRoute {
+    DXGI_FORMAT dxgi{DXGI_FORMAT_UNKNOWN};
+    VkFormat shared{VK_FORMAT_UNDEFINED};
+    VkImageAspectFlags barrier_aspect{};
+    bool via_buffer{};
+    std::uint32_t texel_bytes{};
+};
+
+[[nodiscard]] DepthRoute depth_route(VkFormat format) noexcept {
+    constexpr VkImageAspectFlags depth = VK_IMAGE_ASPECT_DEPTH_BIT;
+    constexpr VkImageAspectFlags both = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    switch (format) {
+        case VK_FORMAT_D32_SFLOAT:
+            return {DXGI_FORMAT_R32_FLOAT, VK_FORMAT_R32_SFLOAT, depth, true, 4};
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:
+            return {DXGI_FORMAT_R32_FLOAT, VK_FORMAT_R32_SFLOAT, both, true, 4};
+        case VK_FORMAT_D16_UNORM:
+            return {DXGI_FORMAT_R16_UNORM, VK_FORMAT_R16_UNORM, depth, true, 2};
+        case VK_FORMAT_D16_UNORM_S8_UINT:
+            return {DXGI_FORMAT_R16_UNORM, VK_FORMAT_R16_UNORM, both, true, 2};
+        case VK_FORMAT_R32_SFLOAT:
+            return {DXGI_FORMAT_R32_FLOAT, VK_FORMAT_R32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, false, 4};
+        case VK_FORMAT_R16_UNORM:
+            return {DXGI_FORMAT_R16_UNORM, VK_FORMAT_R16_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, false, 2};
+        default:
+            return {};
+    }
+}
+
+[[nodiscard]] HRESULT hresult_of(VkResult result) noexcept {
+    return result == VK_SUCCESS ? S_OK
+        : result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY
+            ? E_OUTOFMEMORY
+            : static_cast<HRESULT>(0x887A0000L | (static_cast<std::uint32_t>(-result) & 0xFFFFU));
+}
+
+class GuideTransportVk {
+public:
+    struct Staged {
+        ID3D12Resource* motion{};
+        ID3D12Resource* depth{};
+        bool depth_unrouted{};
+        // A copy two rounds old whose command buffer was never submitted.
+        bool dropped{};
+    };
+
+    // A publication waiting for its command buffer's submission.
+    struct Held {
+        DlssMotionVectorPublication publication{};
+        VkFormat motion_format{};
+        VkFormat depth_format{};
+        bool depth_unrouted{};
+    };
+
+    explicit GuideTransportVk(std::shared_ptr<VulkanApi> api) : vk_(std::move(api)) {}
+    GuideTransportVk(const GuideTransportVk&) = delete;
+    GuideTransportVk& operator=(const GuideTransportVk&) = delete;
+
+    ~GuideTransportVk() {
+        try {
+            if (vk_ && semaphore_ != VK_NULL_HANDLE) vk_->forget_guides(semaphore_);
+            // Destroyed only once every copy recorded has run on the GPU and
+            // every snapshot copy after it; otherwise kept for the process.
+            const bool copies_done = fence_ && fence_->GetCompletedValue() >= copied_;
+            bool snapshots_done = !done_ || done_->GetCompletedValue() >= submitted_;
+            if (copies_done && !snapshots_done && event_ != nullptr &&
+                SUCCEEDED(done_->SetEventOnCompletion(submitted_, event_))) {
+                snapshots_done = WaitForSingleObject(event_, 2000) == WAIT_OBJECT_0;
+            }
+            if (copies_done && snapshots_done && vk_) {
+                const VkDevice device = vk_->binding.device;
+                for (Slot& slot : slots_) {
+                    destroy(slot.motion);
+                    destroy(slot.depth);
+                    if (slot.buffer != VK_NULL_HANDLE) vk_->destroy_buffer(device, slot.buffer, nullptr);
+                    if (slot.buffer_memory != VK_NULL_HANDLE) vk_->free_memory(device, slot.buffer_memory, nullptr);
+                }
+                if (semaphore_ != VK_NULL_HANDLE) vk_->destroy_semaphore(device, semaphore_, nullptr);
+            }
+            if (event_ != nullptr) CloseHandle(event_);
+        } catch (...) {
+        }
+    }
+
+    [[nodiscard]] HRESULT initialize(ID3D12Device* device, ID3D12CommandQueue* queue) noexcept {
+        try {
+            device_ = device;
+            queue_ = queue;
+            HRESULT result = device->CreateFence(0, D3D12_FENCE_FLAG_SHARED,
+                IID_PPV_ARGS(fence_.GetAddressOf()));
+            if (FAILED(result)) return result;
+            result = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(done_.GetAddressOf()));
+            if (FAILED(result)) return result;
+            HANDLE handle = nullptr;
+            result = device->CreateSharedHandle(fence_.Get(), nullptr, GENERIC_ALL, nullptr, &handle);
+            if (FAILED(result)) return result;
+            VkSemaphoreTypeCreateInfo type{};
+            type.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+            type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+            VkSemaphoreCreateInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+            info.pNext = &type;
+            VkResult vk_result = vk_->create_semaphore(vk_->binding.device, &info, nullptr, &semaphore_);
+            if (vk_result != VK_SUCCESS) {
+                CloseHandle(handle);
+                return hresult_of(vk_result);
+            }
+            VkImportSemaphoreWin32HandleInfoKHR import{};
+            import.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR;
+            import.semaphore = semaphore_;
+            import.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT;
+            import.handle = handle;
+            vk_result = vk_->import_semaphore(vk_->binding.device, &import);
+            // An NT handle stays the importer's to close.
+            CloseHandle(handle);
+            if (vk_result != VK_SUCCESS) return hresult_of(vk_result);
+            for (Slot& slot : slots_) {
+                result = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    IID_PPV_ARGS(slot.allocator.GetAddressOf()));
+                if (FAILED(result)) return result;
+                result = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    slot.allocator.Get(), nullptr, IID_PPV_ARGS(slot.list.GetAddressOf()));
+                if (FAILED(result)) return result;
+                result = slot.list->Close();
+                if (FAILED(result)) return result;
+            }
+            event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            return event_ != nullptr ? S_OK : HRESULT_FROM_WIN32(GetLastError());
+        } catch (...) {
+            return E_FAIL;
+        }
+    }
+
+    // In the game's command buffer, ahead of its DLSS: the copies and the
+    // registration with the queue layer. hold() then keeps the publication.
+    [[nodiscard]] HRESULT stage(
+        VkCommandBuffer buffer,
+        const NVSDK_NGX_ImageViewInfo_VK& motion,
+        const NVSDK_NGX_ImageViewInfo_VK* depth,
+        Staged* staged) noexcept {
+        try {
+            *staged = {};
+            std::scoped_lock lock(mutex_);
+            Slot& slot = slots_[next_];
+            // A round of slots ago and still unsubmitted (the caller flushed
+            // the submitted ones just before): it never will be.
+            if (slot.pending) {
+                slot.pending = false;
+                staged->dropped = true;
+            }
+            if (slot.read_done != 0 && done_->GetCompletedValue() < slot.read_done) {
+                HRESULT result = done_->SetEventOnCompletion(slot.read_done, event_);
+                if (FAILED(result)) return result;
+                if (WaitForSingleObject(event_, 100) != WAIT_OBJECT_0) return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+            }
+            const DXGI_FORMAT motion_format = vector_dxgi_format(motion.Format);
+            if (motion_format == DXGI_FORMAT_UNKNOWN || motion.Width == 0 || motion.Height == 0) {
+                return DXGI_ERROR_UNSUPPORTED;
+            }
+            HRESULT result = prepare(slot.motion, motion_format, motion.Format, motion.Width, motion.Height);
+            if (FAILED(result)) return result;
+            DepthRoute route{};
+            bool depth_ready = false;
+            if (depth != nullptr) {
+                route = depth_route(depth->Format);
+                staged->depth_unrouted = route.dxgi == DXGI_FORMAT_UNKNOWN;
+                if (!staged->depth_unrouted && depth->Width != 0 && depth->Height != 0) {
+                    depth_ready = SUCCEEDED(prepare(slot.depth, route.dxgi, route.shared,
+                                      depth->Width, depth->Height)) &&
+                        (!route.via_buffer ||
+                         SUCCEEDED(prepare_buffer(slot,
+                             static_cast<VkDeviceSize>(depth->Width) * depth->Height * route.texel_bytes)));
+                }
+            }
+            record(buffer, motion, slot.motion, depth_ready ? depth : nullptr, slot.depth, route, slot.buffer);
+            slot.copied = ++copied_;
+            vk_->register_guide(buffer, semaphore_, slot.copied, &submitted_value_);
+            recording_ = true;
+            staged->motion = slot.motion.d3d12.Get();
+            staged->depth = depth_ready ? slot.depth.d3d12.Get() : nullptr;
+            return S_OK;
+        } catch (...) {
+            return E_FAIL;
+        }
+    }
+
+    // Keeps the staged copy's publication until its submission.
+    void hold(const Held& held) noexcept {
+        std::scoped_lock lock(mutex_);
+        if (!recording_) return;
+        recording_ = false;
+        Slot& slot = slots_[next_];
+        slot.held = held;
+        slot.pending = true;
+        next_ = (next_ + 1U) % kSlots;
+    }
+
+    // Publishes, oldest first, every held copy whose command buffer the game
+    // has submitted: `publish` records the registry's snapshot copy into the
+    // list given, which then goes to the queue behind the timeline wait.
+    template <typename Publish>
+    void flush(Publish&& publish) noexcept {
+        std::scoped_lock lock(mutex_);
+        const std::uint64_t submitted = submitted_value();
+        std::array<Slot*, kSlots> ready{};
+        std::uint32_t count = 0;
+        for (Slot& slot : slots_) {
+            if (slot.pending && submitted >= slot.copied) ready[count++] = &slot;
+        }
+        std::sort(ready.begin(), ready.begin() + count,
+            [](const Slot* a, const Slot* b) { return a->copied < b->copied; });
+        for (std::uint32_t i = 0; i < count; ++i) {
+            Slot& slot = *ready[i];
+            slot.pending = false;
+            if (FAILED(slot.allocator->Reset()) ||
+                FAILED(slot.list->Reset(slot.allocator.Get(), nullptr))) {
+                continue;
+            }
+            slot.held.publication.producer_command_list = slot.list.Get();
+            publish(slot.held);
+            if (FAILED(slot.list->Close())) continue;
+            submit(slot);
+        }
+    }
+
+private:
+    static constexpr std::uint32_t kSlots = 4;
+
+    struct Shared {
+        ComPtr<ID3D12Resource> d3d12;
+        VkImage image{};
+        VkDeviceMemory memory{};
+        DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
+        std::uint32_t width{}, height{};
+    };
+    struct Slot {
+        Shared motion;
+        Shared depth;
+        VkBuffer buffer{};
+        VkDeviceMemory buffer_memory{};
+        VkDeviceSize buffer_size{};
+        ComPtr<ID3D12CommandAllocator> allocator;
+        ComPtr<ID3D12GraphicsCommandList> list;
+        std::uint64_t copied{};
+        std::uint64_t read_done{};
+        bool pending{};
+        Held held;
+    };
+
+    [[nodiscard]] std::uint64_t submitted_value() const noexcept {
+        return static_cast<std::uint64_t>(InterlockedCompareExchange64(
+            const_cast<volatile LONG64*>(&submitted_value_), 0, 0));
+    }
+
+    void submit(Slot& slot) noexcept {
+        if (FAILED(queue_->Wait(fence_.Get(), slot.copied))) return;
+        ID3D12CommandList* lists[]{slot.list.Get()};
+        queue_->ExecuteCommandLists(1, lists);
+        if (SUCCEEDED(queue_->Signal(done_.Get(), ++submitted_))) slot.read_done = submitted_;
+    }
+
+    void destroy(Shared& shared) noexcept {
+        const VkDevice device = vk_->binding.device;
+        if (shared.image != VK_NULL_HANDLE) vk_->destroy_image(device, shared.image, nullptr);
+        if (shared.memory != VK_NULL_HANDLE) vk_->free_memory(device, shared.memory, nullptr);
+        shared = {};
+    }
+
+    // A D3D12 shared texture, imported into the game's device.
+    [[nodiscard]] HRESULT prepare(Shared& shared, DXGI_FORMAT format, VkFormat vk_format,
+        std::uint32_t width, std::uint32_t height) noexcept {
+        if (shared.d3d12 && shared.format == format && shared.width == width && shared.height == height) {
+            return S_OK;
+        }
+        // The old one may still be read by a copy in flight: kept until the
+        // transport goes (rare: only a resolution change).
+        if (shared.d3d12) retired_.push_back(std::move(shared));
+        shared = {};
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = width;
+        desc.Height = height;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = format;
+        desc.SampleDesc.Count = 1;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+            D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        HRESULT result = device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc,
+            D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(shared.d3d12.GetAddressOf()));
+        if (FAILED(result)) return result;
+        HANDLE handle = nullptr;
+        result = device_->CreateSharedHandle(shared.d3d12.Get(), nullptr, GENERIC_ALL, nullptr, &handle);
+        if (FAILED(result)) return result;
+        VkExternalMemoryImageCreateInfo external{};
+        external.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+        external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
+        VkImageCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        info.pNext = &external;
+        info.imageType = VK_IMAGE_TYPE_2D;
+        info.format = vk_format;
+        info.extent = {width, height, 1};
+        info.mipLevels = 1;
+        info.arrayLayers = 1;
+        info.samples = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        const VkDevice device = vk_->binding.device;
+        VkResult vk_result = vk_->create_image(device, &info, nullptr, &shared.image);
+        if (vk_result != VK_SUCCESS) {
+            CloseHandle(handle);
+            return hresult_of(vk_result);
+        }
+        VkMemoryRequirements requirements{};
+        vk_->image_requirements(device, shared.image, &requirements);
+        const std::uint32_t type = vk_->device_memory_type(requirements.memoryTypeBits);
+        if (type == UINT32_MAX) {
+            CloseHandle(handle);
+            return E_FAIL;
+        }
+        VkImportMemoryWin32HandleInfoKHR import{};
+        import.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+        import.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
+        import.handle = handle;
+        VkMemoryDedicatedAllocateInfo dedicated{};
+        dedicated.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+        dedicated.pNext = &import;
+        dedicated.image = shared.image;
+        VkMemoryAllocateInfo allocate{};
+        allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocate.pNext = &dedicated;
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = type;
+        vk_result = vk_->allocate_memory(device, &allocate, nullptr, &shared.memory);
+        CloseHandle(handle);
+        if (vk_result != VK_SUCCESS) return hresult_of(vk_result);
+        vk_result = vk_->bind_image_memory(device, shared.image, shared.memory, 0);
+        if (vk_result != VK_SUCCESS) return hresult_of(vk_result);
+        shared.format = format;
+        shared.width = width;
+        shared.height = height;
+        return S_OK;
+    }
+
+    [[nodiscard]] HRESULT prepare_buffer(Slot& slot, VkDeviceSize size) noexcept {
+        if (slot.buffer != VK_NULL_HANDLE && slot.buffer_size >= size) return S_OK;
+        const VkDevice device = vk_->binding.device;
+        // As for an image: an old buffer may still be read.
+        if (slot.buffer != VK_NULL_HANDLE) {
+            retired_buffers_.push_back({slot.buffer, slot.buffer_memory});
+            slot.buffer = VK_NULL_HANDLE;
+            slot.buffer_memory = VK_NULL_HANDLE;
+        }
+        VkBufferCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        info.size = size;
+        info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VkResult vk_result = vk_->create_buffer(device, &info, nullptr, &slot.buffer);
+        if (vk_result != VK_SUCCESS) return hresult_of(vk_result);
+        VkMemoryRequirements requirements{};
+        vk_->buffer_requirements(device, slot.buffer, &requirements);
+        const std::uint32_t type = vk_->device_memory_type(requirements.memoryTypeBits);
+        if (type == UINT32_MAX) return E_FAIL;
+        VkMemoryAllocateInfo allocate{};
+        allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = type;
+        vk_result = vk_->allocate_memory(device, &allocate, nullptr, &slot.buffer_memory);
+        if (vk_result != VK_SUCCESS) return hresult_of(vk_result);
+        vk_result = vk_->bind_buffer_memory(device, slot.buffer, slot.buffer_memory, 0);
+        if (vk_result != VK_SUCCESS) return hresult_of(vk_result);
+        slot.buffer_size = size;
+        return S_OK;
+    }
+
+    static VkImageMemoryBarrier image_barrier(VkImage image, VkImageAspectFlags aspect,
+        std::uint32_t mip, std::uint32_t layer, VkImageLayout from, VkImageLayout to,
+        VkAccessFlags source, VkAccessFlags destination) {
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcAccessMask = source;
+        barrier.dstAccessMask = destination;
+        barrier.oldLayout = from;
+        barrier.newLayout = to;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;
+        barrier.subresourceRange = {aspect, mip, 1, layer, 1};
+        return barrier;
+    }
+
+    void record(VkCommandBuffer buffer, const NVSDK_NGX_ImageViewInfo_VK& motion, const Shared& motion_copy,
+        const NVSDK_NGX_ImageViewInfo_VK* depth, const Shared& depth_copy, const DepthRoute& route,
+        VkBuffer staging) noexcept {
+        constexpr VkImageLayout kInput = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        const std::uint32_t motion_mip = motion.SubresourceRange.baseMipLevel;
+        const std::uint32_t motion_layer = motion.SubresourceRange.baseArrayLayer;
+        std::array<VkImageMemoryBarrier, 4> before{};
+        std::uint32_t count = 0;
+        before[count++] = image_barrier(motion.Image, VK_IMAGE_ASPECT_COLOR_BIT, motion_mip, motion_layer,
+            kInput, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        before[count++] = image_barrier(motion_copy.image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
+        const std::uint32_t depth_mip = depth ? depth->SubresourceRange.baseMipLevel : 0;
+        const std::uint32_t depth_layer = depth ? depth->SubresourceRange.baseArrayLayer : 0;
+        if (depth != nullptr) {
+            before[count++] = image_barrier(depth->Image, route.barrier_aspect, depth_mip, depth_layer,
+                kInput, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+            before[count++] = image_barrier(depth_copy.image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
+        }
+        vk_->barrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+            0, nullptr, 0, nullptr, count, before.data());
+        VkImageCopy copy{};
+        copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, motion_mip, motion_layer, 1};
+        copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.extent = {motion.Width, motion.Height, 1};
+        vk_->copy_image(buffer, motion.Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            motion_copy.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        if (depth != nullptr) {
+            if (route.via_buffer) {
+                VkBufferImageCopy out{};
+                out.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, depth_mip, depth_layer, 1};
+                out.imageExtent = {depth->Width, depth->Height, 1};
+                vk_->copy_image_to_buffer(buffer, depth->Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    staging, 1, &out);
+                VkBufferMemoryBarrier through{};
+                through.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+                through.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                through.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                through.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                through.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                through.buffer = staging;
+                through.size = VK_WHOLE_SIZE;
+                vk_->barrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                    0, nullptr, 1, &through, 0, nullptr);
+                VkBufferImageCopy in{};
+                in.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                in.imageExtent = {depth->Width, depth->Height, 1};
+                vk_->copy_buffer_to_image(buffer, staging, depth_copy.image,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &in);
+            } else {
+                VkImageCopy depth_region{};
+                depth_region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, depth_mip, depth_layer, 1};
+                depth_region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                depth_region.extent = {depth->Width, depth->Height, 1};
+                vk_->copy_image(buffer, depth->Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    depth_copy.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &depth_region);
+            }
+        }
+        std::array<VkImageMemoryBarrier, 4> after{};
+        count = 0;
+        after[count++] = image_barrier(motion.Image, VK_IMAGE_ASPECT_COLOR_BIT, motion_mip, motion_layer,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, kInput, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
+        after[count++] = image_barrier(motion_copy.image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, 0);
+        if (depth != nullptr) {
+            after[count++] = image_barrier(depth->Image, route.barrier_aspect, depth_mip, depth_layer,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, kInput, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
+            after[count++] = image_barrier(depth_copy.image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, 0);
+        }
+        vk_->barrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
+            0, nullptr, 0, nullptr, count, after.data());
+    }
+
+    std::shared_ptr<VulkanApi> vk_;
+    ComPtr<ID3D12Device> device_;
+    ComPtr<ID3D12CommandQueue> queue_;
+    ComPtr<ID3D12Fence> fence_;
+    ComPtr<ID3D12Fence> done_;
+    VkSemaphore semaphore_{};
+    alignas(8) volatile LONG64 submitted_value_{};
+    std::array<Slot, kSlots> slots_{};
+    std::vector<Shared> retired_;
+    std::vector<std::pair<VkBuffer, VkDeviceMemory>> retired_buffers_;
+    std::uint32_t next_{};
+    std::uint64_t copied_{};
+    std::uint64_t submitted_{};
+    bool recording_{};
+    HANDLE event_{};
+    std::mutex mutex_;
+};
+
+void skip_vulkan(std::size_t reason, std::uint64_t detail = 0) noexcept {
+    auto& s = state();
+    std::scoped_lock lock(s.mutex);
+    const std::uint64_t count = ++s.statistics.vulkan_transport_failures;
+    if (!s.skip_recorded[reason]) {
+        s.skip_recorded[reason] = true;
+        record(kRecordSkip, reason, count, detail);
+    }
+}
+
+[[nodiscard]] const NVSDK_NGX_ImageViewInfo_VK* image_view(
+    const NVSDK_NGX_Parameter* parameters, const char* name) noexcept {
+    void* pointer = get<void*>(parameters, name);
+    if (pointer == nullptr) return nullptr;
+    const auto* resource = static_cast<const NVSDK_NGX_Resource_VK*>(pointer);
+    if (resource->Type != NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW ||
+        resource->Resource.ImageViewInfo.Image == VK_NULL_HANDLE) {
+        return nullptr;
+    }
+    return &resource->Resource.ImageViewInfo;
+}
+
+void note_vulkan_drop() noexcept {
+    auto& s = state();
+    std::scoped_lock lock(s.mutex);
+    if (++s.statistics.vulkan_dropped % 100 == 1) {
+        record(kRecordVulkanDropped, s.statistics.vulkan_dropped);
+    }
+}
+
+// Publishes one transport's submitted copies, with the bookkeeping a
+// publication has on the other paths.
+void flush_transport_vk(GuideTransportVk& transport) noexcept {
+    transport.flush([](GuideTransportVk::Held& held) {
+        try {
+            auto& s = state();
+            const DlssMotionVectorPublication& publication = held.publication;
+            const auto before = dlss_motion_vector_statistics();
+            publish_dlss_motion_vectors(publication);
+            const auto after = dlss_motion_vector_statistics();
+            std::scoped_lock lock(s.mutex);
+            if (after.published == before.published) {
+                if (s.refusals_recorded++ < 8) {
+                    record(kRecordRefused, after.invalid_publications, after.snapshot_failures,
+                        (static_cast<std::uint64_t>(publication.motion_width) << 32U) |
+                            publication.motion_height);
+                }
+                return;
+            }
+            ++s.statistics.publications;
+            ++s.statistics.vulkan_publications;
+            for (auto& [handle, feature] : s.features) {
+                static_cast<void>(handle);
+                if (feature.stream != publication.stream) continue;
+                if (feature.publications++ == 0) {
+                    record(kRecordVulkanPublication,
+                        (feature.stream & 0xFFFFFFFFULL) |
+                            (publication.depth != nullptr ? 1ULL << 32U : 0ULL) |
+                            (held.depth_unrouted ? 1ULL << 33U : 0ULL),
+                        (static_cast<std::uint64_t>(held.motion_format) << 32U) |
+                            static_cast<std::uint64_t>(held.depth_format),
+                        (static_cast<std::uint64_t>(publication.output_width) << 32U) |
+                            publication.output_height);
+                }
+                break;
+            }
+        } catch (...) {
+        }
+    });
+}
+
+void capture_vk(
+    VkCommandBuffer buffer,
+    const NVSDK_NGX_Handle* handle,
+    const NVSDK_NGX_Parameter* parameters) noexcept {
+    try {
+        auto& s = state();
+        if (!s.vulkan_active.load(std::memory_order_acquire) || buffer == VK_NULL_HANDLE ||
+            handle == nullptr || parameters == nullptr) {
+            return;
+        }
+        Feature feature;
+        std::shared_ptr<VulkanApi> api;
+        ComPtr<ID3D12Device> device;
+        ComPtr<ID3D12CommandQueue> queue;
+        {
+            std::scoped_lock lock(s.mutex);
+            ++s.statistics.evaluations;
+            const auto found = s.features.find(handle);
+            if (found == s.features.end()) {
+                ++s.statistics.skipped_unknown_feature;
+                if (!s.skip_recorded[1]) {
+                    s.skip_recorded[1] = true;
+                    record(kRecordSkip, 1, s.statistics.skipped_unknown_feature);
+                }
+                return;
+            }
+            feature = found->second;
+            api = s.vulkan;
+            device = s.vulkan_d3d12_device;
+            queue = s.vulkan_d3d12_queue;
+        }
+        if (!api || !device || !queue) return;
+        const auto* output = image_view(parameters, NVSDK_NGX_Parameter_Output);
+        const auto* motion = image_view(parameters, NVSDK_NGX_Parameter_MotionVectors);
+        const auto* depth = image_view(parameters, NVSDK_NGX_Parameter_Depth);
+        if (output == nullptr || motion == nullptr) {
+            std::scoped_lock lock(s.mutex);
+            ++s.statistics.skipped_missing_resources;
+            if (!s.skip_recorded[2]) {
+                s.skip_recorded[2] = true;
+                record(kRecordSkip, 2, s.statistics.skipped_missing_resources,
+                    (output != nullptr ? 1U : 0U) | (motion != nullptr ? 2U : 0U));
+            }
+            return;
+        }
+        // The command buffer has to be the session device's: the loader
+        // keeps a device's dispatch table at the start of all its objects.
+        if (*reinterpret_cast<void* const*>(buffer) !=
+            *reinterpret_cast<void* const*>(api->binding.device)) {
+            skip_vulkan(8);
+            return;
+        }
+        std::shared_ptr<GuideTransportVk> transport;
+        ComPtr<ID3D12Resource> placeholder;
+        bool first_evaluation = false;
+        {
+            std::scoped_lock lock(s.mutex);
+            const auto found = s.features.find(handle);
+            if (found == s.features.end()) return;
+            Feature& stored = found->second;
+            first_evaluation = !stored.shape_recorded;
+            stored.shape_recorded = true;
+            if (!stored.transport_vk) {
+                auto created = std::make_shared<GuideTransportVk>(api);
+                const HRESULT result = created->initialize(device.Get(), queue.Get());
+                if (FAILED(result)) {
+                    ++s.statistics.vulkan_transport_failures;
+                    if (!s.skip_recorded[9]) {
+                        s.skip_recorded[9] = true;
+                        record(kRecordSkip, 9, s.statistics.vulkan_transport_failures,
+                            static_cast<std::uint32_t>(result));
+                    }
+                    return;
+                }
+                stored.transport_vk = std::move(created);
+            }
+            if (!stored.output_placeholder ||
+                stored.output_placeholder->GetDesc().Width != output->Width ||
+                stored.output_placeholder->GetDesc().Height != output->Height) {
+                D3D11_TEXTURE2D_DESC shape{};
+                shape.Width = output->Width;
+                shape.Height = output->Height;
+                shape.ArraySize = 1;
+                stored.output_placeholder = output_placeholder(device.Get(), shape);
+            }
+            transport = stored.transport_vk;
+            placeholder = stored.output_placeholder;
+        }
+        if (first_evaluation) {
+            record(kRecordShape,
+                (static_cast<std::uint64_t>(motion->Format) << 32U) | (feature.stream & 0xFFFFFFFFULL),
+                (static_cast<std::uint64_t>(output->Width) << 32U) | output->Height,
+                (static_cast<std::uint64_t>(motion->Width) << 24U) | motion->Height);
+        }
+        if (!placeholder) {
+            skip_vulkan(9, static_cast<std::uint32_t>(E_OUTOFMEMORY));
+            return;
+        }
+        // What the game has submitted since: published before this copy.
+        flush_transport_vk(*transport);
+        GuideTransportVk::Staged staged{};
+        const HRESULT staged_result = transport->stage(buffer, *motion, depth, &staged);
+        if (staged.dropped) note_vulkan_drop();
+        if (FAILED(staged_result)) {
+            skip_vulkan(9, static_cast<std::uint32_t>(staged_result));
+            return;
+        }
+        GuideTransportVk::Held held{};
+        DlssMotionVectorPublication& publication = held.publication;
+        Shape depth_shape{depth != nullptr ? depth->Width : 0U, depth != nullptr ? depth->Height : 0U};
+        fill_publication(publication, feature, parameters,
+            {output->Width, output->Height}, {motion->Width, motion->Height},
+            staged.depth != nullptr ? &depth_shape : nullptr);
+        publication.output = placeholder.Get();
+        publication.motion_vectors = staged.motion;
+        publication.producer_queue = queue.Get();
+        publication.verified_producer_device = device.Get();
+        publication.resource_state = D3D12_RESOURCE_STATE_COMMON;
+        if (staged.depth != nullptr) {
+            publication.depth = staged.depth;
+            publication.depth_resource_state = D3D12_RESOURCE_STATE_COMMON;
+        }
+        held.motion_format = motion->Format;
+        held.depth_format = depth != nullptr ? depth->Format : VK_FORMAT_UNDEFINED;
+        held.depth_unrouted = staged.depth_unrouted;
+        transport->hold(held);
+    } catch (...) {
+    }
+}
+
+template <unsigned Slot>
+NVSDK_NGX_Result NVSDK_CONV hooked_create_vk(
+    VkCommandBuffer buffer, NVSDK_NGX_Feature type, NVSDK_NGX_Parameter* parameters,
+    NVSDK_NGX_Handle** handle) {
+    DepthScope depth;
+    const NVSDK_NGX_Result result = state().modules_vk[Slot].create(buffer, type, parameters, handle);
+    if (depth.outermost() && NVSDK_NGX_SUCCEED(result) && handle != nullptr &&
+        *handle != nullptr && guide_feature(type)) {
+        register_feature(type, parameters, *handle);
+    }
+    return result;
+}
+
+template <unsigned Slot>
+NVSDK_NGX_Result NVSDK_CONV hooked_create_vk1(
+    VkDevice vk_device, VkCommandBuffer buffer, NVSDK_NGX_Feature type,
+    NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** handle) {
+    DepthScope depth;
+    const NVSDK_NGX_Result result =
+        state().modules_vk[Slot].create1(vk_device, buffer, type, parameters, handle);
+    if (depth.outermost() && NVSDK_NGX_SUCCEED(result) && handle != nullptr &&
+        *handle != nullptr && guide_feature(type)) {
+        register_feature(type, parameters, *handle);
+    }
+    return result;
+}
+
+template <unsigned Slot>
+NVSDK_NGX_Result NVSDK_CONV hooked_evaluate_vk(
+    VkCommandBuffer buffer, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
+    PFN_NVSDK_NGX_ProgressCallback callback) {
+    DepthScope depth;
+    register_late<Slot>(handle, parameters);
+    if (depth.outermost()) capture_vk(buffer, handle, parameters);
+    return state().modules_vk[Slot].evaluate(buffer, handle, parameters, callback);
+}
+
+template <unsigned Slot>
+NVSDK_NGX_Result NVSDK_CONV hooked_evaluate_vk_c(
+    VkCommandBuffer buffer, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
+    PFN_NVSDK_NGX_ProgressCallback_C callback) {
+    DepthScope depth;
+    register_late<Slot>(handle, parameters);
+    if (depth.outermost()) capture_vk(buffer, handle, parameters);
+    return state().modules_vk[Slot].evaluate_c(buffer, handle, parameters, callback);
+}
+
+template <unsigned Slot>
+NVSDK_NGX_Result NVSDK_CONV hooked_release_vk(NVSDK_NGX_Handle* handle) {
+    DepthScope depth;
+    if (depth.outermost()) retire_feature(handle);
+    return state().modules_vk[Slot].release(handle);
+}
+
+template <unsigned Slot>
+void install_vk(HMODULE module) noexcept {
+    auto& s = state();
+    ModuleVk& m = s.modules_vk[Slot];
+    if (module == nullptr || m.installed || m.failed) return;
+    try {
+        auto* create = GetProcAddress(module, "NVSDK_NGX_VULKAN_CreateFeature");
+        auto* create1 = GetProcAddress(module, "NVSDK_NGX_VULKAN_CreateFeature1");
+        auto* evaluate = GetProcAddress(module, "NVSDK_NGX_VULKAN_EvaluateFeature");
+        auto* release = GetProcAddress(module, "NVSDK_NGX_VULKAN_ReleaseFeature");
+        auto* evaluate_c = GetProcAddress(module, "NVSDK_NGX_VULKAN_EvaluateFeature_C");
+        if (create == nullptr || evaluate == nullptr || release == nullptr) {
+            m.failed = true;
+            return;
+        }
+        HMODULE pinned = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            reinterpret_cast<LPCWSTR>(create), &pinned);
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            reinterpret_cast<LPCWSTR>(&install_vk<Slot>), &pinned);
+        const bool separate_c = evaluate_c != nullptr &&
+            reinterpret_cast<void*>(evaluate_c) != reinterpret_cast<void*>(evaluate);
+        m.create_hook = safetyhook::create_inline(reinterpret_cast<void*>(create),
+            reinterpret_cast<void*>(&hooked_create_vk<Slot>), SafetyHookInline::StartDisabled);
+        if (create1 != nullptr) {
+            m.create1_hook = safetyhook::create_inline(reinterpret_cast<void*>(create1),
+                reinterpret_cast<void*>(&hooked_create_vk1<Slot>), SafetyHookInline::StartDisabled);
+        }
+        m.evaluate_hook = safetyhook::create_inline(reinterpret_cast<void*>(evaluate),
+            reinterpret_cast<void*>(&hooked_evaluate_vk<Slot>), SafetyHookInline::StartDisabled);
+        m.release_hook = safetyhook::create_inline(reinterpret_cast<void*>(release),
+            reinterpret_cast<void*>(&hooked_release_vk<Slot>), SafetyHookInline::StartDisabled);
+        if (separate_c) {
+            m.evaluate_c_hook = safetyhook::create_inline(reinterpret_cast<void*>(evaluate_c),
+                reinterpret_cast<void*>(&hooked_evaluate_vk_c<Slot>), SafetyHookInline::StartDisabled);
+        }
+        if (!m.create_hook || !m.evaluate_hook || !m.release_hook ||
+            (create1 != nullptr && !m.create1_hook) || (separate_c && !m.evaluate_c_hook)) {
+            m.create_hook = {};
+            m.create1_hook = {};
+            m.evaluate_hook = {};
+            m.evaluate_c_hook = {};
+            m.release_hook = {};
+            m.failed = true;
+            {
+                std::scoped_lock lock(s.mutex);
+                ++s.statistics.modules_failed;
+            }
+            record(kRecordHookFailed, Slot + 20U);
+            return;
+        }
+        m.create = m.create_hook.original<CreateFeatureVk>();
+        m.create1 = create1 != nullptr ? m.create1_hook.original<CreateFeatureVk1>() : nullptr;
+        m.evaluate = m.evaluate_hook.original<EvaluateFeatureVk>();
+        m.evaluate_c = separate_c ? m.evaluate_c_hook.original<EvaluateFeatureVkC>() : nullptr;
+        m.release = m.release_hook.original<ReleaseFeature>();
+        m.installed = true;
+        static_cast<void>(m.create_hook.enable());
+        if (create1 != nullptr) static_cast<void>(m.create1_hook.enable());
+        static_cast<void>(m.evaluate_hook.enable());
+        static_cast<void>(m.release_hook.enable());
+        if (separate_c) static_cast<void>(m.evaluate_c_hook.enable());
+        {
+            std::scoped_lock lock(s.mutex);
+            ++s.statistics.modules_hooked;
+            ++s.statistics.vulkan_modules_hooked;
+        }
+        // 820 a = slot + 20: a module's Vulkan exports.
+        record(kRecordHooked, Slot + 20U, separate_c ? 1U : 0U);
+    } catch (...) {
+        m.failed = true;
+    }
+}
+
+// A feature's release, from any API: its stream retires, and a D3D11 or
+// Vulkan feature's transport goes once its last copies have run.
 void retire_feature(NVSDK_NGX_Handle* handle) noexcept {
     try {
         if (handle == nullptr) return;
         auto& s = state();
         std::uint64_t stream = 0;
         std::shared_ptr<GuideTransport11> transport;
+        std::shared_ptr<GuideTransportVk> transport_vk;
         {
             std::scoped_lock lock(s.mutex);
             const auto found = s.features.find(handle);
             if (found != s.features.end()) {
                 stream = found->second.stream;
                 transport = std::move(found->second.transport);
+                transport_vk = std::move(found->second.transport_vk);
                 s.features.erase(found);
                 ++s.statistics.features_released;
             }
@@ -1266,6 +2254,7 @@ void retire_feature(NVSDK_NGX_Handle* handle) noexcept {
             retire_dlss_motion_vector_stream(stream);
         }
         transport.reset();
+        transport_vk.reset();
     } catch (...) {
     }
 }
@@ -1367,6 +2356,9 @@ void install_all() noexcept {
     install11<0>(GetModuleHandleW(kModuleNames[0]));
     install11<1>(GetModuleHandleW(kModuleNames[1]));
     install11<2>(GetModuleHandleW(kModuleNames[2]));
+    install_vk<0>(GetModuleHandleW(kModuleNames[0]));
+    install_vk<1>(GetModuleHandleW(kModuleNames[1]));
+    install_vk<2>(GetModuleHandleW(kModuleNames[2]));
 }
 
 void start_monitor() noexcept {
@@ -1471,6 +2463,84 @@ void stop_ngx_guide_capture_d3d11(ID3D12CommandQueue* queue) noexcept {
             s.d3d11_active.store(false, std::memory_order_release);
             s.statistics.d3d11_active = false;
         }
+    } catch (...) {
+    }
+}
+
+void configure_ngx_guide_capture_vulkan(
+    const VulkanSessionBinding& binding,
+    ID3D12Device* device,
+    ID3D12CommandQueue* queue,
+    bool enabled) noexcept {
+    try {
+        auto& s = state();
+        if (!enabled || device == nullptr || queue == nullptr) {
+            std::scoped_lock lock(s.mutex);
+            s.vulkan_active.store(false, std::memory_order_release);
+            s.statistics.vulkan_active = false;
+            return;
+        }
+        std::shared_ptr<VulkanApi> api;
+        {
+            std::scoped_lock lock(s.mutex);
+            if (s.vulkan && s.vulkan->binding.device == binding.device) api = s.vulkan;
+        }
+        if (!api) {
+            auto created = std::make_shared<VulkanApi>();
+            const std::uint32_t stage = created->load(binding);
+            if (stage != 0) {
+                std::scoped_lock lock(s.mutex);
+                ++s.statistics.vulkan_transport_failures;
+                s.statistics.vulkan_start_stage = stage;
+                if (!s.skip_recorded[7]) {
+                    s.skip_recorded[7] = true;
+                    record(kRecordSkip, 7, s.statistics.vulkan_transport_failures, stage);
+                }
+                return;
+            }
+            api = std::move(created);
+        }
+        {
+            std::scoped_lock lock(s.mutex);
+            s.vulkan = api;
+            s.vulkan_d3d12_device = device;
+            s.vulkan_d3d12_queue = queue;
+            s.vulkan_active.store(true, std::memory_order_release);
+            s.statistics.vulkan_active = true;
+        }
+        configure_dlss_motion_vector_tracking(true);
+        start_monitor();
+    } catch (...) {
+    }
+}
+
+void stop_ngx_guide_capture_vulkan(ID3D12CommandQueue* queue) noexcept {
+    try {
+        auto& s = state();
+        std::scoped_lock lock(s.mutex);
+        if (s.vulkan_d3d12_queue.Get() == queue) {
+            s.vulkan_active.store(false, std::memory_order_release);
+            s.statistics.vulkan_active = false;
+        }
+    } catch (...) {
+    }
+}
+
+void flush_ngx_guide_capture_vulkan(bool end_of_frame) noexcept {
+    try {
+        auto& s = state();
+        // end_of_frame no longer drops (a frame recorded ahead is still to
+        // be submitted); the slot's next round does.
+        static_cast<void>(end_of_frame);
+        std::vector<std::shared_ptr<GuideTransportVk>> transports;
+        {
+            std::scoped_lock lock(s.mutex);
+            for (const auto& [handle, feature] : s.features) {
+                static_cast<void>(handle);
+                if (feature.transport_vk) transports.push_back(feature.transport_vk);
+            }
+        }
+        for (const auto& transport : transports) flush_transport_vk(*transport);
     } catch (...) {
     }
 }

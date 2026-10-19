@@ -13,6 +13,16 @@
 // the runtime's and the bridge's submissions all reach the driver through
 // the loader, so a layer in the chain serialises all three.
 //
+// Guide submissions (V513). Hybrid on a bridged Vulkan session copies the
+// game's DLSS vectors, at its NGX evaluation, inside the game's own command
+// buffer - which runs whenever the game submits it, something only the queue
+// sees. The OpenXR layer registers such a command buffer here with a
+// timeline semaphore (a D3D12 fence imported into the game's device) and a
+// value; when the game submits it, the layer signals that value on the same
+// queue right after, under the same lock, so the D3D12 side waits for the
+// copy and never for anything earlier, and marks the registration submitted.
+// Nothing happens while nothing is registered beyond one atomic load.
+//
 // What it does not do. It intercepts nothing else, holds the lock only
 // across the driver's own call, and behaves the same in every process it is
 // loaded into, since an implicit layer loads into every Vulkan process while
@@ -28,9 +38,12 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <vector>
 #include <string_view>
 #include <unordered_map>
 
@@ -62,6 +75,19 @@ struct DeviceTable {
     // costs nothing measurable.
     std::mutex queue_mutex;
 };
+
+struct GuideRegistration {
+    VkSemaphore semaphore{};
+    std::uint64_t value{};
+    // Where the value is written once signalled: the highest submitted.
+    volatile LONG64* submitted{};
+};
+
+std::mutex g_guide_mutex;
+// Several streams may record into one command buffer (one DLSS feature per
+// eye, both in the frame's buffer): one registration per semaphore.
+std::unordered_map<VkCommandBuffer, std::vector<GuideRegistration>> g_guides;
+std::atomic<std::uint32_t> g_guide_count{0};
 
 std::mutex g_tables_mutex;
 std::unordered_map<void*, InstanceTable> g_instances;
@@ -212,6 +238,53 @@ VKAPI_ATTR void VKAPI_CALL layer_destroy_device(
     }
 }
 
+// The registrations a successful submission carried, taken out of the map.
+template <typename Each>
+[[nodiscard]] std::vector<GuideRegistration> take_guides(Each&& each_buffer) {
+    std::vector<GuideRegistration> taken;
+    if (g_guide_count.load(std::memory_order_acquire) == 0) return taken;
+    try {
+        std::scoped_lock lock(g_guide_mutex);
+        each_buffer([&](VkCommandBuffer buffer) {
+            const auto found = g_guides.find(buffer);
+            if (found == g_guides.end()) return;
+            taken.insert(taken.end(), found->second.begin(), found->second.end());
+            g_guide_count.fetch_sub(
+                static_cast<std::uint32_t>(found->second.size()), std::memory_order_acq_rel);
+            g_guides.erase(found);
+        });
+    } catch (...) {
+    }
+    return taken;
+}
+
+// Signals each on the queue just submitted to, still under its lock.
+void signal_guides(
+    DeviceTable& table, VkQueue queue, const std::vector<GuideRegistration>& guides) {
+    for (const GuideRegistration& guide : guides) {
+        VkTimelineSemaphoreSubmitInfo timeline{};
+        timeline.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timeline.signalSemaphoreValueCount = 1;
+        timeline.pSignalSemaphoreValues = &guide.value;
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.pNext = &timeline;
+        submit.signalSemaphoreCount = 1;
+        submit.pSignalSemaphores = &guide.semaphore;
+        if (table.queue_submit != nullptr &&
+            table.queue_submit(queue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS &&
+            guide.submitted != nullptr) {
+            LONG64 seen = *guide.submitted;
+            while (seen < static_cast<LONG64>(guide.value)) {
+                const LONG64 previous = InterlockedCompareExchange64(
+                    guide.submitted, static_cast<LONG64>(guide.value), seen);
+                if (previous == seen) break;
+                seen = previous;
+            }
+        }
+    }
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL layer_queue_submit(
     VkQueue queue, uint32_t submit_count, const VkSubmitInfo* submits, VkFence fence) {
     const auto table = device_table(dispatch_key(queue));
@@ -219,7 +292,16 @@ VKAPI_ATTR VkResult VKAPI_CALL layer_queue_submit(
         return VK_ERROR_DEVICE_LOST;
     }
     std::scoped_lock lock(table->queue_mutex);
-    return table->queue_submit(queue, submit_count, submits, fence);
+    const VkResult result = table->queue_submit(queue, submit_count, submits, fence);
+    if (result == VK_SUCCESS && submits != nullptr) {
+        const auto guides = take_guides([&](auto&& visit) {
+            for (uint32_t i = 0; i < submit_count; ++i)
+                for (uint32_t j = 0; j < submits[i].commandBufferCount; ++j)
+                    visit(submits[i].pCommandBuffers[j]);
+        });
+        if (!guides.empty()) signal_guides(*table, queue, guides);
+    }
+    return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL layer_queue_submit2(
@@ -229,7 +311,16 @@ VKAPI_ATTR VkResult VKAPI_CALL layer_queue_submit2(
         return VK_ERROR_DEVICE_LOST;
     }
     std::scoped_lock lock(table->queue_mutex);
-    return table->queue_submit2(queue, submit_count, submits, fence);
+    const VkResult result = table->queue_submit2(queue, submit_count, submits, fence);
+    if (result == VK_SUCCESS && submits != nullptr) {
+        const auto guides = take_guides([&](auto&& visit) {
+            for (uint32_t i = 0; i < submit_count; ++i)
+                for (uint32_t j = 0; j < submits[i].commandBufferInfoCount; ++j)
+                    visit(submits[i].pCommandBufferInfos[j].commandBuffer);
+        });
+        if (!guides.empty()) signal_guides(*table, queue, guides);
+    }
+    return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL layer_queue_submit2_khr(
@@ -239,7 +330,16 @@ VKAPI_ATTR VkResult VKAPI_CALL layer_queue_submit2_khr(
         return VK_ERROR_DEVICE_LOST;
     }
     std::scoped_lock lock(table->queue_mutex);
-    return table->queue_submit2_khr(queue, submit_count, submits, fence);
+    const VkResult result = table->queue_submit2_khr(queue, submit_count, submits, fence);
+    if (result == VK_SUCCESS && submits != nullptr) {
+        const auto guides = take_guides([&](auto&& visit) {
+            for (uint32_t i = 0; i < submit_count; ++i)
+                for (uint32_t j = 0; j < submits[i].commandBufferInfoCount; ++j)
+                    visit(submits[i].pCommandBufferInfos[j].commandBuffer);
+        });
+        if (!guides.empty()) signal_guides(*table, queue, guides);
+    }
+    return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL layer_queue_wait_idle(VkQueue queue) {
@@ -374,6 +474,50 @@ OFXR_vkGetInstanceProcAddr(VkInstance instance, const char* name) {
 extern "C" __declspec(dllexport) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 OFXR_vkGetDeviceProcAddr(VkDevice device, const char* name) {
     return layer_get_device_proc_addr(device, name);
+}
+
+// Guide submissions (V513): see the note at the top. Registering a command
+// buffer again for the same semaphore raises the value to signal - a later
+// copy in the same buffer, whose signal covers the earlier one. Forgetting
+// drops a semaphore's registrations that were never submitted.
+extern "C" __declspec(dllexport) void
+OFXR_vkRegisterGuideSubmission(
+    VkCommandBuffer buffer, VkSemaphore semaphore, std::uint64_t value,
+    volatile LONG64* submitted) {
+    if (buffer == VK_NULL_HANDLE || semaphore == VK_NULL_HANDLE) return;
+    try {
+        std::scoped_lock lock(g_guide_mutex);
+        auto& registrations = g_guides[buffer];
+        for (GuideRegistration& registration : registrations) {
+            if (registration.semaphore == semaphore) {
+                registration.value = std::max(registration.value, value);
+                registration.submitted = submitted;
+                return;
+            }
+        }
+        registrations.push_back({semaphore, value, submitted});
+        g_guide_count.fetch_add(1, std::memory_order_acq_rel);
+    } catch (...) {
+    }
+}
+
+extern "C" __declspec(dllexport) void
+OFXR_vkForgetGuideSubmissions(VkSemaphore semaphore) {
+    try {
+        std::scoped_lock lock(g_guide_mutex);
+        for (auto entry = g_guides.begin(); entry != g_guides.end();) {
+            auto& registrations = entry->second;
+            const auto before = registrations.size();
+            std::erase_if(registrations, [&](const GuideRegistration& registration) {
+                return registration.semaphore == semaphore;
+            });
+            g_guide_count.fetch_sub(
+                static_cast<std::uint32_t>(before - registrations.size()),
+                std::memory_order_acq_rel);
+            entry = registrations.empty() ? g_guides.erase(entry) : std::next(entry);
+        }
+    } catch (...) {
+    }
 }
 
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {

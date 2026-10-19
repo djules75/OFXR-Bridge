@@ -3,6 +3,8 @@
 #include <d3d11.h>
 #include <d3d12.h>
 
+#include "xrfg/vulkan_d3d12_interop.hpp"
+
 #include <cstdint>
 
 // The game's own DLSS motion vectors, taken from its NGX calls (V497).
@@ -55,8 +57,17 @@ struct NgxGuideCaptureStatistics {
     std::uint64_t d3d11_modules_hooked{};
     std::uint64_t d3d11_publications{};
     std::uint64_t d3d11_transport_failures{};
+    // Vulkan (V513): the same, and the copies dropped because the game never
+    // submitted them.
+    std::uint64_t vulkan_modules_hooked{};
+    std::uint64_t vulkan_publications{};
+    std::uint64_t vulkan_transport_failures{};
+    std::uint64_t vulkan_dropped{};
+    // The stage the last Vulkan start failed at (824 reason 7), 0 none.
+    std::uint64_t vulkan_start_stage{};
     bool active{};
     bool d3d11_active{};
+    bool vulkan_active{};
 };
 
 // Start (enabled) or pause capture for the session whose queue this is. The
@@ -78,6 +89,21 @@ void configure_ngx_guide_capture_d3d11(
     ID3D12CommandQueue* queue,
     bool enabled) noexcept;
 void stop_ngx_guide_capture_d3d11(ID3D12CommandQueue* queue) noexcept;
+// A bridged Vulkan session (V513): the game runs DLSS on its Vulkan device.
+// At each evaluation the vectors and depth are copied, inside the game's own
+// command buffer, into textures shared with the layer's D3D12 device; the
+// Vulkan queue layer signals a shared timeline right after the game submits
+// that buffer, and the registry's snapshot copy waits on it.
+void configure_ngx_guide_capture_vulkan(
+    const VulkanSessionBinding& binding,
+    ID3D12Device* device,
+    ID3D12CommandQueue* queue,
+    bool enabled) noexcept;
+void stop_ngx_guide_capture_vulkan(ID3D12CommandQueue* queue) noexcept;
+// Publishes the copies whose command buffer the game has submitted since,
+// with their snapshot copies. A copy the game never submits is dropped when
+// its slot comes round again. end_of_frame is kept for the call sites.
+void flush_ngx_guide_capture_vulkan(bool end_of_frame) noexcept;
 // At each image release of the bridged session, after the bridge's own wait
 // for the game's context: submits the snapshot copies the evaluations since
 // the last release recorded, so they never wait on the game mid-frame.

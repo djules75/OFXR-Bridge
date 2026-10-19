@@ -107,6 +107,37 @@ queue.
   its HRESULT).
 - The Hybrid status line no longer reports 702 for a bridged D3D11 session.
 
+### DLSS vectors from Vulkan games (V513)
+
+A bridged Vulkan session (No Man's Sky, Star Citizen) captures the game's
+DLSS vectors and depth for Hybrid. The NGX Vulkan exports are detoured; at
+each evaluation the vectors are copied, inside the game's command buffer, into
+an image imported from a D3D12 shared texture, and the depth through a buffer
+(which gives the packed depth-stencil formats' depth too). The Vulkan queue
+layer signals a shared timeline right after the game submits that command
+buffer. The publication is made only then, at the next flush (an image
+release, the end of a frame, the feature's next evaluation), with its
+snapshot copy behind a wait on the timeline: No Man's Sky records its DLSS
+ahead, and a publication made at the recording was sometimes the next frame.
+A copy whose command buffer was never submitted is dropped when its slot
+comes round again.
+
+- `presenter_transition` 702 `c` = 3: the Vulkan capture started.
+- `embedded_configuration` 820 `a` = slot + 20: a module's Vulkan exports.
+- 831, a Vulkan stream's first publication: `a` its low bits | bit 32 the
+  depth came | bit 33 the depth's format has no route; `b` vectors VkFormat
+  << 32 | depth VkFormat; `c` output width << 32 | height.
+- 832, every 100th copy dropped unsubmitted: `a` the drops so far.
+- `presenter_transition` 752, once: one DLSS evaluation feeds both eyes,
+  each in a swapchain of its own (No Man's Sky), so both take that
+  evaluation: `c` 1 whole (each swapchain holds the whole side-by-side image,
+  its view picks its half), 2 halved (each half at its swapchain's origin).
+  `a` the evaluation's output width << 32 | height, `b` the view's.
+- 824 reasons 7 (the capture could not start, `c`: 1 the Vulkan loader, 2 the
+  device functions, 3 the queue layer not loaded), 8 (a command buffer not
+  the session device's, or a resource not an image view), 9 (the transport
+  failed, `c` its HRESULT).
+
 ### Generated images for flat panels (V509)
 
 A flat panel on a swapchain of its own (not one a projection view uses),
