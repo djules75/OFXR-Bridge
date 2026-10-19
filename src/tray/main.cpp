@@ -219,6 +219,54 @@ void load_settings(AppState& state) {
     state.settings = xrfg::standalone::parse_settings(text.str());
 }
 
+// The running game's status block as its layer last published it, when a
+// session runs (xrfg::status): copied under its sequence counter; a game
+// that stopped publishing without its xrDestroySession (a crash) counts as
+// gone after three seconds.
+std::optional<xrfg::status::Block> live_session_block() {
+    std::optional<xrfg::status::Block> result;
+    SYSTEMTIME now{};
+    GetSystemTime(&now);
+    FILETIME file_now{};
+    SystemTimeToFileTime(&now, &file_now);
+    const std::uint64_t now_ms =
+        ((static_cast<std::uint64_t>(file_now.dwHighDateTime) << 32U) |
+         file_now.dwLowDateTime) / 10'000ULL - 11'644'473'600'000ULL;
+    if (const HANDLE mapping = OpenFileMappingW(
+            FILE_MAP_READ, FALSE, xrfg::status::kMappingName)) {
+        if (const auto* block = static_cast<const xrfg::status::Block*>(
+                MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, sizeof(xrfg::status::Block)))) {
+            xrfg::status::Block copy{};
+            for (int attempt = 0; attempt < 4; ++attempt) {
+                const auto* sequence =
+                    reinterpret_cast<const volatile LONG*>(&block->sequence);
+                const LONG before = *sequence;
+                MemoryBarrier();
+                std::memcpy(&copy, block, sizeof(copy));
+                MemoryBarrier();
+                if ((before & 1) == 0 && before == *sequence) break;
+            }
+            if (copy.magic == xrfg::status::kMagic &&
+                copy.version == xrfg::status::kVersion && copy.active != 0U &&
+                now_ms >= copy.updated_unix_ms &&
+                now_ms - copy.updated_unix_ms <= 3'000ULL) {
+                copy.process[sizeof(copy.process) - 1] = '\0';
+                copy.runtime[sizeof(copy.runtime) - 1] = '\0';
+                result = copy;
+            }
+            UnmapViewOfFile(block);
+        }
+        CloseHandle(mapping);
+    }
+    return result;
+}
+
+// V529: a game with Luke Ross's R.E.A.L. VR runs (status block flags bit 0).
+[[nodiscard]] bool realvr_session_running() {
+    const auto block = live_session_block();
+    return block && (block->flags & 1U) != 0U;
+}
+
 // status.json beside tray.ini (docs/STATUS_JSON.md): the tray's state, the
 // running game as its layer last published it (xrfg::status), the settings.
 // Written to a temporary file and moved over the old one, so a reader never
@@ -237,47 +285,17 @@ void write_status(const AppState& state) {
             now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond,
             now.wMilliseconds);
         inputs.updated = updated;
-        FILETIME file_now{};
-        SystemTimeToFileTime(&now, &file_now);
-        const std::uint64_t now_ms =
-            ((static_cast<std::uint64_t>(file_now.dwHighDateTime) << 32U) |
-             file_now.dwLowDateTime) / 10'000ULL - 11'644'473'600'000ULL;
-        if (const HANDLE mapping = OpenFileMappingW(
-                FILE_MAP_READ, FALSE, xrfg::status::kMappingName)) {
-            if (const auto* block = static_cast<const xrfg::status::Block*>(
-                    MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, sizeof(xrfg::status::Block)))) {
-                xrfg::status::Block copy{};
-                for (int attempt = 0; attempt < 4; ++attempt) {
-                    const auto* sequence =
-                        reinterpret_cast<const volatile LONG*>(&block->sequence);
-                    const LONG before = *sequence;
-                    MemoryBarrier();
-                    std::memcpy(&copy, block, sizeof(copy));
-                    MemoryBarrier();
-                    if ((before & 1) == 0 && before == *sequence) break;
-                }
-                // A game that stopped publishing without its xrDestroySession
-                // (a crash) counts as gone after three seconds.
-                if (copy.magic == xrfg::status::kMagic &&
-                    copy.version == xrfg::status::kVersion && copy.active != 0U &&
-                    now_ms >= copy.updated_unix_ms &&
-                    now_ms - copy.updated_unix_ms <= 3'000ULL) {
-                    copy.process[sizeof(copy.process) - 1] = '\0';
-                    copy.runtime[sizeof(copy.runtime) - 1] = '\0';
-                    inputs.session_present = true;
-                    inputs.session.pid = copy.pid;
-                    inputs.session.process = copy.process;
-                    inputs.session.runtime = copy.runtime;
-                    inputs.session.multiplier = copy.multiplier;
-                    inputs.session.deep_pipeline = copy.deep_pipeline != 0U;
-                    inputs.session.generating = copy.generating != 0U;
-                    inputs.session.app_fps = copy.app_fps;
-                    inputs.session.output_fps = copy.output_fps;
-                    inputs.session.display_hz = copy.display_hz;
-                }
-                UnmapViewOfFile(block);
-            }
-            CloseHandle(mapping);
+        if (const auto copy = live_session_block()) {
+            inputs.session_present = true;
+            inputs.session.pid = copy->pid;
+            inputs.session.process = copy->process;
+            inputs.session.runtime = copy->runtime;
+            inputs.session.multiplier = copy->multiplier;
+            inputs.session.deep_pipeline = copy->deep_pipeline != 0U;
+            inputs.session.generating = copy->generating != 0U;
+            inputs.session.app_fps = copy->app_fps;
+            inputs.session.output_fps = copy->output_fps;
+            inputs.session.display_hz = copy->display_hz;
         }
         const std::string json = xrfg::standalone::build_status_json(inputs);
         const auto target = state.local_directory / L"status.json";
@@ -1628,6 +1646,19 @@ void show_context_menu(AppState& state) {
     if (pause_bitmap) DeleteObject(pause_bitmap);
 }
 
+// V529: a game with Luke Ross's R.E.A.L. VR runs at 2X whatever was asked
+// for (its layer says so in the status block); the menu and the saved
+// setting follow, once, with a notice why.
+void follow_realvr_session(AppState& state) {
+    if (!state.settings.triple_frame_gen || !realvr_session_running()) return;
+    state.settings.triple_frame_gen = false;
+    update_runtime_options(state);
+    show_balloon(state, L"Frame Gen multiplier: 2X",
+        L"The running game uses Luke Ross's R.E.A.L. VR mod, which does not "
+        L"work with 3X, so OFXR runs it at 2X. The multiplier is now 2X; choose "
+        L"3X again for other games.");
+}
+
 void handle_command(AppState& state, UINT command) {
     switch (command) {
     case toggle_arm:
@@ -1789,6 +1820,14 @@ void handle_command(AppState& state, UINT command) {
     case frame_gen_2x:
     case frame_gen_3x:
         if (state.settings.triple_frame_gen == (command == frame_gen_3x)) {
+            break;
+        }
+        // V529: a game with R.E.A.L. VR runs at 2X; 3X is refused while it runs.
+        if (command == frame_gen_3x && realvr_session_running()) {
+            show_balloon(state, L"Frame Gen multiplier: 2X",
+                L"The running game uses Luke Ross's R.E.A.L. VR mod, which does "
+                L"not work with 3X: it stays at 2X. 3X can be chosen again for "
+                L"other games.");
             break;
         }
         state.settings.triple_frame_gen = command == frame_gen_3x;
@@ -1991,7 +2030,10 @@ LRESULT CALLBACK window_procedure(
         write_status(*state);
         return 0;
     case WM_TIMER:
-        if (wparam == kStatusTimerId) write_status(*state);
+        if (wparam == kStatusTimerId) {
+            follow_realvr_session(*state);
+            write_status(*state);
+        }
         return 0;
     case WM_CLOSE: {
         std::wstring error;

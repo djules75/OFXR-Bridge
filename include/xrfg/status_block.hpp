@@ -34,7 +34,11 @@ struct Block {
     float app_fps;
     float output_fps;
     float display_hz;
-    std::uint32_t reserved;
+    // V529 (was reserved, zero): bit 0 Luke Ross's R.E.A.L. VR is in the
+    // game, whose session runs at 2X whatever the multiplier asked for
+    // (its alternate-eye rendering does not work in 3X); the tray then shows
+    // and saves 2X.
+    std::uint32_t flags;
     // When this was written, milliseconds since 1970-01-01 UTC.
     std::uint64_t updated_unix_ms;
     // The game's executable name and the OpenXR runtime's name, terminated.

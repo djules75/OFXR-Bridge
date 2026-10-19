@@ -5278,14 +5278,22 @@ XrResult layer_create_session_impl(
         state->graphics_binding == SessionGraphicsBinding::d3d12 ||
         state->graphics_binding == SessionGraphicsBinding::vulkan;
     state->deep_pipeline_configured = state->deep_pipeline;
-    if (triple_requested && triple_binding) {
+    // V529: Luke Ross's R.E.A.L. VR (realvr_loaded) runs at 2X whatever was
+    // asked for, and cannot be switched to 3X while it runs: its alternate-
+    // eye rendering hands the frames over with a head pose two to four game
+    // frames old and content that repeats or skips frames, which 3X's two
+    // evenly spaced frames between game frames turn into judder whenever the
+    // head moves (Cyberpunk 2077, 2026-10-20; clean at 2X). The tray reads it
+    // from the status block (flags bit 0) and shows and saves 2X.
+    state->panel_corrections_off = realvr_loaded();
+    if (triple_requested && triple_binding && !state->panel_corrections_off) {
         state->frames_per_application_frame = 3;
         state->deep_pipeline = false;
     }
     state->two_slot_synthetic_ring =
         state->deep_pipeline || state->frames_per_application_frame > 2;
-    state->triple_switchable =
-        triple_binding && state->two_slot_synthetic_ring;
+    state->triple_switchable = triple_binding && state->two_slot_synthetic_ring &&
+        !state->panel_corrections_off;
     if (triple_binding && !state->triple_switchable) {
         state->fixed_frame_multiplier.hold();
     }
@@ -5299,13 +5307,13 @@ XrResult layer_create_session_impl(
         state->deep_pipeline ? 1u : 0u,
         triple_requested ? 1u : 0u);
     // 764 (V524): a 1 where R.E.A.L. VR is in the process and the HUD panel
-    // corrections are off for the session.
-    state->panel_corrections_off = realvr_loaded();
+    // corrections are off for the session; b (V529) 1 where 3X was asked for
+    // and the session runs at 2X instead.
     xrfg::bridge_flight_logger().event(
         xrfg::BridgeFlightOperation::presenter_transition,
         764,
         state->panel_corrections_off ? 1u : 0u,
-        0,
+        state->panel_corrections_off && triple_requested ? 1u : 0u,
         0);
     // And its one DLSS stream rendered for both eyes in turn: the eyes by
     // serial parity, once the pictures have said which parity is the left
@@ -13863,6 +13871,7 @@ void publish_status(SessionState& state) noexcept {
             block.app_fps = rates.app_fps;
             block.output_fps = rates.output_fps;
             block.display_hz = rates.display_hz;
+            block.flags = state.panel_corrections_off ? 1U : 0U;
             block.updated_unix_ms = unix_time_ms();
             std::fill(std::begin(block.process), std::end(block.process), '\0');
             WideCharToMultiByte(CP_UTF8, 0, name.c_str(), -1, block.process,
