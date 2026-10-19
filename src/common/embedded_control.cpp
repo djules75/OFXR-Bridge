@@ -1,5 +1,6 @@
 #include "xrfg/embedded_control.hpp"
 #include "xrfg/implicit_layer.hpp"
+#include "xrfg/ini_file.hpp"
 #include <windows.h>
 #include <atomic>
 #include <map>
@@ -25,11 +26,10 @@ Settings read_settings() {
     settings.preset = static_cast<int>(options.preset);
     settings.scale = static_cast<int>(options.input_scale);
     settings.backward = options.bidirectional;
-    settings.enabled = GetPrivateProfileIntW(L"ofxr", L"enabled", 1, ini().c_str()) != 0;
-    wchar_t motion[16]{};
-    GetPrivateProfileStringW(L"ofxr", L"motion_vectors", L"off", motion, 16, ini().c_str());
-    settings.motion_vectors = _wcsicmp(motion, L"dlss") == 0 ? 1 : 0;
-    settings.hybrid = GetPrivateProfileIntW(L"ofxr", L"hybrid", 0, ini().c_str()) != 0;
+    settings.enabled = ini_file::read_int(ini(), L"ofxr", L"enabled", 1) != 0;
+    const auto motion = ini_file::read_string(ini(), L"ofxr", L"motion_vectors", L"off");
+    settings.motion_vectors = _wcsicmp(motion.c_str(), L"dlss") == 0 ? 1 : 0;
+    settings.hybrid = ini_file::read_int(ini(), L"ofxr", L"hybrid", 0) != 0;
     return settings;
 }
 std::uint64_t ini_stamp() {
@@ -80,6 +80,9 @@ void follow_ini(bool force) noexcept {
             if (stamp == c.stamp) return;
         }
         const auto settings = read_settings();
+        // Written while being read: a half-written file is not a setting.
+        // The next look reads it whole.
+        if (ini_stamp() != stamp) return;
         std::scoped_lock lock(c.mutex);
         c.stamp = stamp;
         if (settings != c.settings) { c.settings = settings; ++c.revision; }
@@ -116,11 +119,11 @@ void applied(std::uint64_t id, std::uint64_t revision, bool enabled, long error)
     auto& c = control(); std::scoped_lock lock(c.mutex);
     if (auto it = c.sessions.find(id); it != c.sessions.end()) it->second = {revision, enabled, error};
 }
-bool logging_setting() { return GetPrivateProfileIntW(L"diagnostics", L"logging_enabled", 0, ini().c_str()) != 0; }
+bool logging_setting() { return ini_file::read_int(ini(), L"diagnostics", L"logging_enabled", 0) != 0; }
 bool set_logging_setting(bool enabled) { return write(L"diagnostics", L"logging_enabled", enabled ? L"1" : L"0"); }
 int overlay_setting() {
-    wchar_t value[32]{}; GetPrivateProfileStringW(L"overlay", L"position", L"upper_right", value, 32, ini().c_str());
-    for (int i = 0; i < 5; ++i) if (_wcsicmp(value, positions[i]) == 0) return i;
+    const auto value = ini_file::read_string(ini(), L"overlay", L"position", L"upper_right");
+    for (int i = 0; i < 5; ++i) if (_wcsicmp(value.c_str(), positions[i]) == 0) return i;
     return 2;
 }
 bool set_overlay_setting(int position) { return position >= 0 && position < 5 && write(L"overlay", L"position", positions[position]); }

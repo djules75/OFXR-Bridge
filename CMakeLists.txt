@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.517.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.518.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -72,6 +72,16 @@ if(XRFG_BUILD_TESTS)
     add_executable(xrfg_fps_overlay_tests tests/fps_overlay_tests.cpp)
     target_link_libraries(xrfg_fps_overlay_tests PRIVATE xrfg_core)
     add_test(NAME xrfg_fps_overlay_tests COMMAND xrfg_fps_overlay_tests)
+    if(WIN32)
+        add_executable(xrfg_ini_file_tests tests/ini_file_tests.cpp)
+        target_include_directories(xrfg_ini_file_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        target_compile_features(xrfg_ini_file_tests PRIVATE cxx_std_20)
+        if(MSVC)
+            target_compile_options(xrfg_ini_file_tests PRIVATE /W4 /permissive- /EHsc)
+            target_compile_definitions(xrfg_ini_file_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        endif()
+        add_test(NAME xrfg_ini_file_tests COMMAND xrfg_ini_file_tests ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    endif()
 
     add_executable(xrfg_optical_flow_tests tests/optical_flow_tests.cpp)
     target_link_libraries(xrfg_optical_flow_tests PRIVATE xrfg_core)

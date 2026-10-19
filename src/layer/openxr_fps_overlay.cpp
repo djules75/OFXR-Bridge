@@ -1,4 +1,5 @@
 #include "xrfg/openxr_fps_overlay.hpp"
+#include "xrfg/ini_file.hpp"
 #include "xrfg/steamvr_delivery.hpp"
 #include <openxr/openxr_platform.h>
 #include <windows.h>
@@ -306,19 +307,16 @@ struct OpenXrFpsOverlay::Impl {
             latency_sum_ns.exchange(0, std::memory_order_relaxed);
         latency_window_count[latency_window] =
             latency_samples.exchange(0, std::memory_order_relaxed);
-        std::array<wchar_t, 32> setting{};
-        GetPrivateProfileStringW(L"overlay", L"position", L"upper_right",
-            setting.data(), static_cast<DWORD>(setting.size()), ini.c_str());
-        std::string value;
-        for (wchar_t c : setting) { if (!c) break; value += c < 128 ? static_cast<char>(c) : '?'; }
-        position = parse_overlay_position(value);
-        GetPrivateProfileStringW(L"overlay", L"size", L"big",
-            setting.data(), static_cast<DWORD>(setting.size()), ini.c_str());
-        value.clear();
-        for (wchar_t c : setting) { if (!c) break; value += c < 128 ? static_cast<char>(c) : '?'; }
-        size = parse_overlay_size(value);
-        show_latency = GetPrivateProfileIntW(L"overlay", L"latency", 1, ini.c_str()) != 0;
-        show_hybrid = GetPrivateProfileIntW(L"overlay", L"hybrid", 1, ini.c_str()) != 0;
+        const auto ascii = [](const std::wstring& setting) {
+            std::string value;
+            for (wchar_t c : setting) value += c < 128 ? static_cast<char>(c) : '?';
+            return value;
+        };
+        position = parse_overlay_position(
+            ascii(ini_file::read_string(ini, L"overlay", L"position", L"upper_right")));
+        size = parse_overlay_size(ascii(ini_file::read_string(ini, L"overlay", L"size", L"big")));
+        show_latency = ini_file::read_int(ini, L"overlay", L"latency", 1) != 0;
+        show_hybrid = ini_file::read_int(ini, L"overlay", L"hybrid", 1) != 0;
         if (position == FpsOverlayPosition::off || disabled || !info->layerCount || !info->layers) return;
         float left = -1, right = 1, down = -1, up = 1;
         std::uint32_t eye_width = 0;

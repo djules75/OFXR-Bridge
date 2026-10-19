@@ -1,4 +1,5 @@
 #include "xrfg/bridge_flight_logger.hpp"
+#include "xrfg/ini_file.hpp"
 
 #include <windows.h>
 
@@ -541,14 +542,10 @@ struct BridgeFlightLogger::Impl {
                 return;
             }
             const UINT maximum_mb = std::clamp<UINT>(
-                GetPrivateProfileIntW(
-                    kConfigurationSection, L"max_file_mb", 32,
-                    config_path.c_str()),
+                ini_file::read_int(config_path, kConfigurationSection, L"max_file_mb", 32),
                 1,
                 256);
-            const bool flush = GetPrivateProfileIntW(
-                kConfigurationSection, L"flush_each_event", 0,
-                config_path.c_str()) != 0;
+            const bool flush = ini_file::read_int(config_path, kConfigurationSection, L"flush_each_event", 0) != 0;
             std::filesystem::path new_path;
             HANDLE new_file = create_log_file(module_directory, &new_path);
             if (new_file == INVALID_HANDLE_VALUE) {
@@ -618,24 +615,12 @@ void BridgeFlightLogger::initialize(
         if (!QueryPerformanceFrequency(&implementation->frequency)) {
             return;
         }
-        const bool wanted = GetPrivateProfileIntW(
-            kConfigurationSection,
-            L"logging_enabled",
-            0,
-            implementation->config_path.c_str()) != 0;
+        const bool wanted = ini_file::read_int(implementation->config_path, kConfigurationSection, L"logging_enabled", 0) != 0;
         const UINT maximum_mb = std::clamp<UINT>(
-            GetPrivateProfileIntW(
-                kConfigurationSection,
-                L"max_file_mb",
-                32,
-                implementation->config_path.c_str()),
+            ini_file::read_int(implementation->config_path, kConfigurationSection, L"max_file_mb", 32),
             1,
             256);
-        const bool flush = GetPrivateProfileIntW(
-            kConfigurationSection,
-            L"flush_each_event",
-            0,
-            implementation->config_path.c_str()) != 0;
+        const bool flush = ini_file::read_int(implementation->config_path, kConfigurationSection, L"flush_each_event", 0) != 0;
         // Last, so the record that follows is at time zero as it always was.
         if (!QueryPerformanceCounter(&implementation->origin)) {
             return;
@@ -693,11 +678,7 @@ void BridgeFlightLogger::follow_setting() noexcept {
         impl_->next_poll_counter.store(
             now.QuadPart + impl_->frequency.QuadPart / 4,
             std::memory_order_relaxed);
-        const bool wanted = GetPrivateProfileIntW(
-            kConfigurationSection,
-            L"logging_enabled",
-            0,
-            impl_->config_path.c_str()) != 0;
+        const bool wanted = ini_file::read_int(impl_->config_path, kConfigurationSection, L"logging_enabled", 0) != 0;
         if (wanted == impl_->active.load(std::memory_order_acquire)) {
             impl_->pending_setting_seen = false;
             return;
