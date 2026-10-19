@@ -8,6 +8,7 @@
 #include "xrfg/vulkan_d3d12_interop.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/generation_backpressure.hpp"
+#include "xrfg/release_spacing.hpp"
 #include "xrfg/implicit_layer.hpp"
 #include "xrfg/embedded_control.hpp"
 #include "xrfg/provider_api.hpp"
@@ -1482,6 +1483,11 @@ struct SessionState {
     // count it last released the application at.
     std::uint64_t presenter_frame_serial{};
     std::uint64_t application_served_serial{};
+    // 3X: whether the next release is held to the 3X cadence by count
+    // (release_serial_floor). A prime arms it; it disarms on the first pair
+    // the floor did not hold back (release_floor_armed_after). Guarded by
+    // presenter_mutex.
+    bool release_floor_armed{};
     bool presenter_stop_requested{};
     bool presenter_active{};
     XrSession handle{XR_NULL_HANDLE};
@@ -10439,6 +10445,7 @@ void continuous_presenter_main(
         // the title and the machine, not the presenter.
         state->presenter_frame_serial = 0;
         state->application_served_serial = 0;
+        state->release_floor_armed = false;
         state->presenter_popped_sequence = 0;
         state->last_enqueued_frame_sequence = 0;
         // A schedule left over from a previous presenter would stall the first
@@ -10668,6 +10675,21 @@ void wait_for_presenter_pair(
                 : 0;
             target = real_sequence > depth ? real_sequence - depth : 0;
         }
+        // 3X: from a frame without synthetics until the cadence is back, each
+        // release is held to the 3X cadence by count whichever measure the
+        // target above uses, so one failed pair cannot speed the game up and
+        // feed the next failure. See release_serial_floor for the loop this
+        // closes.
+        const bool floor_armed = state->release_floor_armed;
+        const std::uint64_t serial_floor = xrfg::release_serial_floor(
+            frames,
+            pairable,
+            floor_armed,
+            state->application_served_serial);
+        const std::uint64_t served_at_entry = state->application_served_serial;
+        // Set when the target above was reached before the floor was: the
+        // floor, not the hold's own phase, is what held this release.
+        bool floor_held_back = false;
         const auto reached_now = [&] {
             return by_count ? state->presenter_frame_serial
                             : state->presenter_popped_sequence;
@@ -10681,7 +10703,13 @@ void wait_for_presenter_pair(
             const bool presenter_starved =
                 state->presenter_submissions.empty() &&
                 state->presenter_last_frame == nullptr;
-            return reached_now() >= target ||
+            const bool target_reached = reached_now() >= target;
+            const bool floor_reached =
+                state->presenter_frame_serial >= serial_floor;
+            if (target_reached && !floor_reached) {
+                floor_held_back = true;
+            }
+            return (target_reached && floor_reached) ||
                    presenter_starved ||
                    XR_FAILED(state->presenter_failure) ||
                    state->presenter_stop_requested;
@@ -10704,6 +10732,11 @@ void wait_for_presenter_pair(
         // means an application that arrives late catches up in one step, and
         // the surplus is what that step discards.
         state->application_served_serial = state->presenter_frame_serial;
+        state->release_floor_armed = xrfg::release_floor_armed_after(
+            frames, pairable, floor_armed, floor_held_back);
+        const std::uint64_t frames_since_release =
+            state->presenter_frame_serial - served_at_entry;
+        const bool floor_still_armed = state->release_floor_armed;
         // 3X on SteamVR only: see triple_release_delay. Elsewhere the phase
         // above is what moves the release, and the delay stays at zero.
         const std::chrono::nanoseconds release_offset =
@@ -10713,6 +10746,20 @@ void wait_for_presenter_pair(
         // Never record under presenter_mutex: the presenter thread takes it
         // every frame, and this path has deadlocked the layer twice.
         lock.unlock();
+        // 804: the 3X floor was in force for this release. a presenter
+        // frames since the previous release, b the floor as a count, c bit 0
+        // set for a pair (clear for the prime itself), bit 1 when the floor
+        // held this release back past its own target, bit 2 when the floor
+        // stays armed for the next one.
+        if (serial_floor != 0) {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::presenter_transition,
+                804,
+                frames_since_release,
+                serial_floor,
+                (pairable ? 1U : 0U) | (floor_held_back ? 2U : 0U) |
+                    (floor_still_armed ? 4U : 0U));
+        }
         if (release_offset > std::chrono::nanoseconds::zero()) {
             // The same high-resolution timer the presenter's pace uses, for
             // the same reason: a condition variable would round the delay up
@@ -13734,6 +13781,7 @@ void apply_live_frame_multiplier(
             state->release_phase_hold = 0;
             // A counted hold counts from here in the new shape.
             state->application_served_serial = state->presenter_frame_serial;
+            state->release_floor_armed = false;
         }
         clear_generation_continuity(state);
         xrfg::bridge_flight_logger().event(

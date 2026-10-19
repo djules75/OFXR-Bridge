@@ -1,6 +1,7 @@
 #include "xrfg/image.hpp"
 #include "xrfg/generation_backpressure.hpp"
 #include "xrfg/pose.hpp"
+#include "xrfg/release_spacing.hpp"
 
 #include <array>
 #include <chrono>
@@ -90,6 +91,91 @@ int main() {
     }
     expect(uevr_nvidia_cooldowns == 0,
            "retained low-rate UEVR timing replay causes no cooldowns");
+
+    // The 3X floor under the once-per-frame hold (release_serial_floor).
+    expect(xrfg::release_serial_floor(2, false, false, 10) == 0,
+           "2X: a prime takes no floor");
+    expect(xrfg::release_serial_floor(2, true, true, 10) == 0,
+           "2X: the pair after a prime takes no floor");
+    expect(xrfg::release_serial_floor(3, true, false, 10) == 0,
+           "3X: a pair with the floor disarmed keeps its pop phase");
+    expect(xrfg::release_serial_floor(3, false, false, 10) == 13,
+           "3X: a prime is held to the 3X cadence");
+    expect(xrfg::release_serial_floor(3, true, true, 13) == 16,
+           "3X: a pair with the floor armed is held to the 3X cadence");
+    expect(xrfg::release_serial_floor(3, false, true, 13) == 16,
+           "3X: a prime after a prime is held to the 3X cadence");
+    expect(!xrfg::release_floor_armed_after(2, false, false, false),
+           "2X: a prime does not arm the floor");
+    expect(xrfg::release_floor_armed_after(3, false, false, false),
+           "3X: a prime arms the floor");
+    expect(xrfg::release_floor_armed_after(3, true, true, true),
+           "3X: a pair the floor held back keeps it armed");
+    expect(!xrfg::release_floor_armed_after(3, true, true, false),
+           "3X: a pair whose own target met the floor disarms it");
+    expect(!xrfg::release_floor_armed_after(3, true, false, false),
+           "3X: a pair never arms the floor");
+    // Alternating failures: every frame costs three presenter frames.
+    {
+        std::uint64_t served = 0;
+        bool armed = false;
+        for (int frame = 0; frame < 12; ++frame) {
+            const bool pairable = frame % 2 == 1;
+            const std::uint64_t floor =
+                xrfg::release_serial_floor(3, pairable, armed, served);
+            // A pair's own count is three; a prime pops after one.
+            const std::uint64_t own = served + (pairable ? 3 : 1);
+            armed = xrfg::release_floor_armed_after(3, pairable, armed, floor > own);
+            served = floor > own ? floor : own;
+        }
+        expect(served == 36,
+               "3X: twelve frames alternating prime and pair take 36 presenter frames");
+    }
+    // The ResetXPDR dip (issue #33, V495 logs): after a prime the pairs'
+    // own pop phase came round 1, 2, 2 presenter frames after the previous
+    // release before it settled back to 3. Each is held to 3, and the floor
+    // disarms on the first pair whose own phase is 3 away again.
+    {
+        const std::uint64_t own_spacing[] = {4, 1, 2, 2, 3, 3, 3};
+        std::uint64_t served = 100;
+        bool armed = false;
+        std::uint64_t floored = 0;
+        bool every_release_three_apart = true;
+        for (std::size_t frame = 0; frame < std::size(own_spacing); ++frame) {
+            const bool pairable = frame != 0;
+            const std::uint64_t floor =
+                xrfg::release_serial_floor(3, pairable, armed, served);
+            const std::uint64_t own = served + own_spacing[frame];
+            const std::uint64_t released = floor > own ? floor : own;
+            if (released - served < 3) {
+                every_release_three_apart = false;
+            }
+            if (floor != 0) {
+                ++floored;
+            }
+            armed = xrfg::release_floor_armed_after(3, pairable, armed, floor > own);
+            served = released;
+        }
+        expect(every_release_three_apart,
+               "3X: after a prime no release comes within three presenter frames");
+        expect(floored == 5,
+               "3X: the floor covers the prime, the three early pairs and the first on time");
+        expect(!armed, "3X: the floor disarms once the pop phase is back");
+    }
+    // Steady 3X never arms the floor.
+    {
+        std::uint64_t served = 0;
+        bool armed = false;
+        bool ever_floored = false;
+        for (int frame = 0; frame < 30; ++frame) {
+            const std::uint64_t floor =
+                xrfg::release_serial_floor(3, true, armed, served);
+            ever_floored = ever_floored || floor != 0;
+            armed = xrfg::release_floor_armed_after(3, true, armed, false);
+            served += 3;
+        }
+        expect(!ever_floored, "3X: steady pairs never take the floor");
+    }
 
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
