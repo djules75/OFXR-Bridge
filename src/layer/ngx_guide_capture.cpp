@@ -267,6 +267,10 @@ struct Capture {
     ComPtr<ID3D12CommandQueue> vulkan_d3d12_queue;
     std::atomic_bool vulkan_active{false};
     std::unordered_map<const NVSDK_NGX_Handle*, Feature> features;
+    // V526, R.E.A.L. VR: the one stream and transport its per-eye handles
+    // publish through.
+    std::uint64_t realvr_stream{};
+    std::shared_ptr<GuideTransport12> realvr_transport;
     std::uint64_t next_stream{kStreamBase};
     NgxGuideCaptureStatistics statistics;
     std::array<bool, 11> skip_recorded{};
@@ -1069,6 +1073,13 @@ void register_late(const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* pa
     }
 }
 
+// V526: where a D3D12 evaluation is captured (capture12_here), and what an
+// evaluation the capture passes over carried (record 855).
+thread_local bool t_chain_captured = false;
+[[nodiscard]] bool capture12_here(unsigned slot, bool outermost) noexcept;
+void note_uncaptured12(unsigned slot, bool outermost, const NVSDK_NGX_Handle* handle,
+    const NVSDK_NGX_Parameter* parameters) noexcept;
+
 template <unsigned Slot>
 NVSDK_NGX_Result NVSDK_CONV hooked_evaluate(
     ID3D12GraphicsCommandList* list,
@@ -1078,9 +1089,11 @@ NVSDK_NGX_Result NVSDK_CONV hooked_evaluate(
     DepthScope depth;
     register_late<Slot>(handle, parameters, d3d12_capturing());
     const bool outermost = depth.outermost();
-    if (outermost) {
+    const bool capture_here = capture12_here(Slot, outermost);
+    if (capture_here) {
         capture12(list, handle, parameters);
     } else {
+        note_uncaptured12(Slot, outermost, handle, parameters);
         try {
             auto& s = state();
             if (d3d12_capturing()) {
@@ -1096,7 +1109,8 @@ NVSDK_NGX_Result NVSDK_CONV hooked_evaluate(
     }
     const NVSDK_NGX_Result result =
         state().modules[Slot].evaluate(list, handle, parameters, callback);
-    if (outermost) complete12(list, parameters, result);
+    if (capture_here) complete12(list, parameters, result);
+    if (outermost) t_chain_captured = false;
     return result;
 }
 
@@ -1109,12 +1123,16 @@ NVSDK_NGX_Result NVSDK_CONV hooked_evaluate_c(
     DepthScope depth;
     register_late<Slot>(handle, parameters, d3d12_capturing());
     const bool outermost = depth.outermost();
-    if (outermost) {
+    const bool capture_here = capture12_here(Slot, outermost);
+    if (capture_here) {
         capture12(list, handle, parameters);
+    } else {
+        note_uncaptured12(Slot, outermost, handle, parameters);
     }
     const NVSDK_NGX_Result result =
         state().modules[Slot].evaluate_c(list, handle, parameters, callback);
-    if (outermost) complete12(list, parameters, result);
+    if (capture_here) complete12(list, parameters, result);
+    if (outermost) t_chain_captured = false;
     return result;
 }
 
@@ -1867,6 +1885,92 @@ constexpr std::int64_t kRecordAnchorSkip = 849;
 // Alternating eyes (configure_ngx_alternating_eye_anchor): the anchor, and
 // the vectors' stretch to each eye's own frame.
 std::atomic_bool g_anchor_enabled{false};
+
+// ------------------------------------------- R.E.A.L. VR's inner call (V526)
+// R.E.A.L. VR hooks _nvngx.dll's exports before the layer does, and fixes the
+// call inside its hook (realvr-dlss-handover, the RealVR64.dll analysis of
+// 2026-10-19): it replaces the motion vectors with its own, rebased from "the
+// game's last step" (the other eye's under alternate-eye rendering) to "the
+// same eye two evaluations back" ("DLSS combined MV", in the game's units),
+// replaces the colour with its copy, doubles the frame-time delta, and
+// evaluates through a feature handle per eye, alternating. The layer's
+// _nvngx.dll hook, outermost, saw the game's raw call - one handle, raw
+// vectors spanning the other eye's step (alternating 3:1 while turning), no
+// frame-time delta - and skipped the nested call into nvngx_dlss.dll (999
+// nested in every 1000 evaluations, record 826) that carries the fixed one.
+// Under R.E.A.L. VR the capture takes the first call into a typed module
+// (nvngx_dlss.dll, nvngx_dlssd.dll) instead: the nested one in the game, the
+// game's own where it calls the module directly. Its per-eye handles publish
+// as one stream through one transport (capture12_bridged), so the eyes still
+// come from the anchor and the serial parity, now on same-eye vectors.
+bool capture12_here(unsigned slot, bool outermost) noexcept {
+    if (!g_anchor_enabled.load(std::memory_order_acquire)) return outermost;
+    if (slot >= 2 || t_chain_captured) return false;
+    t_chain_captured = true;
+    return true;
+}
+
+// The first eight characters of a resource's debug name, ASCII, low byte
+// first: R.E.A.L. VR names its textures ("DLSS combined MV").
+[[nodiscard]] std::uint64_t debug_name_chars(ID3D12Object* object) noexcept {
+    if (object == nullptr) return 0;
+    static const GUID kNameW{0x4cca5fd8, 0x921f, 0x42c8, {0x85, 0x66, 0x70, 0xca, 0xf2, 0xa9, 0xb7, 0x41}};
+    static const GUID kName{0x429b8c22, 0x9188, 0x4b0c, {0x87, 0x42, 0xac, 0xb0, 0xbf, 0x85, 0xc2, 0x00}};
+    std::array<wchar_t, 64> wide{};
+    UINT size = static_cast<UINT>((wide.size() - 1) * sizeof(wchar_t));
+    std::uint64_t packed = 0;
+    if (SUCCEEDED(object->GetPrivateData(kNameW, &size, wide.data()))) {
+        for (std::size_t index = 0; index < 8 && wide[index] != 0; ++index) {
+            packed |= static_cast<std::uint64_t>(wide[index] & 0x7F) << (8U * index);
+        }
+        return packed;
+    }
+    std::array<char, 64> narrow{};
+    size = static_cast<UINT>(narrow.size() - 1);
+    if (SUCCEEDED(object->GetPrivateData(kName, &size, narrow.data()))) {
+        for (std::size_t index = 0; index < 8 && narrow[index] != 0; ++index) {
+            packed |= static_cast<std::uint64_t>(narrow[index] & 0x7F) << (8U * index);
+        }
+    }
+    return packed;
+}
+
+//   854 (V526) a captured evaluation under R.E.A.L. VR, the first 64 and
+//       every 2000th: a its publication | the handle's index (first seen
+//       order) << 48 | the call's depth << 56, b its vectors' resource
+//       (low 48 bits), c the vectors' debug name, 8 ASCII characters
+//   855 (V526) an evaluation passed over under R.E.A.L. VR (the outer,
+//       raw call), the first 64: a the handle's index << 48 | the module
+//       slot << 40 | depth << 56, b the vectors' resource, c their name
+constexpr std::int64_t kRecordInnerEvaluation = 854;
+constexpr std::int64_t kRecordOuterEvaluation = 855;
+
+[[nodiscard]] std::uint64_t realvr_handle_index(const NVSDK_NGX_Handle* handle) noexcept {
+    static std::mutex mutex;
+    static auto* seen = new std::vector<const NVSDK_NGX_Handle*>;
+    std::scoped_lock lock(mutex);
+    const auto found = std::find(seen->begin(), seen->end(), handle);
+    if (found != seen->end()) return static_cast<std::uint64_t>(found - seen->begin());
+    seen->push_back(handle);
+    return seen->size() - 1;
+}
+
+void note_uncaptured12(unsigned slot, bool outermost, const NVSDK_NGX_Handle* handle,
+    const NVSDK_NGX_Parameter* parameters) noexcept {
+    try {
+        static_cast<void>(outermost);
+        if (!g_anchor_enabled.load(std::memory_order_acquire)) return;
+        static std::atomic<std::uint32_t> recorded{0};
+        if (recorded.fetch_add(1, std::memory_order_relaxed) >= 64) return;
+        auto* motion = get<ID3D12Resource*>(parameters, NVSDK_NGX_Parameter_MotionVectors);
+        record(kRecordOuterEvaluation,
+            (realvr_handle_index(handle) << 48U) | (static_cast<std::uint64_t>(slot) << 40U) |
+                (static_cast<std::uint64_t>(t_depth) << 56U),
+            reinterpret_cast<std::uintptr_t>(motion) & 0xFFFFFFFFFFFFULL, debug_name_chars(motion));
+    } catch (...) {
+    }
+}
+
 
 void skip_anchor(std::uint32_t reason, std::uint64_t detail = 0) noexcept {
     static std::array<std::atomic<std::uint64_t>, 8> counts{};
@@ -3684,6 +3788,11 @@ void capture12_bridged(
             feature = found->second;
             device = s.bridge_device;
             queue = s.bridge_queue;
+            // V526: R.E.A.L. VR's per-eye handles are one alternating stream.
+            if (g_anchor_enabled.load(std::memory_order_acquire)) {
+                if (s.realvr_stream == 0) s.realvr_stream = feature.stream;
+                feature.stream = s.realvr_stream;
+            }
         }
         if (!device || !queue) return;
         ID3D12Resource* const output =
@@ -3725,6 +3834,10 @@ void capture12_bridged(
             Feature& stored = found->second;
             first_evaluation = !stored.shape_recorded;
             stored.shape_recorded = true;
+            if (!stored.transport12 && g_anchor_enabled.load(std::memory_order_acquire) &&
+                s.realvr_transport) {
+                stored.transport12 = s.realvr_transport;
+            }
             if (!stored.transport12) {
                 auto created = std::make_shared<GuideTransport12>();
                 const HRESULT result = created->initialize(game.Get(), device.Get(), queue.Get());
@@ -3738,6 +3851,9 @@ void capture12_bridged(
                     return;
                 }
                 stored.transport12 = std::move(created);
+                if (g_anchor_enabled.load(std::memory_order_acquire) && !s.realvr_transport) {
+                    s.realvr_transport = stored.transport12;
+                }
             }
             if (!stored.output_placeholder ||
                 stored.output_placeholder->GetDesc().Width != output_description.Width ||
@@ -3863,6 +3979,17 @@ void capture12_bridged(
         // after the DLSS call (complete12).
         const DlssStreamPosition position = dlss_motion_vector_stream_position(feature.stream);
         transport->note_publication(feature.stream, position);
+        if (g_anchor_enabled.load(std::memory_order_acquire)) {
+            static std::atomic<std::uint64_t> inner_recorded{0};
+            const std::uint64_t inner = inner_recorded.fetch_add(1, std::memory_order_relaxed);
+            if (inner < 64 || inner % 2000 == 0) {
+                record(kRecordInnerEvaluation,
+                    (after.published & 0xFFFFFFFFFFFFULL) | (realvr_handle_index(handle) << 48U) |
+                        (static_cast<std::uint64_t>(t_depth) << 56U),
+                    reinterpret_cast<std::uintptr_t>(motion) & 0xFFFFFFFFFFFFULL,
+                    debug_name_chars(motion));
+            }
+        }
         if (g_anchor_enabled.load(std::memory_order_acquire)) {
             static std::atomic<std::uint64_t> spans_recorded{0};
             const std::uint64_t index = spans_recorded.fetch_add(1, std::memory_order_relaxed);
@@ -5044,7 +5171,22 @@ void retire_feature(NVSDK_NGX_Handle* handle) noexcept {
                 ++s.statistics.features_released;
             }
         }
+        bool shared = false;
         if (stream != 0) {
+            // V526: R.E.A.L. VR's handles share one stream; it goes with the last.
+            std::scoped_lock lock(s.mutex);
+            if (stream == s.realvr_stream) {
+                for (const auto& [other, feature] : s.features) {
+                    static_cast<void>(other);
+                    if (feature.transport12 && feature.transport12 == s.realvr_transport) shared = true;
+                }
+                if (!shared) {
+                    s.realvr_stream = 0;
+                    s.realvr_transport.reset();
+                }
+            }
+        }
+        if (stream != 0 && !shared) {
             retire_dlss_motion_vector_stream(stream);
         }
         transport.reset();

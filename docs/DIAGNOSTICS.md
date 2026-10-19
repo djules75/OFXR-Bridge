@@ -168,6 +168,17 @@ Then:
   and every 2000th: `a` the publication; `b` the eye's mean motion << 32 | the
   other eye's; `c` the factor << 32 | its source (1 measured, 0 the nominal 2)
   (float bits).
+- V526: R.E.A.L. VR fixes the DLSS call inside its own _nvngx.dll hook (its
+  vectors rebased to the same eye two evaluations back, "DLSS combined MV",
+  its colour copy, a feature handle per eye); the layer's hook, outermost,
+  saw only the game's raw call. Under R.E.A.L. VR the capture takes the first
+  call into a typed module (nvngx_dlss.dll), the nested one, and its per-eye
+  handles publish as one stream through one transport. 854, a captured
+  evaluation (first 64, every 2000th): `a` publication | handle index << 48 |
+  depth << 56; `b` the vectors' resource; `c` its debug name, 8 ASCII
+  characters ("DLSS com" for R.E.A.L. VR's). 855, a call passed over (the
+  outer, raw one), first 64: `a` handle index << 48 | module slot << 40 |
+  depth << 56; `b`, `c` as 854.
 - 845, an eye's choice when a stream is shared without the anchor: `a` eye << 32
   | publication; `b` the two cameras' sides; `c` method (1 cameras apart, 2
   equal, 3 unknown) - the evaluation order decides, the cameras never.

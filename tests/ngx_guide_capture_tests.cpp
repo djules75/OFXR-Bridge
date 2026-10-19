@@ -1059,9 +1059,11 @@ void run_bridged_d3d12(HMODULE module, ID3D12Device* layer_device, ID3D12Command
             stream = left_set->eyes[0]->stream;
             require(xrfg::dlss_motion_vector_stream_position(stream).anchored,
                 "the pictures did not anchor the alternating stream");
-            // The left eye has the newest (16); the right, a frame late as
-            // R.E.A.L. VR's AERv2 hands it over, the one before its newest.
-            require(left_set->eyes[0]->serial == 16 && right_set->eyes[0]->serial == 13,
+            // Under R.E.A.L. VR every handle publishes into one stream (V526),
+            // the kept feature's evaluation first (serial 1): the left eye has
+            // the newest (17); the right, a frame late as R.E.A.L. VR's AERv2
+            // hands it over, the one before its newest (14).
+            require(left_set->eyes[0]->serial == 17 && right_set->eyes[0]->serial == 14,
                 "the anchor did not give each eye its evaluation");
             // The vectors as the game wrote them: the stretch is measured and
             // recorded (848), not applied, in this build.
