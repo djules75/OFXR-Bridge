@@ -1472,7 +1472,7 @@ void show_context_menu(AppState& state) {
                  ? MF_CHECKED
                  : MF_UNCHECKED),
         backend_fidelity_fx,
-        L"FidelityFX");
+        L"FidelityFX (default)");
     AppendMenuW(
         backend_menu,
         MF_STRING |
@@ -1492,7 +1492,7 @@ void show_context_menu(AppState& state) {
                  ? MF_CHECKED
                  : MF_UNCHECKED),
         backend_nvidia_medium,
-        L"NVIDIA Medium (default)");
+        L"NVIDIA Medium");
     AppendMenuW(
         backend_menu,
         MF_STRING |
