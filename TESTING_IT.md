@@ -1,3 +1,11 @@
+## V599: memoria AFW durante i cambi
+
+Corregge il rilascio delle allocazioni GPU del provider AFW dopo un reset.
+Avvia il tray V599 e Ghost, poi ripeti il benchmark Luke con DLSS5 che aveva
+mostrato schermo nero e rallentamento. Controlla anche i passaggi 1x1/2x2/4x4.
+Il CSV continua a registrare la VRAM a fine test; F9 puo restare acceso.
+Non serve F8. Il risultato nel gioco resta da confermare.
+
 ## V598: avvio Luke Ross
 
 Corregge l'errore -37 riprodotto quando REAL VR acquisisce il prossimo target

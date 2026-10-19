@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.598.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.599.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1507,7 +1507,16 @@ if(WIN32 AND XRFG_BUILD_TESTS)
  add_test(NAME xrfg_luke_provider_continuity COMMAND xrfg_luke_provider_continuity_tests "${XRFG_AFW_RUNTIME}")
  set_tests_properties(xrfg_luke_provider_continuity PROPERTIES TIMEOUT 30)
  if(TARGET xrfg_d3d12_history)
-  add_executable(xrfg_luke_kcd_quality_tests tests/luke_kcd_quality_tests.cpp)
+  add_executable(xrfg_afw_provider_lifetime_tests tests/afw_provider_lifetime_tests.cpp)
+target_compile_features(xrfg_afw_provider_lifetime_tests PRIVATE cxx_std_20)
+target_compile_definitions(xrfg_afw_provider_lifetime_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_include_directories(xrfg_afw_provider_lifetime_tests PRIVATE include)
+target_link_libraries(xrfg_afw_provider_lifetime_tests PRIVATE d3d12 dxgi)
+add_test(NAME xrfg_afw_provider_lifetime_gpu COMMAND xrfg_afw_provider_lifetime_tests
+    "${XRFG_AFW_RUNTIME}")
+set_tests_properties(xrfg_afw_provider_lifetime_gpu PROPERTIES TIMEOUT 30)
+
+add_executable(xrfg_luke_kcd_quality_tests tests/luke_kcd_quality_tests.cpp)
   target_include_directories(xrfg_luke_kcd_quality_tests PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}/generated-shaders")
   target_compile_features(xrfg_luke_kcd_quality_tests PRIVATE cxx_std_20)
   target_compile_definitions(xrfg_luke_kcd_quality_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

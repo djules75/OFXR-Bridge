@@ -1,3 +1,10 @@
+## V599: AFW reset memory retirement
+
+Retain fresh-provider resets while releasing their abandoned D3D12 allocations
+after GPU completion and module unload. Six actual 2048x2048 resets return to
+the measured memory baseline. Owner Ghost/DLSS5 retry pending.
+[Details](docs/V599_AFW_PROVIDER_RETIREMENT.md).
+
 ## V598: Luke Ross startup image ownership
 
 Preserve the latest released private image when REAL VR acquires its next

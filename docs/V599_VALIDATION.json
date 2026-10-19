@@ -1,0 +1,254 @@
+{
+  "version": "V599",
+  "base": "04d2fc2ab18a10f768e48d168595b0da6a9f64b7",
+  "status": "runtime-pending",
+  "scope": "Retire surviving factory-owned GPU objects after isolated AFW provider unload and proven GPU completion. Preserve fresh provider state, V598 startup ownership, V597 phase and all AFW math.",
+  "passed": 56,
+  "failed": 0,
+  "ctest_seconds": 156.05232979999997,
+  "ctest_passed": [
+    "xrfg_private_output_distributor_tests",
+    "xrfg_private_openxr_runtime_gpu",
+    "xrfg_tray_lifecycle_tests",
+    "xrfg_luke_post_afw_director_packet",
+    "xrfg_private_runtime_ref_gpu",
+    "xrfg_private_runtime_new_gpu",
+    "xrfg_private_runtime_djules_gpu",
+    "xrfg_private_runtime_fidelity_gpu",
+    "xrfg_private_runtime_fsr_gpu",
+    "xrfg_private_runtime_hybrid_gpu",
+    "xrfg_private_runtime_dlssg_gpu",
+    "xrfg_private_runtime_djules3_gpu",
+    "xrfg_private_runtime_dlssg3_gpu",
+    "xrfg_private_runtime_d11-ref_gpu",
+    "xrfg_private_runtime_d11-new_gpu",
+    "xrfg_private_runtime_d11-djules_gpu",
+    "xrfg_private_runtime_d11-fidelity_gpu",
+    "xrfg_private_runtime_new-01_gpu",
+    "xrfg_private_runtime_new-10_gpu",
+    "xrfg_private_runtime_new-11_gpu",
+    "xrfg_private_runtime_switch_gpu",
+    "xrfg_private_runtime_separate-ref_gpu",
+    "xrfg_private_runtime_separate-new_gpu",
+    "xrfg_private_runtime_separate-fidelity_gpu",
+    "xrfg_private_runtime_separate-fsr_gpu",
+    "xrfg_private_runtime_separate-hybrid_gpu",
+    "xrfg_private_runtime_separate-dlssg_gpu",
+    "xrfg_private_runtime_session_gpu",
+    "xrfg_private_runtime_memory_gpu",
+    "xrfg_layer_call_chain",
+    "xrfg_single_configuration_tests",
+    "xrfg_benchmark_suite_tests",
+    "xrfg_dlssg_profile_tests",
+    "xrfg_settings_widgets_tests",
+    "xrfg_afw_provider_lifetime_gpu",
+    "xrfg_luke_kcd_quality_bundled",
+    "xrfg_luke_interleaved_quality_bundled",
+    "xrfg_luke_beta6_shading_4",
+    "xrfg_luke_beta6_shading_8",
+    "xrfg_luke_beta6_shading_9",
+    "xrfg_luke_gap_recovery_0_1",
+    "xrfg_luke_gap_recovery_0_2",
+    "xrfg_luke_gap_recovery_4_1",
+    "xrfg_luke_gap_recovery_4_2",
+    "xrfg_luke_gap_recovery_8_1",
+    "xrfg_luke_gap_recovery_8_2",
+    "xrfg_luke_interleaved_gap_4",
+    "xrfg_luke_interleaved_gap_8",
+    "xrfg_luke_epoch_recovery_0",
+    "xrfg_luke_epoch_recovery_4",
+    "xrfg_luke_epoch_recovery_8",
+    "xrfg_luke_geometry_recovery_0",
+    "xrfg_luke_geometry_recovery_4",
+    "xrfg_luke_geometry_recovery_8",
+    "xrfg_luke_indiana_live_shading",
+    "xrfg_luke_indiana_quality_bundled"
+  ],
+  "headset_validation": "Pending owner Ghost of Tsushima DLSS5 benchmark retry. Confirmed allocation leak fixed in controlled GPU comparison; exact owner black-screen incident not yet declared solved.",
+  "negative_control": "Actual pinned provider following V598 unload sequence retains1412300800bytes after6resets. New factory retirement returns to exact baseline; committed regression also protects foreign AddRef and resources already destroyed.",
+  "memory_comparison": {
+    "provider": "PureDark AFW beta6",
+    "provider_sha256": "5f3cfc38903ac438241a3c47cb4bc3ac329cb39b056e33a63c20045fe15336f9",
+    "resolution": "2048x2048",
+    "baseline": [
+      {
+        "step": 0,
+        "phase": "baseline",
+        "usage_bytes": 15642624,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 1,
+        "phase": "initialized",
+        "usage_bytes": 250916864,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 1,
+        "phase": "unloaded",
+        "usage_bytes": 250916864,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 2,
+        "phase": "initialized",
+        "usage_bytes": 486322176,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 2,
+        "phase": "unloaded",
+        "usage_bytes": 486322176,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 3,
+        "phase": "initialized",
+        "usage_bytes": 721727488,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 3,
+        "phase": "unloaded",
+        "usage_bytes": 721727488,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 4,
+        "phase": "initialized",
+        "usage_bytes": 957132800,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 4,
+        "phase": "unloaded",
+        "usage_bytes": 957132800,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 5,
+        "phase": "initialized",
+        "usage_bytes": 1192538112,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 5,
+        "phase": "unloaded",
+        "usage_bytes": 1192538112,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 6,
+        "phase": "initialized",
+        "usage_bytes": 1427943424,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 6,
+        "phase": "unloaded",
+        "usage_bytes": 1427943424,
+        "budget_bytes": 24505221120
+      }
+    ],
+    "retired": [
+      {
+        "step": 0,
+        "phase": "baseline",
+        "usage_bytes": 15642624,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 1,
+        "phase": "initialized",
+        "usage_bytes": 250916864,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 1,
+        "phase": "unloaded",
+        "usage_bytes": 15642624,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 2,
+        "phase": "initialized",
+        "usage_bytes": 250916864,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 2,
+        "phase": "unloaded",
+        "usage_bytes": 15642624,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 3,
+        "phase": "initialized",
+        "usage_bytes": 250916864,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 3,
+        "phase": "unloaded",
+        "usage_bytes": 15642624,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 4,
+        "phase": "initialized",
+        "usage_bytes": 250916864,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 4,
+        "phase": "unloaded",
+        "usage_bytes": 15642624,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 5,
+        "phase": "initialized",
+        "usage_bytes": 250916864,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 5,
+        "phase": "unloaded",
+        "usage_bytes": 15642624,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 6,
+        "phase": "initialized",
+        "usage_bytes": 250916864,
+        "budget_bytes": 24505221120
+      },
+      {
+        "step": 6,
+        "phase": "unloaded",
+        "usage_bytes": 15642624,
+        "budget_bytes": 24505221120
+      }
+    ],
+    "control_method": "Actual GPU, six isolated module InitDevice/InitFrameWarp, wait GPU, FreeLibrary, wait GPU,100ms settle. Baseline reproduces V598 teardown sequence without tracked factory retirement; final uses the new facade and weak lifetime markers.",
+    "baseline_retained_bytes": 1412300800,
+    "final_retained_bytes": 0,
+    "final_captured_survivors_per_cycle": 79,
+    "committed_regression_output": "0,baseline,15642624,24505221120\n1,initialized,250916864,24505221120\n1,unloaded,15642624,24505221120\n2,initialized,250916864,24505221120\n2,unloaded,15642624,24505221120\n3,initialized,250916864,24505221120\n3,unloaded,15642624,24505221120\n4,initialized,250916864,24505221120\n4,unloaded,15642624,24505221120\n5,initialized,250916864,24505221120\n5,unloaded,15642624,24505221120\n6,initialized,250916864,24505221120\n6,unloaded,15642624,24505221120\nAFW6isolated2048x2048resets:memorybaseline, factory ownership and safe prior destruction PASS\n",
+    "provider_pixel_tests": "Unchanged MAE<6 and D3D12 error/corruption rejection; all reset cases pass.",
+    "abandoned_prototypes_included": false
+  },
+  "unchanged": [
+    "Director and V597 native1ms phase",
+    "V598 latest released source ownership",
+    "AFW depth subtraction, native motion, eye and camera math",
+    "Fresh provider reset boundaries and beta6 binary",
+    "VDXR, frames, swapchain count, meter, INI and benchmark layout"
+  ],
+  "logs": [
+    "v599-build.log",
+    "v599-final-tests.log",
+    "v599-final-junit.xml",
+    "v599-afw-memory-comparison.json"
+  ]
+}

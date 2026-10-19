@@ -1,4 +1,5 @@
 #include "xrfg/luke_afw.hpp"
+#include "xrfg/afw_provider_device.hpp"
 #include "xrfg/luke_depth_format.hpp"
 #include "xrfg/luke_motion_format.hpp"
 #include "xrfg/luke_native_motion.hpp"
@@ -429,6 +430,8 @@ bool copy_compatible_color(const D3D12_RESOURCE_DESC& left,
 }  // namespace
 
 struct LukeAfwSynthesizer::Impl {
+    AfwProviderAllocations provider_allocations;
+    std::unique_ptr<AfwProviderDevice> provider_device;
     HMODULE module{};
     std::filesystem::path provider_path;
     std::filesystem::path private_provider_file;
@@ -499,8 +502,26 @@ struct LukeAfwSynthesizer::Impl {
     bool frame_buffers_ready{};
 
     ~Impl() {
+        // Normal live resets already retired last_submission_fence above.
+        // Cold/failure teardown also proves queue completion before releasing
+        // surviving provider factory references. A timeout leaves them alive.
+        bool retired=false;
+        if(queue && submission_fence && submission_event) {
+            auto receipt=last_submission_fence;
+            if(!receipt) {
+                receipt=next_submission_fence++;
+                if(FAILED(queue->Signal(submission_fence.Get(),receipt)))receipt=0;
+            }
+            if(receipt) {
+                if(submission_fence->GetCompletedValue()<receipt &&
+                    SUCCEEDED(submission_fence->SetEventOnCompletion(receipt,submission_event)))
+                    WaitForSingleObject(submission_event,250);
+                retired=submission_fence->GetCompletedValue()>=receipt;
+            }
+        }
+        if (module != nullptr && FreeLibrary(module) && retired)
+            provider_allocations.retire();
         if (submission_event != nullptr) CloseHandle(submission_event);
-        if (module != nullptr) FreeLibrary(module);
         if (!private_provider_file.empty()) DeleteFileW(private_provider_file.c_str());
     }
 
@@ -1144,7 +1165,7 @@ HRESULT LukeAfwSynthesizer::initialize(ID3D12Device* device,
     ID3D12CommandQueue* queue, const std::filesystem::path& plugin_path) noexcept {
     try {
         std::scoped_lock lock(mutex_);
-        return initialize_locked(device,queue,plugin_path,false);
+        return initialize_locked(device,queue,plugin_path,true);
     } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
       catch (...) { return E_FAIL; }
 }
@@ -1189,11 +1210,6 @@ HRESULT LukeAfwSynthesizer::initialize_locked(ID3D12Device* device,
             GetProcAddress(candidate->module, "EvaluateFrameWarp"));
         if (candidate->init_device == nullptr || candidate->init_frame_warp == nullptr ||
             candidate->evaluate == nullptr) return E_NOINTERFACE;
-        DeviceParams params{};
-        params.d3d12_device = device;
-        params.d3d12_queue = queue;
-        candidate->renderer = candidate->init_device(params);
-        if (candidate->renderer == nullptr) return E_FAIL;
         const D3D12_COMMAND_QUEUE_DESC queue_description = queue->GetDesc();
         HRESULT result = device->CreateCommandAllocator(
             D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -1214,6 +1230,12 @@ HRESULT LukeAfwSynthesizer::initialize_locked(ID3D12Device* device,
             return HRESULT_FROM_WIN32(GetLastError());
         candidate->device = device;
         candidate->queue = queue;
+        DeviceParams params{};
+        candidate->provider_device=std::make_unique<AfwProviderDevice>(device,candidate->provider_allocations);
+        params.d3d12_device = candidate->provider_device.get();
+        params.d3d12_queue = queue;
+        candidate->renderer = candidate->init_device(params);
+        if (candidate->renderer == nullptr) return E_FAIL;
         impl_ = std::move(candidate);
         return S_OK;
     } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }

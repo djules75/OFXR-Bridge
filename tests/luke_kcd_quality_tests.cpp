@@ -360,7 +360,7 @@ int main(int argc,char** argv) {try {
     }
     CloseHandle(event);
     if(publication_gap) {
-        const unsigned expected_replacements=shading>0 ? 4 : 0;
+        const unsigned expected_replacements=12+(shading>0 ? 4 : 0);
         require(private_modules.size()==expected_replacements,
             "each reduced Combined sequence must retire warm state exactly once at the omitted color");
         for(const auto& file:private_modules)require(!std::filesystem::exists(file),
@@ -370,7 +370,7 @@ int main(int argc,char** argv) {try {
             <<"; GPU states and pixels PASS\n";
     }
     if(shading==9) {
-        require(private_modules.size()==12,"live quality transitions did not create fresh isolated provider state");
+        require(private_modules.size()==24,"live quality transitions did not create fresh isolated provider state");
         for(const auto& file:private_modules)require(!std::filesystem::exists(file),
             "retired isolated AFW provider left its private file loaded or on disk");
         const auto log=xrfg::bridge_flight_logger().log_path();

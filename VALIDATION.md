@@ -1,3 +1,10 @@
+## V599: GPU allocations retired across AFW resets
+
+Six actual 2048x2048 beta6 resets return to the exact measured VRAM baseline.
+Factory retirement preserves foreign references and skips prior destruction.
+Existing provider pixel thresholds and GPU state validation are retained.
+[Final checks](docs/V599_VALIDATION.json). Owner Ghost/DLSS5 retry pending.
+
 ## V598: released-image ownership during acquire-ahead
 
 Exact V597 reproduces the observed -37 at End under held source-copy pressure.
