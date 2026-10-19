@@ -136,6 +136,16 @@ constexpr std::int64_t kRecordVulkanUntracked = 833;
 //       are detoured (823 a = 30: they could not be)
 constexpr std::int64_t kRecordStreamlineCamera = 834;
 constexpr std::int64_t kRecordStreamlineStream = 835;
+//   839 (V520) an evaluation's DLSS parameters as published, for a stream's
+//       first four publications and every 2000th after: a the stream's low
+//       16 bits | the creation flags << 16 | bit 48 reset | bit 49 jittered,
+//       b MV scale x (float bits) << 32 | MV scale y, c the vector rectangle:
+//       x << 48 | y << 32 | width << 16 | height
+//   840 (V520) with each 839: a the output rectangle, x << 48 | y << 32 |
+//       width << 16 | height, b jitter x (float bits) << 32 | jitter y, c the
+//       vector texture's DXGI format << 48 | its width << 24 | its height
+constexpr std::int64_t kRecordParameters = 839;
+constexpr std::int64_t kRecordParametersMore = 840;
 constexpr std::int64_t kRecordSkip = 824;
 constexpr std::int64_t kRecordShape = 825;
 constexpr std::int64_t kRecordSummary = 826;
@@ -591,6 +601,42 @@ void fill_publication(
     }
 }
 
+[[nodiscard]] std::uint64_t float_bits(float value) noexcept {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+[[nodiscard]] std::uint64_t pack_rect(std::uint32_t x, std::uint32_t y, std::uint32_t width,
+    std::uint32_t height) noexcept {
+    return (static_cast<std::uint64_t>(x & 0xFFFFU) << 48U) |
+        (static_cast<std::uint64_t>(y & 0xFFFFU) << 32U) |
+        (static_cast<std::uint64_t>(width & 0xFFFFU) << 16U) | (height & 0xFFFFU);
+}
+
+// 839/840 (V520): what a publication says, as the capture read it, to set
+// against what the game's upscaler meant (Skyrim's halo, PureDark's DLSS).
+void record_parameters(const DlssMotionVectorPublication& publication, const Feature& feature,
+    std::uint64_t publications, std::uint32_t motion_format, std::uint32_t motion_width,
+    std::uint32_t motion_height) noexcept {
+    if (publications >= 4 && publications % 2000 != 0) return;
+    record(kRecordParameters,
+        (feature.stream & 0xFFFFULL) |
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(feature.flags)) << 16U) |
+            (publication.reset ? 1ULL << 48U : 0ULL) |
+            (publication.jittered ? 1ULL << 49U : 0ULL),
+        (float_bits(publication.scale_x) << 32U) | float_bits(publication.scale_y),
+        pack_rect(publication.motion_x, publication.motion_y, publication.motion_width,
+            publication.motion_height));
+    record(kRecordParametersMore,
+        pack_rect(publication.output_x, publication.output_y, publication.output_width,
+            publication.output_height),
+        (float_bits(publication.jitter_x) << 32U) | float_bits(publication.jitter_y),
+        (static_cast<std::uint64_t>(motion_format & 0xFFFFU) << 48U) |
+            (static_cast<std::uint64_t>(motion_width & 0xFFFFFFU) << 24U) |
+            (motion_height & 0xFFFFFFU));
+}
+
 // The publication for one evaluation. Before the original runs: the inputs
 // are complete, and the snapshot copy then precedes DLSS on the list.
 void capture(
@@ -754,6 +800,11 @@ void capture(
                         publication.view.tan_up, publication.view.tan_down));
             }
             found->second.viewport_recorded = publication.view.known;
+        }
+        if (found != s.features.end()) {
+            record_parameters(publication, feature, found->second.publications,
+                motion_description.Format, static_cast<std::uint32_t>(motion_description.Width),
+                motion_description.Height);
         }
         if (found != s.features.end() && found->second.publications++ == 0) {
             // a's upper bits (V505): 32 the game's depth came with it, 40-47
@@ -1420,6 +1471,10 @@ void capture11(
         ++s.statistics.publications;
         ++s.statistics.d3d11_publications;
         const auto found = s.features.find(handle);
+        if (found != s.features.end()) {
+            record_parameters(publication, feature, found->second.publications,
+                motion_description.Format, motion_description.Width, motion_description.Height);
+        }
         if (found != s.features.end() && found->second.publications++ == 0) {
             record(kRecordD3D11Publication,
                 (feature.stream & 0xFFFFFFFFULL) |
