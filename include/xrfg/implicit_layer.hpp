@@ -23,18 +23,38 @@ namespace xrfg::implicit_layer {
 [[nodiscard]] std::wstring pause_signal_name(const std::filesystem::path& manifest);
 [[nodiscard]] void* create_pause_signal(const std::filesystem::path& manifest,
                                         std::wstring* error = nullptr) noexcept;
+// Wine's ntdll exports wine_get_version; Windows' does not.
+[[nodiscard]] bool running_under_wine() noexcept;
+// How a session found the tray's control. The flight log's arm_control
+// record carries it.
+enum class ArmControlState : std::int64_t {
+    // No control_event in the ini: a layer the tray does not manage.
+    unmanaged = 0,
+    tray_control = 1,
+    // Managed, but the control is gone: the tray quit or was killed, so
+    // the layer stays Off.
+    control_missing = 2,
+    // The same under Wine, where the layer runs. Proton's tray cannot run
+    // beside the game (separate wineservers deadlock the start-up, and their
+    // named objects are not shared anyway), so the control is always missing
+    // there; failing closed would make the layer unusable.
+    control_missing_wine = 3,
+};
 class ManualArmControl {
 public:
-    explicit ManualArmControl(const std::filesystem::path& module_directory) noexcept;
+    explicit ManualArmControl(const std::filesystem::path& module_directory,
+                              bool under_wine = running_under_wine()) noexcept;
     ~ManualArmControl();
     ManualArmControl(const ManualArmControl&) = delete;
     ManualArmControl& operator=(const ManualArmControl&) = delete;
     [[nodiscard]] bool stop_requested() const noexcept;
     [[nodiscard]] bool pause_requested() const noexcept;
+    [[nodiscard]] ArmControlState state() const noexcept { return state_; }
 private:
     void* event_{};
     void* pause_event_{};
     bool managed_{};
+    ArmControlState state_{ArmControlState::unmanaged};
 };
 
 inline constexpr wchar_t kRegistrySubkey[] =

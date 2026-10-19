@@ -249,12 +249,20 @@ void runtime_stop_and_watchdog() {
     HANDLE event = xrfg::implicit_layer::create_arm_signal(manifest);
     require(event != nullptr, "create arm event");
     require(write_runtime_configuration(test.state, nullptr, manifest), "write private control configuration");
-    xrfg::implicit_layer::ManualArmControl reader(runtime_directory(test.state.local_directory));
+    xrfg::implicit_layer::ManualArmControl reader(
+        runtime_directory(test.state.local_directory), false);
     require(!reader.stop_requested(), "loaded DLL initially enabled");
+    // Under Wine a control that exists is obeyed like anywhere else.
+    xrfg::implicit_layer::ManualArmControl wine_reader(
+        runtime_directory(test.state.local_directory), true);
+    require(!wine_reader.stop_requested() &&
+            wine_reader.state() == xrfg::implicit_layer::ArmControlState::tray_control,
+        "Wine session with the tray's control starts enabled");
     // Reopened tray has neither the old event handle nor the old manifest path.
     const HWND window = make_window(test.state);
     SendMessageW(window, WM_CLOSE, 0, 0);
     require(reader.stop_requested(), "Quit signals loaded DLL through registry discovery");
+    require(wine_reader.stop_requested(), "Quit stops a Wine session that has the control");
     require(!IsWindow(window) && !test.registered(manifest), "Quit removes registration before exit");
     CloseHandle(event);
 
@@ -280,10 +288,73 @@ void runtime_stop_and_watchdog() {
     // Missing event is fail-closed for managed DLLs; embedded INIs have no lease.
     const auto absent = test.state.local_directory / L"RuntimeLayer\\v069\\XR_APILAYER_XRFrameBridge_manual-8-8.json";
     require(write_runtime_configuration(test.state, nullptr, absent), "write absent lease");
-    xrfg::implicit_layer::ManualArmControl absent_reader(runtime_directory(test.state.local_directory));
-    require(absent_reader.stop_requested(), "orphaned managed DLL starts disabled");
+    xrfg::implicit_layer::ManualArmControl absent_reader(
+        runtime_directory(test.state.local_directory), false);
+    require(absent_reader.stop_requested() &&
+            absent_reader.state() == xrfg::implicit_layer::ArmControlState::control_missing,
+        "orphaned managed DLL starts disabled");
+    // Proton cannot keep the tray beside the game, so under Wine an absent
+    // control is On (issue #34).
+    xrfg::implicit_layer::ManualArmControl absent_wine(
+        runtime_directory(test.state.local_directory), true);
+    require(!absent_wine.stop_requested() &&
+            absent_wine.state() == xrfg::implicit_layer::ArmControlState::control_missing_wine,
+        "Wine session without the tray's control starts enabled");
+    {
+        std::ofstream malformed(
+            runtime_directory(test.state.local_directory) / L"ofxr_bridge.ini",
+            std::ios::binary | std::ios::trunc);
+        malformed << "[ofxr]\r\ncontrol_event=not-a-control\r\n";
+    }
+    xrfg::implicit_layer::ManualArmControl malformed_wine(
+        runtime_directory(test.state.local_directory), true);
+    require(malformed_wine.stop_requested() &&
+            malformed_wine.state() == xrfg::implicit_layer::ArmControlState::control_missing,
+        "Wine session with a malformed control stays disabled");
     xrfg::implicit_layer::ManualArmControl embedded(test.state.local_directory / L"embedded");
     require(!embedded.stop_requested(), "embedded layer without tray control unchanged");
+}
+
+// --arm-and-exit (issue #34): the arm outlives the process, is unmanaged, and
+// the next tray start retires it.
+void arm_and_exit_lifecycle() {
+    Fixture test;
+    test.state.executable_directory = test.state.local_directory / L"Install";
+    std::filesystem::create_directories(test.state.executable_directory / L"ofxr");
+    std::ofstream(test.state.executable_directory / L"ofxr" /
+        L"XR_APILAYER_XRFrameBridge_diagnostic.dll") << "layer";
+    // The Vulkan layer registers under the real Vulkan key; keep it out.
+    test.state.settings.vulkan_support = false;
+    std::wstring error;
+    require(arm_and_exit(test.state, &error,
+                xrfg::implicit_layer::RegistryScope::current_user),
+        "arm-and-exit arms");
+    require(test.state.arm_signal == nullptr && test.state.pause_signal == nullptr,
+        "arm-and-exit holds no control");
+    const auto directory = runtime_directory(test.state.local_directory);
+    std::filesystem::path manifest;
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        if (entry.path().filename().wstring().starts_with(
+                xrfg::implicit_layer::kManifestPrefix)) {
+            manifest = entry.path();
+        }
+    }
+    require(!manifest.empty() && test.registered(manifest),
+        "arm-and-exit leaves the layer registered");
+    std::ifstream ini_file(directory / L"ofxr_bridge.ini");
+    const std::string ini((std::istreambuf_iterator<char>(ini_file)),
+        std::istreambuf_iterator<char>());
+    ini_file.close();
+    require(!ini.empty() && ini.find("control_event") == std::string::npos,
+        "arm-and-exit writes no control_event");
+    xrfg::implicit_layer::ManualArmControl reader(directory, false);
+    require(!reader.stop_requested() &&
+            reader.state() == xrfg::implicit_layer::ArmControlState::unmanaged,
+        "arm-and-exit session runs unmanaged");
+    // What the next tray start does before anything else.
+    require(cleanup_all_owned_registrations(test.state, &error) &&
+            !test.registered(manifest),
+        "next tray start retires the arm-and-exit registration");
 }
 
 void integrity_scope_policy() {
@@ -312,6 +383,7 @@ int main() {
         pause_switch();
         blocked_manifest();
         runtime_stop_and_watchdog();
+        arm_and_exit_lifecycle();
         integrity_scope_policy();
         std::cout << "V074 dual-hive registry recovery and production tray lifecycle checks passed\n";
         return 0;

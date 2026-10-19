@@ -127,6 +127,7 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::recording: return "recording";
     case BridgeFlightOperation::deferred_capture: return "deferred_capture";
     case BridgeFlightOperation::history_capture_wait: return "history_capture_wait";
+    case BridgeFlightOperation::arm_control: return "arm_control";
     }
     return "unknown";
 }
@@ -164,6 +165,7 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::process_excluded:
     case BridgeFlightOperation::vulkan_bridge:
     case BridgeFlightOperation::recording:
+    case BridgeFlightOperation::arm_control:
         return true;
     case BridgeFlightOperation::presenter_transition:
         return (result >= 600 && result <= 604) ||

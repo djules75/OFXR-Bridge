@@ -2792,6 +2792,9 @@ struct CreatedPrivateSwapchain {
         return false;
     }
 
+    // Only the handles are checked after enumeration: the layer set each
+    // structure's type itself, and Proton's wineopenxr overwrites it with 0
+    // (see layer_enumerate_swapchain_images_impl).
     if (state->session->graphics_binding == SessionGraphicsBinding::vulkan) {
         std::vector<XrSwapchainImageVulkanKHR> images(image_count);
         for (auto& image : images) {
@@ -2810,8 +2813,7 @@ struct CreatedPrivateSwapchain {
         }
         output->vulkan_resources.resize(image_count);
         for (std::uint32_t index = 0; index < image_count; ++index) {
-            if (images[index].type != XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR ||
-                images[index].image == VK_NULL_HANDLE) {
+            if (images[index].image == VK_NULL_HANDLE) {
                 dispatch->destroy_swapchain(handle);
                 output->vulkan_resources.clear();
                 return false;
@@ -2835,8 +2837,7 @@ struct CreatedPrivateSwapchain {
         }
         output->d3d11_resources.resize(image_count);
         for (std::uint32_t index = 0; index < image_count; ++index) {
-            if (images[index].type != XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR ||
-                images[index].texture == nullptr) {
+            if (images[index].texture == nullptr) {
                 dispatch->destroy_swapchain(handle);
                 output->d3d11_resources.clear();
                 return false;
@@ -2860,8 +2861,7 @@ struct CreatedPrivateSwapchain {
         }
         output->d3d12_resources.resize(image_count);
         for (std::uint32_t index = 0; index < image_count; ++index) {
-            if (images[index].type != XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR ||
-                images[index].texture == nullptr) {
+            if (images[index].texture == nullptr) {
                 dispatch->destroy_swapchain(handle);
                 output->d3d12_resources.clear();
                 return false;
@@ -5052,6 +5052,10 @@ XrResult layer_create_session_impl(
     state->vulkan_support =
         xrfg::implicit_layer::read_vulkan_support(current_layer_directory());
     state->pause_applied = state->manual_control.pause_requested();
+    xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::arm_control,
+        static_cast<std::int64_t>(state->manual_control.state()),
+        xrfg::implicit_layer::running_under_wine() ? 1 : 0);
     state->recorder_applied = xrfg::bridge_flight_logger().enabled();
     state->menu_enabled = initial_control.desired.enabled && !state->pause_applied;
     state->dlss_motion_vectors = initial_control.desired.motion_vectors == 1 ||
@@ -6432,6 +6436,26 @@ XrResult layer_destroy_swapchain_impl(XrSwapchain swapchain) {
     return result;
 }
 
+// The size of one element of the image array an application passes to
+// xrEnumerateSwapchainImages, which is fixed by the session's binding.
+[[nodiscard]] std::size_t swapchain_image_stride(
+    SessionGraphicsBinding binding) noexcept {
+    switch (binding) {
+    case SessionGraphicsBinding::d3d11: return sizeof(XrSwapchainImageD3D11KHR);
+    case SessionGraphicsBinding::d3d12: return sizeof(XrSwapchainImageD3D12KHR);
+    case SessionGraphicsBinding::vulkan: return sizeof(XrSwapchainImageVulkanKHR);
+    default: return 0;
+    }
+}
+
+[[nodiscard]] XrSwapchainImageBaseHeader* swapchain_image_at(
+    XrSwapchainImageBaseHeader* images,
+    std::size_t stride,
+    std::uint32_t index) noexcept {
+    return reinterpret_cast<XrSwapchainImageBaseHeader*>(
+        reinterpret_cast<std::byte*>(images) + stride * index);
+}
+
 XrResult layer_enumerate_swapchain_images_impl(
     XrSwapchain swapchain,
     std::uint32_t image_capacity_input,
@@ -6508,11 +6532,28 @@ XrResult layer_enumerate_swapchain_images_impl(
         const auto shared = bridge->shared_images();
         bridged_resources.assign(shared.begin(), shared.end());
     } else {
+        // Proton's wineopenxr answers a D3D11 or D3D12 session by copying
+        // whole structures over the caller's array from one it zeroed, so
+        // type comes back 0 and next null while the textures are valid. The
+        // application only reads the textures; the checks below are about the
+        // structure it passed, so its own headers are put back.
+        const std::size_t stride = swapchain_image_stride(
+            state->session->graphics_binding);
+        std::vector<XrSwapchainImageBaseHeader> passed_headers;
+        if (images != nullptr && stride != 0) {
+            passed_headers.reserve(image_capacity_input);
+            for (std::uint32_t index = 0; index < image_capacity_input; ++index) {
+                passed_headers.push_back(*swapchain_image_at(images, stride, index));
+            }
+        }
         result = state->session->dispatch->enumerate_swapchain_images(
             swapchain,
             image_capacity_input,
             image_count_output,
             images);
+        for (std::uint32_t index = 0; index < passed_headers.size(); ++index) {
+            *swapchain_image_at(images, stride, index) = passed_headers[index];
+        }
         if (XR_FAILED(result) || image_count_output == nullptr || images == nullptr || image_capacity_input == 0) {
             return result;
         }

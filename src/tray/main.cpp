@@ -33,6 +33,7 @@ namespace {
 constexpr wchar_t kWindowClass[] = L"OFXRBridgeTrayWindow";
 constexpr wchar_t kApplicationName[] = L"OFXR Bridge";
 constexpr wchar_t kCleanupArgument[] = L"--cleanup-manual-arm";
+constexpr wchar_t kArmAndExitArgument[] = L"--arm-and-exit";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kTrayId = 1;
 constexpr int kPauseHotkeyId = 1;
@@ -425,11 +426,14 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     return write_text_atomic(destination, configuration, error);
 }
 
+// `tray_control` false leaves the session unmanaged: no stop or pause event
+// and no control_event in the ini, so the layer runs with no tray behind it.
 [[nodiscard]] bool prepare_runtime_layer(
     AppState& state,
     std::filesystem::path* manifest,
     std::filesystem::path* vulkan_manifest,
-    std::wstring* error) {
+    std::wstring* error,
+    bool tray_control = true) {
     if (vulkan_manifest) vulkan_manifest->clear();
     try {
         const auto source_dll = state.executable_directory / L"ofxr" /
@@ -460,21 +464,24 @@ void log_lifecycle(const std::filesystem::path& local_directory,
             xrfg::implicit_layer::kManifestSuffix;
         const auto generated_manifest = directory / manifest_name;
         *manifest = generated_manifest;
-        state.arm_signal = xrfg::implicit_layer::create_arm_signal(generated_manifest, error);
-        if (!state.arm_signal) return false;
-        // Not worth refusing the arm over: without it the menu entry is grey.
-        std::wstring pause_error;
-        state.pause_signal = xrfg::implicit_layer::create_pause_signal(
-            generated_manifest, &pause_error);
-        state.paused = false;
-        if (!state.pause_signal)
-            log_lifecycle(state.local_directory, L"pause-control", pause_error);
+        if (tray_control) {
+            state.arm_signal = xrfg::implicit_layer::create_arm_signal(generated_manifest, error);
+            if (!state.arm_signal) return false;
+            // Not worth refusing the arm over: without it the menu entry is grey.
+            std::wstring pause_error;
+            state.pause_signal = xrfg::implicit_layer::create_pause_signal(
+                generated_manifest, &pause_error);
+            state.paused = false;
+            if (!state.pause_signal)
+                log_lifecycle(state.local_directory, L"pause-control", pause_error);
+        }
         if (!write_text_atomic(
                 generated_manifest,
                 xrfg::standalone::build_implicit_layer_manifest(
                     runtime_dll, kImplementationVersion),
                 error) ||
-            !write_runtime_configuration(state, error, generated_manifest)) {
+            !write_runtime_configuration(state, error,
+                tray_control ? generated_manifest : std::filesystem::path{})) {
             remove_manifest_file(generated_manifest);
             return false;
         }
@@ -826,6 +833,48 @@ void close_pause_signal(AppState& state) {
         state,
         L"OFXR Bridge armed",
         L"The bridge will remain enabled for OpenXR applications until you disarm it or exit the tray.");
+    return true;
+}
+
+// --arm-and-exit: arm with the tray's settings and leave, keeping the
+// registration. For Proton (issue #34), where the tray cannot run while the
+// game starts: protontricks and Steam start separate wineservers for the
+// prefix and the game deadlocks. Nothing watches the arm, so it lasts until
+// the tray is next started, whose start-up cleanup removes it, and the
+// session is unmanaged: no Disarm, pause or live options while it runs.
+[[nodiscard]] bool arm_and_exit(
+    AppState& state,
+    std::wstring* error,
+    xrfg::implicit_layer::RegistryScope scope =
+        xrfg::implicit_layer::preferred_registry_scope()) {
+    // Reconcile disk/registry state as arm_bridge does; there is no window
+    // or loaded session of this process's to disarm.
+    if (!cleanup_all_owned_registrations(state, error)) return false;
+    std::filesystem::path manifest;
+    std::filesystem::path vulkan_manifest;
+    if (!prepare_runtime_layer(state, &manifest, &vulkan_manifest, error, false) ||
+        !xrfg::implicit_layer::register_manifest(
+            manifest, scope, error, state.registry_subkey) ||
+        (!vulkan_manifest.empty() &&
+         !xrfg::implicit_layer::register_manifest(
+             vulkan_manifest, scope, error,
+             xrfg::implicit_layer::kVulkanRegistrySubkey))) {
+        std::wstring ignored;
+        if (!vulkan_manifest.empty()) {
+            static_cast<void>(xrfg::implicit_layer::retire_manifest(
+                vulkan_manifest, scope, &ignored,
+                xrfg::implicit_layer::kVulkanRegistrySubkey));
+        }
+        if (!manifest.empty()) {
+            static_cast<void>(xrfg::implicit_layer::retire_manifest(
+                manifest, scope, &ignored, state.registry_subkey));
+        }
+        return false;
+    }
+    log_lifecycle(state.local_directory,
+        scope == xrfg::implicit_layer::RegistryScope::local_machine
+            ? L"arm-and-exit-hklm"
+            : L"arm-and-exit-hkcu");
     return true;
 }
 
@@ -2154,12 +2203,23 @@ LRESULT CALLBACK window_procedure(
     return cleaned ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+[[nodiscard]] bool arm_and_exit_requested() {
+    int argument_count = 0;
+    LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count);
+    if (arguments == nullptr) return false;
+    const bool requested = argument_count == 2 &&
+        _wcsicmp(arguments[1], kArmAndExitArgument) == 0;
+    LocalFree(arguments);
+    return requested;
+}
+
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (const auto helper_result = run_cleanup_helper()) {
         return *helper_result;
     }
+    const bool arm_only = arm_and_exit_requested();
 
     HANDLE single_instance = CreateMutexW(nullptr, TRUE, L"Local\\OFXRBridgeTray");
     if (single_instance == nullptr) {
@@ -2172,7 +2232,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             kApplicationName,
             MB_OK | MB_ICONINFORMATION);
         CloseHandle(single_instance);
-        return EXIT_SUCCESS;
+        // The running tray owns the arm; one made here would be retired by it.
+        return arm_only ? EXIT_FAILURE : EXIT_SUCCESS;
     }
 
     AppState state;
@@ -2189,6 +2250,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         }
         log_lifecycle(state.local_directory, L"startup-cleanup");
         load_settings(state);
+        if (arm_only) {
+            std::wstring arm_error;
+            const bool armed = arm_and_exit(state, &arm_error);
+            if (!armed) {
+                log_lifecycle(state.local_directory, L"arm-and-exit", arm_error);
+                MessageBoxW(nullptr, arm_error.c_str(), kApplicationName, MB_OK | MB_ICONERROR);
+            }
+            CloseHandle(single_instance);
+            return armed ? EXIT_SUCCESS : EXIT_FAILURE;
+        }
     } catch (...) {
         MessageBoxW(
             nullptr,

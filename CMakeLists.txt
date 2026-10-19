@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.535.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.536.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -807,6 +807,15 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             COMMAND xrfg_layer_call_chain
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
                 "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-call-chain-test.log")
+        # Proton's wineopenxr zeroes the type and next of every image it
+        # enumerates; the application's array and the private rings must
+        # still arm (issue #34).
+        add_test(
+            NAME xrfg_layer_wineopenxr_image_headers
+            COMMAND xrfg_layer_call_chain
+                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
+                "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-wineopenxr-image-headers.log"
+                wineopenxr-headers)
         add_test(
             NAME xrfg_layer_presenter_swapchain_lifetime
             COMMAND xrfg_layer_call_chain

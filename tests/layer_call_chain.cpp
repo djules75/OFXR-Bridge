@@ -227,6 +227,10 @@ std::atomic<std::uint32_t> g_budget_refusals{0};
 // frame. The fake runtime behaves exactly as in steamvr-presenter.
 bool g_dcs_mode = false;
 bool g_flight_simulator_mode = false;
+// Answers enumeration the way Proton's wineopenxr does for a D3D12 session:
+// whole structures copied over the caller's array from one it zeroed, so
+// type comes back 0 and next null with the textures filled in.
+bool g_wineopenxr_headers_mode = false;
 bool g_destroy_pending_swapchain = false;
 bool g_destroy_pending_space = false;
 // steamvr-layer-invalid: the runtime refuses one of the presenter's
@@ -1287,6 +1291,12 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_swapchain_images(
         }
         d3d12_images[index].texture = (*selected_images)[index].Get();
     }
+    if (g_wineopenxr_headers_mode) {
+        for (std::uint32_t index = 0; index < kImageCount; ++index) {
+            d3d12_images[index].type = XR_TYPE_UNKNOWN;
+            d3d12_images[index].next = nullptr;
+        }
+    }
     return XR_SUCCESS;
 }
 
@@ -2286,6 +2296,8 @@ int main(int argc, char** argv) {
         argc == 4 && std::strcmp(argv[3], "flight-destroy-swapchain") == 0;
     g_flight_simulator_mode = g_destroy_pending_swapchain ||
         (argc == 4 && std::strcmp(argv[3], "flight-simulator") == 0);
+    g_wineopenxr_headers_mode =
+        argc == 4 && std::strcmp(argv[3], "wineopenxr-headers") == 0;
     g_test_application_thread_id = GetCurrentThreadId();
     g_inverted_vertical_fov = argc == 4 &&
         (std::strcmp(argv[3], "inverted-fov") == 0 ||
@@ -2328,7 +2340,7 @@ int main(int argc, char** argv) {
         !g_d3d11_interop_mode && !g_steamvr_runtime_mode &&
         !g_flight_simulator_mode && !g_uevr_pipelined_display_time_mode &&
         !g_inverted_vertical_fov && !g_vulkan_mode && !g_vulkan_bridge_mode &&
-        !g_swapchain_budget_mode) {
+        !g_swapchain_budget_mode && !g_wineopenxr_headers_mode) {
         std::cerr << "unknown test mode\n";
         return EXIT_FAILURE;
     }

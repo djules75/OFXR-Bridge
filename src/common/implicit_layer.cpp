@@ -190,7 +190,15 @@ bool signal_arm_stop(const std::filesystem::path& manifest, std::wstring* error)
     }
 }
 
-ManualArmControl::ManualArmControl(const std::filesystem::path& module_directory) noexcept {
+bool running_under_wine() noexcept {
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    return ntdll != nullptr &&
+        GetProcAddress(ntdll, "wine_get_version") != nullptr;
+}
+
+ManualArmControl::ManualArmControl(
+    const std::filesystem::path& module_directory,
+    bool under_wine) noexcept {
     try {
         std::array<wchar_t, 128> name{};
         const auto ini = module_directory / L"ofxr_bridge.ini";
@@ -205,12 +213,25 @@ ManualArmControl::ManualArmControl(const std::filesystem::path& module_directory
             for (wchar_t c : value.substr(prefix.size())) valid = valid && c >= L'0' && c <= L'9';
             if (valid) {
                 event_ = OpenEventW(SYNCHRONIZE, FALSE, name.data());
+                const DWORD open_status = GetLastError();
                 const std::wstring pause = std::wstring(kPauseSignalPrefix) +
                     std::wstring(value.substr(prefix.size()));
                 pause_event_ = OpenEventW(SYNCHRONIZE, FALSE, pause.c_str());
+                // Only an absent control is forgiven under Wine; a malformed
+                // one or a refused open stays Off there as everywhere.
+                if (!event_ && under_wine && open_status == ERROR_FILE_NOT_FOUND) {
+                    state_ = ArmControlState::control_missing_wine;
+                }
             }
         }
-    } catch (...) { managed_ = true; }
+        if (managed_ && state_ != ArmControlState::control_missing_wine) {
+            state_ = event_ ? ArmControlState::tray_control
+                            : ArmControlState::control_missing;
+        }
+    } catch (...) {
+        managed_ = true;
+        state_ = ArmControlState::control_missing;
+    }
 }
 ManualArmControl::~ManualArmControl() {
     if (event_) CloseHandle(event_);
@@ -221,8 +242,10 @@ bool ManualArmControl::pause_requested() const noexcept {
     return pause_event_ && WaitForSingleObject(pause_event_, 0) == WAIT_OBJECT_0;
 }
 bool ManualArmControl::stop_requested() const noexcept {
-    // Missing/invalid control in a managed session is Off, never fail-open.
-    return managed_ && (!event_ || WaitForSingleObject(event_, 0) != WAIT_TIMEOUT);
+    // Missing/invalid control in a managed session is Off, never fail-open,
+    // except an absent one under Wine (see ArmControlState).
+    if (!managed_ || state_ == ArmControlState::control_missing_wine) return false;
+    return !event_ || WaitForSingleObject(event_, 0) != WAIT_TIMEOUT;
 }
 
 ConfiguredFlowBackend read_flow_backend(

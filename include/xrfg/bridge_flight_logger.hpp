@@ -249,6 +249,10 @@ enum class BridgeFlightOperation : std::uint32_t {
     // the record's own. Lined up against projection_pose this says which
     // locate a submitted pose came from.
     view_locate,
+    // Once per session: how the tray's on/off control was found
+    // (implicit_layer::ArmControlState). a is 1 when the process runs under
+    // Wine.
+    arm_control,
 };
 
 struct BridgeFlightToken {
