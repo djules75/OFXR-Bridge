@@ -578,6 +578,508 @@ int run_vulkan(HMODULE module, const wchar_t* queue_layer_path) {
     return 0;
 }
 
+// V524: a game that renders in D3D12 behind a bridged D3D11 session, as
+// R.E.A.L. VR runs Cyberpunk 2077. Only the D3D11 session's capture is
+// running; the game's D3D12 evaluations copy their vectors and depth into
+// textures shared with the layer's D3D12 device, in the game's own list, and
+// the snapshot copies go to the layer's queue at the release's flush. Checked:
+// every evaluation publishes with its depth, the side-by-side image resolves
+// both eyes on the layer's queue, and the snapshots hold the game's vectors.
+void run_bridged_d3d12(HMODULE module, ID3D12Device* layer_device, ID3D12CommandQueue* layer_queue) {
+    const auto create = reinterpret_cast<CreateFeature>(
+        GetProcAddress(module, "NVSDK_NGX_D3D12_CreateFeature"));
+    const auto evaluate = reinterpret_cast<EvaluateFeature>(
+        GetProcAddress(module, "NVSDK_NGX_D3D12_EvaluateFeature"));
+    const auto release = reinterpret_cast<ReleaseFeature>(
+        GetProcAddress(module, "NVSDK_NGX_D3D12_ReleaseFeature"));
+    require(create && evaluate && release, "the stand-in lacks a D3D12 export");
+    require(!xrfg::ngx_guide_capture_statistics().active &&
+            xrfg::ngx_guide_capture_statistics().d3d11_active,
+        "the bridged D3D12 phase needs the D3D11 capture alone");
+
+    // The game's device, on the layer's adapter.
+    ComPtr<IDXGIFactory4> factory;
+    require_hresult(CreateDXGIFactory2(0, IID_PPV_ARGS(factory.GetAddressOf())), "CreateDXGIFactory2");
+    ComPtr<IDXGIAdapter1> adapter;
+    require_hresult(factory->EnumAdapterByLuid(layer_device->GetAdapterLuid(),
+        IID_PPV_ARGS(adapter.GetAddressOf())), "EnumAdapterByLuid");
+    ComPtr<ID3D12Device> game;
+    require_hresult(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0,
+        IID_PPV_ARGS(game.GetAddressOf())), "D3D12CreateDevice(game)");
+    D3D12_COMMAND_QUEUE_DESC queue_description{};
+    queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    ComPtr<ID3D12CommandQueue> game_queue;
+    require_hresult(game->CreateCommandQueue(&queue_description, IID_PPV_ARGS(game_queue.GetAddressOf())),
+        "game queue");
+    ComPtr<ID3D12CommandAllocator> game_allocator;
+    require_hresult(game->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+        IID_PPV_ARGS(game_allocator.GetAddressOf())), "game allocator");
+    ComPtr<ID3D12GraphicsCommandList> game_list;
+    require_hresult(game->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, game_allocator.Get(),
+        nullptr, IID_PPV_ARGS(game_list.GetAddressOf())), "game list");
+    ComPtr<ID3D12Fence> game_fence;
+    require_hresult(game->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(game_fence.GetAddressOf())),
+        "game fence");
+    UINT64 game_value = 0;
+    const auto run_game = [&] {
+        require_hresult(game_list->Close(), "game Close");
+        ID3D12CommandList* lists[]{game_list.Get()};
+        game_queue->ExecuteCommandLists(1, lists);
+        require_hresult(game_queue->Signal(game_fence.Get(), ++game_value), "game Signal");
+        HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        require_hresult(game_fence->SetEventOnCompletion(game_value, done), "game SetEventOnCompletion");
+        require(WaitForSingleObject(done, 10000) == WAIT_OBJECT_0, "the game's queue did not finish");
+        CloseHandle(done);
+        require_hresult(game_allocator->Reset(), "game allocator Reset");
+        require_hresult(game_list->Reset(game_allocator.Get(), nullptr), "game list Reset");
+    };
+
+    constexpr UINT kRenderWidth = 48, kRenderHeight = 32;
+    constexpr UINT kOutputWidth = 96, kOutputHeight = 64;
+    constexpr UINT kPitch = 256;
+    // R16G16_FLOAT: (-1.0, 2.0) for the left eye, (0.5, -0.5) for the right;
+    // the depth 0.75.
+    constexpr std::uint32_t kLeftVector = 0xBC00U | (0x4000U << 16U);
+    constexpr std::uint32_t kRightVector = 0x3800U | (0xB800U << 16U);
+    constexpr std::uint32_t kDepth = 0x3F400000U;
+    const auto output = create_texture(game.Get(), kOutputWidth, kOutputHeight, 1,
+        DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_STATE_COMMON);
+    const auto motion_left = create_texture(game.Get(), kRenderWidth, kRenderHeight, 1,
+        DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_STATE_COPY_DEST);
+    const auto motion_right = create_texture(game.Get(), kRenderWidth, kRenderHeight, 1,
+        DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_STATE_COPY_DEST);
+    const auto depth = create_texture(game.Get(), kRenderWidth, kRenderHeight, 1,
+        DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_STATE_COPY_DEST);
+    {
+        D3D12_HEAP_PROPERTIES upload_heap{};
+        upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC buffer{};
+        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = 3ULL * kPitch * kRenderHeight;
+        buffer.Height = 1;
+        buffer.DepthOrArraySize = 1;
+        buffer.MipLevels = 1;
+        buffer.SampleDesc.Count = 1;
+        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> upload;
+        require_hresult(game->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buffer,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(upload.GetAddressOf())), "upload");
+        std::uint32_t* mapped = nullptr;
+        require_hresult(upload->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "upload Map");
+        const std::array<std::uint32_t, 3> fills{kLeftVector, kRightVector, kDepth};
+        for (std::size_t texture = 0; texture < fills.size(); ++texture) {
+            for (UINT row = 0; row < kRenderHeight; ++row) {
+                std::uint32_t* line = mapped + (texture * kRenderHeight + row) * (kPitch / 4U);
+                for (UINT column = 0; column < kRenderWidth; ++column) line[column] = fills[texture];
+            }
+        }
+        upload->Unmap(0, nullptr);
+        const std::array<ID3D12Resource*, 3> targets{motion_left.Get(), motion_right.Get(), depth.Get()};
+        const std::array<DXGI_FORMAT, 3> formats{DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16_FLOAT,
+            DXGI_FORMAT_R32_FLOAT};
+        for (std::size_t texture = 0; texture < targets.size(); ++texture) {
+            D3D12_TEXTURE_COPY_LOCATION from{};
+            from.pResource = upload.Get();
+            from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            from.PlacedFootprint.Offset = texture * kPitch * kRenderHeight;
+            from.PlacedFootprint.Footprint = {formats[texture], kRenderWidth, kRenderHeight, 1, kPitch};
+            D3D12_TEXTURE_COPY_LOCATION to{};
+            to.pResource = targets[texture];
+            to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            game_list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = targets[texture];
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            game_list->ResourceBarrier(1, &barrier);
+        }
+        run_game();
+    }
+
+    Parameters creation;
+    creation.Set(NVSDK_NGX_Parameter_Width, kRenderWidth);
+    creation.Set(NVSDK_NGX_Parameter_Height, kRenderHeight);
+    creation.Set(NVSDK_NGX_Parameter_OutWidth, kOutputWidth);
+    creation.Set(NVSDK_NGX_Parameter_OutHeight, kOutputHeight);
+    creation.Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,
+        static_cast<int>(NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_MVJittered));
+    NVSDK_NGX_Handle* left = nullptr;
+    NVSDK_NGX_Handle* right = nullptr;
+    require(NVSDK_NGX_SUCCEED(create(game_list.Get(), NVSDK_NGX_Feature_SuperSampling, &creation, &left)) &&
+            left && NVSDK_NGX_SUCCEED(create(game_list.Get(), NVSDK_NGX_Feature_SuperSampling, &creation, &right)) &&
+            right,
+        "bridged D3D12 feature creation failed through the hook");
+
+    const auto before = xrfg::ngx_guide_capture_statistics();
+    const auto vectors_before = xrfg::dlss_motion_vector_statistics();
+    const auto evaluate_frame = [&](NVSDK_NGX_Handle* handle, ID3D12Resource* vectors, float jitter) {
+        Parameters frame;
+        frame.Set(NVSDK_NGX_Parameter_Output, output.Get());
+        frame.Set(NVSDK_NGX_Parameter_MotionVectors, vectors);
+        frame.Set(NVSDK_NGX_Parameter_Depth, depth.Get());
+        frame.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, kRenderWidth);
+        frame.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, kRenderHeight);
+        frame.Set(NVSDK_NGX_Parameter_Jitter_Offset_X, jitter);
+        frame.Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, -jitter);
+        frame.Set(NVSDK_NGX_Parameter_Reset, 0);
+        require(NVSDK_NGX_SUCCEED(evaluate(game_list.Get(), handle, &frame, nullptr)),
+            "bridged D3D12 evaluation failed through the hook");
+    };
+    // The game runs its frame's list, then the mod releases the eye image.
+    for (int frame = 0; frame < 3; ++frame) {
+        evaluate_frame(left, motion_left.Get(), frame % 2 ? 0.25F : -0.25F);
+        evaluate_frame(right, motion_right.Get(), frame % 2 ? 0.25F : -0.25F);
+        run_game();
+        xrfg::flush_ngx_guide_capture_d3d11();
+    }
+    const auto after = xrfg::ngx_guide_capture_statistics();
+    const auto vectors_after = xrfg::dlss_motion_vector_statistics();
+    require(after.d3d12_bridged_publications - before.d3d12_bridged_publications == 6 &&
+            after.d3d12_bridged_transport_failures == 0 &&
+            after.skipped_device_mismatch == before.skipped_device_mismatch,
+        "the bridged D3D12 evaluations were not all published");
+    require(vectors_after.published - vectors_before.published == 6 &&
+            vectors_after.depth_publications - vectors_before.depth_publications == 6,
+        "the registry did not take every bridged D3D12 publication with its depth");
+
+    // The side-by-side image, on the layer's device.
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC image_description{};
+    image_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    image_description.Width = kOutputWidth * 2U;
+    image_description.Height = kOutputHeight;
+    image_description.DepthOrArraySize = 1;
+    image_description.MipLevels = 1;
+    image_description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    image_description.SampleDesc.Count = 1;
+    ComPtr<ID3D12Resource> image;
+    require_hresult(layer_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &image_description,
+        D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(image.GetAddressOf())), "bridged eye image");
+    const auto set = xrfg::resolve_dlss_motion_vectors(image.Get(), layer_queue);
+    require(set != nullptr && set->eye_count == 2, "no side-by-side guide set from the bridged D3D12 game");
+
+    ComPtr<ID3D12CommandAllocator> allocator;
+    require_hresult(layer_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+        IID_PPV_ARGS(allocator.GetAddressOf())), "allocator");
+    ComPtr<ID3D12GraphicsCommandList> list;
+    require_hresult(layer_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(),
+        nullptr, IID_PPV_ARGS(list.GetAddressOf())), "list");
+    D3D12_HEAP_PROPERTIES readback_heap{};
+    readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC buffer_description{};
+    buffer_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer_description.Width = 4ULL * kPitch * kRenderHeight;
+    buffer_description.Height = 1;
+    buffer_description.DepthOrArraySize = 1;
+    buffer_description.MipLevels = 1;
+    buffer_description.SampleDesc.Count = 1;
+    buffer_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> readback;
+    require_hresult(layer_device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE,
+        &buffer_description, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+        IID_PPV_ARGS(readback.GetAddressOf())), "readback");
+    const auto read = [&](ID3D12Resource* resource, D3D12_RESOURCE_STATES state, DXGI_FORMAT format,
+                          unsigned slot) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = resource;
+        barrier.Transition.StateBefore = state;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1, &barrier);
+        D3D12_TEXTURE_COPY_LOCATION source{};
+        source.pResource = resource;
+        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION destination{};
+        destination.pResource = readback.Get();
+        destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        destination.PlacedFootprint.Offset = slot * static_cast<UINT64>(kPitch) * kRenderHeight;
+        destination.PlacedFootprint.Footprint = {format, kRenderWidth, kRenderHeight, 1, kPitch};
+        list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        list->ResourceBarrier(1, &barrier);
+    };
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        const auto& frame = set->eyes[eye];
+        require(frame && frame->motion_vectors && frame->depth, "a bridged eye lacks its vectors or depth");
+        require(frame->producer_queue.Get() == layer_queue, "the bridged frame is not on the layer's queue");
+        require(frame->motion_width == kRenderWidth && frame->output_width == kOutputWidth,
+            "the bridged frame's rectangles were not carried");
+        read(frame->motion_vectors.Get(), frame->resource_state, DXGI_FORMAT_R16G16_FLOAT, eye);
+        read(frame->depth.Get(), frame->depth_resource_state, frame->depth->GetDesc().Format, 2U + eye);
+    }
+    require_hresult(list->Close(), "Close");
+    ID3D12CommandList* lists[]{list.Get()};
+    layer_queue->ExecuteCommandLists(1, lists);
+    ComPtr<ID3D12Fence> fence;
+    require_hresult(layer_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf())),
+        "fence");
+    require_hresult(layer_queue->Signal(fence.Get(), 1), "Signal");
+    HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    require_hresult(fence->SetEventOnCompletion(1, done), "SetEventOnCompletion");
+    require(WaitForSingleObject(done, 10000) == WAIT_OBJECT_0, "the layer's queue did not finish");
+    CloseHandle(done);
+    std::uint32_t* mapped = nullptr;
+    require_hresult(readback->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "Map");
+    const std::uint32_t slot_words = kPitch * kRenderHeight / 4U;
+    const std::uint32_t eye0 = mapped[0];
+    const std::uint32_t eye1 = mapped[slot_words];
+    const std::uint32_t depth0 = mapped[2U * slot_words];
+    const std::uint32_t depth1_last = mapped[3U * slot_words + (kRenderHeight - 1U) * (kPitch / 4U) +
+        kRenderWidth - 1U];
+    readback->Unmap(0, nullptr);
+    require((eye0 == kLeftVector && eye1 == kRightVector) || (eye0 == kRightVector && eye1 == kLeftVector),
+        "the layer's snapshots do not hold the vectors the game wrote in D3D12");
+    require(depth0 == kDepth && depth1_last == kDepth,
+        "the layer's depth snapshots do not hold the game's D3D12 depth");
+
+    require(NVSDK_NGX_SUCCEED(release(left)) && NVSDK_NGX_SUCCEED(release(right)),
+        "bridged D3D12 release failed through the hook");
+
+    // V524: the alternating-eye anchor. One feature renders both eyes in
+    // turn, the right eye first; its finished output carries each eye's
+    // picture - a ramp across for the left eye, a ramp down for the right -
+    // as do the eye images. The comparisons anchor the stream with the left
+    // eye on the second evaluation's parity, and the resolver gives each eye
+    // its own evaluation.
+    {
+        xrfg::configure_dlss_alternating_eyes(true);
+        xrfg::configure_ngx_alternating_eye_anchor(true);
+        constexpr UINT kOutputPitch = kOutputWidth * 8U;
+        constexpr UINT kEyePitch = 512;
+        const auto to_half = [](float value) {
+            std::uint32_t bits = 0;
+            std::memcpy(&bits, &value, sizeof(bits));
+            const std::uint32_t sign = (bits >> 16U) & 0x8000U;
+            const int exponent = static_cast<int>((bits >> 23U) & 0xFFU) - 127 + 15;
+            const std::uint32_t mantissa = bits & 0x7FFFFFU;
+            if (value == 0.0F || exponent <= 0) return static_cast<std::uint16_t>(sign);
+            return static_cast<std::uint16_t>(sign | (static_cast<std::uint32_t>(exponent) << 10U) |
+                (mantissa >> 13U));
+        };
+        const auto ramp = [](bool across, UINT x, UINT y) {
+            return static_cast<float>((across ? x : y) % 32U) / 31.0F;
+        };
+        D3D12_HEAP_PROPERTIES default_heap{};
+        default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC output_description{};
+        output_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        output_description.Width = kOutputWidth;
+        output_description.Height = kOutputHeight;
+        output_description.DepthOrArraySize = 1;
+        output_description.MipLevels = 1;
+        output_description.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        output_description.SampleDesc.Count = 1;
+        output_description.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        ComPtr<ID3D12Resource> shared_output;
+        require_hresult(game->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE,
+            &output_description, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+            IID_PPV_ARGS(shared_output.GetAddressOf())), "alternating output");
+        // Both eyes' pictures in one upload buffer each side: the output's
+        // (half floats) on the game's device, the eye images' (8-bit) on the
+        // layer's.
+        D3D12_HEAP_PROPERTIES upload_heap{};
+        upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+        const auto upload_buffer = [&](ID3D12Device* device, UINT64 size) {
+            D3D12_RESOURCE_DESC buffer{};
+            buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            buffer.Width = size;
+            buffer.Height = 1;
+            buffer.DepthOrArraySize = 1;
+            buffer.MipLevels = 1;
+            buffer.SampleDesc.Count = 1;
+            buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            ComPtr<ID3D12Resource> resource;
+            require_hresult(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE,
+                &buffer, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                IID_PPV_ARGS(resource.GetAddressOf())), "alternating upload");
+            return resource;
+        };
+        const UINT64 output_bytes = static_cast<UINT64>(kOutputPitch) * kOutputHeight;
+        const auto output_upload = upload_buffer(game.Get(), 2U * output_bytes);
+        {
+            std::uint8_t* mapped = nullptr;
+            require_hresult(output_upload->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "Map");
+            for (UINT picture = 0; picture < 2; ++picture) {
+                for (UINT y = 0; y < kOutputHeight; ++y) {
+                    auto* line = reinterpret_cast<std::uint16_t*>(
+                        mapped + picture * output_bytes + static_cast<UINT64>(y) * kOutputPitch);
+                    for (UINT x = 0; x < kOutputWidth; ++x) {
+                        const std::uint16_t value = to_half(ramp(picture == 0, x, y));
+                        line[4U * x] = value;
+                        line[4U * x + 1U] = value;
+                        line[4U * x + 2U] = value;
+                        line[4U * x + 3U] = to_half(1.0F);
+                    }
+                }
+            }
+            output_upload->Unmap(0, nullptr);
+        }
+        D3D12_RESOURCE_DESC eye_description = output_description;
+        // Typeless, as the runtimes' images and so the bridge's shared
+        // textures are.
+        eye_description.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        eye_description.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS |
+            D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        std::array<ComPtr<ID3D12Resource>, 2> eye_images{};
+        for (auto& eye_image : eye_images) {
+            require_hresult(layer_device->CreateCommittedResource(&default_heap,
+                D3D12_HEAP_FLAG_NONE, &eye_description, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                IID_PPV_ARGS(eye_image.GetAddressOf())), "alternating eye image");
+        }
+        const UINT64 eye_bytes = static_cast<UINT64>(kEyePitch) * kOutputHeight;
+        const auto eye_upload = upload_buffer(layer_device, 2U * eye_bytes);
+        {
+            std::uint8_t* mapped = nullptr;
+            require_hresult(eye_upload->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "Map");
+            for (UINT eye = 0; eye < 2; ++eye) {
+                for (UINT y = 0; y < kOutputHeight; ++y) {
+                    std::uint8_t* line = mapped + eye * eye_bytes + static_cast<UINT64>(y) * kEyePitch;
+                    for (UINT x = 0; x < kOutputWidth; ++x) {
+                        const auto value = static_cast<std::uint8_t>(ramp(eye == 0, x, y) * 255.0F);
+                        line[4U * x] = value;
+                        line[4U * x + 1U] = value;
+                        line[4U * x + 2U] = value;
+                        line[4U * x + 3U] = 255;
+                    }
+                }
+            }
+            eye_upload->Unmap(0, nullptr);
+        }
+        ComPtr<ID3D12CommandAllocator> layer_allocator;
+        require_hresult(layer_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+            IID_PPV_ARGS(layer_allocator.GetAddressOf())), "layer allocator");
+        ComPtr<ID3D12GraphicsCommandList> layer_list;
+        require_hresult(layer_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+            layer_allocator.Get(), nullptr, IID_PPV_ARGS(layer_list.GetAddressOf())), "layer list");
+        for (UINT eye = 0; eye < 2; ++eye) {
+            D3D12_TEXTURE_COPY_LOCATION from{};
+            from.pResource = eye_upload.Get();
+            from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            from.PlacedFootprint.Offset = eye * eye_bytes;
+            from.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_TYPELESS, kOutputWidth,
+                kOutputHeight, 1, kEyePitch};
+            D3D12_TEXTURE_COPY_LOCATION to{};
+            to.pResource = eye_images[eye].Get();
+            to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            layer_list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        }
+        require_hresult(layer_list->Close(), "layer Close");
+        ComPtr<ID3D12Fence> layer_fence;
+        require_hresult(layer_device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+            IID_PPV_ARGS(layer_fence.GetAddressOf())), "layer fence");
+        UINT64 layer_value = 0;
+        const auto layer_idle = [&] {
+            require_hresult(layer_queue->Signal(layer_fence.Get(), ++layer_value), "layer Signal");
+            HANDLE idle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            require_hresult(layer_fence->SetEventOnCompletion(layer_value, idle), "layer event");
+            require(WaitForSingleObject(idle, 10000) == WAIT_OBJECT_0, "the layer's queue did not finish");
+            CloseHandle(idle);
+        };
+        {
+            ID3D12CommandList* upload_lists[]{layer_list.Get()};
+            layer_queue->ExecuteCommandLists(1, upload_lists);
+            layer_idle();
+        }
+
+        NVSDK_NGX_Handle* shared = nullptr;
+        require(NVSDK_NGX_SUCCEED(create(game_list.Get(), NVSDK_NGX_Feature_SuperSampling, &creation,
+                    &shared)) && shared,
+            "the alternating feature was not created through the hook");
+        const auto transition = [&](D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = shared_output.Get();
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barrier.Transition.StateBefore = before;
+            barrier.Transition.StateAfter = after;
+            game_list->ResourceBarrier(1, &barrier);
+        };
+        // An eye's evaluation: its picture into the output, as DLSS would
+        // leave it, then the call.
+        const auto evaluate_eye = [&](UINT picture, ID3D12Resource* vectors) {
+            D3D12_TEXTURE_COPY_LOCATION from{};
+            from.pResource = output_upload.Get();
+            from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            from.PlacedFootprint.Offset = picture * output_bytes;
+            from.PlacedFootprint.Footprint = {DXGI_FORMAT_R16G16B16A16_FLOAT, kOutputWidth,
+                kOutputHeight, 1, kOutputPitch};
+            D3D12_TEXTURE_COPY_LOCATION to{};
+            to.pResource = shared_output.Get();
+            to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            game_list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+            transition(D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            Parameters frame;
+            frame.Set(NVSDK_NGX_Parameter_Output, shared_output.Get());
+            frame.Set(NVSDK_NGX_Parameter_MotionVectors, vectors);
+            frame.Set(NVSDK_NGX_Parameter_Depth, depth.Get());
+            frame.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, kRenderWidth);
+            frame.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, kRenderHeight);
+            frame.Set(NVSDK_NGX_Parameter_Reset, 0);
+            require(NVSDK_NGX_SUCCEED(evaluate(game_list.Get(), shared, &frame, nullptr)),
+                "an alternating evaluation failed through the hook");
+            transition(D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+        };
+        const std::array<xrfg::NgxEyeImage, 2> eyes{{
+            {eye_images[0].Get(), 0, 0, kOutputWidth, kOutputHeight},
+            {eye_images[1].Get(), 0, 0, kOutputWidth, kOutputHeight},
+        }};
+        // A feature kept from an earlier session, evaluated once: the anchor
+        // takes the stream that is publishing (Cyberpunk 2077 keeps its first
+        // session's feature beside the one it plays with).
+        NVSDK_NGX_Handle* kept = nullptr;
+        require(NVSDK_NGX_SUCCEED(create(game_list.Get(), NVSDK_NGX_Feature_SuperSampling, &creation,
+                    &kept)) && kept,
+            "the kept feature was not created through the hook");
+        std::swap(shared, kept);
+        evaluate_eye(0, motion_left.Get());
+        std::swap(shared, kept);
+        run_game();
+        xrfg::flush_ngx_guide_capture_d3d11();
+        for (int frame = 0; frame < 8; ++frame) {
+            evaluate_eye(1, motion_right.Get());
+            evaluate_eye(0, motion_left.Get());
+            run_game();
+            xrfg::flush_ngx_guide_capture_d3d11();
+            xrfg::anchor_ngx_alternating_eyes(eyes, xrfg::dlss_motion_vector_publications());
+            layer_idle();
+        }
+        std::uint64_t stream = 0;
+        {
+            const auto watermark = xrfg::dlss_motion_vector_publications();
+            const auto left_set = xrfg::resolve_dlss_motion_vectors(
+                eye_images[0].Get(), layer_queue, 0, watermark, watermark);
+            const auto right_set = xrfg::resolve_dlss_motion_vectors(
+                eye_images[1].Get(), layer_queue, 1, watermark, watermark);
+            require(left_set && right_set && left_set->eyes[0] && right_set->eyes[0],
+                "the anchored alternating stream did not guide both eyes");
+            stream = left_set->eyes[0]->stream;
+            require(xrfg::dlss_motion_vector_stream_position(stream).anchored,
+                "the pictures did not anchor the alternating stream");
+            // The left eye has the newest (16); the right, a frame late as
+            // R.E.A.L. VR's AERv2 hands it over, the one before its newest.
+            require(left_set->eyes[0]->serial == 16 && right_set->eyes[0]->serial == 13,
+                "the anchor did not give each eye its evaluation");
+            // The vectors as the game wrote them: the stretch is measured and
+            // recorded (848), not applied, in this build.
+            require(left_set->eyes[0]->scale_x == 1.0F && right_set->eyes[0]->scale_x == 1.0F,
+                "the alternating eyes' vectors were stretched");
+            std::cout << "ngx guide capture alternating anchor: left serial "
+                      << left_set->eyes[0]->serial << ", right " << right_set->eyes[0]->serial << "\n";
+        }
+        require(NVSDK_NGX_SUCCEED(release(shared)) && NVSDK_NGX_SUCCEED(release(kept)),
+            "the alternating features' release failed");
+        xrfg::configure_ngx_alternating_eye_anchor(false);
+        xrfg::configure_dlss_alternating_eyes(false);
+    }
+    std::cout << "ngx guide capture bridged D3D12: publications="
+              << after.d3d12_bridged_publications << " eye0=0x" << std::hex << eye0
+              << " eye1=0x" << eye1 << std::dec << "\n";
+}
+
 int run_d3d11(HMODULE module) {
     const auto create = reinterpret_cast<CreateFeature11>(
         GetProcAddress(module, "NVSDK_NGX_D3D11_CreateFeature"));
@@ -913,6 +1415,7 @@ int run_d3d11(HMODULE module) {
     static_cast<void>(xrfg::resolve_dlss_motion_vectors(image.Get(), queue12.Get()));
     require(xrfg::dlss_motion_vector_statistics().retired_snapshots_held == 0,
         "retired snapshots were kept after their copies finished");
+    run_bridged_d3d12(module, device12.Get(), queue12.Get());
     xrfg::stop_ngx_guide_capture_d3d11(queue12.Get());
     std::cout << "ngx guide capture D3D11: publications=" << statistics.d3d11_publications
               << " eye0=0x" << std::hex << eye0 << " eye1=0x" << eye1 << std::dec << "\n";

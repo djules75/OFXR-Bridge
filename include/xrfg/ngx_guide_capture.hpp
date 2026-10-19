@@ -5,6 +5,7 @@
 
 #include "xrfg/vulkan_d3d12_interop.hpp"
 
+#include <array>
 #include <cstdint>
 
 // The game's own DLSS motion vectors, taken from its NGX calls (V497).
@@ -57,6 +58,10 @@ struct NgxGuideCaptureStatistics {
     std::uint64_t d3d11_modules_hooked{};
     std::uint64_t d3d11_publications{};
     std::uint64_t d3d11_transport_failures{};
+    // V524: a D3D12 game in a bridged D3D11 session (R.E.A.L. VR's Cyberpunk
+    // 2077): its D3D12 evaluations published, and that transport failing.
+    std::uint64_t d3d12_bridged_publications{};
+    std::uint64_t d3d12_bridged_transport_failures{};
     // Vulkan (V513): the same, and the copies dropped because the game never
     // submitted them.
     std::uint64_t vulkan_modules_hooked{};
@@ -90,7 +95,10 @@ void stop_ngx_guide_capture(ID3D12CommandQueue* queue) noexcept;
 // D3D11 exports are detoured as the D3D12 ones are; at each evaluation the
 // vectors (and the depth, where the driver shares its format) are copied
 // into textures shared with that D3D12 device, ordered by shared fences on
-// the GPU, and published on its queue. Pause by enabled = false.
+// the GPU, and published on its queue. Pause by enabled = false. A game that
+// renders in D3D12 behind a D3D11 session (V524, R.E.A.L. VR) is captured too:
+// its D3D12 evaluations copy into textures shared with that D3D12 device, and
+// their snapshot copies wait for the release, as the D3D11 ones do.
 void configure_ngx_guide_capture_d3d11(
     ID3D11Device* game_device,
     ID3D12Device* device,
@@ -116,6 +124,28 @@ void flush_ngx_guide_capture_vulkan(bool end_of_frame) noexcept;
 // for the game's context: submits the snapshot copies the evaluations since
 // the last release recorded, so they never wait on the game mid-frame.
 void flush_ngx_guide_capture_d3d11() noexcept;
+// V524: the eyes of one DLSS stream rendered for both eyes in turn
+// (configure_dlss_alternating_eyes; Luke Ross's R.E.A.L. VR). While enabled,
+// each bridged D3D12 evaluation of a stream not yet anchored in its epoch
+// also copies 16 patches of its finished DLSS output into its slot; at each
+// release anchor_ngx_alternating_eyes compares the stream's two newest
+// evaluations with the two eye images and, once five comparisons agree,
+// anchors the stream's left eye to that evaluation's serial parity.
+void configure_ngx_alternating_eye_anchor(bool enabled) noexcept;
+struct NgxEyeImage {
+    // The layer's D3D12 image the eye was released in (a bridged session's
+    // shared texture, simultaneous access), and the eye's rectangle on it.
+    ID3D12Resource* image{};
+    std::int32_t x{};
+    std::int32_t y{};
+    std::uint32_t width{};
+    std::uint32_t height{};
+};
+// At xrEndFrame's mapping, both eyes released with the same watermark, on
+// the queue the bridged release flushed to. Reads a comparison queued at an
+// earlier call once the GPU has run it, and queues the next one.
+void anchor_ngx_alternating_eyes(
+    const std::array<NgxEyeImage, 2>& eyes, std::uint64_t released_at) noexcept;
 // Look for the NGX modules now rather than on the monitor's next tick, so a
 // test need not wait for it.
 void poll_ngx_guide_capture() noexcept;

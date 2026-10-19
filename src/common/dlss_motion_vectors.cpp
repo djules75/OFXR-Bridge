@@ -5,6 +5,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstring>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 #include <utility>
@@ -16,7 +18,87 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr std::uint64_t kMaximumStereoPublicationGap = 4;
-constexpr std::size_t kSnapshotSlotCount = 4;
+
+// An eye image the size of a DLSS output, or (V524) cropped from it by a few
+// texels at its far edges: R.E.A.L. VR's Cyberpunk 2077 runs DLSS at
+// 4480x3760 and submits 4479x3760 eyes. An eye pixel is still the same output
+// pixel, and the view lies inside the output as the draw requires. Two
+// texels, or 1/256 of the extent where that is more - 17 at 4479 - is no
+// mirror or spectator view.
+[[nodiscard]] bool output_fits_extent(std::uint64_t output, std::uint64_t image) noexcept {
+    return output >= image && output - image <= std::max<std::uint64_t>(2U, image / 256U);
+}
+
+// Where a camera stands along its own right vector; NaN without a camera.
+[[nodiscard]] float camera_side(const DlssMotionVectorFrame& frame) noexcept {
+    if (!frame.view.known) return std::numeric_limits<float>::quiet_NaN();
+    const auto& p = frame.view.position;
+    const auto& r = frame.view.right;
+    return p[0] * r[0] + p[1] * r[1] + p[2] * r[2];
+}
+
+// V524: one shared stream's last two evaluations, both made before either
+// eye's release, and where their cameras stood, for record 845. The earlier
+// is the left eye's. The cameras do not decide: R.E.A.L. VR's Cyberpunk 2077
+// gives Streamline the same camera for both eyes and moves the eye after it,
+// so cameras that stand apart have moved with the player between the two
+// evaluations - taking the one further left as the left eye swapped the eyes
+// whenever the player moved. method 1 the cameras stand apart (a millimetre,
+// or a part in a million of where they stand), 2 both known but not apart,
+// 3 a camera unknown.
+struct SharedStreamOrder {
+    bool left_is_second{};
+    unsigned method{};
+    float first_side{};
+    float second_side{};
+};
+
+[[nodiscard]] SharedStreamOrder shared_stream_eye_order(
+    const DlssMotionVectorFrame& first, const DlssMotionVectorFrame& second) noexcept {
+    SharedStreamOrder order;
+    order.first_side = camera_side(first);
+    order.second_side = camera_side(second);
+    if (!std::isfinite(order.first_side) || !std::isfinite(order.second_side)) {
+        order.method = 3;
+        return order;
+    }
+    const float apart = std::max(1.0e-3F,
+        1.0e-6F * std::max(std::fabs(order.first_side), std::fabs(order.second_side)));
+    if (std::fabs(order.first_side - order.second_side) <= apart) {
+        order.method = 2;
+        return order;
+    }
+    order.method = 1;
+    return order;
+}
+
+// 845 (V524): an eye's choice from one shared stream evaluated twice before
+// either release, the first 512 and every 2000th after: a the eye << 32 | the
+// chosen publication, b the earlier evaluation's camera side (float bits)
+// << 32 | the later's, c the method | bit 8 the later is the left eye | bit
+// 9 the chosen is the later.
+void record_shared_stream_choice(std::uint64_t eye, const SharedStreamOrder& order,
+    const DlssMotionVectorFrame& chosen, bool chosen_is_second) noexcept {
+    static std::atomic<std::uint64_t> records{0};
+    const std::uint64_t record = records.fetch_add(1, std::memory_order_relaxed);
+    if (record >= 512 && record % 2000 != 0) return;
+    try {
+        std::uint32_t first_bits = 0, second_bits = 0;
+        std::memcpy(&first_bits, &order.first_side, sizeof(first_bits));
+        std::memcpy(&second_bits, &order.second_side, sizeof(second_bits));
+        bridge_flight_logger().event(BridgeFlightOperation::presenter_transition, 845,
+            (eye << 32U) | (chosen.publication & 0xFFFFFFFFULL),
+            (static_cast<std::uint64_t>(first_bits) << 32U) | second_bits,
+            order.method | (order.left_is_second ? 1U << 8U : 0U) |
+                (chosen_is_second ? 1U << 9U : 0U));
+    } catch (...) {
+    }
+}
+constexpr std::size_t kSnapshotSlotCount = 6;
+// The snapshot ring's length: four, and six under alternating eyes (V524),
+// whose lagging eye takes the evaluation three before the newest - its
+// snapshot has to outlast the two evaluations of the frame after.
+[[nodiscard]] std::size_t snapshot_ring_length() noexcept;
 constexpr D3D12_RESOURCE_STATES kSnapshotReadState =
     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -35,6 +117,17 @@ struct StreamState {
     float jitter_y{};
     std::shared_ptr<const DlssMotionVectorFrame> previous;
     std::shared_ptr<const DlssMotionVectorFrame> latest;
+    // V524, alternating eyes: the two before `previous`.
+    std::shared_ptr<const DlssMotionVectorFrame> previous2;
+    std::shared_ptr<const DlssMotionVectorFrame> previous3;
+    // V524, alternating eyes: each eye's evaluation at this frame's release
+    // watermark and at the frame before (the resolver's).
+    struct EyeTrack {
+        std::uint64_t watermark{};
+        std::shared_ptr<const DlssMotionVectorFrame> current;
+        std::shared_ptr<const DlssMotionVectorFrame> previous;
+    };
+    std::array<EyeTrack, 2> eyes{};
     std::array<SnapshotSlot, kSnapshotSlotCount> snapshots;
     std::size_t next_snapshot{};
     std::array<SnapshotSlot, kSnapshotSlotCount> depth_snapshots;
@@ -42,6 +135,10 @@ struct StreamState {
     // The queue the stream's snapshot copies run on (V519): the game's for a
     // native D3D12 session, the layer's for a bridged one.
     ComPtr<ID3D12CommandQueue> producer_queue;
+    // V524: alternating eyes, the epoch the eyes were anchored in and the
+    // left eye's serial parity (anchor_dlss_alternating_eyes).
+    std::uint64_t anchor_epoch{};
+    std::uint32_t left_parity{};
 };
 
 // Snapshot textures the registry has let go of (V519): a retired stream, a
@@ -79,6 +176,11 @@ Registry& registry() {
 }
 
 std::atomic_bool g_tracking_enabled{false};
+std::atomic_bool g_alternating_eyes{false};
+
+std::size_t snapshot_ring_length() noexcept {
+    return g_alternating_eyes.load(std::memory_order_acquire) ? kSnapshotSlotCount : 4U;
+}
 
 ComPtr<IUnknown> identity(IUnknown* object) noexcept {
     ComPtr<IUnknown> value;
@@ -383,7 +485,7 @@ HRESULT snapshot_resource(
     producer_command_list->ResourceBarrier(after_count, after.data());
     slot.state = kSnapshotReadState;
     *snapshot = slot.resource;
-    next_snapshot = (next_snapshot + 1) % kSnapshotSlotCount;
+    next_snapshot = (next_snapshot + 1) % snapshot_ring_length();
     return S_OK;
 }
 
@@ -438,6 +540,8 @@ void publish_dlss_motion_vectors(
             stream.serial = 0;
             stream.previous.reset();
             stream.latest.reset();
+            stream.previous2.reset();
+            stream.previous3.reset();
         }
 
         ComPtr<ID3D12Resource> motion_snapshot;
@@ -526,6 +630,8 @@ void publish_dlss_motion_vectors(
         if (stream.first_publication == 0) {
             stream.first_publication = frame->publication;
         }
+        stream.previous3 = std::move(stream.previous2);
+        stream.previous2 = std::move(stream.previous);
         stream.previous = std::move(stream.latest);
         stream.latest = std::move(frame);
         if (state.statistics.used == 0) {
@@ -562,6 +668,8 @@ void configure_dlss_motion_vector_tracking(bool enabled) noexcept {
             stream.jitter_y = 0.0F;
             stream.previous.reset();
             stream.latest.reset();
+            stream.previous2.reset();
+            stream.previous3.reset();
         }
         state.statistics = {};
         state.statistics.status = DlssMotionVectorStatus::waiting_for_dlss;
@@ -930,6 +1038,41 @@ std::uint64_t dlss_motion_vector_publications() noexcept {
     }
 }
 
+void configure_dlss_alternating_eyes(bool required) noexcept {
+    g_alternating_eyes.store(required, std::memory_order_release);
+}
+
+void anchor_dlss_alternating_eyes(
+    std::uint64_t stream, std::uint64_t epoch, std::uint32_t left_parity) noexcept {
+    try {
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        const auto found = state.streams.find(stream);
+        if (found == state.streams.end() || found->second.epoch != epoch) return;
+        found->second.anchor_epoch = epoch;
+        found->second.left_parity = left_parity & 1U;
+    } catch (...) {
+    }
+}
+
+DlssStreamPosition dlss_motion_vector_stream_position(std::uint64_t stream) noexcept {
+    DlssStreamPosition position;
+    try {
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        const auto found = state.streams.find(stream);
+        if (found == state.streams.end()) return position;
+        const StreamState& value = found->second;
+        position.known = true;
+        position.epoch = value.epoch;
+        position.serial = value.serial;
+        position.publication = value.latest ? value.latest->publication : 0;
+        position.anchored = value.anchor_epoch != 0 && value.anchor_epoch == value.epoch;
+    } catch (...) {
+    }
+    return position;
+}
+
 std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
     ID3D12Resource* output,
     ID3D12CommandQueue* consumer_queue,
@@ -1047,11 +1190,12 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         if (eye_count == 1 && !direct_match) {
             // Composition/UI swapchains share the scene queue but are not the
             // upscaler output, and a mirror's evaluation is not an eye's.
-            // Only an evaluation the size of this image can be its guide.
+            // Only an evaluation the size of this image (or a few texels
+            // larger, output_fits_extent) can be its guide.
             std::erase_if(candidates, [&](const Candidate& c) {
                 return c.frame->output_x != 0 || c.frame->output_y != 0 ||
-                    c.frame->output_width != description.Width ||
-                    c.frame->output_height != description.Height;
+                    !output_fits_extent(c.frame->output_width, description.Width) ||
+                    !output_fits_extent(c.frame->output_height, description.Height);
             });
         }
 
@@ -1094,6 +1238,125 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             std::sort(frames.begin(), frames.end(), [](const auto& a, const auto& b) {
                 return a->publication > b->publication;
             });
+            // V524: alternating eyes (configure_dlss_alternating_eyes). One
+            // stream for both eyes, its eyes by serial parity once anchored
+            // (unanchored, it guides no eye), each eye's previous two serials
+            // back. R.E.A.L. VR's AERv2 hands over one eye a frame late: in
+            // Cyberpunk 2077 each eye image matched (record 851, ~0.72 against
+            // ~0.35) either the newest evaluation, for that evaluation's eye,
+            // or - for the other eye - not its newest but the one before it,
+            // its evaluation of the previous frame. So the newest
+            // evaluation's eye takes it, and the other eye takes its
+            // second-newest.
+            if (g_alternating_eyes.load(std::memory_order_acquire) &&
+                candidates.size() == 1 && !array_eyes(*candidates.front().frame)) {
+                const auto& latest = candidates.front().frame;
+                const auto found = state.streams.find(latest->stream);
+                if (found == state.streams.end() || found->second.anchor_epoch == 0 ||
+                    found->second.anchor_epoch != latest->epoch) {
+                    return stale();
+                }
+                StreamState& stream = found->second;
+                const std::uint32_t parity =
+                    eye == 0 ? stream.left_parity : 1U - stream.left_parity;
+                std::vector<std::shared_ptr<const DlssMotionVectorFrame>> history;
+                for (const auto* frame : {&stream.latest, &stream.previous, &stream.previous2,
+                         &stream.previous3}) {
+                    if (*frame && (*frame)->epoch == latest->epoch &&
+                        (*frame)->publication <= released_at) {
+                        history.push_back(*frame);
+                    }
+                }
+                std::sort(history.begin(), history.end(),
+                    [](const auto& a, const auto& b) { return a->serial > b->serial; });
+                if (history.empty()) return stale();
+                const bool current = (history.front()->serial & 1U) == parity;
+                bool skipped = false;
+                std::shared_ptr<const DlssMotionVectorFrame> chosen;
+                for (const auto& frame : history) {
+                    if ((frame->serial & 1U) != parity) continue;
+                    if (!current && !skipped) {
+                        skipped = true;
+                        continue;
+                    }
+                    chosen = frame;
+                    break;
+                }
+                if (!chosen) return stale();
+                // Per eye, against its frame before (the release watermark
+                // tells the frames apart): never back in time - where the
+                // eyes trade places at a frame of one evaluation, the lagging
+                // eye's second-newest is older than what it showed, and its
+                // picture is shown again instead - its previous the guide it
+                // had that frame, so a pair holds across the trade, and a
+                // repeat (the same evaluation, the same picture) without
+                // motion. Each of these was a pair the composition refused
+                // (815, 1 in 5 of R.E.A.L. VR's pairs) and drew with the flow
+                // alone: Hybrid and flow in turn, a flicker standing still.
+                StreamState::EyeTrack& track = stream.eyes[static_cast<std::size_t>(eye)];
+                if (track.current && track.current->epoch != chosen->epoch) track = {};
+                if (released_at != track.watermark) {
+                    track.previous = track.current;
+                    track.watermark = released_at;
+                }
+                if (track.previous && chosen->serial < track.previous->serial) chosen = track.previous;
+                track.current = chosen;
+                auto frame = std::make_shared<DlssMotionVectorFrame>(*chosen);
+                frame->previous_serial = track.previous ? track.previous->serial
+                    : (frame->serial > 2 ? frame->serial - 2 : 0);
+                if (track.previous && track.previous->serial == frame->serial) {
+                    frame->scale_x = 1.0e-6F;
+                    frame->scale_y = 1.0e-6F;
+                }
+                // The right eye as R.E.A.L. VR shows it (DominantEye=0): not
+                // its evaluation as rendered but that render rotated to the
+                // left eye's pose, both eyes submitted with one orientation.
+                // In Cyberpunk 2077 its picture sat up to 13 output pixels to
+                // the side of its evaluation's, following the head's turn
+                // (record 851), the left eye's at none. The rotation is the
+                // one between the two evaluations' cameras (Streamline's), and
+                // where the left camera's forward falls in the right one's
+                // projection is how far the right eye's vectors are read
+                // from: a rectangle placed by the camera, as MSFS 2024's
+                // periphery is.
+                const StreamState::EyeTrack& left = stream.eyes[0];
+                if (eye == 1 && left.current && left.watermark == released_at &&
+                    left.current->serial != frame->serial && left.current->view.known &&
+                    frame->view.known && frame->output_width != 0 && frame->output_height != 0 &&
+                    frame->motion_width != 0 && frame->motion_height != 0) {
+                    const auto dot = [](const std::array<float, 3>& a, const std::array<float, 3>& b) {
+                        return static_cast<double>(a[0]) * b[0] + static_cast<double>(a[1]) * b[1] +
+                            static_cast<double>(a[2]) * b[2];
+                    };
+                    const auto& forward = left.current->view.forward;
+                    const double z = dot(forward, frame->view.forward);
+                    const double span_x = static_cast<double>(frame->view.tan_right) - frame->view.tan_left;
+                    const double span_y = static_cast<double>(frame->view.tan_up) - frame->view.tan_down;
+                    if (z > 0.5 && span_x > 0.0 && span_y > 0.0) {
+                        const double tan_x = dot(forward, frame->view.right) / z;
+                        const double tan_y = dot(forward, frame->view.up) / z;
+                        const double dx = tan_x / span_x * frame->output_width;
+                        const double dy = -tan_y / span_y * frame->output_height;
+                        if (std::isfinite(dx) && std::isfinite(dy) &&
+                            std::fabs(dx) < frame->output_width / 4.0 &&
+                            std::fabs(dy) < frame->output_height / 4.0) {
+                            const double per_x = static_cast<double>(frame->motion_width) / frame->output_width;
+                            const double per_y = static_cast<double>(frame->motion_height) / frame->output_height;
+                            frame->placed = true;
+                            frame->placed_motion_rect = {
+                                static_cast<float>(frame->motion_x + dx * per_x),
+                                static_cast<float>(frame->motion_y + dy * per_y),
+                                static_cast<float>(frame->motion_width),
+                                static_cast<float>(frame->motion_height)};
+                        }
+                    }
+                }
+                auto result = std::make_shared<DlssMotionVectorSet>();
+                result->eye_count = 1;
+                result->eyes[0] = std::move(frame);
+                ++state.statistics.matched;
+                return result;
+            }
             const auto newest_by = [&](std::uint64_t limit) {
                 for (const auto& frame : frames)
                     if (frame->publication <= limit) return frame;
@@ -1120,15 +1383,24 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                     chosen = candidate.frame->publication <= released_at
                         ? candidate.frame : candidate.previous;
                 } else {
-                    // One shared stream: left first when both eyes were
-                    // evaluated before either release.
+                    // One shared stream, both eyes evaluated before either
+                    // release: the cameras say which was the left
+                    // (shared_stream_eye_order), else left first.
                     const auto later = std::find(frames.begin(), frames.end(), chosen);
                     const auto earlier = later + 1;
-                    chosen = eye == 1 ? *later
-                        : earlier != frames.end() ? *earlier : nullptr;
-                    if (chosen && eye == 0 && (chosen->stream != other->stream ||
-                        chosen->epoch != other->epoch ||
-                        chosen->serial + 1 != other->serial)) return stale();
+                    const auto second = *later;
+                    const auto first = earlier != frames.end() ? *earlier : nullptr;
+                    const SharedStreamOrder order = first
+                        ? shared_stream_eye_order(*first, *second) : SharedStreamOrder{};
+                    const bool take_second = (eye == 0) == order.left_is_second;
+                    chosen = take_second ? second : first;
+                    if (chosen && !take_second && (chosen->stream != second->stream ||
+                        chosen->epoch != second->epoch ||
+                        chosen->serial + 1 != second->serial)) return stale();
+                    if (chosen && first) {
+                        record_shared_stream_choice(static_cast<std::uint64_t>(eye), order,
+                            *chosen, take_second);
+                    }
                 }
             }
             if (!chosen || frames.empty() || chosen->publication > released_at ||

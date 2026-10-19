@@ -4734,6 +4734,31 @@ struct D3D12FrameSynthesizer::Impl {
                     ((a ? a->epoch : 0ULL) << 32U) | (b ? b->epoch : 0ULL));
             }
         }
+        // V524: record 853 every 512th pair under Hybrid - how its pairs
+        // went: a pairs << 32 | with the game's vectors, b unpaired (the two
+        // frames' guides do not pair, or another device) << 32 | not
+        // covering the views, c without any guide.
+        if (nvidia_options.hybrid) {
+            static std::array<std::atomic<std::uint64_t>, 5> counts{};
+            const std::uint64_t pairs = counts[0].fetch_add(1, std::memory_order_relaxed) + 1;
+            if (guides != nullptr) {
+                counts[1].fetch_add(1, std::memory_order_relaxed);
+            } else if (!current_source.motion_vectors) {
+                counts[4].fetch_add(1, std::memory_order_relaxed);
+            } else if (valid_game_motion_pair(previous_source, current_source)) {
+                counts[3].fetch_add(1, std::memory_order_relaxed);
+            } else {
+                counts[2].fetch_add(1, std::memory_order_relaxed);
+            }
+            if (pairs % 512 == 0) {
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::embedded_configuration, 853,
+                    (pairs << 32U) | (counts[1].load(std::memory_order_relaxed) & 0xFFFFFFFFULL),
+                    (counts[2].load(std::memory_order_relaxed) << 32U) |
+                        (counts[3].load(std::memory_order_relaxed) & 0xFFFFFFFFULL),
+                    counts[4].load(std::memory_order_relaxed));
+            }
+        }
         // V516: an inset beside a placed periphery (MSFS 2024's foveated
         // rendering) is composed into one field per eye first; failing that,
         // the periphery alone guides the pair, as in V515.

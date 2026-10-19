@@ -3272,9 +3272,141 @@ void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
     const auto legacy_left = xrfg::resolve_dlss_motion_vectors(xr_color.Get(), fixture.queue(), 0);
     require(legacy_left && legacy_left->eyes[0]->stream == 722,
         "without a watermark two equal streams no longer follow discovery order");
-    xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_dlss_motion_vector_stream(711);
     xrfg::retire_dlss_motion_vector_stream(722);
+
+    // V524: eye images a texel narrower than the DLSS output (R.E.A.L. VR's
+    // Cyberpunk 2077, 4480 evaluated, 4479 submitted) still take their own
+    // eye's evaluation of one shared stream; an output far larger does not.
+    const auto cropped = texture(63);
+    publish(744, spectator.Get());
+    for (int frame = 0; frame < 3; ++frame) {
+        left_release = publish(766, color.Get());
+        right_release = publish(766, color.Get());
+    }
+    const auto crop_left = xrfg::resolve_dlss_motion_vectors(
+        cropped.Get(), fixture.queue(), 0, left_release, right_release);
+    const auto crop_right = xrfg::resolve_dlss_motion_vectors(
+        cropped.Get(), fixture.queue(), 1, right_release, left_release);
+    require(crop_left && crop_right && crop_left->eyes[0]->stream == 766 &&
+            crop_right->eyes[0]->stream == 766 && crop_left->eyes[0]->serial == 5 &&
+            crop_right->eyes[0]->serial == 6 && crop_left->eyes[0]->previous_serial == 3 &&
+            crop_right->eyes[0]->previous_serial == 4,
+        "eye images a texel narrower than the DLSS output lost their guides");
+    const auto narrow = texture(32);
+    require(!xrfg::resolve_dlss_motion_vectors(
+                narrow.Get(), fixture.queue(), 0, left_release, right_release),
+        "an eye image half the DLSS output's width took its vectors");
+    xrfg::retire_dlss_motion_vector_stream(744);
+    xrfg::retire_dlss_motion_vector_stream(766);
+
+    // V524: one shared stream evaluated twice before either release, with
+    // Streamline's cameras: the earlier is the left eye's whether the cameras
+    // stand apart or not. R.E.A.L. VR's cameras are the same for both eyes and
+    // stand apart only where the player moved between the two evaluations.
+    const auto publish_eye = [&](std::uint64_t stream, float side) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            xrfg::DlssMotionVectorPublication p{};
+            p.stream = stream;
+            p.output = color.Get();
+            p.motion_vectors = motion.Get();
+            p.output_width = 64;
+            p.output_height = 32;
+            p.motion_width = 64;
+            p.motion_height = 32;
+            p.producer_queue = fixture.queue();
+            p.producer_command_list = list;
+            p.resource_state = D3D12_RESOURCE_STATE_COMMON;
+            p.view.known = true;
+            p.view.right = {0.0F, 0.0F, 1.0F};
+            p.view.position = {100.0F, 5.0F, 2000.0F + side};
+            xrfg::publish_dlss_motion_vectors(p);
+        });
+        return xrfg::dlss_motion_vector_publications();
+    };
+    std::uint64_t pair_release = 0;
+    for (int frame = 0; frame < 3; ++frame) {
+        publish_eye(777, 0.032F);
+        pair_release = publish_eye(777, -0.032F);
+    }
+    const auto camera_left = xrfg::resolve_dlss_motion_vectors(
+        cropped.Get(), fixture.queue(), 0, pair_release, pair_release);
+    const auto camera_right = xrfg::resolve_dlss_motion_vectors(
+        cropped.Get(), fixture.queue(), 1, pair_release, pair_release);
+    require(camera_left && camera_right && camera_left->eyes[0]->serial == 5 &&
+            camera_right->eyes[0]->serial == 6 && camera_left->eyes[0]->previous_serial == 3 &&
+            camera_right->eyes[0]->previous_serial == 4,
+        "cameras that stand apart reordered a shared stream's eyes");
+    for (int frame = 0; frame < 1; ++frame) {
+        publish_eye(777, 0.0F);
+        pair_release = publish_eye(777, 0.0F);
+    }
+    const auto together_left = xrfg::resolve_dlss_motion_vectors(
+        cropped.Get(), fixture.queue(), 0, pair_release, pair_release);
+    require(together_left && together_left->eyes[0]->serial == 7,
+        "cameras that do not stand apart did not keep the evaluation order");
+    xrfg::retire_dlss_motion_vector_stream(777);
+
+    // V524: alternating eyes (R.E.A.L. VR). One stream for both eyes guides
+    // no eye before its anchor; anchored, each eye takes the newest
+    // evaluation of its serial parity at its release, its previous two
+    // serials back, through a frame that carried one evaluation.
+    xrfg::configure_dlss_alternating_eyes(true);
+    std::uint64_t alternating_release = 0;
+    for (int frame = 0; frame < 2; ++frame) {
+        publish_eye(799, 0.0F);
+        alternating_release = publish_eye(799, 0.0F);
+    }
+    require(!xrfg::resolve_dlss_motion_vectors(
+                cropped.Get(), fixture.queue(), 0, alternating_release, alternating_release),
+        "an alternating stream guided an eye before its anchor");
+    const auto position = xrfg::dlss_motion_vector_stream_position(799);
+    require(position.known && !position.anchored && position.serial == 4,
+        "the alternating stream's position was not reported");
+    xrfg::anchor_dlss_alternating_eyes(799, position.epoch, 1);
+    require(xrfg::dlss_motion_vector_stream_position(799).anchored,
+        "the alternating stream did not take its anchor");
+    const auto resolve_alternating = [&](int eye) {
+        return xrfg::resolve_dlss_motion_vectors(
+            cropped.Get(), fixture.queue(), eye, alternating_release, alternating_release);
+    };
+    // The newest evaluation's eye takes it; the other eye, a frame late as
+    // R.E.A.L. VR's AERv2 hands it over, takes the one before its newest.
+    auto alternating_left = resolve_alternating(0);
+    auto alternating_right = resolve_alternating(1);
+    require(alternating_left && alternating_right && alternating_left->eyes[0]->serial == 1 &&
+            alternating_right->eyes[0]->serial == 4 &&
+            alternating_right->eyes[0]->previous_serial == 2,
+        "an anchored alternating stream did not give each eye its evaluation");
+    // Asked again in the same frame (the release, then xrEndFrame): the same.
+    require(resolve_alternating(1)->eyes[0]->serial == 4 &&
+            resolve_alternating(1)->eyes[0]->previous_serial == 2,
+        "a second resolve in the frame moved the eye on");
+    // A frame with one evaluation: the left eye has the newest now, its
+    // previous the 1 it had; the right eye's second-newest (2) is older than
+    // the 4 it showed, so the 4 again, without motion.
+    alternating_release = publish_eye(799, 0.0F);
+    alternating_left = resolve_alternating(0);
+    alternating_right = resolve_alternating(1);
+    require(alternating_left && alternating_right && alternating_left->eyes[0]->serial == 5 &&
+            alternating_left->eyes[0]->previous_serial == 1 &&
+            alternating_right->eyes[0]->serial == 4 &&
+            alternating_right->eyes[0]->previous_serial == 4 &&
+            alternating_right->eyes[0]->scale_x < 1.0e-3F &&
+            alternating_left->eyes[0]->scale_x > 0.5F,
+        "a frame with one evaluation did not keep each eye's pairs");
+    alternating_release = publish_eye(799, 0.0F);
+    alternating_left = resolve_alternating(0);
+    alternating_right = resolve_alternating(1);
+    require(alternating_left && alternating_right && alternating_left->eyes[0]->serial == 5 &&
+            alternating_left->eyes[0]->previous_serial == 5 &&
+            alternating_right->eyes[0]->serial == 6 &&
+            alternating_right->eyes[0]->previous_serial == 4 &&
+            alternating_right->eyes[0]->scale_x > 0.5F,
+        "the alternating stream lost its eyes after a frame with one evaluation");
+    xrfg::configure_dlss_alternating_eyes(false);
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_dlss_motion_vector_stream(799);
 }
 
 void test_dlss_motion_vector_gpu_ingress(

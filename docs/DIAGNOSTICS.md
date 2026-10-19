@@ -68,7 +68,7 @@ that stopped:
 | --- | --- |
 | 702 | not a native D3D12 session (a D3D11 or Vulkan game): the capture cannot run |
 | 820 | no DLSS module found or hooked in the game |
-| 821 | DLSS modules hooked, but no DLSS evaluation: the game is not running DLSS (DI2: the F8 FSR2 toggle) |
+| 821 | DLSS modules hooked, but no DLSS evaluation: the game is not running DLSS (DI2: the F8 FSR2 toggle), or, before V524, a D3D12 game behind a D3D11 session (R.E.A.L. VR) |
 | 824 | DLSS runs, but its evaluations were skipped |
 | 827 | vectors captured, but the guide registry refused them (snapshot failed) |
 | 828 | vectors captured, but not matched to the eye images |
@@ -106,6 +106,71 @@ queue.
   immediate context) and 6 (the copy into the shared textures failed, `c`
   its HRESULT).
 - The Hybrid status line no longer reports 702 for a bridged D3D11 session.
+
+### DLSS vectors from D3D12 games behind a D3D11 session (V524)
+
+A game that renders in D3D12 while its VR mod hands the runtime a D3D11
+session - Cyberpunk 2077 under R.E.A.L. VR - runs DLSS on its D3D12 device.
+Until V524 only a native D3D12 session captured D3D12 evaluations, so the
+game's feature was created (821 `a` = 1) and evaluated every frame while
+Hybrid read **HYBRID KO (821)**. In a bridged D3D11 session the D3D12
+evaluations are now captured too: each one copies its vectors, and its depth
+where the format can be shared, in the game's own command list into textures
+shared with the layer's D3D12 device, and the snapshot copies go to the
+layer's queue at the session's next image release, as the D3D11 ones do.
+
+- `embedded_configuration` 843, a stream's first publication on this path:
+  `a` the stream's low bits | bit 32 the depth came with it | bit 33 the
+  depth's format cannot be shared (packed depth-stencil) | bit 34 the game's
+  device is the layer's own (D3D12 returns one device per adapter); `b`
+  vectors format << 32 | depth format; `c` output width << 32 | height.
+- 824 reason 10: this path's transport failed, `c` its HRESULT; reason 4
+  with `c` 1 or 0: the vectors and the command list are not one device.
+- 825 and 839-842 as for a native session.
+- 844, a publication on this path (first 512, then every 2000th): `a` the
+  registry's publication number; `b` the stream's low bits | bit 32 inside
+  Streamline's DLSS evaluation | bit 33 its camera known | the viewport << 40;
+  `c` the camera's position along its right vector (float bits).
+- 847, the mean of an evaluation's vectors over 16 patches (first 512): `a`
+  its publication; `b` mean x << 32 | mean y; `c` mean |x| << 32 | mean |y|
+  (float bits, the vectors' own units). With the head still, means that flip
+  sign from one evaluation to the next are the other eye's parallax.
+
+### R.E.A.L. VR (V524)
+
+Luke Ross's R.E.A.L. VR is recognised by its version resource (product
+"R.E.A.L. VR", original file RealVR64.dll), whatever it is installed as
+(Cyberpunk 2077: `bin\x64\dxgi.dll`). `presenter_transition` 764 `a` 1: found.
+Then:
+
+- Its flat panels go out as it placed them: no pose between frames (V508), no
+  generated panel images (V509).
+- Its one DLSS stream for both eyes, one eye per game frame, goes to the eyes
+  by serial parity once anchored, and guides no eye before. The anchor
+  compares 16 patches of the two newest finished DLSS outputs with each eye
+  image at a release, by rank correlation of luminance; five agreeing votes
+  anchor the left eye's parity, and a DLSS reset needs a new anchor.
+- 846, each comparison: `a` the older evaluation's publication << 32 | the
+  newer's; `b` older-left's summed correlation << 32 | older-right's (float
+  bits); `c` outcome (0 a vote, 1 too few patches with detail, 2 too close) |
+  the vote's left parity << 8 | agreeing votes << 16 | bit 24 anchored | the
+  fewest patches used << 32.
+- The anchor takes the stream published most recently: the game may keep an
+  earlier session's feature beside the one it plays with.
+- Its vectors span the game's last frame, the other eye's (R.E.A.L. VR's
+  frames are unevenly spaced, and one eye's vectors run about three times the
+  other's while turning), and are stretched to the eye's own frame by what
+  they measure: each serial parity's running mean motion (847, read for every
+  evaluation here), an eye's vectors times (its own + the other's) / its own,
+  2 until both are measured. Neither the recording times nor a frame-time
+  delta tell the spans: Cyberpunk gives DLSS none, and the evaluation recorded
+  4 ms after the previous one carries the larger motion. 848, the first 512
+  and every 2000th: `a` the publication; `b` the eye's mean motion << 32 | the
+  other eye's; `c` the factor << 32 | its source (1 measured, 0 the nominal 2)
+  (float bits).
+- 845, an eye's choice when a stream is shared without the anchor: `a` eye << 32
+  | publication; `b` the two cameras' sides; `c` method (1 cameras apart, 2
+  equal, 3 unknown) - the evaluation order decides, the cameras never.
 
 ### DLSS vectors from Vulkan games (V513)
 

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.523.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.524.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -428,7 +428,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         xrfg_bridge_flight_logger
         xrfg_fps_overlay
         xrfg_implicit_layer
-        psapi)
+        psapi
+        version)
     target_compile_features(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE cxx_std_20)
     target_compile_definitions(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE
         NOMINMAX

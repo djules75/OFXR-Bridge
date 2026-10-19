@@ -827,6 +827,10 @@ struct SessionState {
     std::vector<PanelPose> panel_poses_current;
     std::vector<PanelPose> panel_poses_previous;
     std::vector<XrSwapchain> panels_recorded;
+    // V524: Luke Ross's R.E.A.L. VR is in the process (realvr_loaded): its
+    // flat panels go out as it placed them, neither moved between frames
+    // (V508) nor given generated images (V509). Set at session creation.
+    bool panel_corrections_off{};
     // V509: application end frames counted, and the frame each flat panel's
     // swapchain last had its own generated images prepared at, so a panel
     // pairs only straight after a frame that primed or paired it. Panels
@@ -5007,6 +5011,8 @@ XrResult layer_destroy_instance_impl(XrInstance instance) {
     return result;
 }
 
+[[nodiscard]] bool realvr_loaded() noexcept;
+
 XrResult layer_create_session_impl(
     XrInstance instance,
     const XrSessionCreateInfo* create_info,
@@ -5292,10 +5298,23 @@ XrResult layer_create_session_impl(
         state->frames_per_application_frame,
         state->deep_pipeline ? 1u : 0u,
         triple_requested ? 1u : 0u);
+    // 764 (V524): a 1 where R.E.A.L. VR is in the process and the HUD panel
+    // corrections are off for the session.
+    state->panel_corrections_off = realvr_loaded();
+    xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::presenter_transition,
+        764,
+        state->panel_corrections_off ? 1u : 0u,
+        0,
+        0);
+    // And its one DLSS stream rendered for both eyes in turn: the eyes by
+    // serial parity, once the pictures have said which parity is the left
+    // (configure_dlss_alternating_eyes, anchor_ngx_alternating_eyes).
+    xrfg::configure_dlss_alternating_eyes(state->panel_corrections_off);
+    xrfg::configure_ngx_alternating_eye_anchor(state->panel_corrections_off);
     // The game's own DLSS vectors for the hybrid composition: captured from
-    // its NGX calls on a native D3D12 session. A bridged session's game
-    // renders in D3D11 or Vulkan, whose NGX the capture does not detour; a
-    // provider (an OFXR-aware OptiScaler) can still publish there.
+    // its NGX calls on a native D3D12 session, and for a bridged session
+    // below.
     //
     // Hybrid only. The tray always writes motion_vectors=dlss, which before
     // the capture existed meant only a provider's vectors; with the capture
@@ -5309,7 +5328,9 @@ XrResult layer_create_session_impl(
     }
     // A bridged D3D11 session (V512): the game's DLSS runs on its D3D11
     // device, and the capture carries its vectors across to the layer's
-    // D3D12 device and queue.
+    // D3D12 device and queue. Or (V524) on the game's own D3D12 device behind
+    // the D3D11 session - R.E.A.L. VR's Cyberpunk 2077 - which the same
+    // capture carries across from its D3D12 evaluations.
     const bool d3d11_capture = state->d3d11_bridge && state->d3d11_bridge->device &&
         state->d3d12_device && state->d3d12_queue && initial_control.desired.hybrid;
     if (d3d11_capture) {
@@ -7448,8 +7469,10 @@ void note_projection_eyes(
 // eye's guide join: at its own release an eye could only see the other's
 // previous release, so a right-first game got the wrong evaluation (V497,
 // from 0.3's R15). Colour and its capture ticket stay as released. Record
-// 751 per eye for the first frames and now and then after: a the eye, b its
-// release watermark, c the chosen guide's publication (0 refused).
+// 751 per eye for the first frames, the first 256 with a publication (V524:
+// a game whose DLSS starts after the session's first frames), and now and
+// then after: a the eye, b its release watermark, c the chosen guide's
+// publication (0 refused).
 //
 // One evaluation for both eyes (V513): No Man's Sky runs DLSS once into an
 // image twice an eye's width and copies each half to that eye's swapchain,
@@ -7496,11 +7519,29 @@ void refresh_projection_guides(
         }
         if (!chains[0] || !chains[1]) return;
         static std::atomic<std::uint64_t> records{0};
+        static std::atomic<std::uint64_t> published_records{0};
         const std::uint64_t record = records.fetch_add(1, std::memory_order_relaxed);
-        const bool log = record < 128 || record % 512 == 0;
+        const std::uint64_t published_record = releases[0] != 0 || releases[1] != 0
+            ? published_records.fetch_add(1, std::memory_order_relaxed)
+            : std::numeric_limits<std::uint64_t>::max();
+        const bool log = record < 128 || published_record < 256 || record % 512 == 0;
         std::scoped_lock gpu_lock(session.gpu_mutex);
         for (std::size_t eye = 0; eye < chains.size(); ++eye) {
             session.eye_release_publication[eye].store(releases[eye], std::memory_order_relaxed);
+        }
+        // R.E.A.L. VR (V524): both eyes released behind the same evaluations
+        // compare them with the eye images, until the stream is anchored.
+        if (session.panel_corrections_off && releases[0] != 0 && releases[0] == releases[1]) {
+            std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, 2> images{};
+            std::array<xrfg::NgxEyeImage, 2> eyes{};
+            for (std::size_t eye = 0; eye < chains.size(); ++eye) {
+                std::scoped_lock lock(chains[eye]->mutex);
+                images[eye] = chains[eye]->enumerated_d3d12_images[*chains[eye]->last_released_index];
+                eyes[eye] = {images[eye].Get(), rects[eye].offset.x, rects[eye].offset.y,
+                    static_cast<std::uint32_t>(rects[eye].extent.width),
+                    static_cast<std::uint32_t>(rects[eye].extent.height)};
+            }
+            xrfg::anchor_ngx_alternating_eyes(eyes, releases[0]);
         }
         // One evaluation for both eyes: the same one for each - whole where
         // each eye's swapchain holds the whole side-by-side image and its
@@ -11559,6 +11600,75 @@ void note_panel_poses(const XrFrameEndInfo* info, std::vector<PanelPose>* poses)
     }
 }
 
+// Whether Luke Ross's R.E.A.L. VR mod is loaded (V524), under whatever name
+// it is installed as - Cyberpunk 2077 loads it as dxgi.dll: a module outside
+// the Windows directory whose version resource names the product R.E.A.L. VR
+// or the original file RealVR64.dll or RealVR.dll. R.E.A.L. VR renders one
+// eye per game frame and places its HUD quad itself; moving that quad
+// between frames (V508) made the HUD jump in generated frames, which
+// 0.2.13.4 did not.
+[[nodiscard]] bool realvr_loaded() noexcept {
+    try {
+        std::vector<HMODULE> modules(1024);
+        DWORD needed = 0;
+        if (!EnumProcessModules(GetCurrentProcess(), modules.data(),
+                static_cast<DWORD>(modules.size() * sizeof(HMODULE)), &needed)) {
+            return false;
+        }
+        modules.resize(std::min<std::size_t>(needed / sizeof(HMODULE), modules.size()));
+        std::wstring windows(MAX_PATH, L'\0');
+        windows.resize(GetWindowsDirectoryW(windows.data(), MAX_PATH));
+        const auto lower = [](std::wstring text) {
+            for (auto& character : text) character = static_cast<wchar_t>(towlower(character));
+            return text;
+        };
+        const std::wstring windows_prefix = lower(windows) + L"\\";
+        for (HMODULE module : modules) {
+            std::wstring path(32768, L'\0');
+            path.resize(GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size())));
+            if (path.empty() || (!windows.empty() && lower(path).rfind(windows_prefix, 0) == 0)) {
+                continue;
+            }
+            DWORD ignored = 0;
+            const DWORD size = GetFileVersionInfoSizeW(path.c_str(), &ignored);
+            if (size == 0) continue;
+            std::vector<std::byte> data(size);
+            if (!GetFileVersionInfoW(path.c_str(), 0, size, data.data())) continue;
+            struct Translation {
+                WORD language;
+                WORD code_page;
+            };
+            Translation* translations = nullptr;
+            UINT length = 0;
+            if (!VerQueryValueW(data.data(), L"\\VarFileInfo\\Translation",
+                    reinterpret_cast<void**>(&translations), &length) ||
+                length < sizeof(Translation)) {
+                continue;
+            }
+            const auto field = [&](const wchar_t* name) {
+                wchar_t key[96];
+                swprintf_s(key, L"\\StringFileInfo\\%04x%04x\\%s", translations[0].language,
+                    translations[0].code_page, name);
+                wchar_t* value = nullptr;
+                UINT value_length = 0;
+                if (!VerQueryValueW(data.data(), key, reinterpret_cast<void**>(&value),
+                        &value_length) || value == nullptr) {
+                    return std::wstring{};
+                }
+                return lower(value);
+            };
+            const std::wstring product = field(L"ProductName");
+            const std::wstring original = field(L"OriginalFilename");
+            if (product.find(L"r.e.a.l. vr") != std::wstring::npos ||
+                original == L"realvr64.dll" || original == L"realvr.dll") {
+                return true;
+            }
+        }
+    } catch (...) {
+    }
+    return false;
+}
+
 // Between two poses at `fraction` of the way from `from` to `to`: the
 // position along the line, the orientation by normalised lerp on the short
 // arc (two frames apart, the arc is small).
@@ -11602,6 +11712,7 @@ void place_panels_between(
     float fraction,
     std::span<const ProjectionResourceDestination> destinations,
     GeneratedFrameEndInfo* output) {
+    if (state.panel_corrections_off) return;
     if (previous.empty() || !(fraction > 0.0F && fraction < 1.0F)) return;
     // The same reservation build_generated_frame_end_info made, so nothing
     // already pointing into it moves.
@@ -12530,7 +12641,7 @@ constexpr std::size_t kMaxGeneratedPanels = 2;
 [[nodiscard]] bool panel_generation_supported(const SessionState& state) noexcept {
     const bool native = state.graphics_binding == SessionGraphicsBinding::d3d12 &&
         !state.d3d11_bridge && !state.vulkan_bridge && state.d3d12_queue;
-    return native;
+    return native && !state.panel_corrections_off;
 }
 
 // The frame's flat panels on swapchains of their own: not one the

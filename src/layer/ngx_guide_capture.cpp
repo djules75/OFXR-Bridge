@@ -17,12 +17,14 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
 #include <limits>
+#include <numeric>
 #include <memory>
 #include <thread>
 #include <unordered_map>
@@ -158,6 +160,19 @@ constexpr std::int64_t kRecordRealigned = 841;
 //       width << 16 | height, b 1 when the depth came with the publication,
 //       c 1 when it is inverted
 constexpr std::int64_t kRecordDepthRect = 842;
+//   843 (V524) the first publication of a stream a D3D12 game evaluated in a
+//       bridged D3D11 session: a its low bits | bit 32 the depth was shared |
+//       bit 33 the depth's format cannot be shared (packed depth-stencil) |
+//       bit 34 the game's device backs the layer's, b vectors format << 32 |
+//       depth format, c output width << 32 | height
+//   824 reason 10 (V524): that path's transport failed, c its HRESULT
+constexpr std::int64_t kRecordBridgedD3D12Publication = 843;
+//   844 (V524) a publication on that path, the first 512 and every 2000th
+//       after: a the registry's publication number, b the stream's low 32
+//       bits | bit 32 inside Streamline's DLSS evaluation | bit 33 its camera
+//       known | the viewport << 40, c where the camera stands along its right
+//       vector (float bits; the left eye's is the smaller)
+constexpr std::int64_t kRecordBridgedD3D12Evaluation = 844;
 constexpr std::int64_t kRecordSkip = 824;
 constexpr std::int64_t kRecordShape = 825;
 constexpr std::int64_t kRecordSummary = 826;
@@ -178,6 +193,7 @@ struct Module {
 };
 
 class GuideTransport11;
+class GuideTransport12;
 class GuideTransportVk;
 
 struct Feature {
@@ -193,6 +209,9 @@ struct Feature {
     // through, and a stand-in for its output on the D3D12 device.
     std::shared_ptr<GuideTransport11> transport;
     ComPtr<ID3D12Resource> output_placeholder;
+    // A D3D12 game in a bridged D3D11 session (V524): the same, from the
+    // game's D3D12 device.
+    std::shared_ptr<GuideTransport12> transport12;
     // Vulkan (V513).
     std::shared_ptr<GuideTransportVk> transport_vk;
 };
@@ -250,7 +269,7 @@ struct Capture {
     std::unordered_map<const NVSDK_NGX_Handle*, Feature> features;
     std::uint64_t next_stream{kStreamBase};
     NgxGuideCaptureStatistics statistics;
-    std::array<bool, 10> skip_recorded{};
+    std::array<bool, 11> skip_recorded{};
     std::uint64_t refusals_recorded{};
 };
 
@@ -490,6 +509,8 @@ DlssViewGeometry camera_from_constants(
     for (std::size_t axis = 0; axis < 3; ++axis) {
         view.position[axis] = std::isfinite(c.position[axis]) ? c.position[axis] : 0.0F;
         view.right[axis] = std::isfinite(c.right[axis]) ? c.right[axis] : 0.0F;
+        view.up[axis] = std::isfinite(c.up[axis]) ? c.up[axis] : 0.0F;
+        view.forward[axis] = std::isfinite(c.forward[axis]) ? c.forward[axis] : 0.0F;
     }
     return view;
 }
@@ -956,7 +977,8 @@ NVSDK_NGX_Result NVSDK_CONV hooked_create(
 // evaluation that registers it is not captured; the next one is.
 //
 // active is the capture of the API the evaluation came through: the native
-// D3D12 one, or a bridged session's D3D11 or Vulkan one (V519 - before, only
+// D3D12 one (or, V524, the bridged D3D11 session's for a D3D12 game), or a
+// bridged session's D3D11 or Vulkan one (V519 - before, only
 // the D3D12 capture's flag was read, so a bridged game whose DLSS started
 // before Hybrid was switched on never registered: Skyrim, 824 reason 1 on
 // every evaluation). _nvngx.dll serves every feature type and is not typed;
@@ -964,17 +986,48 @@ NVSDK_NGX_Result NVSDK_CONV hooked_create(
 // and motion vectors is super resolution - there is no D3D11 frame
 // generation - so there it registers too. PureDark's Skyrim upscaler links
 // NGX statically, which makes _nvngx.dll the outermost call.
+// A D3D12 evaluation is captured by the native session's capture, or (V524)
+// in a bridged D3D11 session whose game renders in D3D12 - Cyberpunk 2077
+// under R.E.A.L. VR - by capture12_bridged.
+[[nodiscard]] bool d3d12_capturing() noexcept {
+    auto& s = state();
+    return s.active.load(std::memory_order_acquire) ||
+        s.d3d11_active.load(std::memory_order_acquire);
+}
+
+void capture12_bridged(
+    ID3D12GraphicsCommandList* list,
+    const NVSDK_NGX_Handle* handle,
+    const NVSDK_NGX_Parameter* parameters) noexcept;
+// V524: after the DLSS call, the alternating-eye anchor's output patches.
+void complete12(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter* parameters,
+    NVSDK_NGX_Result result) noexcept;
+
+// The native capture first: a native D3D12 session never runs the bridge.
+void clear_patch_transport() noexcept;
+
+void capture12(
+    ID3D12GraphicsCommandList* list,
+    const NVSDK_NGX_Handle* handle,
+    const NVSDK_NGX_Parameter* parameters) noexcept {
+    clear_patch_transport();
+    if (state().active.load(std::memory_order_acquire)) {
+        capture(list, handle, parameters);
+    } else {
+        capture12_bridged(list, handle, parameters);
+    }
+}
+
 template <unsigned Slot>
 void register_late(const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
-    const std::atomic<bool>& active, bool untyped_is_upscaling = false) noexcept {
+    bool active, bool untyped_is_upscaling = false) noexcept {
     if constexpr (Slot >= 2) {
         if (!untyped_is_upscaling) return;
     }
     {
         try {
             auto& s = state();
-            if (!active.load(std::memory_order_acquire) || handle == nullptr ||
-                parameters == nullptr) {
+            if (!active || handle == nullptr || parameters == nullptr) {
                 return;
             }
             if constexpr (Slot >= 2) {
@@ -1023,13 +1076,14 @@ NVSDK_NGX_Result NVSDK_CONV hooked_evaluate(
     const NVSDK_NGX_Parameter* parameters,
     PFN_NVSDK_NGX_ProgressCallback callback) {
     DepthScope depth;
-    register_late<Slot>(handle, parameters, state().active);
-    if (depth.outermost()) {
-        capture(list, handle, parameters);
+    register_late<Slot>(handle, parameters, d3d12_capturing());
+    const bool outermost = depth.outermost();
+    if (outermost) {
+        capture12(list, handle, parameters);
     } else {
         try {
             auto& s = state();
-            if (s.active.load(std::memory_order_acquire)) {
+            if (d3d12_capturing()) {
                 std::scoped_lock lock(s.mutex);
                 ++s.statistics.skipped_nested;
                 if (!s.skip_recorded[3]) {
@@ -1040,7 +1094,10 @@ NVSDK_NGX_Result NVSDK_CONV hooked_evaluate(
         } catch (...) {
         }
     }
-    return state().modules[Slot].evaluate(list, handle, parameters, callback);
+    const NVSDK_NGX_Result result =
+        state().modules[Slot].evaluate(list, handle, parameters, callback);
+    if (outermost) complete12(list, parameters, result);
+    return result;
 }
 
 template <unsigned Slot>
@@ -1050,11 +1107,15 @@ NVSDK_NGX_Result NVSDK_CONV hooked_evaluate_c(
     const NVSDK_NGX_Parameter* parameters,
     PFN_NVSDK_NGX_ProgressCallback_C callback) {
     DepthScope depth;
-    register_late<Slot>(handle, parameters, state().active);
-    if (depth.outermost()) {
-        capture(list, handle, parameters);
+    register_late<Slot>(handle, parameters, d3d12_capturing());
+    const bool outermost = depth.outermost();
+    if (outermost) {
+        capture12(list, handle, parameters);
     }
-    return state().modules[Slot].evaluate_c(list, handle, parameters, callback);
+    const NVSDK_NGX_Result result =
+        state().modules[Slot].evaluate_c(list, handle, parameters, callback);
+    if (outermost) complete12(list, parameters, result);
+    return result;
 }
 
 
@@ -1766,6 +1827,2080 @@ void capture11(
     }
 }
 
+// ------------------------------------------- alternating-eye anchor (V524)
+// R.E.A.L. VR renders one eye per game frame through one DLSS feature; the
+// registry gives such a stream's evaluations to the eyes by serial parity
+// once it knows which parity is the left (configure_dlss_alternating_eyes).
+// That is read from the pictures: 16 patches of an evaluation's finished DLSS
+// output against the same places of each eye image, by rank correlation of
+// their luminance - the eye images are tone-mapped, DLSS's output is not, and
+// ranks do not care. An evaluation is most like the eye it was rendered for:
+// the other eye is another viewpoint (the near scene shifts by the eyes'
+// parallax) and another moment.
+constexpr std::uint32_t kAnchorPatches = 16;
+constexpr std::uint32_t kAnchorPatch = 32;
+constexpr std::uint32_t kAnchorAtlas = 4 * kAnchorPatch;
+constexpr std::uint32_t kAnchorVotes = 5;
+constexpr double kAnchorMargin = 0.02;
+//   846 (V524) an anchor comparison: a the older evaluation's publication
+//       << 32 | the newer's, b the pairing older-left's summed correlation
+//       (float bits) << 32 | older-right's, c the outcome (0 a vote, 1 too
+//       few patches with detail, 2 the pairings too close) | the vote's left
+//       parity << 8 | agreeing votes << 16 | bit 24 anchored | the fewest
+//       patches used << 32
+//   847 (V524) a bridged evaluation's vectors, the first 512 (read for
+//       every evaluation under alternating eyes, for their stretch): a its
+//       publication, b the mean x (float bits) << 32 | the mean y, c the mean
+//       |x| << 32 | the mean |y|, over 16 patches of 32x32 texels, in the
+//       vectors' own units
+constexpr std::int64_t kRecordAnchor = 846;
+constexpr std::int64_t kRecordMotionMean = 847;
+//   849 (V524) a comparison the anchor could not queue, the first of each
+//       reason and every 1000th after: a the reason (1 no bridged stream or
+//       device, 2 the newest evaluations' patches not taken, 3 they are not
+//       the stream's two newest before the release, 4 an eye image it cannot
+//       read: c its DXGI format | its flags << 32, 5 a patch outside the eye:
+//       c width << 32 | height, 6 its resources could not be made), b the
+//       count so far
+constexpr std::int64_t kRecordAnchorSkip = 849;
+
+// Alternating eyes (configure_ngx_alternating_eye_anchor): the anchor, and
+// the vectors' stretch to each eye's own frame.
+std::atomic_bool g_anchor_enabled{false};
+
+void skip_anchor(std::uint32_t reason, std::uint64_t detail = 0) noexcept {
+    static std::array<std::atomic<std::uint64_t>, 8> counts{};
+    const std::uint64_t count = counts[reason & 7U].fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count == 1 || count % 1000 == 0) record(kRecordAnchorSkip, reason, count, detail);
+}
+
+// Patch `index` of a 4x4 grid over the middle 70% of an extent.
+[[nodiscard]] std::pair<std::uint32_t, std::uint32_t> anchor_patch_origin(
+    std::uint32_t index, std::uint32_t width, std::uint32_t height) noexcept {
+    const auto place = [](std::uint32_t cell, std::uint32_t extent) {
+        const double centre =
+            (0.15 + 0.7 * (static_cast<double>(cell) + 0.5) / 4.0) * static_cast<double>(extent);
+        const double last = extent > kAnchorPatch ? static_cast<double>(extent - kAnchorPatch) : 0.0;
+        return static_cast<std::uint32_t>(std::clamp(centre - kAnchorPatch / 2.0, 0.0, last));
+    };
+    return {place(index % 4U, width), place(index / 4U, height)};
+}
+
+// The typeless families read as their typed members: a runtime's images are
+// typeless (R8G8B8A8_TYPELESS on Virtual Desktop and Pimax), and so are the
+// bridge's shared textures made from them.
+[[nodiscard]] DXGI_FORMAT anchor_typed_format(DXGI_FORMAT format) noexcept {
+    switch (format) {
+        case DXGI_FORMAT_R32G32B32A32_TYPELESS:
+            return DXGI_FORMAT_R32G32B32A32_FLOAT;
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+            return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+            return DXGI_FORMAT_R10G10B10A2_UNORM;
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+            return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+            return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+            return DXGI_FORMAT_B8G8R8X8_UNORM;
+        case DXGI_FORMAT_R32G32_TYPELESS:
+            return DXGI_FORMAT_R32G32_FLOAT;
+        case DXGI_FORMAT_R16G16_TYPELESS:
+            return DXGI_FORMAT_R16G16_FLOAT;
+        default:
+            return format;
+    }
+}
+
+[[nodiscard]] std::uint32_t anchor_texel_bytes(DXGI_FORMAT format) noexcept {
+    switch (anchor_typed_format(format)) {
+        case DXGI_FORMAT_R32G32B32A32_FLOAT:
+            return 16;
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+        case DXGI_FORMAT_R32G32_FLOAT:
+            return 8;
+        case DXGI_FORMAT_R11G11B10_FLOAT:
+        case DXGI_FORMAT_R10G10B10A2_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        case DXGI_FORMAT_B8G8R8X8_UNORM:
+        case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+        case DXGI_FORMAT_R16G16_FLOAT:
+            return 4;
+        default:
+            return 0;
+    }
+}
+
+[[nodiscard]] constexpr std::uint64_t align_up(std::uint64_t value, std::uint64_t alignment) noexcept {
+    return (value + alignment - 1U) / alignment * alignment;
+}
+
+[[nodiscard]] float half_to_float(std::uint16_t bits) noexcept {
+    const std::uint32_t exponent = (bits >> 10U) & 0x1FU;
+    const std::uint32_t mantissa = bits & 0x3FFU;
+    float value = 0.0F;
+    if (exponent == 0) {
+        value = std::ldexp(static_cast<float>(mantissa), -24);
+    } else if (exponent == 31) {
+        value = 0.0F;
+    } else {
+        value = std::ldexp(static_cast<float>(mantissa | 0x400U), static_cast<int>(exponent) - 25);
+    }
+    return (bits & 0x8000U) != 0 ? -value : value;
+}
+
+// An unsigned small float (R11G11B10's channels): a five-bit exponent.
+[[nodiscard]] float small_float(std::uint32_t bits, int mantissa_bits) noexcept {
+    const std::uint32_t mantissa = bits & ((1U << mantissa_bits) - 1U);
+    const std::uint32_t exponent = (bits >> mantissa_bits) & 0x1FU;
+    if (exponent == 0) return std::ldexp(static_cast<float>(mantissa), -14 - mantissa_bits);
+    if (exponent == 31) return 0.0F;
+    return std::ldexp(static_cast<float>(mantissa | (1U << mantissa_bits)),
+        static_cast<int>(exponent) - 15 - mantissa_bits);
+}
+
+// A texel's luminance, its colour channels as stored (no sRGB decode: the
+// rank correlation does not need one).
+[[nodiscard]] float anchor_luminance(const std::byte* texel, DXGI_FORMAT format) noexcept {
+    float r = 0.0F, g = 0.0F, b = 0.0F;
+    switch (anchor_typed_format(format)) {
+        case DXGI_FORMAT_R32G32B32A32_FLOAT: {
+            std::array<float, 4> value{};
+            std::memcpy(value.data(), texel, sizeof(value));
+            r = value[0];
+            g = value[1];
+            b = value[2];
+            break;
+        }
+        case DXGI_FORMAT_R16G16B16A16_FLOAT: {
+            std::array<std::uint16_t, 4> value{};
+            std::memcpy(value.data(), texel, sizeof(value));
+            r = half_to_float(value[0]);
+            g = half_to_float(value[1]);
+            b = half_to_float(value[2]);
+            break;
+        }
+        case DXGI_FORMAT_R11G11B10_FLOAT: {
+            std::uint32_t value = 0;
+            std::memcpy(&value, texel, sizeof(value));
+            r = small_float(value, 6);
+            g = small_float(value >> 11U, 6);
+            b = small_float(value >> 22U, 5);
+            break;
+        }
+        case DXGI_FORMAT_R10G10B10A2_UNORM: {
+            std::uint32_t value = 0;
+            std::memcpy(&value, texel, sizeof(value));
+            r = static_cast<float>(value & 1023U) / 1023.0F;
+            g = static_cast<float>((value >> 10U) & 1023U) / 1023.0F;
+            b = static_cast<float>((value >> 20U) & 1023U) / 1023.0F;
+            break;
+        }
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            r = static_cast<float>(std::to_integer<unsigned>(texel[0])) / 255.0F;
+            g = static_cast<float>(std::to_integer<unsigned>(texel[1])) / 255.0F;
+            b = static_cast<float>(std::to_integer<unsigned>(texel[2])) / 255.0F;
+            break;
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        case DXGI_FORMAT_B8G8R8X8_UNORM:
+        case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+            b = static_cast<float>(std::to_integer<unsigned>(texel[0])) / 255.0F;
+            g = static_cast<float>(std::to_integer<unsigned>(texel[1])) / 255.0F;
+            r = static_cast<float>(std::to_integer<unsigned>(texel[2])) / 255.0F;
+            break;
+        default:
+            break;
+    }
+    const float luminance = 0.2126F * r + 0.7152F * g + 0.0722F * b;
+    return std::isfinite(luminance) ? luminance : 0.0F;
+}
+
+// A patch's luminance, kAnchorPatch square, from a footprint in a mapped
+// readback buffer.
+void read_anchor_patch(const std::byte* base, std::uint64_t pitch, std::uint32_t x,
+    std::uint32_t y, DXGI_FORMAT format, std::vector<float>* out) {
+    const std::uint32_t bytes = anchor_texel_bytes(format);
+    out->resize(static_cast<std::size_t>(kAnchorPatch) * kAnchorPatch);
+    for (std::uint32_t row = 0; row < kAnchorPatch; ++row) {
+        const std::byte* line = base + (y + row) * pitch + static_cast<std::uint64_t>(x) * bytes;
+        for (std::uint32_t column = 0; column < kAnchorPatch; ++column) {
+            (*out)[static_cast<std::size_t>(row) * kAnchorPatch + column] =
+                anchor_luminance(line + static_cast<std::size_t>(column) * bytes, format);
+        }
+    }
+}
+
+// Spearman's rank correlation; NaN where either patch is flat.
+[[nodiscard]] double rank_correlation(const std::vector<float>& a, const std::vector<float>& b) {
+    const auto ranks = [](const std::vector<float>& values) {
+        std::vector<std::uint32_t> order(values.size());
+        std::iota(order.begin(), order.end(), 0U);
+        std::sort(order.begin(), order.end(),
+            [&](std::uint32_t l, std::uint32_t r) { return values[l] < values[r]; });
+        std::vector<double> rank(values.size());
+        for (std::size_t first = 0; first < order.size();) {
+            std::size_t last = first;
+            while (last + 1 < order.size() && values[order[last + 1]] == values[order[first]]) ++last;
+            const double shared = (static_cast<double>(first) + static_cast<double>(last)) / 2.0;
+            for (std::size_t index = first; index <= last; ++index) rank[order[index]] = shared;
+            first = last + 1;
+        }
+        return rank;
+    };
+    if (a.size() != b.size() || a.empty()) return std::numeric_limits<double>::quiet_NaN();
+    const auto ra = ranks(a), rb = ranks(b);
+    const double mean = (static_cast<double>(a.size()) - 1.0) / 2.0;
+    double covariance = 0.0, va = 0.0, vb = 0.0;
+    for (std::size_t index = 0; index < ra.size(); ++index) {
+        covariance += (ra[index] - mean) * (rb[index] - mean);
+        va += (ra[index] - mean) * (ra[index] - mean);
+        vb += (rb[index] - mean) * (rb[index] - mean);
+    }
+    const double floor = 1.0e-3 * static_cast<double>(a.size()) * static_cast<double>(a.size());
+    if (va < floor || vb < floor) return std::numeric_limits<double>::quiet_NaN();
+    return covariance / std::sqrt(va * vb);
+}
+
+
+// ------------------------------------------ vector alignment probe (V524)
+// R.E.A.L. VR in Cyberpunk 2077: Hybrid's ghost of near things sits on each
+// eye's outer side, the left eye's to the left and the right eye's to the
+// right - parallax between the vectors and the picture, larger near than
+// far. The probe measures it: in 16 regions of 64x64 render texels, the
+// sideways shift that best lines up the edges of an evaluation's vectors
+// with the edges of its colour (DLSS's input, the eye's picture), of its
+// vectors with its depth, and of its depth with its colour. A shift that
+// follows the raw depth (reversed Z: proportional to 1 / distance) is
+// parallax; one that does not is an image offset. Record 850 per region:
+//   a the publication << 24 | the serial's low 16 bits << 8 | the region
+//   b vectors-to-colour shift (int16) << 48 | vectors-to-depth shift << 32 |
+//     the region's median raw depth (float bits)
+//   c depth-to-colour shift (int16) | the three matches' correlations, each
+//     x1000 as a uint16, vectors-colour << 16, vectors-depth << 32,
+//     depth-colour << 48
+// A shift s means the first's edges sit s texels right of the second's.
+// Analysed on a thread of its own, off the frame.
+constexpr std::int64_t kRecordAlignmentProbe = 850;
+constexpr std::uint32_t kProbeRegions = 16;
+constexpr std::uint32_t kProbeRegion = 64;
+constexpr std::uint32_t kProbeAtlas = 4 * kProbeRegion;
+constexpr int kProbeShift = 12;
+
+// Region `index` of a 4x4 grid over the middle 70% of an extent.
+[[nodiscard]] std::pair<std::uint32_t, std::uint32_t> probe_region_origin(
+    std::uint32_t index, std::uint32_t width, std::uint32_t height) noexcept {
+    const auto place = [](std::uint32_t cell, std::uint32_t extent) {
+        const double centre =
+            (0.15 + 0.7 * (static_cast<double>(cell) + 0.5) / 4.0) * static_cast<double>(extent);
+        const double last = extent > kProbeRegion ? static_cast<double>(extent - kProbeRegion) : 0.0;
+        return static_cast<std::uint32_t>(std::clamp(centre - kProbeRegion / 2.0, 0.0, last));
+    };
+    return {place(index % 4U, width), place(index / 4U, height)};
+}
+
+struct ProbeData {
+    std::uint64_t publication{};
+    std::uint64_t serial{};
+    bool has_depth{};
+    // Per region, kProbeRegion square, row-major.
+    std::vector<float> colour, motion_x, motion_y, depth;
+};
+
+// The sideways shift that best lines up two edge maps of a region: the
+// Pearson correlation of a(x + s, y) with b(x, y) over the overlap.
+[[nodiscard]] std::pair<int, double> best_shift(
+    const std::vector<float>& a, const std::vector<float>& b, std::size_t base) {
+    int best = 0;
+    double best_value = -2.0;
+    for (int shift = -kProbeShift; shift <= kProbeShift; ++shift) {
+        double sa = 0.0, sb = 0.0, saa = 0.0, sbb = 0.0, sab = 0.0;
+        std::size_t n = 0;
+        for (std::uint32_t y = 0; y < kProbeRegion; ++y) {
+            for (int x = 1 + std::max(0, -shift); x < static_cast<int>(kProbeRegion) - 1 - std::max(0, shift); ++x) {
+                const double va = a[base + y * kProbeRegion + static_cast<std::size_t>(x + shift)];
+                const double vb = b[base + y * kProbeRegion + static_cast<std::size_t>(x)];
+                sa += va;
+                sb += vb;
+                saa += va * va;
+                sbb += vb * vb;
+                sab += va * vb;
+                ++n;
+            }
+        }
+        if (n < 64) continue;
+        const double count = static_cast<double>(n);
+        const double cov = sab - sa * sb / count;
+        const double var_a = saa - sa * sa / count;
+        const double var_b = sbb - sb * sb / count;
+        if (var_a <= 1.0e-18 || var_b <= 1.0e-18) continue;
+        const double value = cov / std::sqrt(var_a * var_b);
+        if (value > best_value) {
+            best_value = value;
+            best = shift;
+        }
+    }
+    return {best, best_value};
+}
+
+void analyse_probe(const ProbeData& data) noexcept {
+    try {
+        const std::size_t area = static_cast<std::size_t>(kProbeRegion) * kProbeRegion;
+        // Horizontal edge strength: |f(x + 1) - f(x - 1)|.
+        const auto edges = [&](const std::vector<float>& f, const std::vector<float>* g) {
+            std::vector<float> e(f.size(), 0.0F);
+            for (std::size_t region = 0; region < kProbeRegions; ++region) {
+                for (std::uint32_t y = 0; y < kProbeRegion; ++y) {
+                    for (std::uint32_t x = 1; x + 1 < kProbeRegion; ++x) {
+                        const std::size_t at = region * area + y * kProbeRegion + x;
+                        float value = std::fabs(f[at + 1] - f[at - 1]);
+                        if (g != nullptr) value += std::fabs((*g)[at + 1] - (*g)[at - 1]);
+                        e[at] = std::isfinite(value) ? value : 0.0F;
+                    }
+                }
+            }
+            return e;
+        };
+        const auto colour = edges(data.colour, nullptr);
+        const auto motion = edges(data.motion_x, &data.motion_y);
+        const auto depth = data.has_depth ? edges(data.depth, nullptr) : std::vector<float>{};
+        const auto pack = [](int shift) {
+            return static_cast<std::uint64_t>(static_cast<std::uint16_t>(static_cast<std::int16_t>(shift)));
+        };
+        const auto quality = [](double value) {
+            return static_cast<std::uint64_t>(std::clamp(value, 0.0, 1.0) * 1000.0);
+        };
+        for (std::uint32_t region = 0; region < kProbeRegions; ++region) {
+            const std::size_t base = region * area;
+            const auto [mv_colour, q_mv_colour] = best_shift(motion, colour, base);
+            std::pair<int, double> mv_depth{0, -1.0}, depth_colour{0, -1.0};
+            float median_depth = 0.0F;
+            if (data.has_depth) {
+                mv_depth = best_shift(motion, depth, base);
+                depth_colour = best_shift(depth, colour, base);
+                std::vector<float> values(data.depth.begin() + static_cast<std::ptrdiff_t>(base),
+                    data.depth.begin() + static_cast<std::ptrdiff_t>(base + area));
+                std::nth_element(values.begin(), values.begin() + values.size() / 2, values.end());
+                median_depth = values[values.size() / 2];
+            }
+            record(kRecordAlignmentProbe,
+                (data.publication << 24U) | ((data.serial & 0xFFFFU) << 8U) | region,
+                (pack(mv_colour) << 48U) | (pack(mv_depth.first) << 32U) | float_bits(median_depth),
+                pack(depth_colour.first) | (quality(q_mv_colour) << 16U) |
+                    (quality(mv_depth.second) << 32U) | (quality(depth_colour.second) << 48U));
+        }
+    } catch (...) {
+    }
+}
+
+[[nodiscard]] float probe_value(const std::byte* texel, DXGI_FORMAT format) noexcept {
+    switch (format) {
+        case DXGI_FORMAT_R32_FLOAT:
+        case DXGI_FORMAT_R32_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT: {
+            float value = 0.0F;
+            std::memcpy(&value, texel, sizeof(value));
+            return value;
+        }
+        case DXGI_FORMAT_R16_TYPELESS:
+        case DXGI_FORMAT_R16_UNORM:
+        case DXGI_FORMAT_D16_UNORM: {
+            std::uint16_t value = 0;
+            std::memcpy(&value, texel, sizeof(value));
+            return static_cast<float>(value) / 65535.0F;
+        }
+        default:
+            return 0.0F;
+    }
+}
+
+[[nodiscard]] std::uint32_t probe_depth_bytes(DXGI_FORMAT format) noexcept {
+    switch (format) {
+        case DXGI_FORMAT_R32_FLOAT:
+        case DXGI_FORMAT_R32_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT:
+            return 4;
+        case DXGI_FORMAT_R16_TYPELESS:
+        case DXGI_FORMAT_R16_UNORM:
+        case DXGI_FORMAT_D16_UNORM:
+            return 2;
+        default:
+            return 0;
+    }
+}
+
+
+// --------------------------------------- eye image measurement (V524, 851)
+// R.E.A.L. VR's AERv2 renders one eye per game step and interpolates the
+// other (RealVR.ini HighQualityOF2), so an eye image may be an evaluation's
+// picture or the mod's interpolation, and which one changes frame by frame.
+// The measurement says which: at every 4th release (the first 400, then
+// every 64th) 16 regions of each eye image are compared with the finished
+// DLSS output of each of the last four evaluations, sliding up to 16 output
+// pixels sideways. Record 851 per eye per comparison:
+//   a the newest evaluation's publication << 8 | the eye << 4 | the best
+//     evaluation (0 the newest, 3 the oldest)
+//   b each evaluation's best correlation x100 as a byte (newest in the low
+//     byte) << 32 | each one's best shift as an int8 (newest low)
+//   c the newest evaluation's serial (low 32 bits) | each evaluation's
+//     correlation at no shift x100 as a byte << 32
+// The correlation is Pearson's of ranked luminance (the output is not tone
+// mapped, the eye image is).
+constexpr std::int64_t kRecordEyeMeasure = 851;
+constexpr int kMeasureShift = 16;
+constexpr std::uint32_t kMeasureWindow = kAnchorPatch + 2U * kMeasureShift;
+
+struct MeasureData {
+    std::uint64_t publication{};
+    std::uint64_t serial{};
+    // [evaluation][patch][kAnchorPatch x kAnchorPatch], newest first.
+    std::array<std::vector<float>, 4> outputs;
+    // [eye][patch][kAnchorPatch rows x kMeasureWindow].
+    std::array<std::vector<float>, 2> eyes;
+};
+
+[[nodiscard]] std::vector<double> rank_values(const float* values, std::size_t count) {
+    std::vector<std::uint32_t> order(count);
+    std::iota(order.begin(), order.end(), 0U);
+    std::sort(order.begin(), order.end(),
+        [&](std::uint32_t l, std::uint32_t r) { return values[l] < values[r]; });
+    std::vector<double> rank(count);
+    for (std::size_t first = 0; first < count;) {
+        std::size_t last = first;
+        while (last + 1 < count && values[order[last + 1]] == values[order[first]]) ++last;
+        const double shared = (static_cast<double>(first) + static_cast<double>(last)) / 2.0;
+        for (std::size_t index = first; index <= last; ++index) rank[order[index]] = shared;
+        first = last + 1;
+    }
+    return rank;
+}
+
+void analyse_measure(const MeasureData& data) noexcept {
+    try {
+        const std::size_t patch_area = static_cast<std::size_t>(kAnchorPatch) * kAnchorPatch;
+        const std::size_t window_area = static_cast<std::size_t>(kAnchorPatch) * kMeasureWindow;
+        // Ranked per patch once: the outputs' 32x32, the eyes' 32x64 windows.
+        std::array<std::vector<double>, 4> outputs;
+        for (std::size_t j = 0; j < 4; ++j) {
+            outputs[j].resize(kAnchorPatches * patch_area);
+            for (std::size_t p = 0; p < kAnchorPatches; ++p) {
+                const auto ranked = rank_values(data.outputs[j].data() + p * patch_area, patch_area);
+                std::copy(ranked.begin(), ranked.end(), outputs[j].begin() + static_cast<std::ptrdiff_t>(p * patch_area));
+            }
+        }
+        std::array<std::vector<double>, 2> eyes;
+        for (std::size_t k = 0; k < 2; ++k) {
+            eyes[k].resize(kAnchorPatches * window_area);
+            for (std::size_t p = 0; p < kAnchorPatches; ++p) {
+                const auto ranked = rank_values(data.eyes[k].data() + p * window_area, window_area);
+                std::copy(ranked.begin(), ranked.end(), eyes[k].begin() + static_cast<std::ptrdiff_t>(p * window_area));
+            }
+        }
+        const auto correlation = [&](std::size_t j, std::size_t k, int shift) {
+            double total = 0.0;
+            std::uint32_t used = 0;
+            for (std::size_t p = 0; p < kAnchorPatches; ++p) {
+                double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+                for (std::uint32_t y = 0; y < kAnchorPatch; ++y) {
+                    for (std::uint32_t x = 0; x < kAnchorPatch; ++x) {
+                        const double a = outputs[j][p * patch_area + y * kAnchorPatch + x];
+                        const double b = eyes[k][p * window_area + y * kMeasureWindow +
+                            static_cast<std::size_t>(static_cast<int>(x) + kMeasureShift + shift)];
+                        sa += a; sb += b; saa += a * a; sbb += b * b; sab += a * b;
+                    }
+                }
+                const double n = static_cast<double>(patch_area);
+                const double va = saa - sa * sa / n, vb = sbb - sb * sb / n;
+                if (va < 1.0 || vb < 1.0) continue;
+                total += (sab - sa * sb / n) / std::sqrt(va * vb);
+                ++used;
+            }
+            return used >= 4 ? total / used : -1.0;
+        };
+        for (std::uint32_t k = 0; k < 2; ++k) {
+            std::array<double, 4> best{-2, -2, -2, -2}, at_zero{};
+            std::array<int, 4> shift{};
+            for (std::size_t j = 0; j < 4; ++j) {
+                at_zero[j] = correlation(j, k, 0);
+                for (int s = -kMeasureShift; s <= kMeasureShift; ++s) {
+                    const double value = correlation(j, k, s);
+                    if (value > best[j]) {
+                        best[j] = value;
+                        shift[j] = s;
+                    }
+                }
+            }
+            std::uint32_t chosen = 0;
+            for (std::uint32_t j = 1; j < 4; ++j) if (best[j] > best[chosen]) chosen = j;
+            const auto byte = [](double value) {
+                return static_cast<std::uint64_t>(std::clamp(value, 0.0, 1.0) * 100.0 + 0.5);
+            };
+            std::uint64_t b = 0, c = data.serial & 0xFFFFFFFFULL;
+            for (std::uint32_t j = 0; j < 4; ++j) {
+                b |= byte(best[j]) << (32U + 8U * j);
+                b |= static_cast<std::uint64_t>(static_cast<std::uint8_t>(static_cast<std::int8_t>(shift[j]))) << (8U * j);
+                c |= byte(at_zero[j]) << (32U + 8U * j);
+            }
+            record(kRecordEyeMeasure, (data.publication << 8U) | (k << 4U) | chosen, b, c);
+        }
+    } catch (...) {
+    }
+}
+
+// -------------------------------------------- D3D12 in a bridged D3D11 session
+// V524. A bridged D3D11 session whose game renders, and runs DLSS, in D3D12:
+// Cyberpunk 2077 under R.E.A.L. VR hands the runtime a D3D11 session and keeps
+// its rendering on the game's D3D12 device, so the D3D12 exports see the
+// evaluations, but only a native D3D12 session captured them - Hybrid read KO
+// 821 with the game's feature created and evaluated every frame. At each
+// evaluation the vectors - and the depth, where its format can be shared - are
+// copied in the game's own command list, ahead of DLSS, into textures made on
+// the layer's D3D12 device and opened on the game's. A list cannot signal a
+// fence, and the game's queue is not known here; the registry's snapshot copy
+// waits for the bridged session's next image release
+// (flush_ngx_guide_capture_d3d11), behind the bridge's wait for the game's
+// D3D11 context. The mod's D3D11 copy of an eye image runs after the D3D12
+// work that drew it, the DLSS evaluation and so these copies among it. Two
+// slots per feature alternate as in the D3D11 transport; a slot is written
+// again only once its last snapshot copy has run.
+class GuideTransport12 {
+public:
+    struct Staged {
+        ID3D12Resource* motion{};
+        ID3D12Resource* depth{};
+        ID3D12GraphicsCommandList* list{};
+        bool depth_unshareable{};
+    };
+
+    GuideTransport12() = default;
+    GuideTransport12(const GuideTransport12&) = delete;
+    GuideTransport12& operator=(const GuideTransport12&) = delete;
+
+    ~GuideTransport12() {
+        // The game's list may still hold a copy into these textures, and a
+        // snapshot copy may still read them: keep them past both.
+        if (submitted_ != 0 && read_ && read_->GetCompletedValue() < submitted_ &&
+            event_ != nullptr && SUCCEEDED(read_->SetEventOnCompletion(submitted_, event_))) {
+            WaitForSingleObject(event_, 2000);
+        }
+        bury(std::move(slots_));
+        if (event_ != nullptr) CloseHandle(event_);
+    }
+
+    [[nodiscard]] HRESULT initialize(
+        ID3D12Device* game, ID3D12Device* device, ID3D12CommandQueue* queue) noexcept {
+        try {
+            if (game == nullptr || device == nullptr || queue == nullptr) return E_INVALIDARG;
+            game_ = game;
+            device_ = device;
+            queue_ = queue;
+            HRESULT result = device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                IID_PPV_ARGS(read_.GetAddressOf()));
+            if (FAILED(result)) return result;
+            for (Slot& slot : slots_) {
+                result = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    IID_PPV_ARGS(slot.allocator.GetAddressOf()));
+                if (FAILED(result)) return result;
+                result = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    slot.allocator.Get(), nullptr, IID_PPV_ARGS(slot.list.GetAddressOf()));
+                if (FAILED(result)) return result;
+                result = slot.list->Close();
+                if (FAILED(result)) return result;
+            }
+            event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            return event_ != nullptr ? S_OK : HRESULT_FROM_WIN32(GetLastError());
+        } catch (...) {
+            return E_FAIL;
+        }
+    }
+
+    // In the game's list, before its DLSS: the copies out of the game's
+    // resources, which DLSS reads in the given states; and an open list on
+    // the layer's queue for the registry's snapshot copies. finish() closes it.
+    [[nodiscard]] HRESULT stage(
+        ID3D12GraphicsCommandList* game_list,
+        ID3D12Resource* motion,
+        D3D12_RESOURCE_STATES motion_state,
+        ID3D12Resource* depth,
+        D3D12_RESOURCE_STATES depth_state,
+        Staged* staged) noexcept {
+        try {
+            *staged = {};
+            std::scoped_lock lock(mutex_);
+            Slot& slot = slots_[next_];
+            last_slot_ = next_;
+            // Its previous snapshot copy never reached a release: submit it.
+            if (slot.pending) submit(slot);
+            if (slot.read_done != 0 && read_->GetCompletedValue() < slot.read_done) {
+                const HRESULT waited = read_->SetEventOnCompletion(slot.read_done, event_);
+                if (FAILED(waited)) return waited;
+                if (WaitForSingleObject(event_, 100) != WAIT_OBJECT_0) {
+                    return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+                }
+            }
+            HRESULT result = prepare(slot.motion, motion, false);
+            if (FAILED(result)) return result;
+            bool depth_ready = false;
+            if (depth != nullptr) {
+                const HRESULT depth_result = prepare(slot.depth, depth, true);
+                depth_ready = SUCCEEDED(depth_result);
+                staged->depth_unshareable = depth_result == DXGI_ERROR_UNSUPPORTED;
+            }
+            copy(game_list, slot.motion, motion, motion_state);
+            if (depth_ready) copy(game_list, slot.depth, depth, depth_state);
+            result = slot.allocator->Reset();
+            if (FAILED(result)) return result;
+            result = slot.list->Reset(slot.allocator.Get(), nullptr);
+            if (FAILED(result)) return result;
+            recording_ = true;
+            staged->motion = slot.motion.layer.Get();
+            staged->depth = depth_ready ? slot.depth.layer.Get() : nullptr;
+            staged->list = slot.list.Get();
+            return S_OK;
+        } catch (...) {
+            return E_FAIL;
+        }
+    }
+
+    // The registry has recorded into the list: close it for the next release.
+    [[nodiscard]] HRESULT finish() noexcept {
+        std::scoped_lock lock(mutex_);
+        if (!recording_) return E_UNEXPECTED;
+        recording_ = false;
+        Slot& slot = slots_[next_];
+        const HRESULT result = slot.list->Close();
+        slot.pending = SUCCEEDED(result);
+        next_ ^= 1U;
+        return result;
+    }
+
+    // At an image release of the bridged session: every closed list goes to
+    // the queue, behind the bridge's wait for the game's context.
+    void flush() noexcept {
+        std::scoped_lock lock(mutex_);
+        poll_motion_means();
+        poll_probes();
+        for (Slot& slot : slots_) {
+            if (slot.pending) submit(slot);
+        }
+    }
+
+    // V524: an evaluation's place in its stream, and whether its slot's atlas
+    // holds the patches of its finished output (alternating-eye anchor).
+    struct AnchorSample {
+        bool valid{};
+        std::uint64_t stream{};
+        std::uint64_t epoch{};
+        std::uint64_t serial{};
+        std::uint64_t publication{};
+        DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
+        std::uint32_t width{};
+        std::uint32_t height{};
+    };
+
+    // The evaluation just staged was published at this place in its stream.
+    void note_publication(std::uint64_t stream, const DlssStreamPosition& position) noexcept {
+        std::scoped_lock lock(mutex_);
+        Slot& slot = slots_[last_slot_];
+        slot.sample = {};
+        slot.sample.stream = stream;
+        slot.sample.epoch = position.epoch;
+        slot.sample.serial = position.serial;
+        slot.sample.publication = position.publication;
+    }
+
+    // In the game's list after its DLSS: 16 patches of the finished output
+    // into the slot's atlas. DLSS writes its output as an unordered-access
+    // resource, the state the game leaves it in for the call.
+    [[nodiscard]] HRESULT record_output_patches(
+        ID3D12GraphicsCommandList* game_list, ID3D12Resource* output) noexcept {
+        try {
+            std::scoped_lock lock(mutex_);
+            Slot& slot = slots_[last_slot_];
+            const D3D12_RESOURCE_DESC description = output->GetDesc();
+            const auto width = static_cast<std::uint32_t>(description.Width);
+            const std::uint32_t height = description.Height;
+            if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+                description.SampleDesc.Count != 1 || anchor_texel_bytes(description.Format) == 0 ||
+                width < 2U * kAnchorPatch || height < kAnchorPatch) {
+                return DXGI_ERROR_UNSUPPORTED;
+            }
+            const HRESULT result = prepare_atlas(slot.atlas, description.Format);
+            if (FAILED(result)) return result;
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = output;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            game_list->ResourceBarrier(1, &barrier);
+            for (std::uint32_t patch = 0; patch < kAnchorPatches; ++patch) {
+                const auto [x, y] = anchor_patch_origin(patch, width, height);
+                D3D12_TEXTURE_COPY_LOCATION from{};
+                from.pResource = output;
+                from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                D3D12_TEXTURE_COPY_LOCATION to{};
+                to.pResource = slot.atlas.game.Get();
+                to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                const D3D12_BOX box{x, y, 0, x + kAnchorPatch, y + kAnchorPatch, 1};
+                game_list->CopyTextureRegion(&to, (patch % 4U) * kAnchorPatch,
+                    (patch / 4U) * kAnchorPatch, 0, &from, &box);
+            }
+            // V524, record 851: the same patches into the four-deep history,
+            // by serial, once its last read has run.
+            const std::size_t entry = slot.sample.serial & 3U;
+            bool history_free = history_read_done_[entry] == 0 ||
+                read_->GetCompletedValue() >= history_read_done_[entry];
+            if (!history_free &&
+                SUCCEEDED(read_->SetEventOnCompletion(history_read_done_[entry], event_))) {
+                history_free = WaitForSingleObject(event_, 100) == WAIT_OBJECT_0;
+            }
+            if (history_free && SUCCEEDED(prepare_atlas(history_atlas_[entry], description.Format))) {
+                for (std::uint32_t patch = 0; patch < kAnchorPatches; ++patch) {
+                    const auto [x, y] = anchor_patch_origin(patch, width, height);
+                    D3D12_TEXTURE_COPY_LOCATION from{};
+                    from.pResource = output;
+                    from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                    D3D12_TEXTURE_COPY_LOCATION to{};
+                    to.pResource = history_atlas_[entry].game.Get();
+                    to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                    const D3D12_BOX box{x, y, 0, x + kAnchorPatch, y + kAnchorPatch, 1};
+                    game_list->CopyTextureRegion(&to, (patch % 4U) * kAnchorPatch,
+                        (patch / 4U) * kAnchorPatch, 0, &from, &box);
+                }
+            }
+            std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+            game_list->ResourceBarrier(1, &barrier);
+            slot.sample.valid = true;
+            slot.sample.format = description.Format;
+            slot.sample.width = width;
+            slot.sample.height = height;
+            if (history_free) history_samples_[entry] = slot.sample;
+            return S_OK;
+        } catch (...) {
+            return E_FAIL;
+        }
+    }
+
+    // Both slots' samples, older first, and their slot indices.
+    void samples(std::array<AnchorSample, 2>* out, std::array<std::uint32_t, 2>* indices) noexcept {
+        std::scoped_lock lock(mutex_);
+        const bool swapped = slots_[0].sample.serial > slots_[1].sample.serial;
+        (*out)[0] = slots_[swapped ? 1 : 0].sample;
+        (*out)[1] = slots_[swapped ? 0 : 1].sample;
+        (*indices)[0] = swapped ? 1U : 0U;
+        (*indices)[1] = swapped ? 0U : 1U;
+    }
+
+    // In a list for the layer's queue: a slot's atlas into a readback buffer.
+    void read_atlas(std::uint32_t index, ID3D12GraphicsCommandList* list,
+        ID3D12Resource* readback, std::uint64_t offset, std::uint64_t pitch) noexcept {
+        std::scoped_lock lock(mutex_);
+        const Slot& slot = slots_[index & 1U];
+        if (!slot.atlas.layer) return;
+        D3D12_TEXTURE_COPY_LOCATION from{};
+        from.pResource = slot.atlas.layer.Get();
+        from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION to{};
+        to.pResource = readback;
+        to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        to.PlacedFootprint.Offset = offset;
+        to.PlacedFootprint.Footprint = {slot.atlas.source.Format, kAnchorAtlas, kAnchorAtlas, 1,
+            static_cast<UINT>(pitch)};
+        list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+    }
+
+    // V524, alternating eyes. R.E.A.L. VR's vectors span the game's last
+    // frame, which rendered the other eye, while an eye's own frames are two
+    // evaluations apart; its frames are not evenly spaced, and the vectors'
+    // size follows (one eye's about three times the other's while turning).
+    // Neither the recording times nor a frame-time delta tell the spans -
+    // the game gives DLSS none, and the evaluation recorded 4 ms after the
+    // previous one carries the larger motion - so they are measured from the
+    // vectors: each serial parity's mean motion (record 847, a running
+    // average while there is motion), and an eye's vectors stretched by
+    // (its own + the other's) / its own. Nominal 2 until both are measured.
+    struct Stretch {
+        float factor{2.0F};
+        float own{};
+        float other{};
+        std::uint32_t source{};
+    };
+
+    [[nodiscard]] Stretch motion_stretch(std::uint64_t serial, std::uint64_t epoch) noexcept {
+        std::scoped_lock lock(mutex_);
+        Stretch stretch;
+        if (epoch != motion_epoch_) return stretch;
+        const std::size_t own = serial & 1U;
+        if (!(parity_motion_[own] > 0.0) || !(parity_motion_[own ^ 1U] > 0.0)) return stretch;
+        stretch.own = static_cast<float>(parity_motion_[own]);
+        stretch.other = static_cast<float>(parity_motion_[own ^ 1U]);
+        stretch.factor = std::clamp(
+            static_cast<float>((parity_motion_[own] + parity_motion_[own ^ 1U]) / parity_motion_[own]),
+            1.0F, 6.0F);
+        stretch.source = 1;
+        return stretch;
+    }
+
+    // V524, the alignment probe (record 850): in the game's list before its
+    // DLSS, 16 regions of its colour into the slot's colour atlas; the
+    // vectors and depth are already copied whole. `colour_base` is the
+    // colour's input rectangle origin, `motion_base` and `depth_base` the
+    // vectors' and depth's, `extent` the render size they share.
+    [[nodiscard]] HRESULT probe_colour(ID3D12GraphicsCommandList* game_list, ID3D12Resource* colour,
+        D3D12_RESOURCE_STATES colour_state, std::array<std::uint32_t, 2> colour_base,
+        std::array<std::uint32_t, 2> motion_base, std::array<std::uint32_t, 2> depth_base,
+        std::array<std::uint32_t, 2> extent) noexcept {
+        try {
+            std::scoped_lock lock(mutex_);
+            Slot& slot = slots_[last_slot_];
+            slot.probe = {};
+            const D3D12_RESOURCE_DESC description = colour->GetDesc();
+            if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+                description.SampleDesc.Count != 1 || anchor_texel_bytes(description.Format) == 0 ||
+                extent[0] < kProbeRegion || extent[1] < kProbeRegion ||
+                colour_base[0] + extent[0] > description.Width ||
+                colour_base[1] + extent[1] > description.Height) {
+                return DXGI_ERROR_UNSUPPORTED;
+            }
+            const HRESULT result = prepare_atlas(slot.probe_colour, description.Format, kProbeAtlas);
+            if (FAILED(result)) return result;
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = colour;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barrier.Transition.StateBefore = colour_state;
+            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            if (colour_state != D3D12_RESOURCE_STATE_COPY_SOURCE) game_list->ResourceBarrier(1, &barrier);
+            for (std::uint32_t region = 0; region < kProbeRegions; ++region) {
+                const auto [x, y] = probe_region_origin(region, extent[0], extent[1]);
+                D3D12_TEXTURE_COPY_LOCATION from{};
+                from.pResource = colour;
+                from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                D3D12_TEXTURE_COPY_LOCATION to{};
+                to.pResource = slot.probe_colour.game.Get();
+                to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                const UINT left = colour_base[0] + x;
+                const UINT top = colour_base[1] + y;
+                const D3D12_BOX box{left, top, 0, left + kProbeRegion, top + kProbeRegion, 1};
+                game_list->CopyTextureRegion(&to, (region % 4U) * kProbeRegion,
+                    (region / 4U) * kProbeRegion, 0, &from, &box);
+            }
+            std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+            if (colour_state != D3D12_RESOURCE_STATE_COPY_SOURCE) game_list->ResourceBarrier(1, &barrier);
+            slot.probe.pending = true;
+            slot.probe.motion_base = motion_base;
+            slot.probe.depth_base = depth_base;
+            slot.probe.extent = extent;
+            return S_OK;
+        } catch (...) {
+            return E_FAIL;
+        }
+    }
+
+    // V524, record 851: the last four evaluations' output patches.
+    void history(std::array<AnchorSample, 4>* out) noexcept {
+        std::scoped_lock lock(mutex_);
+        *out = history_samples_;
+    }
+
+    void read_history(std::uint32_t index, ID3D12GraphicsCommandList* list,
+        ID3D12Resource* readback, std::uint64_t offset, std::uint64_t pitch) noexcept {
+        std::scoped_lock lock(mutex_);
+        const Shared& atlas = history_atlas_[index & 3U];
+        if (!atlas.layer) return;
+        D3D12_TEXTURE_COPY_LOCATION from{};
+        from.pResource = atlas.layer.Get();
+        from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION to{};
+        to.pResource = readback;
+        to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        to.PlacedFootprint.Offset = offset;
+        to.PlacedFootprint.Footprint = {atlas.source.Format, kAnchorAtlas, kAnchorAtlas, 1,
+            static_cast<UINT>(pitch)};
+        list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+    }
+
+    // After a list that read the history has gone to the queue: no entry is
+    // written again before it has run.
+    void protect_history() noexcept {
+        std::scoped_lock lock(mutex_);
+        if (SUCCEEDED(queue_->Signal(read_.Get(), ++submitted_))) {
+            for (auto& done : history_read_done_) done = std::max(done, submitted_);
+        }
+    }
+
+    // After a list that read the atlases has gone to the queue: neither slot
+    // is written again before it has run.
+    void protect_slots() noexcept {
+        std::scoped_lock lock(mutex_);
+        if (SUCCEEDED(queue_->Signal(read_.Get(), ++submitted_))) {
+            for (Slot& slot : slots_) slot.read_done = std::max(slot.read_done, submitted_);
+        }
+    }
+
+private:
+    struct Shared {
+        ComPtr<ID3D12Resource> layer;
+        ComPtr<ID3D12Resource> game;
+        D3D12_RESOURCE_DESC source{};
+    };
+    struct Slot {
+        Shared motion;
+        Shared depth;
+        // V524: the finished output's patches (alternating-eye anchor).
+        Shared atlas;
+        AnchorSample sample;
+        // V524: the alignment probe's colour regions, and where the same
+        // regions lie on the vectors and depth (probe_colour).
+        Shared probe_colour;
+        struct {
+            bool pending{};
+            std::array<std::uint32_t, 2> motion_base{};
+            std::array<std::uint32_t, 2> depth_base{};
+            std::array<std::uint32_t, 2> extent{};
+        } probe;
+        ComPtr<ID3D12CommandAllocator> allocator;
+        ComPtr<ID3D12GraphicsCommandList> list;
+        std::uint64_t read_done{};
+        bool pending{};
+    };
+    // V524: record 847, the mean of an evaluation's vectors over 16 patches,
+    // read back behind its snapshot copy.
+    struct MotionMean {
+        ComPtr<ID3D12CommandAllocator> allocator;
+        ComPtr<ID3D12GraphicsCommandList> list;
+        ComPtr<ID3D12Resource> readback;
+        std::uint64_t value{};
+        std::uint64_t publication{};
+        std::uint64_t serial{};
+        std::uint64_t epoch{};
+        DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
+        bool pending{};
+    };
+    // Below this mean motion (vectors' units: a hundredth of a texel at
+    // R.E.A.L. VR's 2240-wide vectors) the head is still and the averages
+    // stay as they were.
+    static constexpr double kStillMotion = 5.0e-6;
+    static constexpr std::uint64_t kMotionPatchPitch = 256;
+    static constexpr std::uint64_t kMotionPatchBytes = kMotionPatchPitch * kAnchorPatch;
+    static std::atomic<std::uint32_t>& motion_means_queued() noexcept {
+        static std::atomic<std::uint32_t> value{0};
+        return value;
+    }
+
+    // V524, the alignment probe's readbacks (probe_colour, record 850).
+    struct ProbeRead {
+        ComPtr<ID3D12CommandAllocator> allocator;
+        ComPtr<ID3D12GraphicsCommandList> list;
+        ComPtr<ID3D12Resource> readback;
+        std::uint64_t value{};
+        std::uint64_t publication{};
+        std::uint64_t serial{};
+        DXGI_FORMAT colour_format{DXGI_FORMAT_UNKNOWN};
+        DXGI_FORMAT motion_format{DXGI_FORMAT_UNKNOWN};
+        DXGI_FORMAT depth_format{DXGI_FORMAT_UNKNOWN};
+        std::uint64_t colour_pitch{};
+        std::uint64_t motion_offset{};
+        std::uint64_t motion_pitch{};
+        std::uint64_t depth_offset{};
+        std::uint64_t depth_pitch{};
+        bool has_depth{};
+        bool pending{};
+    };
+    static constexpr std::uint64_t kProbeReadbackBytes = 2U * 1024U * 1024U;
+
+    // A list reading the slot's colour atlas and the same regions of its
+    // vectors and depth back, behind its snapshot copy; null when none is
+    // probed or free.
+    ProbeRead* queue_probe(Slot& slot) noexcept {
+        try {
+            if (!slot.probe.pending || !slot.probe_colour.layer || !slot.motion.layer) return nullptr;
+            slot.probe.pending = false;
+            const DXGI_FORMAT motion_format = slot.motion.source.Format;
+            if (motion_format != DXGI_FORMAT_R16G16_FLOAT && motion_format != DXGI_FORMAT_R32G32_FLOAT) {
+                return nullptr;
+            }
+            ProbeRead* free = nullptr;
+            for (ProbeRead& candidate : probe_reads_) {
+                if (!candidate.pending) free = &candidate;
+            }
+            if (free == nullptr) return nullptr;
+            if (!free->readback) {
+                D3D12_HEAP_PROPERTIES heap{};
+                heap.Type = D3D12_HEAP_TYPE_READBACK;
+                D3D12_RESOURCE_DESC buffer{};
+                buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                buffer.Width = kProbeReadbackBytes;
+                buffer.Height = 1;
+                buffer.DepthOrArraySize = 1;
+                buffer.MipLevels = 1;
+                buffer.SampleDesc.Count = 1;
+                buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                        IID_PPV_ARGS(free->readback.GetAddressOf()))) ||
+                    FAILED(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                        IID_PPV_ARGS(free->allocator.GetAddressOf()))) ||
+                    FAILED(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                        free->allocator.Get(), nullptr, IID_PPV_ARGS(free->list.GetAddressOf())))) {
+                    free->readback.Reset();
+                    return nullptr;
+                }
+            } else if (FAILED(free->allocator->Reset()) ||
+                       FAILED(free->list->Reset(free->allocator.Get(), nullptr))) {
+                return nullptr;
+            }
+            free->colour_format = slot.probe_colour.source.Format;
+            free->colour_pitch = align_up(static_cast<std::uint64_t>(kProbeAtlas) *
+                anchor_texel_bytes(free->colour_format), D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+            const std::uint64_t colour_size =
+                align_up(free->colour_pitch * kProbeAtlas, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+            free->motion_format = motion_format;
+            free->motion_pitch = align_up(static_cast<std::uint64_t>(kProbeRegion) *
+                (motion_format == DXGI_FORMAT_R16G16_FLOAT ? 4U : 8U), D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+            free->motion_offset = colour_size;
+            const std::uint64_t motion_region =
+                align_up(free->motion_pitch * kProbeRegion, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+            free->depth_format = slot.depth.layer ? slot.depth.source.Format : DXGI_FORMAT_UNKNOWN;
+            free->has_depth = slot.depth.layer && probe_depth_bytes(free->depth_format) != 0;
+            if (free->has_depth) {
+                // The shared copy is the depth's typeless family.
+                free->depth_format = shareable_format(free->depth_format);
+                if (probe_depth_bytes(free->depth_format) == 0) free->has_depth = false;
+            }
+            free->depth_pitch = align_up(static_cast<std::uint64_t>(kProbeRegion) *
+                std::max(1U, probe_depth_bytes(free->depth_format)), D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+            free->depth_offset = free->motion_offset + kProbeRegions * motion_region;
+            const std::uint64_t depth_region =
+                align_up(free->depth_pitch * kProbeRegion, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+            if (free->depth_offset + kProbeRegions * depth_region > kProbeReadbackBytes) return nullptr;
+            const auto read_region = [&](ID3D12Resource* source, DXGI_FORMAT format, UINT left,
+                                         UINT top, std::uint64_t offset, std::uint64_t pitch) {
+                D3D12_TEXTURE_COPY_LOCATION from{};
+                from.pResource = source;
+                from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                D3D12_TEXTURE_COPY_LOCATION to{};
+                to.pResource = free->readback.Get();
+                to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                to.PlacedFootprint.Offset = offset;
+                to.PlacedFootprint.Footprint = {format, kProbeRegion, kProbeRegion, 1,
+                    static_cast<UINT>(pitch)};
+                const D3D12_BOX box{left, top, 0, left + kProbeRegion, top + kProbeRegion, 1};
+                free->list->CopyTextureRegion(&to, 0, 0, 0, &from, &box);
+            };
+            {
+                D3D12_TEXTURE_COPY_LOCATION from{};
+                from.pResource = slot.probe_colour.layer.Get();
+                from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                D3D12_TEXTURE_COPY_LOCATION to{};
+                to.pResource = free->readback.Get();
+                to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                to.PlacedFootprint.Footprint = {free->colour_format, kProbeAtlas, kProbeAtlas, 1,
+                    static_cast<UINT>(free->colour_pitch)};
+                free->list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+            }
+            const auto motion_width = static_cast<std::uint32_t>(slot.motion.source.Width);
+            const std::uint32_t motion_height = slot.motion.source.Height;
+            const auto depth_width = static_cast<std::uint32_t>(slot.depth.source.Width);
+            const std::uint32_t depth_height = slot.depth.source.Height;
+            for (std::uint32_t region = 0; region < kProbeRegions; ++region) {
+                const auto [x, y] = probe_region_origin(region, slot.probe.extent[0], slot.probe.extent[1]);
+                const UINT mx = slot.probe.motion_base[0] + x, my = slot.probe.motion_base[1] + y;
+                if (mx + kProbeRegion > motion_width || my + kProbeRegion > motion_height) return nullptr;
+                read_region(slot.motion.layer.Get(), motion_format, mx, my,
+                    free->motion_offset + region * motion_region, free->motion_pitch);
+                if (free->has_depth) {
+                    const UINT dx = slot.probe.depth_base[0] + x, dy = slot.probe.depth_base[1] + y;
+                    if (dx + kProbeRegion > depth_width || dy + kProbeRegion > depth_height) {
+                        free->has_depth = false;
+                        continue;
+                    }
+                    read_region(slot.depth.layer.Get(), free->depth_format, dx, dy,
+                        free->depth_offset + region * depth_region, free->depth_pitch);
+                }
+            }
+            if (FAILED(free->list->Close())) return nullptr;
+            free->pending = true;
+            free->value = ~0ULL;
+            free->publication = slot.sample.publication;
+            free->serial = slot.sample.serial;
+            return free;
+        } catch (...) {
+            return nullptr;
+        }
+    }
+
+    // Probes the GPU has read back: their data to a thread of their own.
+    void poll_probes() noexcept {
+        for (ProbeRead& read : probe_reads_) {
+            if (!read.pending || read.value == ~0ULL || read_->GetCompletedValue() < read.value) continue;
+            read.pending = false;
+            std::byte* mapped = nullptr;
+            const D3D12_RANGE range{0, static_cast<SIZE_T>(kProbeReadbackBytes)};
+            if (FAILED(read.readback->Map(0, &range, reinterpret_cast<void**>(&mapped))) ||
+                mapped == nullptr) {
+                continue;
+            }
+            try {
+                ProbeData data;
+                data.publication = read.publication;
+                data.serial = read.serial;
+                data.has_depth = read.has_depth;
+                const std::size_t area = static_cast<std::size_t>(kProbeRegion) * kProbeRegion;
+                data.colour.resize(kProbeRegions * area);
+                data.motion_x.resize(kProbeRegions * area);
+                data.motion_y.resize(kProbeRegions * area);
+                if (data.has_depth) data.depth.resize(kProbeRegions * area);
+                const std::uint32_t colour_bytes = anchor_texel_bytes(read.colour_format);
+                const std::uint64_t motion_region =
+                    align_up(read.motion_pitch * kProbeRegion, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+                const std::uint64_t depth_region =
+                    align_up(read.depth_pitch * kProbeRegion, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+                const std::uint32_t depth_bytes = probe_depth_bytes(read.depth_format);
+                for (std::uint32_t region = 0; region < kProbeRegions; ++region) {
+                    for (std::uint32_t y = 0; y < kProbeRegion; ++y) {
+                        for (std::uint32_t x = 0; x < kProbeRegion; ++x) {
+                            const std::size_t at = region * area + y * kProbeRegion + x;
+                            const std::uint64_t cx = (region % 4U) * kProbeRegion + x;
+                            const std::uint64_t cy = (region / 4U) * kProbeRegion + y;
+                            data.colour[at] = anchor_luminance(
+                                mapped + cy * read.colour_pitch + cx * colour_bytes, read.colour_format);
+                            const std::byte* motion = mapped + read.motion_offset +
+                                region * motion_region + y * read.motion_pitch;
+                            if (read.motion_format == DXGI_FORMAT_R16G16_FLOAT) {
+                                std::array<std::uint16_t, 2> value{};
+                                std::memcpy(value.data(), motion + x * 4U, sizeof(value));
+                                data.motion_x[at] = half_to_float(value[0]);
+                                data.motion_y[at] = half_to_float(value[1]);
+                            } else {
+                                std::array<float, 2> value{};
+                                std::memcpy(value.data(), motion + x * 8U, sizeof(value));
+                                data.motion_x[at] = value[0];
+                                data.motion_y[at] = value[1];
+                            }
+                            if (data.has_depth) {
+                                data.depth[at] = probe_value(mapped + read.depth_offset +
+                                    region * depth_region + y * read.depth_pitch + x * depth_bytes,
+                                    read.depth_format);
+                            }
+                        }
+                    }
+                }
+                read.readback->Unmap(0, nullptr);
+                std::thread([data = std::move(data)] { analyse_probe(data); }).detach();
+            } catch (...) {
+                read.readback->Unmap(0, nullptr);
+            }
+        }
+    }
+
+    // Textures the game's queue may not have finished writing: kept two
+    // seconds, as the registry keeps a retired snapshot.
+    static void bury(std::array<Slot, 2>&& slots) noexcept {
+        try {
+            struct Grave {
+                ULONGLONG at;
+                std::array<Slot, 2> slots;
+            };
+            static std::mutex mutex;
+            static auto* graves = new std::vector<Grave>;
+            std::scoped_lock lock(mutex);
+            const ULONGLONG now = GetTickCount64();
+            graves->erase(std::remove_if(graves->begin(), graves->end(),
+                [now](const Grave& grave) { return now - grave.at > 2000; }), graves->end());
+            graves->push_back({now, std::move(slots)});
+        } catch (...) {
+        }
+    }
+
+    void submit(Slot& slot) noexcept {
+        slot.pending = false;
+        MotionMean* mean = queue_motion_mean(slot);
+        ProbeRead* probe = queue_probe(slot);
+        std::array<ID3D12CommandList*, 3> lists{slot.list.Get()};
+        UINT count = 1;
+        if (mean != nullptr) lists[count++] = mean->list.Get();
+        if (probe != nullptr) lists[count++] = probe->list.Get();
+        queue_->ExecuteCommandLists(count, lists.data());
+        if (SUCCEEDED(queue_->Signal(read_.Get(), ++submitted_))) {
+            slot.read_done = submitted_;
+            if (mean != nullptr) mean->value = submitted_;
+            if (probe != nullptr) probe->value = submitted_;
+        } else {
+            if (mean != nullptr) mean->pending = false;
+            if (probe != nullptr) probe->pending = false;
+        }
+    }
+
+    // A list copying 16 patches of the slot's vectors to a readback buffer,
+    // for the first 512 evaluations; null when none is due or free.
+    MotionMean* queue_motion_mean(Slot& slot) noexcept {
+        try {
+            const DXGI_FORMAT format = slot.motion.source.Format;
+            if (!slot.motion.layer || (format != DXGI_FORMAT_R16G16_FLOAT &&
+                    format != DXGI_FORMAT_R32G32_FLOAT) ||
+                slot.motion.source.Width < kAnchorPatch ||
+                slot.motion.source.Height < kAnchorPatch ||
+                (!g_anchor_enabled.load(std::memory_order_acquire) &&
+                    motion_means_queued().load(std::memory_order_relaxed) >= 512)) {
+                return nullptr;
+            }
+            MotionMean* free = nullptr;
+            for (MotionMean& candidate : motion_means_) {
+                if (!candidate.pending) free = &candidate;
+            }
+            if (free == nullptr) return nullptr;
+            if (!free->readback) {
+                D3D12_HEAP_PROPERTIES heap{};
+                heap.Type = D3D12_HEAP_TYPE_READBACK;
+                D3D12_RESOURCE_DESC buffer{};
+                buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                buffer.Width = kMotionPatchBytes * kAnchorPatches;
+                buffer.Height = 1;
+                buffer.DepthOrArraySize = 1;
+                buffer.MipLevels = 1;
+                buffer.SampleDesc.Count = 1;
+                buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                        IID_PPV_ARGS(free->readback.GetAddressOf()))) ||
+                    FAILED(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                        IID_PPV_ARGS(free->allocator.GetAddressOf()))) ||
+                    FAILED(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                        free->allocator.Get(), nullptr, IID_PPV_ARGS(free->list.GetAddressOf())))) {
+                    free->readback.Reset();
+                    return nullptr;
+                }
+            } else if (FAILED(free->allocator->Reset()) ||
+                       FAILED(free->list->Reset(free->allocator.Get(), nullptr))) {
+                return nullptr;
+            }
+            const auto width = static_cast<std::uint32_t>(slot.motion.source.Width);
+            const std::uint32_t height = slot.motion.source.Height;
+            for (std::uint32_t patch = 0; patch < kAnchorPatches; ++patch) {
+                const auto [x, y] = anchor_patch_origin(patch, width, height);
+                D3D12_TEXTURE_COPY_LOCATION from{};
+                from.pResource = slot.motion.layer.Get();
+                from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                D3D12_TEXTURE_COPY_LOCATION to{};
+                to.pResource = free->readback.Get();
+                to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                to.PlacedFootprint.Offset = patch * kMotionPatchBytes;
+                to.PlacedFootprint.Footprint = {format, kAnchorPatch, kAnchorPatch, 1,
+                    static_cast<UINT>(kMotionPatchPitch)};
+                const D3D12_BOX box{x, y, 0, x + kAnchorPatch, y + kAnchorPatch, 1};
+                free->list->CopyTextureRegion(&to, 0, 0, 0, &from, &box);
+            }
+            if (FAILED(free->list->Close())) return nullptr;
+            free->pending = true;
+            free->value = ~0ULL;
+            free->publication = slot.sample.publication;
+            free->serial = slot.sample.serial;
+            free->epoch = slot.sample.epoch;
+            free->format = format;
+            motion_means_queued().fetch_add(1, std::memory_order_relaxed);
+            return free;
+        } catch (...) {
+            return nullptr;
+        }
+    }
+
+    // The means the GPU has read back since, as record 847.
+    void poll_motion_means() noexcept {
+        for (MotionMean& mean : motion_means_) {
+            if (!mean.pending || mean.value == ~0ULL || read_->GetCompletedValue() < mean.value) {
+                continue;
+            }
+            mean.pending = false;
+            std::byte* mapped = nullptr;
+            const D3D12_RANGE range{0, static_cast<SIZE_T>(kMotionPatchBytes * kAnchorPatches)};
+            if (FAILED(mean.readback->Map(0, &range, reinterpret_cast<void**>(&mapped))) ||
+                mapped == nullptr) {
+                continue;
+            }
+            double sum_x = 0.0, sum_y = 0.0, abs_x = 0.0, abs_y = 0.0;
+            std::uint64_t count = 0;
+            for (std::uint32_t patch = 0; patch < kAnchorPatches; ++patch) {
+                for (std::uint32_t row = 0; row < kAnchorPatch; ++row) {
+                    const std::byte* line = mapped + patch * kMotionPatchBytes + row * kMotionPatchPitch;
+                    for (std::uint32_t column = 0; column < kAnchorPatch; ++column) {
+                        float x = 0.0F, y = 0.0F;
+                        if (mean.format == DXGI_FORMAT_R16G16_FLOAT) {
+                            std::array<std::uint16_t, 2> value{};
+                            std::memcpy(value.data(), line + column * 4U, sizeof(value));
+                            x = half_to_float(value[0]);
+                            y = half_to_float(value[1]);
+                        } else {
+                            std::array<float, 2> value{};
+                            std::memcpy(value.data(), line + column * 8U, sizeof(value));
+                            x = value[0];
+                            y = value[1];
+                        }
+                        if (!std::isfinite(x) || !std::isfinite(y)) continue;
+                        sum_x += x;
+                        sum_y += y;
+                        abs_x += std::fabs(x);
+                        abs_y += std::fabs(y);
+                        ++count;
+                    }
+                }
+            }
+            mean.readback->Unmap(0, nullptr);
+            const double n = count != 0 ? static_cast<double>(count) : 1.0;
+            // The parity's running average for the stretch; a new epoch
+            // starts the averages again (its serials start again).
+            if (mean.epoch != motion_epoch_) {
+                motion_epoch_ = mean.epoch;
+                parity_motion_ = {};
+            }
+            const double motion = (abs_x + abs_y) / n;
+            if (std::isfinite(motion) && motion > kStillMotion) {
+                double& average = parity_motion_[mean.serial & 1U];
+                average = average > 0.0 ? average + 0.2 * (motion - average) : motion;
+            }
+            static std::atomic<std::uint32_t> means_recorded{0};
+            if (means_recorded.fetch_add(1, std::memory_order_relaxed) < 512) {
+                record(kRecordMotionMean, mean.publication,
+                    (float_bits(static_cast<float>(sum_x / n)) << 32U) |
+                        float_bits(static_cast<float>(sum_y / n)),
+                    (float_bits(static_cast<float>(abs_x / n)) << 32U) |
+                        float_bits(static_cast<float>(abs_y / n)));
+            }
+        }
+    }
+
+    // The slot's atlas: kAnchorAtlas square of the output's format, made on
+    // the layer's device and opened on the game's.
+    [[nodiscard]] HRESULT prepare_atlas(
+        Shared& shared, DXGI_FORMAT format, std::uint32_t size = kAnchorAtlas) noexcept {
+        if (shared.layer && shared.source.Format == format && shared.source.Width == size) return S_OK;
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = size;
+        desc.Height = size;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = format;
+        desc.SampleDesc.Count = 1;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS |
+            D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        Shared replacement;
+        HRESULT result = device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc,
+            D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(replacement.layer.GetAddressOf()));
+        if (FAILED(result)) return result;
+        HANDLE handle = nullptr;
+        result = device_->CreateSharedHandle(replacement.layer.Get(), nullptr, GENERIC_ALL,
+            nullptr, &handle);
+        if (FAILED(result)) return result;
+        result = game_->OpenSharedHandle(handle, IID_PPV_ARGS(replacement.game.GetAddressOf()));
+        CloseHandle(handle);
+        if (FAILED(result)) return result;
+        replacement.source = desc;
+        if (shared.layer) {
+            std::array<Slot, 2> old_slots{};
+            old_slots[0].atlas = std::move(shared);
+            bury(std::move(old_slots));
+        }
+        shared = std::move(replacement);
+        return S_OK;
+    }
+
+    // A single-mip texture of the source's size, format family and slices,
+    // made on the layer's device and opened on the game's.
+    [[nodiscard]] HRESULT prepare(Shared& shared, ID3D12Resource* source, bool depth) noexcept {
+        const D3D12_RESOURCE_DESC description = source->GetDesc();
+        if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+            description.SampleDesc.Count != 1) {
+            return DXGI_ERROR_UNSUPPORTED;
+        }
+        const auto& old = shared.source;
+        if (shared.layer && old.Width == description.Width &&
+            old.Height == description.Height && old.Format == description.Format &&
+            old.DepthOrArraySize == description.DepthOrArraySize &&
+            old.MipLevels == description.MipLevels) {
+            return S_OK;
+        }
+        const DXGI_FORMAT format = depth ? shareable_format(description.Format) : description.Format;
+        if (format == DXGI_FORMAT_UNKNOWN) return DXGI_ERROR_UNSUPPORTED;
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = description.Width;
+        desc.Height = description.Height;
+        desc.DepthOrArraySize = description.DepthOrArraySize;
+        desc.MipLevels = 1;
+        desc.Format = format;
+        desc.SampleDesc.Count = 1;
+        // Simultaneous access: COMMON at both ends of every list, so neither
+        // device tracks the other's state.
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS |
+            D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        Shared replacement;
+        HRESULT result = device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc,
+            D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(replacement.layer.GetAddressOf()));
+        if (FAILED(result)) return result;
+        HANDLE handle = nullptr;
+        result = device_->CreateSharedHandle(replacement.layer.Get(), nullptr, GENERIC_ALL,
+            nullptr, &handle);
+        if (FAILED(result)) return result;
+        result = game_->OpenSharedHandle(handle, IID_PPV_ARGS(replacement.game.GetAddressOf()));
+        CloseHandle(handle);
+        if (FAILED(result)) return result;
+        replacement.source = description;
+        // The pair it replaces may still be in a list the game has not run.
+        if (shared.layer) {
+            std::array<Slot, 2> old_slots{};
+            old_slots[0].motion = std::move(shared);
+            bury(std::move(old_slots));
+        }
+        shared = std::move(replacement);
+        return S_OK;
+    }
+
+    // Mip 0 of every slice, out of the game's resource in its DLSS state and
+    // back to it. The shared texture is promoted from COMMON by the copy.
+    static void copy(ID3D12GraphicsCommandList* list, const Shared& shared,
+        ID3D12Resource* source, D3D12_RESOURCE_STATES state) noexcept {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = source;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = state;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        if (state != D3D12_RESOURCE_STATE_COPY_SOURCE) list->ResourceBarrier(1, &barrier);
+        for (UINT slice = 0; slice < shared.source.DepthOrArraySize; ++slice) {
+            D3D12_TEXTURE_COPY_LOCATION from{};
+            from.pResource = source;
+            from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            from.SubresourceIndex = slice * shared.source.MipLevels;
+            D3D12_TEXTURE_COPY_LOCATION to{};
+            to.pResource = shared.game.Get();
+            to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            to.SubresourceIndex = slice;
+            list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        }
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        if (state != D3D12_RESOURCE_STATE_COPY_SOURCE) list->ResourceBarrier(1, &barrier);
+    }
+
+    ComPtr<ID3D12Device> game_;
+    ComPtr<ID3D12Device> device_;
+    ComPtr<ID3D12CommandQueue> queue_;
+    ComPtr<ID3D12Fence> read_;
+    std::array<Slot, 2> slots_{};
+    std::array<MotionMean, 4> motion_means_{};
+    std::array<ProbeRead, 2> probe_reads_{};
+    // V524, record 851: the last four evaluations' output patches, by serial.
+    std::array<Shared, 4> history_atlas_{};
+    std::array<AnchorSample, 4> history_samples_{};
+    std::array<std::uint64_t, 4> history_read_done_{};
+    // V524: each serial parity's mean motion in motion_epoch_ (motion_stretch).
+    std::array<double, 2> parity_motion_{};
+    std::uint64_t motion_epoch_{};
+    std::uint32_t next_{};
+    std::uint32_t last_slot_{};
+    std::uint64_t submitted_{};
+    bool recording_{};
+    HANDLE event_{};
+    std::mutex mutex_;
+};
+
+// ------------------------------------------- alternating-eye anchor (V524)
+// The evaluation thread's transport, between its staging and the end of the
+// DLSS call, when its stream still needs an anchor: complete12 then copies
+// the finished output's patches.
+thread_local std::shared_ptr<GuideTransport12> t_patch_transport;
+
+void clear_patch_transport() noexcept {
+    t_patch_transport.reset();
+}
+
+void complete12(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter* parameters,
+    NVSDK_NGX_Result result) noexcept {
+    try {
+        const auto transport = std::move(t_patch_transport);
+        t_patch_transport.reset();
+        if (!transport || list == nullptr || !NVSDK_NGX_SUCCEED(result)) return;
+        if (auto* output = get<ID3D12Resource*>(parameters, NVSDK_NGX_Parameter_Output)) {
+            static_cast<void>(transport->record_output_patches(list, output));
+        }
+    } catch (...) {
+    }
+}
+
+struct AnchorJob {
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    ComPtr<ID3D12Fence> fence;
+    ComPtr<ID3D12Resource> readback;
+    std::uint64_t value{};
+    bool pending{};
+    // What the queued comparison read: the two evaluations, older first,
+    // the readback layout and the eye images' formats.
+    std::array<GuideTransport12::AnchorSample, 2> samples{};
+    std::array<DXGI_FORMAT, 2> eye_formats{};
+    std::uint64_t atlas_pitch{};
+    std::array<std::uint64_t, 2> atlas_offsets{};
+    std::uint64_t patch_pitch_bytes[2]{};
+    std::uint64_t eye_base{};
+    std::uint64_t patch_size{};
+    // The votes for the stream in its epoch.
+    std::uint64_t stream{};
+    std::uint64_t epoch{};
+    std::uint64_t last_publication{};
+    std::uint32_t vote_parity{};
+    std::uint32_t votes{};
+    std::uint64_t records{};
+};
+
+constexpr std::uint64_t kAnchorReadbackBytes = 2U * 2048U * kAnchorAtlas +
+    2U * kAnchorPatches * 32U * 512U;
+
+AnchorJob& anchor_job() noexcept {
+    static auto* value = new AnchorJob;
+    return *value;
+}
+
+std::mutex& anchor_mutex() noexcept {
+    static auto* value = new std::mutex;
+    return *value;
+}
+
+// The queued comparison has run: its votes, and the anchor once five agree.
+void judge_anchor(AnchorJob& job) noexcept {
+    std::array<std::array<double, 2>, 2> correlation{};
+    std::array<std::array<std::uint32_t, 2>, 2> used{};
+    std::byte* mapped = nullptr;
+    const D3D12_RANGE range{0, static_cast<SIZE_T>(kAnchorReadbackBytes)};
+    if (FAILED(job.readback->Map(0, &range, reinterpret_cast<void**>(&mapped))) || mapped == nullptr) {
+        return;
+    }
+    std::vector<float> evaluation, eye_patch;
+    for (std::uint32_t source = 0; source < 2; ++source) {
+        for (std::uint32_t eye = 0; eye < 2; ++eye) {
+            double total = 0.0;
+            std::uint32_t count = 0;
+            for (std::uint32_t patch = 0; patch < kAnchorPatches; ++patch) {
+                read_anchor_patch(mapped + job.atlas_offsets[source], job.atlas_pitch,
+                    (patch % 4U) * kAnchorPatch, (patch / 4U) * kAnchorPatch,
+                    job.samples[source].format, &evaluation);
+                read_anchor_patch(mapped + job.eye_base +
+                        (static_cast<std::uint64_t>(eye) * kAnchorPatches + patch) * job.patch_size,
+                    job.patch_pitch_bytes[eye], 0, 0, job.eye_formats[eye], &eye_patch);
+                const double value = rank_correlation(evaluation, eye_patch);
+                if (std::isfinite(value)) {
+                    total += value;
+                    ++count;
+                }
+            }
+            correlation[source][eye] = count != 0 ? total / count : 0.0;
+            used[source][eye] = count;
+        }
+    }
+    job.readback->Unmap(0, nullptr);
+    const std::uint32_t fewest =
+        std::min({used[0][0], used[0][1], used[1][0], used[1][1]});
+    const double older_left = correlation[0][0] + correlation[1][1];
+    const double older_right = correlation[0][1] + correlation[1][0];
+    std::uint32_t outcome = 0;
+    std::uint32_t parity = 0;
+    if (fewest < 4) {
+        outcome = 1;
+    } else if (std::fabs(older_left - older_right) < kAnchorMargin) {
+        outcome = 2;
+    } else {
+        const auto& left = older_left > older_right ? job.samples[0] : job.samples[1];
+        parity = static_cast<std::uint32_t>(left.serial & 1U);
+        job.votes = job.votes != 0 && job.vote_parity == parity ? job.votes + 1 : 1;
+        job.vote_parity = parity;
+    }
+    const bool anchored = outcome == 0 && job.votes >= kAnchorVotes;
+    if (anchored) anchor_dlss_alternating_eyes(job.stream, job.epoch, job.vote_parity);
+    if (job.records++ < 512 || anchored) {
+        record(kRecordAnchor,
+            (job.samples[0].publication << 32U) | (job.samples[1].publication & 0xFFFFFFFFULL),
+            (float_bits(static_cast<float>(older_left)) << 32U) |
+                float_bits(static_cast<float>(older_right)),
+            outcome | (static_cast<std::uint64_t>(parity) << 8U) |
+                (static_cast<std::uint64_t>(std::min(job.votes, 255U)) << 16U) |
+                (anchored ? 1ULL << 24U : 0ULL) |
+                (static_cast<std::uint64_t>(fewest) << 32U));
+    }
+}
+
+// V524, alternating eyes: record 848, the stretch of an evaluation's
+// vectors to its eye's own frame (GuideTransport12::motion_stretch), the
+// first 512 and every 2000th after: a the publication, b its eye's mean
+// motion (float bits) << 32 | the other eye's, c the factor (float bits) <<
+// 32 | the source (1 measured, 0 not yet: the nominal 2). This build
+// measures and records the factor but does not apply it: Cyberpunk 2077's
+// R.E.A.L. VR may already hand DLSS each eye's own span (FixDLSS=1), and
+// with the stretch both eye assignments smeared at walls.
+constexpr std::int64_t kRecordSpanScale = 848;
+
+
+// The measurement job (record 851), queued at a release and read at a
+// later one.
+struct MeasureJob {
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    ComPtr<ID3D12Fence> fence;
+    ComPtr<ID3D12Resource> readback;
+    std::uint64_t value{};
+    bool pending{};
+    std::array<GuideTransport12::AnchorSample, 4> samples{};  // newest first
+    std::array<DXGI_FORMAT, 2> eye_formats{};
+    std::uint64_t atlas_pitch{};
+    std::uint64_t atlas_size{};
+    std::array<std::uint64_t, 2> eye_pitch{};
+    std::uint64_t eye_base{};
+    std::uint64_t window_size{};
+    std::uint64_t calls{};
+    std::uint64_t queued{};
+};
+
+constexpr std::uint64_t kMeasureReadbackBytes = 4U * 2048U * kAnchorAtlas +
+    2U * kAnchorPatches * kAnchorPatch * 2048U;
+
+MeasureJob& measure_job() noexcept {
+    static auto* value = new MeasureJob;
+    return *value;
+}
+
+void read_measure(MeasureJob& job) noexcept {
+    std::byte* mapped = nullptr;
+    const D3D12_RANGE range{0, static_cast<SIZE_T>(kMeasureReadbackBytes)};
+    if (FAILED(job.readback->Map(0, &range, reinterpret_cast<void**>(&mapped))) || mapped == nullptr) {
+        return;
+    }
+    try {
+        MeasureData data;
+        data.publication = job.samples[0].publication;
+        data.serial = job.samples[0].serial;
+        const std::size_t patch_area = static_cast<std::size_t>(kAnchorPatch) * kAnchorPatch;
+        const std::size_t window_area = static_cast<std::size_t>(kAnchorPatch) * kMeasureWindow;
+        const std::uint32_t output_bytes = anchor_texel_bytes(job.samples[0].format);
+        for (std::size_t j = 0; j < 4; ++j) {
+            data.outputs[j].resize(kAnchorPatches * patch_area);
+            const std::byte* base = mapped + j * job.atlas_size;
+            for (std::uint32_t p = 0; p < kAnchorPatches; ++p) {
+                for (std::uint32_t y = 0; y < kAnchorPatch; ++y) {
+                    for (std::uint32_t x = 0; x < kAnchorPatch; ++x) {
+                        const std::uint64_t ax = (p % 4U) * kAnchorPatch + x;
+                        const std::uint64_t ay = (p / 4U) * kAnchorPatch + y;
+                        data.outputs[j][p * patch_area + y * kAnchorPatch + x] = anchor_luminance(
+                            base + ay * job.atlas_pitch + ax * output_bytes, job.samples[j].format);
+                    }
+                }
+            }
+        }
+        for (std::size_t k = 0; k < 2; ++k) {
+            data.eyes[k].resize(kAnchorPatches * window_area);
+            const std::uint32_t bytes = anchor_texel_bytes(job.eye_formats[k]);
+            for (std::uint32_t p = 0; p < kAnchorPatches; ++p) {
+                const std::byte* base = mapped + job.eye_base + (k * kAnchorPatches + p) * job.window_size;
+                for (std::uint32_t y = 0; y < kAnchorPatch; ++y) {
+                    for (std::uint32_t x = 0; x < kMeasureWindow; ++x) {
+                        data.eyes[k][p * window_area + y * kMeasureWindow + x] =
+                            anchor_luminance(base + y * job.eye_pitch[k] + x * bytes, job.eye_formats[k]);
+                    }
+                }
+            }
+        }
+        job.readback->Unmap(0, nullptr);
+        std::thread([data = std::move(data)] { analyse_measure(data); }).detach();
+    } catch (...) {
+        job.readback->Unmap(0, nullptr);
+    }
+}
+
+// At a release: read the last comparison if the GPU has run it, and queue
+// the next when one is due and the last four evaluations are in the history.
+void measure_eyes(const std::shared_ptr<GuideTransport12>& transport, ID3D12Device* device,
+    ID3D12CommandQueue* queue, const std::array<NgxEyeImage, 2>& eyes,
+    std::uint64_t released_at) noexcept {
+    try {
+        MeasureJob& job = measure_job();
+        if (job.pending) {
+            if (job.fence->GetCompletedValue() < job.value) return;
+            job.pending = false;
+            read_measure(job);
+        }
+        const std::uint64_t call = job.calls++;
+        if (call % 4 != 0 || (job.queued >= 400 && call % 64 != 0)) return;
+        std::array<GuideTransport12::AnchorSample, 4> history{};
+        transport->history(&history);
+        // Newest first, four consecutive serials of one epoch, all before the release.
+        std::array<GuideTransport12::AnchorSample, 4> samples = history;
+        std::sort(samples.begin(), samples.end(),
+            [](const auto& a, const auto& b) { return a.serial > b.serial; });
+        for (std::size_t j = 0; j < 4; ++j) {
+            const auto& sample = samples[j];
+            if (!sample.valid || sample.epoch != samples[0].epoch ||
+                sample.serial + j != samples[0].serial || sample.publication > released_at ||
+                sample.format != samples[0].format || sample.width != samples[0].width ||
+                sample.height != samples[0].height) {
+                return;
+            }
+        }
+        std::array<std::uint64_t, 2> eye_pitch{};
+        std::array<DXGI_FORMAT, 2> eye_formats{};
+        for (std::uint32_t k = 0; k < 2; ++k) {
+            const NgxEyeImage& image = eyes[k];
+            if (image.image == nullptr || image.x < 0 || image.y < 0) return;
+            const D3D12_RESOURCE_DESC description = image.image->GetDesc();
+            const std::uint32_t bytes = anchor_texel_bytes(description.Format);
+            if (bytes == 0 || (description.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS) == 0) {
+                return;
+            }
+            for (std::uint32_t p = 0; p < kAnchorPatches; ++p) {
+                const auto [x, y] = anchor_patch_origin(p, samples[0].width, samples[0].height);
+                if (x < static_cast<std::uint32_t>(kMeasureShift) ||
+                    x + kAnchorPatch + kMeasureShift > image.width || y + kAnchorPatch > image.height) {
+                    return;
+                }
+            }
+            eye_formats[k] = description.Format;
+            eye_pitch[k] = align_up(static_cast<std::uint64_t>(kMeasureWindow) * bytes,
+                D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+        }
+        if (!job.readback) {
+            D3D12_HEAP_PROPERTIES heap{};
+            heap.Type = D3D12_HEAP_TYPE_READBACK;
+            D3D12_RESOURCE_DESC buffer{};
+            buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            buffer.Width = kMeasureReadbackBytes;
+            buffer.Height = 1;
+            buffer.DepthOrArraySize = 1;
+            buffer.MipLevels = 1;
+            buffer.SampleDesc.Count = 1;
+            buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(job.readback.GetAddressOf()))) ||
+                FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    IID_PPV_ARGS(job.allocator.GetAddressOf()))) ||
+                FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    job.allocator.Get(), nullptr, IID_PPV_ARGS(job.list.GetAddressOf()))) ||
+                FAILED(job.list->Close()) ||
+                FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(job.fence.GetAddressOf())))) {
+                job.readback.Reset();
+                return;
+            }
+        }
+        if (FAILED(job.allocator->Reset()) || FAILED(job.list->Reset(job.allocator.Get(), nullptr))) return;
+        job.atlas_pitch = align_up(static_cast<std::uint64_t>(kAnchorAtlas) *
+            anchor_texel_bytes(samples[0].format), D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+        job.atlas_size = align_up(job.atlas_pitch * kAnchorAtlas, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+        job.eye_base = 4U * job.atlas_size;
+        job.window_size = align_up(std::max(eye_pitch[0], eye_pitch[1]) * kAnchorPatch,
+            D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+        if (job.eye_base + 2U * kAnchorPatches * job.window_size > kMeasureReadbackBytes) return;
+        for (std::uint32_t j = 0; j < 4; ++j) {
+            transport->read_history(static_cast<std::uint32_t>(samples[j].serial & 3U), job.list.Get(),
+                job.readback.Get(), j * job.atlas_size, job.atlas_pitch);
+        }
+        for (std::uint32_t k = 0; k < 2; ++k) {
+            for (std::uint32_t p = 0; p < kAnchorPatches; ++p) {
+                const auto [x, y] = anchor_patch_origin(p, samples[0].width, samples[0].height);
+                const auto left = static_cast<UINT>(eyes[k].x) + x - kMeasureShift;
+                const auto top = static_cast<UINT>(eyes[k].y) + y;
+                D3D12_TEXTURE_COPY_LOCATION from{};
+                from.pResource = eyes[k].image;
+                from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                D3D12_TEXTURE_COPY_LOCATION to{};
+                to.pResource = job.readback.Get();
+                to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                to.PlacedFootprint.Offset = job.eye_base + (k * kAnchorPatches + p) * job.window_size;
+                to.PlacedFootprint.Footprint = {eye_formats[k], kMeasureWindow, kAnchorPatch, 1,
+                    static_cast<UINT>(eye_pitch[k])};
+                const D3D12_BOX box{left, top, 0, left + kMeasureWindow, top + kAnchorPatch, 1};
+                job.list->CopyTextureRegion(&to, 0, 0, 0, &from, &box);
+            }
+        }
+        if (FAILED(job.list->Close())) return;
+        ID3D12CommandList* lists[]{job.list.Get()};
+        queue->ExecuteCommandLists(1, lists);
+        if (FAILED(queue->Signal(job.fence.Get(), ++job.value))) return;
+        transport->protect_history();
+        job.samples = samples;
+        job.eye_formats = eye_formats;
+        job.eye_pitch = eye_pitch;
+        job.pending = true;
+        ++job.queued;
+    } catch (...) {
+    }
+}
+
+void skip_bridged_d3d12(std::size_t reason, std::uint64_t detail = 0) noexcept {
+    auto& s = state();
+    std::scoped_lock lock(s.mutex);
+    const std::uint64_t count = reason == 4 ? ++s.statistics.skipped_device_mismatch
+                                            : ++s.statistics.d3d12_bridged_transport_failures;
+    if (!s.skip_recorded[reason]) {
+        s.skip_recorded[reason] = true;
+        record(kRecordSkip, reason, count, detail);
+    }
+}
+
+void capture12_bridged(
+    ID3D12GraphicsCommandList* list,
+    const NVSDK_NGX_Handle* handle,
+    const NVSDK_NGX_Parameter* parameters) noexcept {
+    try {
+        auto& s = state();
+        if (!s.d3d11_active.load(std::memory_order_acquire) || list == nullptr ||
+            handle == nullptr || parameters == nullptr) {
+            return;
+        }
+        Feature feature;
+        ComPtr<ID3D12Device> device;
+        ComPtr<ID3D12CommandQueue> queue;
+        {
+            std::scoped_lock lock(s.mutex);
+            ++s.statistics.evaluations;
+            if (s.statistics.evaluations % 1000 == 0) {
+                record(kRecordSummary, s.statistics.evaluations, s.statistics.publications,
+                    (s.statistics.skipped_unknown_feature << 40U) |
+                        ((s.statistics.skipped_missing_resources & 0xFFFFFULL) << 20U) |
+                        (s.statistics.skipped_nested & 0xFFFFFULL));
+            }
+            const auto found = s.features.find(handle);
+            if (found == s.features.end()) {
+                ++s.statistics.skipped_unknown_feature;
+                if (!s.skip_recorded[1]) {
+                    s.skip_recorded[1] = true;
+                    record(kRecordSkip, 1, s.statistics.skipped_unknown_feature);
+                }
+                return;
+            }
+            feature = found->second;
+            device = s.bridge_device;
+            queue = s.bridge_queue;
+        }
+        if (!device || !queue) return;
+        ID3D12Resource* const output =
+            get<ID3D12Resource*>(parameters, NVSDK_NGX_Parameter_Output);
+        ID3D12Resource* const motion =
+            get<ID3D12Resource*>(parameters, NVSDK_NGX_Parameter_MotionVectors);
+        ID3D12Resource* const depth = get<ID3D12Resource*>(parameters, NVSDK_NGX_Parameter_Depth);
+        if (output == nullptr || motion == nullptr) {
+            std::scoped_lock lock(s.mutex);
+            ++s.statistics.skipped_missing_resources;
+            if (!s.skip_recorded[2]) {
+                s.skip_recorded[2] = true;
+                record(kRecordSkip, 2, s.statistics.skipped_missing_resources,
+                    (output != nullptr ? 1U : 0U) | (motion != nullptr ? 2U : 0U));
+            }
+            return;
+        }
+        // The copies go in the list DLSS is recorded into: it has to be the
+        // vectors' device's.
+        ComPtr<ID3D12Device> game, list_device;
+        if (FAILED(motion->GetDevice(IID_PPV_ARGS(game.GetAddressOf()))) ||
+            FAILED(list->GetDevice(IID_PPV_ARGS(list_device.GetAddressOf()))) ||
+            !same_d3d12_device_backing(game.Get(), list_device.Get())) {
+            skip_bridged_d3d12(4, game.Get() == list_device.Get() ? 1U : 0U);
+            return;
+        }
+        const D3D12_RESOURCE_DESC output_description = output->GetDesc();
+        const D3D12_RESOURCE_DESC motion_description = motion->GetDesc();
+        D3D12_RESOURCE_DESC depth_description{};
+        if (depth != nullptr) depth_description = depth->GetDesc();
+
+        std::shared_ptr<GuideTransport12> transport;
+        ComPtr<ID3D12Resource> placeholder;
+        bool first_evaluation = false;
+        {
+            std::scoped_lock lock(s.mutex);
+            const auto found = s.features.find(handle);
+            if (found == s.features.end()) return;
+            Feature& stored = found->second;
+            first_evaluation = !stored.shape_recorded;
+            stored.shape_recorded = true;
+            if (!stored.transport12) {
+                auto created = std::make_shared<GuideTransport12>();
+                const HRESULT result = created->initialize(game.Get(), device.Get(), queue.Get());
+                if (FAILED(result)) {
+                    ++s.statistics.d3d12_bridged_transport_failures;
+                    if (!s.skip_recorded[10]) {
+                        s.skip_recorded[10] = true;
+                        record(kRecordSkip, 10, s.statistics.d3d12_bridged_transport_failures,
+                            static_cast<std::uint32_t>(result));
+                    }
+                    return;
+                }
+                stored.transport12 = std::move(created);
+            }
+            if (!stored.output_placeholder ||
+                stored.output_placeholder->GetDesc().Width != output_description.Width ||
+                stored.output_placeholder->GetDesc().Height != output_description.Height) {
+                D3D11_TEXTURE2D_DESC shape{};
+                shape.Width = static_cast<UINT>(output_description.Width);
+                shape.Height = output_description.Height;
+                shape.ArraySize = output_description.DepthOrArraySize;
+                stored.output_placeholder = output_placeholder(device.Get(), shape);
+            }
+            transport = stored.transport12;
+            placeholder = stored.output_placeholder;
+        }
+        if (first_evaluation) {
+            record(kRecordShape,
+                (static_cast<std::uint64_t>(output_description.Format) << 48U) |
+                    (static_cast<std::uint64_t>(output_description.DepthOrArraySize) << 40U) |
+                    (static_cast<std::uint64_t>(motion_description.Format) << 32U) |
+                    (feature.stream & 0xFFFFFFFFULL),
+                (static_cast<std::uint64_t>(output_description.Width) << 32U) |
+                    output_description.Height,
+                (static_cast<std::uint64_t>(motion_description.DepthOrArraySize) << 56U) |
+                    (static_cast<std::uint64_t>(motion_description.Width) << 24U) |
+                    motion_description.Height);
+        }
+        if (!placeholder) {
+            skip_bridged_d3d12(10, static_cast<std::uint32_t>(E_OUTOFMEMORY));
+            return;
+        }
+        DlssMotionVectorPublication publication{};
+        Shape depth_shape{depth_description.Width, depth_description.Height};
+        fill_publication(publication, feature, parameters,
+            {output_description.Width, output_description.Height},
+            {motion_description.Width, motion_description.Height},
+            depth != nullptr ? &depth_shape : nullptr);
+        // V524, alternating eyes: the stretch the stream's vectors measured
+        // (motion_stretch), for the serial this evaluation is about to take -
+        // recorded, not applied (kRecordSpanScale).
+        GuideTransport12::Stretch span;
+        if (g_anchor_enabled.load(std::memory_order_acquire)) {
+            const DlssStreamPosition before_position =
+                dlss_motion_vector_stream_position(feature.stream);
+            const std::uint64_t serial =
+                publication.reset || !before_position.known ? 1 : before_position.serial + 1;
+            const std::uint64_t epoch = before_position.known
+                ? before_position.epoch + (publication.reset ? 1U : 0U) : 1;
+            span = transport->motion_stretch(serial, epoch);
+        }
+        // DLSS reads its inputs as shader resources; the game put them in that
+        // state for it, as the native capture assumes.
+        GuideTransport12::Staged staged{};
+        const HRESULT staged_result = transport->stage(list, motion,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, depth,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, &staged);
+        if (FAILED(staged_result)) {
+            skip_bridged_d3d12(10, static_cast<std::uint32_t>(staged_result));
+            return;
+        }
+        // V524: the alignment probe (record 850), once the stream's eyes are
+        // anchored: its first 256 evaluations, then every 64th.
+        if (g_anchor_enabled.load(std::memory_order_acquire)) {
+            static std::atomic<std::uint64_t> probed{0};
+            const DlssStreamPosition probe_position = dlss_motion_vector_stream_position(feature.stream);
+            if (probe_position.anchored) {
+                const std::uint64_t index = probed.fetch_add(1, std::memory_order_relaxed);
+                auto* colour = get<ID3D12Resource*>(parameters, NVSDK_NGX_Parameter_Color);
+                if ((index < 256 || index % 64 == 0) && colour != nullptr) {
+                    static_cast<void>(transport->probe_colour(list, colour,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        {get<unsigned>(parameters, NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X),
+                            get<unsigned>(parameters, NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y)},
+                        {publication.motion_x, publication.motion_y},
+                        {publication.depth_x, publication.depth_y},
+                        {publication.motion_width, publication.motion_height}));
+                }
+            }
+        }
+        // V515: inside Streamline's DLSS evaluation, its viewport's camera.
+        bool inside_streamline = false;
+        publication.view = current_streamline_camera(&inside_streamline);
+        publication.output = placeholder.Get();
+        publication.motion_vectors = staged.motion;
+        publication.producer_queue = queue.Get();
+        publication.producer_command_list = staged.list;
+        publication.verified_producer_device = device.Get();
+        // Shared simultaneous-access textures, back to COMMON after the copy.
+        publication.resource_state = D3D12_RESOURCE_STATE_COMMON;
+        if (staged.depth != nullptr) {
+            publication.depth = staged.depth;
+            publication.depth_resource_state = D3D12_RESOURCE_STATE_COMMON;
+        }
+        const auto before = dlss_motion_vector_statistics();
+        publish_dlss_motion_vectors(publication);
+        const auto after = dlss_motion_vector_statistics();
+        static_cast<void>(transport->finish());
+        if (after.published == before.published) {
+            std::scoped_lock lock(s.mutex);
+            if (s.refusals_recorded++ < 8) {
+                record(kRecordRefused, after.invalid_publications, after.snapshot_failures,
+                    (static_cast<std::uint64_t>(publication.motion_width) << 32U) |
+                        publication.motion_height);
+            }
+            return;
+        }
+        {
+            static std::atomic<std::uint64_t> recorded{0};
+            const std::uint64_t index = recorded.fetch_add(1, std::memory_order_relaxed);
+            if (index < 512 || index % 2000 == 0) {
+                const auto& view = publication.view;
+                const float side = view.known
+                    ? view.position[0] * view.right[0] + view.position[1] * view.right[1] +
+                        view.position[2] * view.right[2]
+                    : 0.0F;
+                record(kRecordBridgedD3D12Evaluation, after.published,
+                    (feature.stream & 0xFFFFFFFFULL) | (inside_streamline ? 1ULL << 32U : 0ULL) |
+                        (view.known ? 1ULL << 33U : 0ULL) |
+                        (static_cast<std::uint64_t>(view.viewport & 0xFFFFFFU) << 40U),
+                    float_bits(side));
+            }
+        }
+        // V524: where the evaluation stands in its stream; and, while its
+        // stream still needs its eyes anchored, its finished output's patches
+        // after the DLSS call (complete12).
+        const DlssStreamPosition position = dlss_motion_vector_stream_position(feature.stream);
+        transport->note_publication(feature.stream, position);
+        if (g_anchor_enabled.load(std::memory_order_acquire)) {
+            static std::atomic<std::uint64_t> spans_recorded{0};
+            const std::uint64_t index = spans_recorded.fetch_add(1, std::memory_order_relaxed);
+            if (index < 512 || index % 2000 == 0) {
+                record(kRecordSpanScale, after.published,
+                    (float_bits(span.own) << 32U) | float_bits(span.other),
+                    (float_bits(span.factor) << 32U) | span.source);
+            }
+        }
+        // V524: also every evaluation once anchored, for record 851's history.
+        if (g_anchor_enabled.load(std::memory_order_acquire) && position.known) {
+            t_patch_transport = transport;
+        }
+        std::scoped_lock lock(s.mutex);
+        ++s.statistics.publications;
+        ++s.statistics.d3d12_bridged_publications;
+        if (publication.view.known) ++s.statistics.publications_with_camera;
+        const auto found = s.features.find(handle);
+        if (found != s.features.end()) {
+            record_parameters(publication, feature, found->second.publications,
+                motion_description.Format, static_cast<std::uint32_t>(motion_description.Width),
+                motion_description.Height);
+        }
+        if (found != s.features.end() && found->second.publications++ == 0) {
+            record(kRecordBridgedD3D12Publication,
+                (feature.stream & 0xFFFFFFFFULL) |
+                    (staged.depth != nullptr ? 1ULL << 32U : 0ULL) |
+                    (staged.depth_unshareable ? 1ULL << 33U : 0ULL) |
+                    (same_d3d12_device_backing(game.Get(), device.Get()) ? 1ULL << 34U : 0ULL),
+                (static_cast<std::uint64_t>(motion_description.Format) << 32U) |
+                    static_cast<std::uint64_t>(depth != nullptr ? depth_description.Format : 0),
+                (static_cast<std::uint64_t>(publication.output_width) << 32U) |
+                    publication.output_height);
+        }
+    } catch (...) {
+    }
+}
+
 void register_feature(
     NVSDK_NGX_Feature type,
     const NVSDK_NGX_Parameter* parameters,
@@ -1818,7 +3953,8 @@ NVSDK_NGX_Result NVSDK_CONV hooked_evaluate11(
     const NVSDK_NGX_Parameter* parameters,
     PFN_NVSDK_NGX_ProgressCallback callback) {
     DepthScope depth;
-    register_late<Slot>(handle, parameters, state().d3d11_active, true);
+    register_late<Slot>(handle, parameters,
+        state().d3d11_active.load(std::memory_order_acquire), true);
     if (depth.outermost()) {
         capture11(context, handle, parameters);
     }
@@ -1832,7 +3968,8 @@ NVSDK_NGX_Result NVSDK_CONV hooked_evaluate11_c(
     const NVSDK_NGX_Parameter* parameters,
     PFN_NVSDK_NGX_ProgressCallback_C callback) {
     DepthScope depth;
-    register_late<Slot>(handle, parameters, state().d3d11_active, true);
+    register_late<Slot>(handle, parameters,
+        state().d3d11_active.load(std::memory_order_acquire), true);
     if (depth.outermost()) {
         capture11(context, handle, parameters);
     }
@@ -2787,7 +4924,8 @@ NVSDK_NGX_Result NVSDK_CONV hooked_evaluate_vk(
     VkCommandBuffer buffer, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
     PFN_NVSDK_NGX_ProgressCallback callback) {
     DepthScope depth;
-    register_late<Slot>(handle, parameters, state().vulkan_active);
+    register_late<Slot>(handle, parameters,
+        state().vulkan_active.load(std::memory_order_acquire));
     if (depth.outermost()) capture_vk(buffer, handle, parameters);
     return state().modules_vk[Slot].evaluate(buffer, handle, parameters, callback);
 }
@@ -2797,7 +4935,8 @@ NVSDK_NGX_Result NVSDK_CONV hooked_evaluate_vk_c(
     VkCommandBuffer buffer, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
     PFN_NVSDK_NGX_ProgressCallback_C callback) {
     DepthScope depth;
-    register_late<Slot>(handle, parameters, state().vulkan_active);
+    register_late<Slot>(handle, parameters,
+        state().vulkan_active.load(std::memory_order_acquire));
     if (depth.outermost()) capture_vk(buffer, handle, parameters);
     return state().modules_vk[Slot].evaluate_c(buffer, handle, parameters, callback);
 }
@@ -2891,6 +5030,7 @@ void retire_feature(NVSDK_NGX_Handle* handle) noexcept {
         auto& s = state();
         std::uint64_t stream = 0;
         std::shared_ptr<GuideTransport11> transport;
+        std::shared_ptr<GuideTransport12> transport12;
         std::shared_ptr<GuideTransportVk> transport_vk;
         {
             std::scoped_lock lock(s.mutex);
@@ -2898,6 +5038,7 @@ void retire_feature(NVSDK_NGX_Handle* handle) noexcept {
             if (found != s.features.end()) {
                 stream = found->second.stream;
                 transport = std::move(found->second.transport);
+                transport12 = std::move(found->second.transport12);
                 transport_vk = std::move(found->second.transport_vk);
                 s.features.erase(found);
                 ++s.statistics.features_released;
@@ -2907,6 +5048,7 @@ void retire_feature(NVSDK_NGX_Handle* handle) noexcept {
             retire_dlss_motion_vector_stream(stream);
         }
         transport.reset();
+        transport12.reset();
         transport_vk.reset();
     } catch (...) {
     }
@@ -3144,14 +5286,201 @@ void flush_ngx_guide_capture_d3d11() noexcept {
     try {
         auto& s = state();
         std::vector<std::shared_ptr<GuideTransport11>> transports;
+        std::vector<std::shared_ptr<GuideTransport12>> transports12;
         {
             std::scoped_lock lock(s.mutex);
             for (const auto& [handle, feature] : s.features) {
                 static_cast<void>(handle);
                 if (feature.transport) transports.push_back(feature.transport);
+                if (feature.transport12) transports12.push_back(feature.transport12);
             }
         }
         for (const auto& transport : transports) transport->flush();
+        // V524: a D3D12 game's copies, behind the same wait.
+        for (const auto& transport : transports12) transport->flush();
+    } catch (...) {
+    }
+}
+
+void configure_ngx_alternating_eye_anchor(bool enabled) noexcept {
+    g_anchor_enabled.store(enabled, std::memory_order_release);
+}
+
+void anchor_ngx_alternating_eyes(
+    const std::array<NgxEyeImage, 2>& eyes, std::uint64_t released_at) noexcept {
+    try {
+        auto& s = state();
+        if (!g_anchor_enabled.load(std::memory_order_acquire) ||
+            !s.d3d11_active.load(std::memory_order_acquire)) {
+            return;
+        }
+        // The stream published most recently: a game can keep the feature of
+        // an earlier session (Cyberpunk 2077 keeps its first one through the
+        // OpenXR session it recreates) or register another beside it.
+        std::shared_ptr<GuideTransport12> transport;
+        std::uint64_t stream = 0;
+        ComPtr<ID3D12Device> device;
+        ComPtr<ID3D12CommandQueue> queue;
+        std::vector<std::pair<std::uint64_t, std::shared_ptr<GuideTransport12>>> bridged;
+        {
+            std::scoped_lock lock(s.mutex);
+            for (const auto& [handle, feature] : s.features) {
+                static_cast<void>(handle);
+                if (feature.transport12) bridged.emplace_back(feature.stream, feature.transport12);
+            }
+            device = s.bridge_device;
+            queue = s.bridge_queue;
+        }
+        std::uint64_t newest_publication = 0;
+        for (const auto& [candidate_stream, candidate] : bridged) {
+            const DlssStreamPosition candidate_position =
+                dlss_motion_vector_stream_position(candidate_stream);
+            if (candidate_position.known && candidate_position.publication > newest_publication) {
+                newest_publication = candidate_position.publication;
+                stream = candidate_stream;
+                transport = candidate;
+            }
+        }
+        if (!transport || !device || !queue) {
+            skip_anchor(1);
+            return;
+        }
+        std::scoped_lock lock(anchor_mutex());
+        measure_eyes(transport, device.Get(), queue.Get(), eyes, released_at);
+        AnchorJob& job = anchor_job();
+        if (job.pending) {
+            if (job.fence->GetCompletedValue() < job.value) return;
+            job.pending = false;
+            if (job.samples[0].stream == job.stream && job.samples[0].epoch == job.epoch) {
+                judge_anchor(job);
+            }
+        }
+        const DlssStreamPosition position = dlss_motion_vector_stream_position(stream);
+        if (!position.known || position.anchored) return;
+        if (job.stream != stream || job.epoch != position.epoch) {
+            job.stream = stream;
+            job.epoch = position.epoch;
+            job.votes = 0;
+            job.last_publication = 0;
+        }
+        std::array<GuideTransport12::AnchorSample, 2> samples{};
+        std::array<std::uint32_t, 2> slots{};
+        transport->samples(&samples, &slots);
+        const auto& older = samples[0];
+        const auto& newer = samples[1];
+        if (!older.valid || !newer.valid || older.stream != stream || newer.stream != stream ||
+            older.epoch != position.epoch || newer.epoch != position.epoch ||
+            newer.serial != older.serial + 1 || newer.serial != position.serial ||
+            newer.publication > released_at || newer.publication <= job.last_publication ||
+            older.format != newer.format || older.width != newer.width ||
+            older.height != newer.height) {
+            skip_anchor(older.valid && newer.valid ? 3U : 2U,
+                (newer.serial << 32U) | (position.serial & 0xFFFFFFFFULL));
+            return;
+        }
+        // The eye images: a bridged session's shared textures, read without a
+        // barrier; every patch where it lies on the output, from the eye's
+        // origin.
+        std::array<std::uint64_t, 2> patch_pitch{};
+        for (std::uint32_t eye = 0; eye < 2; ++eye) {
+            const NgxEyeImage& image = eyes[eye];
+            if (image.image == nullptr || image.x < 0 || image.y < 0) {
+                skip_anchor(4);
+                return;
+            }
+            const D3D12_RESOURCE_DESC description = image.image->GetDesc();
+            const std::uint32_t bytes = anchor_texel_bytes(description.Format);
+            if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || bytes == 0 ||
+                description.SampleDesc.Count != 1 ||
+                (description.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS) == 0 ||
+                static_cast<std::uint64_t>(image.x) + image.width > description.Width ||
+                static_cast<std::uint64_t>(image.y) + image.height > description.Height) {
+                skip_anchor(4, static_cast<std::uint64_t>(description.Format) |
+                    (static_cast<std::uint64_t>(description.Flags) << 32U));
+                return;
+            }
+            for (std::uint32_t patch = 0; patch < kAnchorPatches; ++patch) {
+                const auto [x, y] = anchor_patch_origin(patch, older.width, older.height);
+                if (x + kAnchorPatch > image.width || y + kAnchorPatch > image.height) {
+                    skip_anchor(5, (static_cast<std::uint64_t>(image.width) << 32U) | image.height);
+                    return;
+                }
+            }
+            job.eye_formats[eye] = description.Format;
+            patch_pitch[eye] = align_up(static_cast<std::uint64_t>(kAnchorPatch) * bytes,
+                D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+        }
+        if (!job.readback) {
+            D3D12_HEAP_PROPERTIES heap{};
+            heap.Type = D3D12_HEAP_TYPE_READBACK;
+            D3D12_RESOURCE_DESC buffer{};
+            buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            buffer.Width = kAnchorReadbackBytes;
+            buffer.Height = 1;
+            buffer.DepthOrArraySize = 1;
+            buffer.MipLevels = 1;
+            buffer.SampleDesc.Count = 1;
+            buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                    IID_PPV_ARGS(job.readback.GetAddressOf()))) ||
+                FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    IID_PPV_ARGS(job.allocator.GetAddressOf()))) ||
+                FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    job.allocator.Get(), nullptr, IID_PPV_ARGS(job.list.GetAddressOf()))) ||
+                FAILED(job.list->Close()) ||
+                FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                    IID_PPV_ARGS(job.fence.GetAddressOf())))) {
+                job.readback.Reset();
+                skip_anchor(6);
+                return;
+            }
+        }
+        if (FAILED(job.allocator->Reset()) || FAILED(job.list->Reset(job.allocator.Get(), nullptr))) {
+            return;
+        }
+        // The layout: both atlases, then 16 patches of each eye.
+        job.atlas_pitch = align_up(static_cast<std::uint64_t>(kAnchorAtlas) *
+                anchor_texel_bytes(older.format), D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+        const std::uint64_t atlas_size =
+            align_up(job.atlas_pitch * kAnchorAtlas, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+        job.atlas_offsets = {0, atlas_size};
+        job.eye_base = 2U * atlas_size;
+        job.patch_size = align_up(std::max(patch_pitch[0], patch_pitch[1]) * kAnchorPatch,
+            D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+        job.patch_pitch_bytes[0] = patch_pitch[0];
+        job.patch_pitch_bytes[1] = patch_pitch[1];
+        transport->read_atlas(slots[0], job.list.Get(), job.readback.Get(), job.atlas_offsets[0],
+            job.atlas_pitch);
+        transport->read_atlas(slots[1], job.list.Get(), job.readback.Get(), job.atlas_offsets[1],
+            job.atlas_pitch);
+        for (std::uint32_t eye = 0; eye < 2; ++eye) {
+            for (std::uint32_t patch = 0; patch < kAnchorPatches; ++patch) {
+                const auto [x, y] = anchor_patch_origin(patch, older.width, older.height);
+                const auto left = static_cast<UINT>(eyes[eye].x) + x;
+                const auto top = static_cast<UINT>(eyes[eye].y) + y;
+                D3D12_TEXTURE_COPY_LOCATION from{};
+                from.pResource = eyes[eye].image;
+                from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                D3D12_TEXTURE_COPY_LOCATION to{};
+                to.pResource = job.readback.Get();
+                to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                to.PlacedFootprint.Offset = job.eye_base +
+                    (static_cast<std::uint64_t>(eye) * kAnchorPatches + patch) * job.patch_size;
+                to.PlacedFootprint.Footprint = {job.eye_formats[eye], kAnchorPatch, kAnchorPatch, 1,
+                    static_cast<UINT>(patch_pitch[eye])};
+                const D3D12_BOX box{left, top, 0, left + kAnchorPatch, top + kAnchorPatch, 1};
+                job.list->CopyTextureRegion(&to, 0, 0, 0, &from, &box);
+            }
+        }
+        if (FAILED(job.list->Close())) return;
+        ID3D12CommandList* lists[]{job.list.Get()};
+        queue->ExecuteCommandLists(1, lists);
+        if (FAILED(queue->Signal(job.fence.Get(), ++job.value))) return;
+        transport->protect_slots();
+        job.samples = samples;
+        job.pending = true;
+        job.last_publication = newer.publication;
     } catch (...) {
     }
 }

@@ -25,6 +25,10 @@ struct DlssViewGeometry {
     float tan_down{};
     std::array<float, 3> position{};
     std::array<float, 3> right{};
+    // V524: the rest of the camera's basis (Streamline's cameraUp and
+    // cameraFwd), for the rotation between two evaluations' cameras.
+    std::array<float, 3> up{};
+    std::array<float, 3> forward{};
 };
 
 // Four tangents in one flight-log word (V515): left, right, up, down from
@@ -281,6 +285,27 @@ resolve_view_placed_dlss_guides(
     const std::array<std::uint64_t, kDlssMotionVectorEyeCount>& released_at) noexcept;
 // The process-monotonic publication count: a release watermark.
 std::uint64_t dlss_motion_vector_publications() noexcept;
+// V524: alternating-eye rendering (Luke Ross's R.E.A.L. VR). The game renders
+// one eye per frame and evaluates one DLSS stream for both, in turn; which
+// eye an evaluation is for cannot be read from its inputs (the same camera,
+// the same rectangles, the order of the two in a frame changing whenever a
+// frame carries one evaluation or none). While required, such a stream's
+// evaluations go to the eyes by their serial's parity once the stream has
+// been anchored in its epoch - its left eye takes `left_parity` - and guide
+// no eye before. A reset (a new epoch) needs a new anchor.
+void configure_dlss_alternating_eyes(bool required) noexcept;
+void anchor_dlss_alternating_eyes(
+    std::uint64_t stream, std::uint64_t epoch, std::uint32_t left_parity) noexcept;
+struct DlssStreamPosition {
+    bool known{};
+    // Anchored in the stream's current epoch.
+    bool anchored{};
+    std::uint64_t epoch{};
+    std::uint64_t serial{};
+    std::uint64_t publication{};
+};
+// Where a stream stands: its newest publication's epoch, serial and number.
+DlssStreamPosition dlss_motion_vector_stream_position(std::uint64_t stream) noexcept;
 void report_dlss_motion_vector_status(DlssMotionVectorStatus status) noexcept;
 void report_dlss_motion_vector_use() noexcept;
 // A pair the hybrid composition used: counted as used, and as hybrid.
