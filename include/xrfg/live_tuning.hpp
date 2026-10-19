@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 
 // Values the tray can change while a game is running, read by the layer.
@@ -9,51 +10,120 @@
 // does not. The tray creates and owns the block; while it does not exist, or
 // holds another layout, the layer uses the composition's built-in values.
 // Diagnostic tuning only - nothing here is a setting, and nothing is saved.
+//
+// Since V507 the block serves the hybrid composition only: the synthesizer
+// uploads it, header and all, into a small buffer the hybrid shader reads at
+// t8 (frame_synthesis.hlsl, HybridTuning), so the field order below is the
+// shader's too - a new field goes at the end, with its index there.
 namespace xrfg::live_tuning {
 
 inline constexpr wchar_t kMappingName[] = L"Local\\OFXRBridgeLiveTuning";
 inline constexpr std::uint32_t kMagic = 0x4C565446U;  // "FTVL"
-// 6: the repeating-pattern lock and the hybrid composition (V497). Edge
-// ghosting reduction and its search values left with this version: the
-// feature is off on this branch, and the constants that carried its values
-// carry the DLSS guide rectangle in a hybrid draw. 5 was V478's (edge
-// ghosting reduction and the pattern lock); 4 V477's; 3 V475's, which also
-// carried the background fill and the hardware bilinear switch; 1 and 2 the
-// V374 flow-history window, which never reached main.
-inline constexpr std::uint32_t kVersion = 6U;
+// 7: the hybrid's values (V507), uploaded whole; the repeating-pattern lock
+// left with this version (not needed beside the hybrid). 6 was V497's
+// (pattern lock and three hybrid values in the draw constants); 5 V478's
+// (edge ghosting reduction and the pattern lock); 4 V477's; 3 V475's, which
+// also carried the background fill and the hardware bilinear switch; 1 and 2
+// the V374 flow-history window, which never reached main.
+inline constexpr std::uint32_t kVersion = 7U;
 
-// Fractions of the colour range are in 255ths.
+// Each slider in the tray runs from cheaper on the GPU (left) to costlier
+// (right); the comments say which way that is for a value.
 struct Block {
     std::uint32_t magic;
     std::uint32_t version;
     // Incremented by the tray after every change, so the layer can record
     // each new set of values exactly once.
     std::uint32_t sequence;
-    // Repeating-pattern lock: where the pose alone ("nothing moved beyond the
-    // head") matches within this margin of the flow's motion, the pose wins.
-    // Reaches the flow composition only; a hybrid draw runs the built-in
-    // values (lock on, margin 1/255).
-    std::uint32_t pattern_lock;  // 0 off, 1 on
-    std::uint32_t pattern_lock_margin_255ths;
-    // Hybrid composition: the game's motion vectors and the optical flow,
-    // chosen per pixel. Where the two frames warped by the vectors disagree
-    // by less than the agree threshold, the vectors are taken outright and
-    // the flow branch is not evaluated at that pixel. Elsewhere both run and
-    // the one whose warped samples disagree less wins, as sharply as the
-    // choice slope says (1 soft blend, 15 hard pick). The vectors slope is
-    // the vectors branch's own fall-back toward the pose-only blend as its
-    // samples disagree (3 = 0.3's value; the vectors-only composition had 6).
-    std::uint32_t hybrid_agree_threshold_255ths;  // 0-62
-    std::uint32_t hybrid_choice_slope;            // 1-15
-    std::uint32_t hybrid_vectors_slope;           // 1-15
+
+    // Hybrid choice: the game's motion vectors and the optical flow, chosen
+    // per pixel. Where the two frames warped by the vectors disagree by less
+    // than the agree threshold, the vectors are taken outright and the flow
+    // branch is not evaluated at that pixel (higher = cheaper). Elsewhere
+    // both run and the one whose warped samples disagree less wins, as
+    // sharply as the choice slope says (1 soft blend, 15 hard pick). The
+    // vectors slope is the vectors branch's own fall-back toward the pose-
+    // only blend as its samples disagree (3 = 0.3's value); the flow rule
+    // slope is how sharply the flow must beat the camera-only blend to be
+    // kept (V502). The slopes cost nothing.
+    std::uint32_t hybrid_agree_threshold_255ths;  // 0-62, default 62
+    std::uint32_t hybrid_choice_slope;            // 1-15, default 8
+    std::uint32_t hybrid_vectors_slope;           // 1-15, default 3
+    std::uint32_t hybrid_flow_rule_slope;         // 1-15, default 8
+
+    // The vectors branch at motion edges (V498-V504). The probes for an edge
+    // reach edge_reach_percent of the pixel's motion (16 px at least), and
+    // the search for a surface in front follows that reach: wider costs
+    // solves. At most edge_search_solves second-surface solves per edge
+    // pixel (0 none); a found surface's frames must agree within
+    // edge_surface_agree (no cost). A revealed background accepted within
+    // revealed_error (V500) is kept by the vectors and the flow is not asked
+    // (looser = cheaper). Across a motion edge the nearest vector replaces
+    // the bilinear one where the four texels differ by more than
+    // vector_snap pixels (V503; 0 = always nearest; no cost).
+    std::uint32_t edge_reach_percent;             // 100-200, default 100
+    std::uint32_t edge_search_solves;             // 0-4, default 1
+    std::uint32_t edge_surface_agree_1000ths;     // 0-250, default 50
+    std::uint32_t revealed_error_1000ths;         // 0-250, default 0
+    std::uint32_t vector_snap_tenths;             // 0-40, default 0
+
+    // The depth search for thin near surfaces (V505): off, nothing of it
+    // runs. Along the motion the game's depth is read every 2 px out to
+    // depth_near_reach, then every 4 px out to depth_far_reach, either side;
+    // a point depth_nearer_percent nearer than the answer starts a solve
+    // (smaller = more starts = costlier), at most depth_solves of them; a
+    // nearer surface whose frames agree within depth_agree replaces the
+    // answer (no cost).
+    std::uint32_t depth_search;                   // 0 off, 1 on
+    std::uint32_t depth_near_reach_px;            // 0-32 by 2, default 0
+    std::uint32_t depth_far_reach_px;             // 0-80 by 4, default 32
+    std::uint32_t depth_solves;                   // 1-4, default 1
+    std::uint32_t depth_nearer_percent;           // 0-50, default 50
+    std::uint32_t depth_agree_1000ths;            // 0-250, default 250
 };
 
 // The composition's built-in values (frame_synthesis.hlsl), so the window
-// opens on exactly what runs without it.
+// opens on exactly what runs without it: the set the user settled on in
+// DI2 on 2026-10-19 (V507's first session), which cost 0.95 ms per
+// generated frame over plain optical flow there against 3.4 ms for the
+// values V505 shipped with - except one edge surface solve where that set
+// had none: without it the revealing edge of the hybrid test scene went
+// from 1.3 back to 32.5 (5.2 with one solve, the same as with two).
 inline constexpr Block kDefaults{
     kMagic, kVersion, 0U,
-    1U, 1U,
-    5U, 8U, 3U,
+    62U, 8U, 3U, 8U,
+    100U, 1U, 50U, 0U, 0U,
+    1U, 0U, 32U, 1U, 50U, 250U,
 };
+
+// The block's values within their ranges, as the shader expects them.
+[[nodiscard]] inline Block clamped(Block block) noexcept {
+    block.hybrid_agree_threshold_255ths = std::min(block.hybrid_agree_threshold_255ths, 62U);
+    block.hybrid_choice_slope = std::clamp(block.hybrid_choice_slope, 1U, 15U);
+    block.hybrid_vectors_slope = std::clamp(block.hybrid_vectors_slope, 1U, 15U);
+    block.hybrid_flow_rule_slope = std::clamp(block.hybrid_flow_rule_slope, 1U, 15U);
+    block.edge_reach_percent = std::clamp(block.edge_reach_percent, 100U, 200U);
+    block.edge_search_solves = std::min(block.edge_search_solves, 4U);
+    block.edge_surface_agree_1000ths = std::min(block.edge_surface_agree_1000ths, 250U);
+    block.revealed_error_1000ths = std::min(block.revealed_error_1000ths, 250U);
+    block.vector_snap_tenths = std::min(block.vector_snap_tenths, 40U);
+    block.depth_search = block.depth_search != 0U ? 1U : 0U;
+    block.depth_near_reach_px = std::min(block.depth_near_reach_px, 32U) & ~1U;
+    block.depth_far_reach_px = std::min(block.depth_far_reach_px, 80U) & ~3U;
+    block.depth_solves = std::clamp(block.depth_solves, 1U, 4U);
+    block.depth_nearer_percent = std::min(block.depth_nearer_percent, 50U);
+    block.depth_agree_1000ths = std::min(block.depth_agree_1000ths, 250U);
+    return block;
+}
+
+// The fields after the header, in order: what the shader indexes and what the
+// 813 record packs, 8 bits a value (every range fits).
+inline constexpr std::size_t kFieldCount = 15;
+[[nodiscard]] inline const std::uint32_t* fields(const Block& block) noexcept {
+    return &block.hybrid_agree_threshold_255ths;
+}
+static_assert(sizeof(Block) == sizeof(std::uint32_t) * (3 + kFieldCount));
+static_assert(offsetof(Block, hybrid_agree_threshold_255ths) == 12);
+static_assert(offsetof(Block, depth_agree_1000ths) == 12 + 4 * (kFieldCount - 1));
 
 }  // namespace xrfg::live_tuning

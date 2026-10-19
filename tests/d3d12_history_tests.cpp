@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include "xrfg/d3d12_frame_synthesizer.hpp"
+#include "xrfg/live_tuning.hpp"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -4585,7 +4586,10 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
         // V500: the vectors keep the edges they explain as an occlusion
         // (2.4 before, when the flow took them; 0.7 after).
         // V503: render-resolution vectors held to the same bound.
-        require(measure_only || !occluding || edge_error <= 1.2,
+        // V507: the cheaper defaults chosen in DI2 measure 2.8 here (the
+        // revealing edge 5.2 against 1.3 with V506's values; 32.5 without
+        // the one edge surface solve). Held at 6 so losing that solve fails.
+        require(measure_only || !occluding || edge_error <= 6.0,
             std::string("hybrid occlusion edges went back to the flow for eye ") +
                 std::to_string(eye) + ": " + std::to_string(edge_error));
     }
@@ -4828,7 +4832,9 @@ void test_hybrid_side_by_side(D3D12WarpFixture& fixture) {
         const double blend_error = blend_total / static_cast<double>(count);
         std::cout << "hybrid side-by-side eye=" << eye << " edge_mae=" << edge_error
                   << " blend_mae=" << blend_error << '\n';
-        require(edge_error <= 1.2,
+        // A half drawn with the other eye's vectors measures about 48; the
+        // V507 defaults measure 2.8 (the occlusion scene's bound).
+        require(edge_error <= 6.0,
             "hybrid side-by-side eye " + std::to_string(eye) +
                 " did not draw with its own vectors: " + std::to_string(edge_error));
     }
@@ -4997,6 +5003,7 @@ int main(int argc, char** argv) {
         }
         if (argc > 2 && std::string_view(argv[1]) == "hybrid" &&
             std::string_view(argv[2]) == "nvidia") {
+            SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
             D3D12WarpFixture nvidia_fixture(true);
             for (const auto scene : {HybridScene::occlusion, HybridScene::overlay, HybridScene::fade,
                                      HybridScene::occlusion_low_res}) {
@@ -5005,6 +5012,8 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc > 1 && std::string_view(argv[1]) == "hybrid") {
+            // The built-in values, not a tray window's (V507).
+            SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
             D3D12WarpFixture hybrid_fixture;
             for (const auto scene : {HybridScene::occlusion, HybridScene::overlay, HybridScene::fade,
                                      HybridScene::occlusion_low_res}) {
@@ -5016,6 +5025,40 @@ int main(int argc, char** argv) {
             // generated frame (none of them without it).
             require(test_hybrid_bars(hybrid_fixture, true) >= 0.95,
                 "hybrid bars with depth are not whole in the generated frame");
+            // V507: the tray's live tuning block reaches the shader. With a
+            // block that switches the depth search off, the bars go again.
+            // Skipped where a tray already owns the block, so a live window
+            // is not written over.
+            {
+                const HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr,
+                    PAGE_READWRITE, 0, sizeof(xrfg::live_tuning::Block),
+                    xrfg::live_tuning::kMappingName);
+                const bool owned = mapping != nullptr && GetLastError() != ERROR_ALREADY_EXISTS;
+                if (owned) {
+                    auto* block = static_cast<xrfg::live_tuning::Block*>(MapViewOfFile(
+                        mapping, FILE_MAP_WRITE, 0, 0, sizeof(xrfg::live_tuning::Block)));
+                    require(block != nullptr, "mapping the live tuning block");
+                    xrfg::live_tuning::Block values = xrfg::live_tuning::kDefaults;
+                    values.sequence = 1;
+                    values.depth_search = 0;
+                    *block = values;
+                    // The synthesizer retries a failed open once a second.
+                    SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", nullptr);
+                    Sleep(1100);
+                    const double with_block = test_hybrid_bars(hybrid_fixture, true);
+                    SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
+                    require(with_block <= 0.05,
+                        "the live tuning block's depth switch did not reach the shader");
+                    values.depth_search = 1;
+                    values.sequence = 2;
+                    *block = values;
+                    UnmapViewOfFile(block);
+                    CloseHandle(mapping);
+                } else if (mapping != nullptr) {
+                    CloseHandle(mapping);
+                    std::cout << "live tuning block owned by a tray; switch check skipped\n";
+                }
+            }
             hybrid_fixture.require_no_debug_errors();
             return 0;
         }

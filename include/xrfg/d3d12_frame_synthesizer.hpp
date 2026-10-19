@@ -301,12 +301,9 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// The composition's refinements as the ini sets them, for every synthesizer
-// in the process. Edge ghosting reduction is off on this branch whatever the
-// ini says; the repeating-pattern lock is on by default. The tray's live
-// tuning window, where it is open (expert mode), overrides the lock.
-void set_composition_switches(
-    bool edge_ghosting_reduction,
-    bool repeating_pattern_lock) noexcept;
+// The composition's edge ghosting reduction as the ini sets it, for every
+// synthesizer in the process; off on this branch whatever the ini says. (The
+// repeating-pattern lock left with V507: not needed beside the hybrid.)
+void set_composition_switches(bool edge_ghosting_reduction) noexcept;
 
 }  // namespace xrfg

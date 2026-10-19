@@ -67,36 +67,51 @@ uint repeated_capture_flag() {
     return SynthesisFlags & 1u;
 }
 
-// The tray's live tuning window for edge ghosting reduction
-// (xrfg::live_tuning), carried in the game-motion constants, which only the
-// game-motion branch reads. Bit 0 of GameMotionPadding says the values are
-// there; without it - no window, or a game-motion pair, whose padding is the
-// guide's output height - every accessor returns its built-in value, the set
-// chosen in the headset on V475 (2026-10-17).
-//   GameMotionPadding: bit 1 edge ghosting reduction on, bit 2 repeating-
-//     pattern lock on, bits 4-7 search rings, bits 8-11 survivors.
-//   GameMotionRect: spread trigger (px), endpoint error trigger, survivor
-//     margin, lands-on-itself tolerance (px).
-//   GameMotionScale: lands-on-itself tolerance per pixel of speed, pattern
-//     lock margin.
-bool live_tuning_present() {
-#ifdef XRFG_HYBRID
-    // A hybrid draw's game-motion constants carry the guide rectangle.
-    return false;
-#else
-    return UseGameMotion == 0u && (GameMotionPadding & 1u) != 0u;
-#endif
-}
-
+// The tray's live tuning window (xrfg::live_tuning), for the hybrid
+// composition only since V507 (the built-in values below are
+// live_tuning::kDefaults, the user's DI2 set of 2026-10-19): the synthesizer uploads its block, header and
+// all, into a small buffer at t8 for every hybrid pair - the window's values
+// while it is open, the built-in ones otherwise - so an accessor reads one
+// uniform word. A buffer without the magic (a null view) yields the built-in
+// values too. The other compositions have no tunable values left: the
+// repeating-pattern lock, which the flow composition carried in its free
+// game-motion constants, left with V507.
+//
 // The hybrid composition (compiled with XRFG_HYBRID): the game's vectors and
 // the optical flow both, chosen per pixel. Its game-motion constants carry
 // the guide rectangle for every draw, so the DLSS output rectangle travels
 // packed, 16 bits a value: UseGameMotion = x | y << 16, GameMotionPadding =
-// width | height << 16. The live tuning window's hybrid values ride in the
-// free bits of SynthesisFlags, which every composition ignores but this one:
-// bits 2-7 the agree threshold plus one (255ths), 24-27 the choice slope,
-// 28-31 the vectors slope; zero means the built-in value.
+// width | height << 16, bits 15 and 31 the depth flags.
 #ifdef XRFG_HYBRID
+ByteAddressBuffer HybridTuning : register(t8);
+
+static const uint kTuningMagic = 0x4C565446u;
+static const uint kTuningVersion = 7u;
+// Field indices: xrfg::live_tuning::Block's order after its header.
+static const uint kTuningAgree = 0u;
+static const uint kTuningChoiceSlope = 1u;
+static const uint kTuningVectorsSlope = 2u;
+static const uint kTuningFlowRuleSlope = 3u;
+static const uint kTuningEdgeReach = 4u;
+static const uint kTuningEdgeSolves = 5u;
+static const uint kTuningEdgeSurfaceAgree = 6u;
+static const uint kTuningRevealedError = 7u;
+static const uint kTuningVectorSnap = 8u;
+static const uint kTuningDepthSearch = 9u;
+static const uint kTuningDepthNearReach = 10u;
+static const uint kTuningDepthFarReach = 11u;
+static const uint kTuningDepthSolves = 12u;
+static const uint kTuningDepthNearer = 13u;
+static const uint kTuningDepthAgree = 14u;
+
+bool tuning_present() {
+    return HybridTuning.Load(0u) == kTuningMagic && HybridTuning.Load(4u) == kTuningVersion;
+}
+
+uint tuning_value(uint index, uint built_in) {
+    return tuning_present() ? HybridTuning.Load(12u + 4u * index) : built_in;
+}
+
 // How far the last synthesize_midpoint's two warped samples disagreed, blurred
 // a little, and lerped toward the pose-only blend's own disagreement where it
 // fell back to that: what the hybrid chooses by. 1 where it had no samples.
@@ -108,63 +123,65 @@ static float last_disagreement = 1.0;
 static uint last_vectors_case = 0u;
 #endif
 
+// Where the vectors' warped samples disagree by less, they are taken as they
+// are and the flow is not asked.
 float hybrid_agree_threshold() {
-    uint value = (SynthesisFlags >> 2u) & 0x3fu;
-    return value == 0u ? 5.0 / 255.0 : float(value - 1u) / 255.0;
+    return float(min(tuning_value(kTuningAgree, 62u), 62u)) / 255.0;
 }
-
 float hybrid_choice_slope() {
-    uint value = (SynthesisFlags >> 24u) & 0xfu;
-    return value == 0u ? 8.0 : float(value);
+    return float(clamp(tuning_value(kTuningChoiceSlope, 8u), 1u, 15u));
 }
-
 // Game motion's disagreements are mostly resampling at sharp detail, which a
 // gentle slope keeps on the warp (0.3's value).
 float game_motion_confidence_slope() {
-    uint value = (SynthesisFlags >> 28u) & 0xfu;
-    return value == 0u ? 3.0 : float(value);
+    return float(clamp(tuning_value(kTuningVectorsSlope, 3u), 1u, 15u));
+}
+float hybrid_flow_rule_slope() {
+    return float(clamp(tuning_value(kTuningFlowRuleSlope, 8u), 1u, 15u));
+}
+float edge_reach_factor() {
+    return float(clamp(tuning_value(kTuningEdgeReach, 100u), 100u, 200u)) / 100.0;
+}
+uint edge_search_solves() { return min(tuning_value(kTuningEdgeSolves, 1u), 4u); }
+float edge_surface_agree() {
+    return float(min(tuning_value(kTuningEdgeSurfaceAgree, 50u), 250u)) / 1000.0;
+}
+float revealed_error_limit() {
+    return float(min(tuning_value(kTuningRevealedError, 0u), 250u)) / 1000.0;
+}
+float vector_snap_pixels() {
+    return float(min(tuning_value(kTuningVectorSnap, 0u), 40u)) / 10.0;
+}
+bool depth_search_enabled() { return tuning_value(kTuningDepthSearch, 1u) != 0u; }
+uint depth_near_reach() { return min(tuning_value(kTuningDepthNearReach, 0u), 32u) & ~1u; }
+uint depth_far_reach() { return min(tuning_value(kTuningDepthFarReach, 32u), 80u) & ~3u; }
+uint depth_solve_limit() { return clamp(tuning_value(kTuningDepthSolves, 1u), 1u, 4u); }
+float depth_nearer_factor() {
+    return 1.0 + float(min(tuning_value(kTuningDepthNearer, 50u), 50u)) / 100.0;
+}
+float depth_agree_limit() {
+    return float(min(tuning_value(kTuningDepthAgree, 250u), 250u)) / 1000.0;
 }
 #else
+// The vectors-only composition runs the built-in values.
 float game_motion_confidence_slope() { return 3.0; }
+float edge_reach_factor() { return 1.25; }
+uint edge_search_solves() { return 2u; }
+float edge_surface_agree() { return 0.05; }
+float vector_snap_pixels() { return 1.0; }
 #endif
 
-bool live_flag(uint bit, bool built_in) {
-    return live_tuning_present() ? (GameMotionPadding & bit) != 0u : built_in;
-}
-
-uint live_field(uint shift, uint built_in) {
-    return live_tuning_present() ? (GameMotionPadding >> shift) & 0xfu : built_in;
-}
-
-// Edge ghosting reduction is off on this branch (V497): the live window no
-// longer carries its values, and a constant lets the compiler drop the
-// search from every composition.
+// Edge ghosting reduction is off on this branch (V497): a constant lets the
+// compiler drop the search from every composition, and its values are the
+// built-in ones, the set chosen in the headset on V475 (2026-10-17).
 bool edge_ghosting_reduction_enabled() { return false; }
-bool pattern_lock_enabled() { return live_flag(4u, true); }
-float pattern_lock_margin() {
-    return live_tuning_present() ? GameMotionScale.y : 1.0 / 255.0;
-}
-// The pose's error the lock accepts, both as its mean over the 3x3 patch and
-// at the pixel itself: a static surface under the pose differs from frame to
-// frame by little more than the game's temporal antialiasing noise.
-float pattern_lock_static_tolerance() { return 6.0 / 255.0; }
-uint midpoint_search_rings() { return clamp(live_field(4u, 3u), 1u, 5u); }
-uint midpoint_survivor_limit() { return clamp(live_field(8u, 1u), 1u, 3u); }
-float midpoint_spread_trigger() {
-    return live_tuning_present() ? GameMotionRect.x : 8.0;
-}
-float midpoint_error_trigger() {
-    return live_tuning_present() ? GameMotionRect.y : 24.0 / 255.0;
-}
-float midpoint_survivor_margin() {
-    return live_tuning_present() ? GameMotionRect.z : 2.0 / 255.0;
-}
-float fixed_point_tolerance() {
-    return live_tuning_present() ? GameMotionRect.w : 1.0;
-}
-float fixed_point_speed_tolerance() {
-    return live_tuning_present() ? GameMotionScale.x : 0.1;
-}
+uint midpoint_search_rings() { return 3u; }
+uint midpoint_survivor_limit() { return 1u; }
+float midpoint_spread_trigger() { return 8.0; }
+float midpoint_error_trigger() { return 24.0 / 255.0; }
+float midpoint_survivor_margin() { return 2.0 / 255.0; }
+float fixed_point_tolerance() { return 1.0; }
+float fixed_point_speed_tolerance() { return 0.1; }
 
 // The source views are the swapchain's own format. On an sRGB swapchain a
 // Load returns linear light, which is what the composition needs to write
@@ -710,7 +727,7 @@ float2 game_motion_for_pixel(float2 pixel, uint slice, uint view_index) {
     float2 t11 = GameMotionVectors.Load(int4(bottom_right, 0, 0));
     float2 lowest = min(min(t00, t10), min(t01, t11));
     float2 highest = max(max(t00, t10), max(t01, t11));
-    if (length((highest - lowest) * GameMotionScale) > 1.0) {
+    if (length((highest - lowest) * GameMotionScale) > vector_snap_pixels()) {
         raw = fraction.y < 0.5 ? (fraction.x < 0.5 ? t00 : t10)
                                : (fraction.x < 0.5 ? t01 : t11);
     }
@@ -1182,7 +1199,7 @@ float game_nearness(float2 pixel) {
     return (GameMotionPadding & 0x80000000u) != 0u ? depth : 1.0 - depth;
 }
 
-bool nearer(float a, float b) { return a > b * 1.05 + 1.0e-6; }
+bool nearer(float a, float b) { return a > b * depth_nearer_factor() + 1.0e-6; }
 #endif
 
 struct FullscreenVertex {
@@ -1303,7 +1320,7 @@ float4 synthesize_midpoint(
                 float2 last_displacement = float2(0.0, 0.0);
                 // The previous frame at the pixel itself, through the pose
                 // mapping alone: what a static surface shows there. The stable
-                // fallback blends it, and the pattern lock compares it.
+                // fallback blends it.
                 CameraSample previous_at_pixel = sample_previous_target(
                     pixel, Slice, ViewIndex);
                 if (use_game_motion_pipeline) {
@@ -1376,90 +1393,6 @@ float4 synthesize_midpoint(
                     current_coordinate = pixel - motion.residual * (1.0 - synthesis_fraction());
                     if (input_pose_compensated) {
                         raw_backward = motion.residual;
-                    }
-                    // Repeating-pattern lock. On a checkerboard, a grille or a
-                    // row of identical squares the block one period away
-                    // matches as well as the right one, and the flow
-                    // occasionally takes it: that frame's in-between image puts
-                    // the pattern a period off, then it snaps back - smooth, a
-                    // jump, smooth. The search above never sees it (the whole
-                    // patch carries the same wrong vector, so neither the
-                    // spread nor the endpoint error triggers). The pose already
-                    // explains a static surface, so where "nothing moved beyond
-                    // the head" matches about as well as the flow's motion, the
-                    // pose wins and the pixel is the stable blend. A moving
-                    // object's pose-only samples disagree, and its flow stands.
-                    //
-                    // Judged on the current-frame pixel against where each
-                    // answer says it came from - the flow's previous endpoint
-                    // at the whole vector, the pose's at the pixel itself -
-                    // so the verdict does not depend on the synthetic's
-                    // position. Judged on the in-between endpoints instead,
-                    // V478 could lock a pixel in the 3X synthetic at a third
-                    // and not in the one at two thirds, and a pattern then
-                    // alternated within the pair. Only where the search kept
-                    // the pixel's own vector, so an edge it corrected is left
-                    // as it chose.
-                    //
-                    // Judged on the 3x3 patch around the pixel, and the pose
-                    // must also match it almost exactly, not just as well as
-                    // the flow. One sample a side could not tell a static
-                    // pattern from a moving surface of low contrast - MSFS 2024
-                    // terrain and distant buildings seen from a flying aircraft,
-                    // which move with the aircraft, not the head - where both
-                    // answers match about as well: the lock took the pose
-                    // there, turning moving pixels into a cross-fade, and the
-                    // game's TAA noise decided it afresh per pixel and per frame,
-                    // which showed as sparkle and flicker, worst in 3X. A
-                    // static pattern under the pose matches across the whole
-                    // patch; a moving surface's pose answer misses its detail.
-                    // The tolerance also bounds what a wrong lock can cost: the
-                    // cross-fade it picks differs from the frames by about that.
-                    [branch] if (pattern_lock_enabled() &&
-                                 repeated_capture_flag() == 0 &&
-                                 length(residual_backward) >= 1.0 &&
-                                 length(motion.residual - residual_backward) < 0.5 &&
-                                 previous_at_pixel.valid >= 0.5 &&
-                                 current_fallback.valid >= 0.5) {
-                        float pose_error = 0.0;
-                        float flow_error = 0.0;
-                        bool patch_valid = true;
-                        [unroll] for (int dy = -1; dy <= 1; ++dy) {
-                            [unroll] for (int dx = -1; dx <= 1; ++dx) {
-                                const float2 offset = float2(dx, dy);
-                                CameraSample current_tap = current_fallback;
-                                CameraSample pose_tap = previous_at_pixel;
-                                if (dx != 0 || dy != 0) {
-                                    current_tap = sample_current_target(
-                                        pixel + offset, Slice, ViewIndex);
-                                    pose_tap = sample_previous_target(
-                                        pixel + offset, Slice, ViewIndex);
-                                }
-                                CameraSample flow_tap = sample_previous_target(
-                                    pixel + offset + residual_backward, Slice, ViewIndex);
-                                patch_valid = patch_valid && current_tap.valid >= 0.5 &&
-                                    pose_tap.valid >= 0.5 && flow_tap.valid >= 0.5;
-                                pose_error += rgb_error(pose_tap.color, current_tap.color);
-                                flow_error += rgb_error(flow_tap.color, current_tap.color);
-                            }
-                        }
-                        // The patch's mean, and the pixel's own: a locked
-                        // pixel's output depends only on its own pose sample,
-                        // so that is where the tolerance bounds the cost. A
-                        // lit window or a bright edge on a plain wall passed
-                        // the mean alone, up to 54/255 off, and sparkled on
-                        // distant MSFS 2024 buildings in 3X, where they move
-                        // past the pixel this lock needs and in 2X do not.
-                        if (patch_valid &&
-                            pose_error <= flow_error + 9.0 * pattern_lock_margin() &&
-                            pose_error <= 9.0 * pattern_lock_static_tolerance() &&
-                            rgb_error(previous_at_pixel.color, current_fallback.color) <=
-                                pattern_lock_static_tolerance()) {
-                            previous_sample = previous_at_pixel;
-                            current_sample = current_fallback;
-                            previous_coordinate = pixel;
-                            current_coordinate = pixel;
-                        }
                     }
                 }
                 if (endpoints_valid) {
@@ -1551,7 +1484,7 @@ float4 synthesize_midpoint(
                         // ghost. NVIDIA's cost and the fast check leaned on
                         // that blend there; only the bidirectional check stays.
                         confidence = saturate(1.0 +
-                            (stable_disagreement - disagreement) * 8.0) *
+                            (stable_disagreement - disagreement) * hybrid_flow_rule_slope()) *
                             consistency_confidence;
                         output_color = saturate(lerp(
                             stable_midpoint,
@@ -1630,7 +1563,7 @@ float4 synthesize_midpoint(
                             // 16 pixels, or a quarter beyond the displacement
                             // when that is larger. The tolerance grows with the
                             // reach, which keeps it the same gradient.
-                            float reach = max(16.0, 1.25 * max(length(last_displacement), length(here)));
+                            float reach = max(16.0, edge_reach_factor() * max(length(last_displacement), length(here)));
                             float tolerance = 0.1 * reach / 16.0;
                             bool motion_edge = false;
 #ifdef XRFG_HYBRID
@@ -1659,7 +1592,7 @@ float4 synthesize_midpoint(
 #ifdef XRFG_HYBRID_TINT
                                 last_vectors_case = revealed < 0.05 ? 2u : 3u;
 #endif
-                                if (revealed < 0.05) {
+                                if (revealed < revealed_error_limit()) {
                                     output_color = saturate(current_sample.color);
                                     explained = min(explained, revealed);
                                 }
@@ -1674,7 +1607,7 @@ float4 synthesize_midpoint(
                             // most two starts on another surface, nearest first,
                             // out to 32 pixels or the probes' reach (128 at most).
                             uint solves = 0;
-                            bool done = !motion_edge;
+                            bool done = !motion_edge || edge_search_solves() == 0u;
                             float search_reach = max(32.0, reach);
                             [loop] for (uint radius_index = 0; radius_index < 6 && !done; ++radius_index) {
                                 float radius = 4.0 * float(1u << radius_index);
@@ -1687,7 +1620,7 @@ float4 synthesize_midpoint(
                                         float4 a, b;
                                         ++solves;
                                         if (game_motion_surface(pixel, start, a, b) &&
-                                            rgb_error(a, b) < 0.05) {
+                                            rgb_error(a, b) < edge_surface_agree()) {
                                             output_color = saturate(lerp(a, b, synthesis_fraction()));
 #ifdef XRFG_HYBRID
                                             explained = rgb_error(a, b);
@@ -1697,7 +1630,7 @@ float4 synthesize_midpoint(
 #endif
                                             done = true;
                                         }
-                                        done = done || solves >= 2;
+                                        done = done || solves >= edge_search_solves();
                                     }
                                 }
                             }
@@ -1713,19 +1646,27 @@ float4 synthesize_midpoint(
                         // nearest first, that the game's depth says are
                         // nearer than the answer start a solve; a nearer
                         // surface that reaches the pixel is shown instead.
-                        if (game_depth_available() && !covered_case &&
+                        if (game_depth_available() && depth_search_enabled() && !covered_case &&
                             repeated_capture_flag() == 0) {
                             float here = game_nearness(current_coordinate);
                             float2 along = length(last_displacement) > 0.5
                                 ? normalize(last_displacement) : float2(1.0, 0.0);
                             uint depth_solves = 0;
                             bool depth_found = false;
-                            // Every 2 px out to 16, then every 4 out to 40,
-                            // either side: a 3 px bar is not stepped over.
-                            [loop] for (uint k = 0; k < 28 && !depth_found && depth_solves < 2; ++k) {
+                            // Every 2 px out to the near reach, then every 4
+                            // out to the far reach, either side: a 3 px bar is
+                            // not stepped over.
+                            uint near_steps = depth_near_reach() / 2u;
+                            uint far_steps = depth_far_reach() > depth_near_reach()
+                                ? (depth_far_reach() - depth_near_reach()) / 4u : 0u;
+                            uint depth_steps = 2u * (near_steps + far_steps);
+                            uint depth_limit = depth_solve_limit();
+                            [loop] for (uint k = 0; k < depth_steps && !depth_found &&
+                                        depth_solves < depth_limit; ++k) {
                                 uint step = k >> 1u;
-                                float distance = step < 8u
-                                    ? 2.0 * float(step + 1u) : 16.0 + 4.0 * float(step - 7u);
+                                float distance = step < near_steps
+                                    ? 2.0 * float(step + 1u)
+                                    : float(depth_near_reach()) + 4.0 * float(step - near_steps + 1u);
                                 float2 start = pixel + ((k & 1u) != 0u ? -distance : distance) * along;
                                 if (nearer(game_nearness(start), here)) {
                                     ++depth_solves;
@@ -1733,7 +1674,7 @@ float4 synthesize_midpoint(
                                     float2 endpoint;
                                     if (game_motion_surface_at(pixel, start, a, b, endpoint) &&
                                         nearer(game_nearness(endpoint), here) &&
-                                        rgb_error(a, b) < 0.1) {
+                                        rgb_error(a, b) < depth_agree_limit()) {
                                         output_color = saturate(lerp(a, b, synthesis_fraction()));
                                         explained = rgb_error(a, b);
                                         depth_found = true;
@@ -1749,7 +1690,7 @@ float4 synthesize_midpoint(
                     } else {
 #ifdef XRFG_HYBRID
                         // The hybrid's FidelityFX flow, by the same rule (V502).
-                        confidence = saturate(1.0 + (stable_disagreement - disagreement) * 8.0);
+                        confidence = saturate(1.0 + (stable_disagreement - disagreement) * hybrid_flow_rule_slope());
 #endif
                         output_color = saturate(lerp(
                             stable_midpoint,

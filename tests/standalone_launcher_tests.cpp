@@ -64,25 +64,22 @@ int main() {
             return 1;
         }
     }
-    // The composition's two switches: edge ghosting reduction off and the lock
-    // on by default, in both inis, round-trip; expert_mode is tray.ini only and
-    // off by default.
+    // The composition's switch: edge ghosting reduction off by default, in
+    // both inis, round-trips; expert_mode is tray.ini only and off by default.
+    // The repeating-pattern lock left with V507 and is written to neither.
     {
         LauncherSettings flipped;
         flipped.edge_ghosting_reduction = true;
-        flipped.repeating_pattern_lock = false;
         flipped.expert_mode = true;
         const LauncherSettings round_trip = parse_settings(serialize_settings(flipped));
-        if (release_defaults.edge_ghosting_reduction ||
-            !release_defaults.repeating_pattern_lock || release_defaults.expert_mode ||
+        if (release_defaults.edge_ghosting_reduction || release_defaults.expert_mode ||
             !contains(default_runtime_ini, "edge_ghosting_reduction=0") ||
-            !contains(default_runtime_ini, "repeating_pattern_lock=1") ||
+            contains(default_runtime_ini, "repeating_pattern_lock") ||
+            contains(serialize_settings(release_defaults), "repeating_pattern_lock") ||
             contains(default_runtime_ini, "expert_mode") ||
-            !round_trip.edge_ghosting_reduction || round_trip.repeating_pattern_lock ||
-            !round_trip.expert_mode ||
-            !contains(build_runtime_ini(round_trip), "edge_ghosting_reduction=1") ||
-            !contains(build_runtime_ini(round_trip), "repeating_pattern_lock=0")) {
-            std::cerr << "composition switches or expert_mode did not round-trip\n";
+            !round_trip.edge_ghosting_reduction || !round_trip.expert_mode ||
+            !contains(build_runtime_ini(round_trip), "edge_ghosting_reduction=1")) {
+            std::cerr << "composition switch or expert_mode did not round-trip\n";
             return 1;
         }
     }

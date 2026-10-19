@@ -259,9 +259,6 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "edge_ghosting_reduction") {
                     settings.edge_ghosting_reduction = value == "1" ||
                         lower_ascii(value) == "true";
-                } else if (key == "repeating_pattern_lock") {
-                    settings.repeating_pattern_lock = value == "1" ||
-                        lower_ascii(value) == "true";
                 } else if (key == "expert_mode") {
                     settings.expert_mode = value == "1" ||
                         lower_ascii(value) == "true";
@@ -351,8 +348,6 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\npause_hotkey=" + settings.pause_hotkey +
            "\r\nedge_ghosting_reduction=" +
            (settings.edge_ghosting_reduction ? "1" : "0") +
-           "\r\nrepeating_pattern_lock=" +
-           (settings.repeating_pattern_lock ? "1" : "0") +
            "\r\nexpert_mode=" + (settings.expert_mode ? "1" : "0") +
            "\r\n";
 }
@@ -590,8 +585,6 @@ std::string build_runtime_ini(
            "\r\ncapture_at_end_frame=" + (settings.capture_at_end_frame ? "1" : "0") +
            "\r\nedge_ghosting_reduction=" +
            (settings.edge_ghosting_reduction ? "1" : "0") +
-           "\r\nrepeating_pattern_lock=" +
-           (settings.repeating_pattern_lock ? "1" : "0") +
            "\r\n\r\n[diagnostics]\r\nlogging_enabled=" +
            (settings.diagnostics ? "1" : "0") +
            "\r\nmax_file_mb=" + std::to_string(max_file_mb) +

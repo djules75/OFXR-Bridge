@@ -42,8 +42,8 @@ composed from the game's vectors alone).
 
 | result | meaning |
 | --- | --- |
-| 812 | the ini's composition switches: bit 1 the repeating-pattern lock (bit 0, edge ghosting reduction, is recorded but off on this build) |
-| 813 | the live tuning window's values, once per change: `a` = pattern lock on `<< 8` or its margin in 255ths; `b` = hybrid agree threshold (255ths) `<< 16` or choice slope `<< 8` or vectors slope |
+| 812 | the ini's composition switch: bit 0 edge ghosting reduction, recorded but off on this build (bit 1, the repeating-pattern lock, left with V507) |
+| 813 | the live tuning window's values for the hybrid (V507), once per change, 8 bits a field from bit 0 in `xrfg::live_tuning::Block`'s order: `a` agree threshold (255ths), choice slope, vectors slope, flow rule slope, edge reach (percent), edge surface solves, surface agreement (1000ths), revealed check (1000ths); `b` vector snap (tenths of a pixel), depth search on, near reach (px), far reach (px), depth solves, nearer margin (percent), depth agreement (1000ths); `c` the window's sequence, 0 without the window (the built-in values) |
 | 814 | the first pair composed by the hybrid; `a` 1 on the NVIDIA backend, 0 on FidelityFX |
 | 815 | a pair with the game's vectors the hybrid could not use, first eight: `a` 1 the two frames' guides do not pair (`b` previous serial `<< 32` or the current guide's previous serial, `c` previous epoch `<< 32` or current epoch), 2 the guides do not cover the views (`b` view width `<< 32` or height, `c` guide output width `<< 32` or height), 3 the guide's resource is on another device |
 | 820 | an NGX module's exports are detoured; `a` the module (0 nvngx_dlss.dll, 1 nvngx_dlssd.dll, 2 _nvngx.dll), `b` whether it had a separate `EvaluateFeature_C` |

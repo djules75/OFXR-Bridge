@@ -106,12 +106,10 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_triple_frame_gen(
     const std::filesystem::path& module_directory) noexcept;
 
-// `[ofxr] edge_ghosting_reduction` and `[ofxr] repeating_pattern_lock`: the
-// composition's two refinements. Edge ghosting reduction is off unless set
-// to 1, the lock on unless set to 0; followed while the session runs.
+// `[ofxr] edge_ghosting_reduction`: the composition's refinement, off unless
+// set to 1; followed while the session runs. (`repeating_pattern_lock` left
+// with V507.)
 [[nodiscard]] bool read_edge_ghosting_reduction(
-    const std::filesystem::path& module_directory) noexcept;
-[[nodiscard]] bool read_repeating_pattern_lock(
     const std::filesystem::path& module_directory) noexcept;
 
 // `[ofxr] vulkan_session_bridge`: a Vulkan game's session is handed to the

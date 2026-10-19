@@ -94,14 +94,13 @@ struct LauncherSettings {
     // parse_hotkey's form. No menu entry; edit tray.ini. Empty, "off" or
     // anything parse_hotkey refuses means no key.
     std::string pause_hotkey{"ctrl+alt+f7"}; // kDefaultPauseHotkey
-    // The composition's edge ghosting reduction and repeating-pattern lock
-    // (the layer's edge_ghosting_reduction and repeating_pattern_lock). Not in
-    // the menu: edge ghosting reduction is off by default (it costs about
-    // 0.2 ms per game frame in 2X, 0.5 ms in 3X), the lock is on; tray.ini
-    // turns either on or off, and the running game follows within a quarter
-    // second of the next arm or option change. Reset to default restores both.
+    // The composition's edge ghosting reduction (the layer's
+    // edge_ghosting_reduction). Not in the menu: off by default (it costs
+    // about 0.2 ms per game frame in 2X, 0.5 ms in 3X); tray.ini turns it on,
+    // and the running game follows within a quarter second of the next arm
+    // or option change. Reset to default restores it. (The repeating-pattern
+    // lock left with V507: not needed beside the hybrid.)
     bool edge_ghosting_reduction{false};
-    bool repeating_pattern_lock{true};
     // Shows "Frame generation tuning (live)..." in the menu: the diagnostic
     // window for the composition's parameters. Off by default, set to 1 by
     // hand in tray.ini; Reset to default leaves it as it is.

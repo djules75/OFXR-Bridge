@@ -114,15 +114,14 @@ struct AppState {
     HICON disarmed_icon{};
     UINT taskbar_created_message{};
     bool armed{};
-    // The live tuning window for the pattern lock and the hybrid
-    // composition: hidden rather than destroyed on close so it keeps its
-    // position, and the shared block it writes (xrfg::live_tuning). The
-    // block lives as long as the tray, so values set once hold for every
-    // game started after them.
+    // The live tuning window for the hybrid composition: hidden rather than
+    // destroyed on close so it keeps its position, and the shared block it
+    // writes (xrfg::live_tuning). The block lives as long as the tray, so
+    // values set once hold for every game started after them.
     HWND tuning_window{};
     std::array<HWND, 1> tuning_switches{};
-    std::array<HWND, 4> tuning_sliders{};
-    std::array<HWND, 4> tuning_labels{};
+    std::array<HWND, 14> tuning_sliders{};
+    std::array<HWND, 14> tuning_labels{};
     HANDLE tuning_mapping{};
     xrfg::live_tuning::Block* tuning_block{};
 };
@@ -1054,7 +1053,9 @@ void change_pause_hotkey(AppState& state) {
 // The live tuning window. Each slider maps its integer position to one field
 // of xrfg::live_tuning::Block; the layer picks the values up on its next pair.
 // It opens on the composition's built-in values (live_tuning::kDefaults), so
-// nothing changes until a control moves.
+// nothing changes until a control moves. Every slider runs from cheaper on
+// the GPU at the left to costlier at the right: a value that is cheaper when
+// larger is `reversed`, its positions counted from the right.
 struct TuningSlider {
     const wchar_t* name;
     int minimum;
@@ -1066,33 +1067,70 @@ struct TuningSlider {
     const wchar_t* hint;
     // A heading drawn above this slider, opening a section of the window.
     const wchar_t* section;
+    bool reversed;
 };
 
-constexpr std::array<TuningSlider, 4> kTuningSliders{{
-    {L"Pattern lock margin", 0, 32,
-     &xrfg::live_tuning::Block::pattern_lock_margin_255ths, 1U, 1.0, L"/255",
-     L"higher = steadier patterns, risk of blur on slow movers", nullptr},
+constexpr std::array<TuningSlider, 14> kTuningSliders{{
     {L"Agree threshold", 0, 62,
      &xrfg::live_tuning::Block::hybrid_agree_threshold_255ths, 1U, 1.0, L"/255",
-     L"below it the vectors are taken as they are and the flow is skipped (cost)",
-     L"Hybrid: game motion vectors + optical flow (DLSS games, Hybrid on)"},
+     L"the flow is asked only where the vectors' two frames disagree by more",
+     L"Hybrid choice: the game's vectors against the optical flow", true},
     {L"Choice slope", 1, 15,
      &xrfg::live_tuning::Block::hybrid_choice_slope, 1U, 1.0, L"",
-     L"how sharply the better branch wins: 1 soft blend, 15 hard pick", nullptr},
+     L"1 soft blend, 15 hard pick of the better branch (no cost)", nullptr, false},
     {L"Vectors slope", 1, 15,
      &xrfg::live_tuning::Block::hybrid_vectors_slope, 1U, 1.0, L"",
-     L"how fast a vectors mismatch falls back to the pose-only blend", nullptr},
+     L"how fast a vectors mismatch falls back to the pose-only blend (no cost)",
+     nullptr, false},
+    {L"Flow rule slope", 1, 15,
+     &xrfg::live_tuning::Block::hybrid_flow_rule_slope, 1U, 1.0, L"",
+     L"how sharply the flow must beat the camera-only blend to be kept (no cost)",
+     nullptr, false},
+    {L"Edge reach", 100, 200,
+     &xrfg::live_tuning::Block::edge_reach_percent, 1U, 0.01, L"x",
+     L"edge probes and the surface search as a multiple of the motion",
+     L"The vectors at motion edges (V498-V504)", false},
+    {L"Edge surface solves", 0, 4,
+     &xrfg::live_tuning::Block::edge_search_solves, 1U, 1.0, L"",
+     L"second-surface solves per edge pixel; 0 none", nullptr, false},
+    {L"Surface agreement", 0, 250,
+     &xrfg::live_tuning::Block::edge_surface_agree_1000ths, 1U, 0.001, L"",
+     L"a found surface's two frames must agree within this (no cost)", nullptr, false},
+    {L"Revealed check", 0, 250,
+     &xrfg::live_tuning::Block::revealed_error_1000ths, 1U, 0.001, L"",
+     L"revealed background accepted within this; looser skips the flow more",
+     nullptr, true},
+    {L"Vector snap", 0, 40,
+     &xrfg::live_tuning::Block::vector_snap_tenths, 1U, 0.1, L"px",
+     L"nearest vector where the four texels differ by more; 0 always (no cost)",
+     nullptr, false},
+    {L"Near reach", 0, 16,
+     &xrfg::live_tuning::Block::depth_near_reach_px, 2U, 2.0, L"px",
+     L"the game's depth read every 2 px out to here, either side",
+     L"Depth search for thin near surfaces (V505; the switch above)", false},
+    {L"Far reach", 0, 20,
+     &xrfg::live_tuning::Block::depth_far_reach_px, 4U, 4.0, L"px",
+     L"then every 4 px out to here", nullptr, false},
+    {L"Depth solves", 1, 4,
+     &xrfg::live_tuning::Block::depth_solves, 1U, 1.0, L"",
+     L"solves per pixel from nearer starts", nullptr, false},
+    {L"Nearer margin", 0, 50,
+     &xrfg::live_tuning::Block::depth_nearer_percent, 1U, 1.0, L"%",
+     L"how much nearer a start must be; smaller tries more", nullptr, true},
+    {L"Depth agreement", 0, 250,
+     &xrfg::live_tuning::Block::depth_agree_1000ths, 1U, 0.001, L"",
+     L"a nearer surface's two frames must agree within this (no cost)", nullptr, false},
 }};
 
-// Unticked, off, for an A/B in the same scene.
+// Unticked, off, for an A/B in the same scene; off is the cheaper side.
 struct TuningSwitch {
     const wchar_t* label;
     std::uint32_t xrfg::live_tuning::Block::*field;
 };
 
 constexpr std::array<TuningSwitch, 1> kTuningSwitches{{
-    {L"Repeating-pattern lock",
-     &xrfg::live_tuning::Block::pattern_lock},
+    {L"Depth search (V505): nearer surfaces along the motion reach the generated pixel",
+     &xrfg::live_tuning::Block::depth_search},
 }};
 static_assert(kTuningSliders.size() == std::tuple_size_v<decltype(AppState::tuning_sliders)>);
 static_assert(kTuningSwitches.size() == std::tuple_size_v<decltype(AppState::tuning_switches)>);
@@ -1100,14 +1138,29 @@ static_assert(kTuningSwitches.size() == std::tuple_size_v<decltype(AppState::tun
 constexpr int kTuningSwitchBaseId = 2101;
 constexpr int kTuningResetId = 2120;
 
-[[nodiscard]] std::wstring tuning_slider_text(const TuningSlider& slider, int position) {
+// A slider's position for a block value, and the value's steps for a
+// position: a reversed slider counts from the right, so the costlier end is
+// the right one for every slider.
+[[nodiscard]] int tuning_position(const TuningSlider& slider, std::uint32_t value) {
+    const int steps = static_cast<int>(value / slider.per_step);
+    return slider.reversed ? slider.maximum + slider.minimum - steps : steps;
+}
+
+[[nodiscard]] int tuning_steps(const TuningSlider& slider, int position) {
+    return slider.reversed ? slider.maximum + slider.minimum - position : position;
+}
+
+[[nodiscard]] std::wstring tuning_slider_text(const TuningSlider& slider, int steps) {
     wchar_t text[240]{};
-    if (slider.display_scale == 1.0) {
-        swprintf_s(text, L"%s: %d%s  -  %s", slider.name, position, slider.unit,
+    const double shown = static_cast<double>(steps) * slider.display_scale;
+    if (shown == static_cast<double>(static_cast<int>(shown))) {
+        swprintf_s(text, L"%s: %d%s  -  %s", slider.name, static_cast<int>(shown),
+            slider.unit, slider.hint);
+    } else if (slider.display_scale >= 0.01) {
+        swprintf_s(text, L"%s: %.2f%s  -  %s", slider.name, shown, slider.unit,
             slider.hint);
     } else {
-        swprintf_s(text, L"%s: %.2f%s  -  %s", slider.name,
-            static_cast<double>(position) * slider.display_scale, slider.unit,
+        swprintf_s(text, L"%s: %.3f%s  -  %s", slider.name, shown, slider.unit,
             slider.hint);
     }
     return text;
@@ -1119,12 +1172,13 @@ void write_tuning(AppState& state) {
         return;
     }
     for (std::size_t index = 0; index < kTuningSliders.size(); ++index) {
+        const TuningSlider& slider = kTuningSliders[index];
         const int position = static_cast<int>(
             SendMessageW(state.tuning_sliders[index], TBM_GETPOS, 0, 0));
-        block->*kTuningSliders[index].field =
-            static_cast<std::uint32_t>(position) * kTuningSliders[index].per_step;
+        const int steps = tuning_steps(slider, position);
+        block->*slider.field = static_cast<std::uint32_t>(steps) * slider.per_step;
         SetWindowTextW(state.tuning_labels[index],
-            tuning_slider_text(kTuningSliders[index], position).c_str());
+            tuning_slider_text(slider, steps).c_str());
     }
     for (std::size_t index = 0; index < kTuningSwitches.size(); ++index) {
         block->*kTuningSwitches[index].field =
@@ -1141,7 +1195,7 @@ void reset_tuning_controls(AppState& state) {
     for (std::size_t index = 0; index < kTuningSliders.size(); ++index) {
         const TuningSlider& slider = kTuningSliders[index];
         SendMessageW(state.tuning_sliders[index], TBM_SETPOS, TRUE,
-            static_cast<LPARAM>(defaults.*slider.field / slider.per_step));
+            static_cast<LPARAM>(tuning_position(slider, defaults.*slider.field)));
     }
     for (std::size_t index = 0; index < kTuningSwitches.size(); ++index) {
         SendMessageW(state.tuning_switches[index], BM_SETCHECK,
@@ -1181,7 +1235,7 @@ LRESULT CALLBACK tuning_procedure(
 }
 
 // Creates the shared block the first time the window needs it, on the
-// built-in values with the two switches as tray.ini has them.
+// built-in values.
 [[nodiscard]] bool ensure_tuning_block(AppState& state) {
     if (state.tuning_block != nullptr) {
         return true;
@@ -1200,7 +1254,6 @@ LRESULT CALLBACK tuning_procedure(
     // Values first, then the header that makes the block valid.
     xrfg::live_tuning::Block values = xrfg::live_tuning::kDefaults;
     values.magic = 0;
-    values.pattern_lock = state.settings.repeating_pattern_lock ? 1U : 0U;
     *state.tuning_block = values;
     MemoryBarrier();
     state.tuning_block->magic = xrfg::live_tuning::kMagic;
@@ -1226,11 +1279,13 @@ void show_tuning_window(AppState& state) {
         controls.dwSize = sizeof(controls);
         controls.dwICC = ICC_BAR_CLASSES;
         static_cast<void>(InitCommonControlsEx(&controls));
+        constexpr int kCaptionHeight = 24;
         constexpr int kSwitchHeight = 26;
-        constexpr int kRowHeight = 52;
+        constexpr int kRowHeight = 44;
         constexpr int kSectionHeight = 30;
+        const int switches_top = 12 + kCaptionHeight;
         const int sliders_top =
-            12 + static_cast<int>(kTuningSwitches.size()) * kSwitchHeight + 8;
+            switches_top + static_cast<int>(kTuningSwitches.size()) * kSwitchHeight + 8;
         // Each slider's row, with a section heading's height above the
         // sliders that open one.
         std::array<int, kTuningSliders.size()> slider_tops{};
@@ -1258,11 +1313,17 @@ void show_tuning_window(AppState& state) {
             return;
         }
         const HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        const HWND caption = CreateWindowExW(
+            0, L"STATIC",
+            L"Every slider runs from cheaper on the GPU (left) to costlier (right).",
+            WS_CHILD | WS_VISIBLE, 14, 12, 570, 18,
+            state.tuning_window, nullptr, instance, nullptr);
+        SendMessageW(caption, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         for (std::size_t index = 0; index < kTuningSwitches.size(); ++index) {
             state.tuning_switches[index] = CreateWindowExW(
                 0, L"BUTTON", kTuningSwitches[index].label,
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                14, 12 + static_cast<int>(index) * kSwitchHeight, 570, 22,
+                14, switches_top + static_cast<int>(index) * kSwitchHeight, 570, 22,
                 state.tuning_window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(
                     kTuningSwitchBaseId + static_cast<int>(index))),
@@ -1288,7 +1349,7 @@ void show_tuning_window(AppState& state) {
             state.tuning_sliders[index] = CreateWindowExW(
                 0, TRACKBAR_CLASSW, L"",
                 WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_AUTOTICKS,
-                8, top + 18, 580, 30,
+                8, top + 18, 580, 24,
                 state.tuning_window, nullptr, instance, nullptr);
             const TuningSlider& slider = kTuningSliders[index];
             const bool fine = slider.maximum - slider.minimum > 16;
@@ -1707,7 +1768,7 @@ void handle_command(AppState& state, UINT command) {
                 L"consistency off. Prefer FPS over latency: on. Frame Gen "
                 L"multiplier: 2X. Lower VRAM: on. FPS overlay: upper right, big, latency and Hybrid status shown. Bridge "
                 L"flight recorder: off. Pause key: Ctrl + Alt + F7. Hybrid: off. "
-                L"Repeating-pattern lock: on. Settings "
+                L"Settings "
                 L"only reachable in tray.ini go back to their defaults too.\n\n"
                 L"The FPS overlay, the flight recorder, the Frame Gen multiplier, "
                 L"the optical flow and Hybrid change in running games at once; "

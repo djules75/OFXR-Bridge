@@ -12950,9 +12950,9 @@ void clear_status() noexcept {
     });
 }
 
-// The ini's edge_ghosting_reduction and repeating_pattern_lock, followed
-// while the session runs like triple_frame_gen: a read every quarter second,
-// handed to the synthesizers, which take it at their next pair.
+// The ini's edge_ghosting_reduction, followed while the session runs like
+// triple_frame_gen: a read every quarter second, handed to the synthesizers,
+// which take it at their next pair. (repeating_pattern_lock left with V507.)
 void follow_composition_switches() noexcept {
     static std::atomic<std::int64_t> next_poll{0};
     const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -12964,12 +12964,9 @@ void follow_composition_switches() noexcept {
                   std::chrono::milliseconds(250))
                   .count(),
         std::memory_order_relaxed);
-    const auto directory = current_layer_directory();
     // Edge ghosting reduction is off on this branch (V497) whatever the ini
     // says: the composition no longer compiles its search.
-    xrfg::set_composition_switches(
-        false,
-        xrfg::implicit_layer::read_repeating_pattern_lock(directory));
+    xrfg::set_composition_switches(false);
 }
 
 void apply_live_frame_multiplier(

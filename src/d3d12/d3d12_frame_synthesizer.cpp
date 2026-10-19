@@ -79,8 +79,12 @@ struct NvidiaInputScaleRatio {
     }
 }
 constexpr UINT kMaxReprojectionViews = 2;
-// t7: the game's depth for the hybrid (V505).
-constexpr UINT kSrvDescriptorCount = 8;
+// t7: the game's depth for the hybrid (V505); t8: the live tuning block
+// for the hybrid (V507).
+constexpr UINT kSrvDescriptorCount = 9;
+// The tuning block's upload buffer, per work slot; the block is 72 bytes.
+constexpr UINT kTuningBufferBytes = 256;
+static_assert(sizeof(xrfg::live_tuning::Block) <= kTuningBufferBytes);
 constexpr UINT kUavDescriptorCount = 3;
 constexpr UINT kDescriptorBlockSize =
     kSrvDescriptorCount + kUavDescriptorCount;
@@ -342,25 +346,20 @@ constexpr UINT kEncodeSrgbFlowInputFlag = 2U;
 }
 
 // The ini's switches (set_composition_switches): bit 0 edge ghosting
-// reduction, bit 1 repeating-pattern lock. Edge ghosting reduction is off on
-// this branch (V497): the composition no longer compiles its search, so the
-// bit is recorded but changes nothing.
-std::atomic<std::uint32_t> g_composition_switches{2U};
+// reduction. Off on this branch (V497): the composition no longer compiles
+// its search, so the bit is recorded but changes nothing. The repeating-
+// pattern lock, bit 1, left with V507.
+std::atomic<std::uint32_t> g_composition_switches{0U};
 
-// Which composition a draw's constants are laid out for. The flow
-// composition's game-motion constants are free, so the live window's
-// pattern-lock values ride there (frame_synthesis.hlsl, live_tuning_present);
-// the vectors-only composition carries the guide rectangle in them, and the
-// hybrid carries the guide rectangle in them too, with the window's hybrid
-// values in the spare bits of synthesis_flags.
+// Which composition a draw's constants are laid out for. The vectors-only
+// composition carries the guide rectangle in the game-motion constants, and
+// the hybrid does too, with the live tuning window's values uploaded apart
+// (apply_live_composition_tuning); the flow composition's are free.
 enum class CompositionLayout { flow, game_motion, hybrid };
 
-// Where the live window is not open: the built-in values with the ini's
-// pattern-lock switch, in the same constants. Lock on leaves the constants
-// alone, which is what the shader's built-in values already are. Each change
-// of the switches is recorded once, as embedded_configuration result=812
-// with the two bits.
-void apply_composition_switches(SynthesisParameters& parameters) noexcept {
+// Each change of the switches is recorded once, as embedded_configuration
+// result=812 with the bits.
+void record_composition_switches() noexcept {
     static std::atomic<std::uint32_t> recorded{0xFFFFFFFFU};
     const std::uint32_t switches = g_composition_switches.load(std::memory_order_relaxed);
     if (recorded.exchange(switches, std::memory_order_relaxed) != switches) {
@@ -369,12 +368,6 @@ void apply_composition_switches(SynthesisParameters& parameters) noexcept {
             812,
             switches);
     }
-    if ((switches & 2U) != 0U) {
-        return;
-    }
-    parameters.game_motion_padding = 1U | (3U << 4U) | (1U << 8U);
-    parameters.game_motion_rect = {8.0F, 24.0F / 255.0F, 2.0F / 255.0F, 1.0F};
-    parameters.game_motion_scale = {0.1F, 1.0F / 255.0F};
 }
 
 // The tray's live tuning window (xrfg::live_tuning). The block is opened
@@ -387,6 +380,11 @@ void apply_composition_switches(SynthesisParameters& parameters) noexcept {
     static HANDLE mapping = nullptr;
     static const xrfg::live_tuning::Block* block = nullptr;
     static std::chrono::steady_clock::time_point next_attempt{};
+    // The test harness measures the built-in values whatever a tray's window
+    // holds (it read the window's values until V507).
+    if (GetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", nullptr, 0) != 0) {
+        return false;
+    }
     std::scoped_lock lock(mutex);
     if (block == nullptr) {
         const auto now = std::chrono::steady_clock::now();
@@ -416,54 +414,42 @@ void apply_composition_switches(SynthesisParameters& parameters) noexcept {
     return true;
 }
 
-// The window's values into a draw's constants, called once per pair. The
-// pattern lock reaches the flow composition's constants only (the other two
-// layouts carry the guide rectangle there); the hybrid values ride in
-// synthesis_flags for every layout, where only the hybrid reads them. Each
-// new set of values is recorded once, as embedded_configuration result=813:
-//   a: repeating-pattern lock on << 8 | its margin (255ths)
-//   b: hybrid agree threshold (255ths) << 16 | choice slope << 8 | vectors
-//      slope
-// (811 was V475-V494's record, with the edge ghosting reduction values that
-// left with the feature.)
+// The window's block into a hybrid pair's slot buffer, read by the shader at
+// t8 (V507): the window's values while it is open, the built-in ones
+// otherwise, clamped to their ranges, so the shader has one source. Called
+// once per pair for every layout, so the switches are recorded for all of
+// them. Each new set of values is recorded once, as embedded_configuration
+// result=813: a the first eight fields of xrfg::live_tuning::Block, 8 bits
+// each from bit 0; b the remaining seven, likewise; c the window's sequence
+// (0 without the window). (811 was V475-V494's record, with the edge
+// ghosting reduction values that left with the feature; V497-V506's 813
+// packed the pattern lock and three hybrid values.)
 void apply_live_composition_tuning(
-    SynthesisParameters& parameters,
+    void* tuning_mapped,
     CompositionLayout layout) noexcept {
     static std::atomic<std::uint64_t> recorded{~0ULL};
-    if (layout == CompositionLayout::game_motion) {
+    record_composition_switches();
+    if (layout != CompositionLayout::hybrid || tuning_mapped == nullptr) {
         return;
     }
-    xrfg::live_tuning::Block values{};
-    if (!read_live_tuning(&values)) {
-        if (layout == CompositionLayout::flow) {
-            apply_composition_switches(parameters);
-        }
-        return;
+    xrfg::live_tuning::Block values = xrfg::live_tuning::kDefaults;
+    xrfg::live_tuning::Block live{};
+    if (read_live_tuning(&live)) {
+        values = xrfg::live_tuning::clamped(live);
     }
-    const bool pattern_lock = values.pattern_lock != 0U;
-    const std::uint32_t lock_margin =
-        std::min<std::uint32_t>(values.pattern_lock_margin_255ths, 255U);
-    const std::uint32_t agree =
-        std::min<std::uint32_t>(values.hybrid_agree_threshold_255ths, 62U);
-    const std::uint32_t choice =
-        std::clamp<std::uint32_t>(values.hybrid_choice_slope, 1U, 15U);
-    const std::uint32_t vectors =
-        std::clamp<std::uint32_t>(values.hybrid_vectors_slope, 1U, 15U);
-    if (layout == CompositionLayout::flow) {
-        parameters.game_motion_padding = 1U | (pattern_lock ? 4U : 0U) |
-            (3U << 4U) | (1U << 8U);
-        parameters.game_motion_rect = {8.0F, 24.0F / 255.0F, 2.0F / 255.0F, 1.0F};
-        parameters.game_motion_scale = {0.1F, static_cast<float>(lock_margin) / 255.0F};
-    }
-    parameters.synthesis_flags = (parameters.synthesis_flags & 0x00FFFF03U) |
-        ((agree + 1U) << 2U) | (choice << 24U) | (vectors << 28U);
+    std::memcpy(tuning_mapped, &values, sizeof(values));
     if (recorded.exchange(values.sequence, std::memory_order_relaxed) != values.sequence) {
+        const std::uint32_t* field = xrfg::live_tuning::fields(values);
+        std::uint64_t a = 0, b = 0;
+        for (std::size_t index = 0; index < 8; ++index) {
+            a |= static_cast<std::uint64_t>(field[index] & 0xFFU) << (8 * index);
+        }
+        for (std::size_t index = 8; index < xrfg::live_tuning::kFieldCount; ++index) {
+            b |= static_cast<std::uint64_t>(field[index] & 0xFFU) << (8 * (index - 8));
+        }
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::embedded_configuration,
-            813,
-            (static_cast<std::uint64_t>(pattern_lock ? 1U : 0U) << 8U) | lock_margin,
-            (static_cast<std::uint64_t>(agree) << 16U) |
-                (static_cast<std::uint64_t>(choice) << 8U) | vectors);
+            813, a, b, values.sequence);
     }
 }
 
@@ -844,6 +830,12 @@ struct D3D12FrameSynthesizer::Impl {
         ComPtr<ID3D12CommandAllocator> timing_marker_allocator;
         ComPtr<ID3D12GraphicsCommandList> timing_marker_command_list;
         ComPtr<ID3D12DescriptorHeap> descriptor_heap;
+        // The live tuning block for this slot's hybrid draws (V507): an
+        // upload buffer the CPU fills as the pair is recorded, read as a raw
+        // buffer at t8 of every descriptor block. The slot's previous pair
+        // has finished on the GPU by then (reset_work_slot).
+        ComPtr<ID3D12Resource> tuning_buffer;
+        void* tuning_mapped{};
         std::array<NvidiaEyeResources, kMaxReprojectionViews> nvidia_eyes;
         D3D12NvidiaGpuTiming timing_metadata{};
         D3D12NvidiaGpuTiming cached_timing{};
@@ -1906,6 +1898,34 @@ struct D3D12FrameSynthesizer::Impl {
             if (FAILED(result)) {
                 return result;
             }
+            {
+                D3D12_HEAP_PROPERTIES upload{};
+                upload.Type = D3D12_HEAP_TYPE_UPLOAD;
+                upload.CreationNodeMask = 1;
+                upload.VisibleNodeMask = 1;
+                D3D12_RESOURCE_DESC buffer{};
+                buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                buffer.Width = kTuningBufferBytes;
+                buffer.Height = 1;
+                buffer.DepthOrArraySize = 1;
+                buffer.MipLevels = 1;
+                buffer.SampleDesc.Count = 1;
+                buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                result = device->CreateCommittedResource(
+                    &upload, D3D12_HEAP_FLAG_NONE, &buffer,
+                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                    IID_PPV_ARGS(slot.tuning_buffer.GetAddressOf()));
+                if (FAILED(result)) {
+                    return result;
+                }
+                slot.tuning_buffer->SetName(L"OFXR Live Tuning");
+                const D3D12_RANGE no_read{0, 0};
+                result = slot.tuning_buffer->Map(0, &no_read, &slot.tuning_mapped);
+                if (FAILED(result)) {
+                    return result;
+                }
+                std::memset(slot.tuning_mapped, 0, kTuningBufferBytes);
+            }
             if (backend == D3D12OpticalFlowBackend::nvidia) {
                 result = device->CreateCommandAllocator(
                     D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -2109,6 +2129,14 @@ struct D3D12FrameSynthesizer::Impl {
                     : 1U;
             D3D12_SHADER_RESOURCE_VIEW_DESC null_depth = null_motion;
             null_depth.Format = DXGI_FORMAT_R32_FLOAT;
+            // The slot's tuning block at t8 of every block (V507).
+            D3D12_SHADER_RESOURCE_VIEW_DESC tuning_view{};
+            tuning_view.Format = DXGI_FORMAT_R32_TYPELESS;
+            tuning_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            tuning_view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            tuning_view.Buffer.FirstElement = 0;
+            tuning_view.Buffer.NumElements = kTuningBufferBytes / 4;
+            tuning_view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
             for (UINT block = 0; block < block_count; ++block) {
                 device->CreateShaderResourceView(nullptr, &null_motion,
                     offset_cpu_handle(cpu_start,
@@ -2117,6 +2145,10 @@ struct D3D12FrameSynthesizer::Impl {
                 device->CreateShaderResourceView(nullptr, &null_depth,
                     offset_cpu_handle(cpu_start,
                         block * kDescriptorBlockSize + 7U,
+                        descriptor_increment));
+                device->CreateShaderResourceView(slot.tuning_buffer.Get(), &tuning_view,
+                    offset_cpu_handle(cpu_start,
+                        block * kDescriptorBlockSize + 8U,
                         descriptor_increment));
             }
         }
@@ -2494,13 +2526,19 @@ struct D3D12FrameSynthesizer::Impl {
                 DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R32_UINT,
                 DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R32_UINT,
                 DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT,
+                DXGI_FORMAT_R32_TYPELESS,
             };
             for (UINT index = 0; index < kSrvDescriptorCount; ++index) {
                 const bool array = index == 0 || index == 1 || index == 6 || index == 7;
                 D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
                 srv.Format = kSrvFormats[index];
                 srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                if (array) {
+                if (index == 8) {
+                    // The tuning block, a raw buffer (V507).
+                    srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                    srv.Buffer.NumElements = kTuningBufferBytes / 4;
+                    srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+                } else if (array) {
                     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
                     srv.Texture2DArray.MipLevels = 1;
                     srv.Texture2DArray.ArraySize = 1;
@@ -3764,7 +3802,7 @@ struct D3D12FrameSynthesizer::Impl {
         SynthesisParameters parameters{};
         parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
             pack_input_flags(view_format);
-        apply_live_composition_tuning(parameters,
+        apply_live_composition_tuning(slot.tuning_mapped,
             guides != nullptr ? CompositionLayout::hybrid : CompositionLayout::flow);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
@@ -4282,7 +4320,7 @@ struct D3D12FrameSynthesizer::Impl {
         SynthesisParameters parameters{};
         parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
             pack_input_flags(view_format);
-        apply_live_composition_tuning(parameters,
+        apply_live_composition_tuning(slot.tuning_mapped,
             guides != nullptr ? CompositionLayout::hybrid : CompositionLayout::flow);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
@@ -4584,7 +4622,7 @@ struct D3D12FrameSynthesizer::Impl {
 
         SynthesisParameters parameters{};
         parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
-        apply_live_composition_tuning(parameters, CompositionLayout::flow);
+        apply_live_composition_tuning(slot.tuning_mapped, CompositionLayout::flow);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;
@@ -5803,11 +5841,9 @@ bool D3D12FrameSynthesizer::initialized() const noexcept {
     }
 }
 
-void set_composition_switches(
-    bool edge_ghosting_reduction,
-    bool repeating_pattern_lock) noexcept {
+void set_composition_switches(bool edge_ghosting_reduction) noexcept {
     g_composition_switches.store(
-        (edge_ghosting_reduction ? 1U : 0U) | (repeating_pattern_lock ? 2U : 0U),
+        edge_ghosting_reduction ? 1U : 0U,
         std::memory_order_relaxed);
 }
 

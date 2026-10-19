@@ -296,20 +296,6 @@ bool read_edge_ghosting_reduction(
     }
 }
 
-bool read_repeating_pattern_lock(
-    const std::filesystem::path& module_directory) noexcept {
-    try {
-        if (module_directory.empty()) {
-            return true;
-        }
-        const auto ini_path = module_directory / L"ofxr_bridge.ini";
-        return GetPrivateProfileIntW(
-                   L"ofxr", L"repeating_pattern_lock", 1, ini_path.c_str()) != 0;
-    } catch (...) {
-        return true;
-    }
-}
-
 bool read_vulkan_session_bridge(
     const std::filesystem::path& module_directory) noexcept {
     try {
