@@ -3404,6 +3404,84 @@ void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
             alternating_right->eyes[0]->previous_serial == 4 &&
             alternating_right->eyes[0]->scale_x > 0.5F,
         "the alternating stream lost its eyes after a frame with one evaluation");
+
+    // V533: R.E.A.L. VR's Ghost of Tsushima. The DLSS output is wider than the
+    // eye image (4192 against 4003): the eye image is its middle window, the
+    // camera's field (+-1.2043) holding the eye's (+-1.1501). Scaled down: a
+    // 64-wide output, a 61-wide eye image, the eye's field 61/64 of the
+    // camera's. Without the eye's view the stream is refused by size; with it,
+    // each eye takes the stream placed on its window.
+    {
+        constexpr float kCameraTan = 1.2043F;
+        constexpr float kEyeTan = kCameraTan * 61.0F / 64.0F;
+        const auto window = texture(61);
+        const auto publish_wide = [&]() {
+            fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+                xrfg::DlssMotionVectorPublication p{};
+                p.stream = 833;
+                p.output = color.Get();
+                p.motion_vectors = motion.Get();
+                p.output_width = 64;
+                p.output_height = 32;
+                p.motion_width = 64;
+                p.motion_height = 32;
+                p.producer_queue = fixture.queue();
+                p.producer_command_list = list;
+                p.resource_state = D3D12_RESOURCE_STATE_COMMON;
+                p.view.known = true;
+                p.view.tan_left = -kCameraTan;
+                p.view.tan_right = kCameraTan;
+                p.view.tan_up = 0.9656F;
+                p.view.tan_down = -0.9656F;
+                p.view.right = {0.0F, 0.0F, 1.0F};
+                p.view.position = {100.0F, 5.0F, 2000.0F};
+                xrfg::publish_dlss_motion_vectors(p);
+            });
+            return xrfg::dlss_motion_vector_publications();
+        };
+        std::uint64_t wide_release = 0;
+        for (int frame = 0; frame < 2; ++frame) {
+            publish_wide();
+            wide_release = publish_wide();
+        }
+        const auto wide_position = xrfg::dlss_motion_vector_stream_position(833);
+        xrfg::anchor_dlss_alternating_eyes(833, wide_position.epoch, 1);
+        const auto resolve_wide = [&](int eye) {
+            return xrfg::resolve_dlss_motion_vectors(
+                window.Get(), fixture.queue(), eye, wide_release, wide_release);
+        };
+        require(!resolve_wide(0), "a wider stream guided an eye whose view is unknown");
+        for (std::uint32_t eye = 0; eye < 2; ++eye) {
+            xrfg::set_dlss_eye_view(eye, {-kEyeTan, kEyeTan, 0.9656F, -0.9656F, 0, 0, 61, 32});
+        }
+        const auto wide_left = resolve_wide(0);
+        const auto wide_right = resolve_wide(1);
+        const auto on_window = [](const std::shared_ptr<const xrfg::DlssMotionVectorSet>& set) {
+            if (!set || !set->eyes[0]) return false;
+            const auto& frame = *set->eyes[0];
+            return frame.placed && frame.output_x == 0 && frame.output_width == 61 &&
+                frame.output_height == 32 && std::fabs(frame.placed_motion_rect[0] - 1.5F) < 0.05F &&
+                std::fabs(frame.placed_motion_rect[2] - 61.0F) < 0.05F &&
+                std::fabs(frame.placed_motion_rect[1]) < 0.05F &&
+                std::fabs(frame.placed_motion_rect[3] - 32.0F) < 0.05F;
+        };
+        require(on_window(wide_left) && on_window(wide_right) &&
+                wide_left->eyes[0]->serial != wide_right->eyes[0]->serial,
+            "a wider stream was not placed on each eye's window");
+        // The anchor's patches: the output's origin a texel and a half to the
+        // left of the eye image's.
+        std::int32_t origin_x = 0, origin_y = 0;
+        require(xrfg::dlss_inset_origin(833, 0, &origin_x, &origin_y) &&
+                (origin_x == -2 || origin_x == -1) && origin_y == 0,
+            "the eye image's window was not reported for the anchor");
+        // A camera that does not hold the eye's field places nothing.
+        for (std::uint32_t eye = 0; eye < 2; ++eye) {
+            xrfg::set_dlss_eye_view(eye, {-1.5F, 1.5F, 0.9656F, -0.9656F, 0, 0, 61, 32});
+        }
+        require(!resolve_wide(0), "a stream whose camera misses the eye's field guided it");
+        for (std::uint32_t eye = 0; eye < 2; ++eye) xrfg::set_dlss_eye_view(eye, {});
+        xrfg::retire_dlss_motion_vector_stream(833);
+    }
     xrfg::configure_dlss_alternating_eyes(false);
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_dlss_motion_vector_stream(799);

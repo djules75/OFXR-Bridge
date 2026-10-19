@@ -168,6 +168,9 @@ struct Registry {
     std::unordered_map<std::uint64_t, StreamState> streams;
     std::vector<RetiredSnapshots> retired;
     DlssMotionVectorStatistics statistics;
+    // V533: set_dlss_eye_view.
+    std::array<DlssEyeView, kDlssMotionVectorEyeCount> eye_views{};
+    std::array<bool, kDlssMotionVectorEyeCount> eye_view_known{};
 };
 
 Registry& registry() {
@@ -1055,6 +1058,51 @@ void anchor_dlss_alternating_eyes(
     }
 }
 
+void set_dlss_eye_view(std::uint32_t eye, const DlssEyeView& view) noexcept {
+    try {
+        if (eye >= kDlssMotionVectorEyeCount) return;
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        state.eye_views[eye] = view;
+        state.eye_view_known[eye] = view.width != 0 && view.height != 0 &&
+            view.tan_right > view.tan_left && view.tan_up > view.tan_down;
+    } catch (...) {
+    }
+}
+
+bool dlss_inset_origin(std::uint64_t stream, std::uint32_t eye,
+    std::int32_t* x, std::int32_t* y) noexcept {
+    try {
+        if (eye >= kDlssMotionVectorEyeCount || x == nullptr || y == nullptr) return false;
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        const auto found = state.streams.find(stream);
+        if (found == state.streams.end() || !found->second.latest ||
+            !state.eye_view_known[eye]) return false;
+        const DlssMotionVectorFrame& frame = *found->second.latest;
+        const auto placed = place_guide_in_view(frame, state.eye_views[eye]);
+        if (!placed || frame.output_width == 0 || frame.output_height == 0) return false;
+        // The output's edges on the eye image, as place_guide_in_view finds
+        // them, and its pixels' size there.
+        const DlssEyeView& view = state.eye_views[eye];
+        const DlssViewGeometry& g = frame.view;
+        const double eye_width = static_cast<double>(view.tan_right) - view.tan_left;
+        const double eye_height = static_cast<double>(view.tan_up) - view.tan_down;
+        const double left = view.x + (g.tan_left - view.tan_left) / eye_width * view.width;
+        const double right = view.x + (g.tan_right - view.tan_left) / eye_width * view.width;
+        const double top = view.y + (view.tan_up - g.tan_up) / eye_height * view.height;
+        const double bottom = view.y + (view.tan_up - g.tan_down) / eye_height * view.height;
+        const double scale_x = (right - left) / frame.output_width;
+        const double scale_y = (bottom - top) / frame.output_height;
+        if (!(std::fabs(scale_x - 1.0) <= 0.01) || !(std::fabs(scale_y - 1.0) <= 0.01)) return false;
+        *x = static_cast<std::int32_t>(std::lround(left));
+        *y = static_cast<std::int32_t>(std::lround(top));
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 DlssStreamPosition dlss_motion_vector_stream_position(std::uint64_t stream) noexcept {
     DlssStreamPosition position;
     try {
@@ -1130,9 +1178,50 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             return frame.output->GetDesc().DepthOrArraySize >= kDlssMotionVectorEyeCount &&
                 frame.motion_vectors->GetDesc().DepthOrArraySize >= kDlssMotionVectorEyeCount;
         };
+        // V533: an evaluation larger than this image whose camera holds this
+        // eye's field: the eye image is a window of it (R.E.A.L. VR's Ghost of
+        // Tsushima), and the evaluation guides it placed on that window.
+        const bool eye_view = (eye == 0 || eye == 1) &&
+            state.eye_view_known[static_cast<std::size_t>(eye)];
+        const auto fits_image = [&](const DlssMotionVectorFrame& frame) {
+            return frame.output_x == 0 && frame.output_y == 0 &&
+                output_fits_extent(frame.output_width, description.Width) &&
+                output_fits_extent(frame.output_height, description.Height);
+        };
+        const auto inset_of_image = [&](const DlssMotionVectorFrame& frame) {
+            return eye_view && frame.output_x == 0 && frame.output_y == 0 &&
+                frame.output_width >= description.Width &&
+                frame.output_height >= description.Height &&
+                place_guide_in_view(frame, state.eye_views[static_cast<std::size_t>(eye)]) != nullptr;
+        };
+        // 858, the first eight placements: a the eye << 32 | the stream's low
+        // bits, b the output's width << 32 | height, c the placed vector
+        // rectangle (x, y, width, height in eighths of a texel, 16 bits each).
+        const auto place_inset = [&](DlssMotionVectorFrame& frame) {
+            if (!eye_view || fits_image(frame)) return;
+            const auto placed =
+                place_guide_in_view(frame, state.eye_views[static_cast<std::size_t>(eye)]);
+            if (!placed) return;
+            frame = *placed;
+            if (state.statistics.inset_placed++ < 8) {
+                const auto eighths = [](float value) {
+                    return static_cast<std::uint64_t>(std::clamp(value * 8.0F, 0.0F, 65535.0F)) & 0xFFFFU;
+                };
+                try {
+                    bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 858,
+                        (static_cast<std::uint64_t>(eye) << 32U) | (frame.stream & 0xFFFFFFFFULL),
+                        (static_cast<std::uint64_t>(frame.output_width) << 32U) | frame.output_height,
+                        eighths(frame.placed_motion_rect[0]) | (eighths(frame.placed_motion_rect[1]) << 16U) |
+                            (eighths(frame.placed_motion_rect[2]) << 32U) |
+                            (eighths(frame.placed_motion_rect[3]) << 48U));
+                } catch (...) {
+                }
+            }
+        };
         const auto one_eye = [&](std::shared_ptr<const DlssMotionVectorFrame> chosen,
                                  bool shared_stream) {
             auto frame = std::make_shared<DlssMotionVectorFrame>(*chosen);
+            place_inset(*frame);
             if (array_eyes(*chosen) && (eye == 0 || eye == 1)) {
                 frame->output_slice = static_cast<std::uint32_t>(eye);
                 frame->motion_slice = static_cast<std::uint32_t>(eye);
@@ -1193,9 +1282,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             // Only an evaluation the size of this image (or a few texels
             // larger, output_fits_extent) can be its guide.
             std::erase_if(candidates, [&](const Candidate& c) {
-                return c.frame->output_x != 0 || c.frame->output_y != 0 ||
-                    !output_fits_extent(c.frame->output_width, description.Width) ||
-                    !output_fits_extent(c.frame->output_height, description.Height);
+                return !fits_image(*c.frame) && !inset_of_image(*c.frame);
             });
         }
 
@@ -1320,6 +1407,10 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 // from: a rectangle placed by the camera, as MSFS 2024's
                 // periphery is.
                 const StreamState::EyeTrack& left = stream.eyes[0];
+                // V533: as a shift of the vectors read (in texels), applied
+                // after the eye's window is placed.
+                double shift_x = 0.0, shift_y = 0.0;
+                bool shifted = false;
                 if (eye == 1 && left.current && left.watermark == released_at &&
                     left.current->serial != frame->serial && left.current->view.known &&
                     frame->view.known && frame->output_width != 0 && frame->output_height != 0 &&
@@ -1342,14 +1433,22 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                             std::fabs(dy) < frame->output_height / 4.0) {
                             const double per_x = static_cast<double>(frame->motion_width) / frame->output_width;
                             const double per_y = static_cast<double>(frame->motion_height) / frame->output_height;
-                            frame->placed = true;
-                            frame->placed_motion_rect = {
-                                static_cast<float>(frame->motion_x + dx * per_x),
-                                static_cast<float>(frame->motion_y + dy * per_y),
-                                static_cast<float>(frame->motion_width),
-                                static_cast<float>(frame->motion_height)};
+                            shift_x = dx * per_x;
+                            shift_y = dy * per_y;
+                            shifted = true;
                         }
                     }
+                }
+                place_inset(*frame);
+                if (shifted) {
+                    if (!frame->placed) {
+                        frame->placed = true;
+                        frame->placed_motion_rect = {static_cast<float>(frame->motion_x),
+                            static_cast<float>(frame->motion_y), static_cast<float>(frame->motion_width),
+                            static_cast<float>(frame->motion_height)};
+                    }
+                    frame->placed_motion_rect[0] += static_cast<float>(shift_x);
+                    frame->placed_motion_rect[1] += static_cast<float>(shift_y);
                 }
                 auto result = std::make_shared<DlssMotionVectorSet>();
                 result->eye_count = 1;
@@ -1429,9 +1528,12 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                         if (ao != bo) return ao < bo;
                         return a.first_publication < b.first_publication;
                     });
+                auto frame = std::make_shared<DlssMotionVectorFrame>(
+                    *candidates[static_cast<std::size_t>(eye)].frame);
+                place_inset(*frame);
                 auto result = std::make_shared<DlssMotionVectorSet>();
                 result->eye_count = 1;
-                result->eyes[0] = candidates[static_cast<std::size_t>(eye)].frame;
+                result->eyes[0] = std::move(frame);
                 ++state.statistics.matched;
                 return result;
             }

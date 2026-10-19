@@ -7527,6 +7527,17 @@ void refresh_projection_guides(
             releases[eye] = chain->release_publication;
         }
         if (!chains[0] || !chains[1]) return;
+        // V533: each eye's view for the resolver and the R.E.A.L. VR anchor,
+        // where an eye image is a window of a wider evaluation.
+        for (std::size_t eye = 0; eye < fovs.size(); ++eye) {
+            if (!fovs[eye] || rects[eye].extent.width <= 0 || rects[eye].extent.height <= 0) continue;
+            xrfg::set_dlss_eye_view(static_cast<std::uint32_t>(eye),
+                {std::tan(fovs[eye]->angleLeft), std::tan(fovs[eye]->angleRight),
+                    std::tan(fovs[eye]->angleUp), std::tan(fovs[eye]->angleDown),
+                    rects[eye].offset.x, rects[eye].offset.y,
+                    static_cast<std::uint32_t>(rects[eye].extent.width),
+                    static_cast<std::uint32_t>(rects[eye].extent.height)});
+        }
         static std::atomic<std::uint64_t> records{0};
         static std::atomic<std::uint64_t> published_records{0};
         const std::uint64_t record = records.fetch_add(1, std::memory_order_relaxed);

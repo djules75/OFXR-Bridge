@@ -179,6 +179,19 @@ Then:
   characters ("DLSS com" for R.E.A.L. VR's). 855, a call passed over (the
   outer, raw one), first 64: `a` handle index << 48 | module slot << 40 |
   depth << 56; `b`, `c` as 854.
+- V533: an eye image can be a window of a wider DLSS output. R.E.A.L. VR's
+  Ghost of Tsushima renders 4192 x 3360 with a camera of +-1.2043 and submits
+  each eye as the middle 4003 x 3360 at +-1.1501. The layer hands the
+  registry each eye's view at every mapping (set_dlss_eye_view); a stream
+  larger than the eye image whose camera holds the eye's field passes the
+  size check and is placed on the eye's window (place_guide_in_view, as for
+  MSFS 2024's periphery), the right eye's rotation shift (V524) on top. The
+  anchor's and the eye measurement's patches are read at the output's origin
+  on the eye image (dlss_inset_origin), so they compare the same picture.
+  858, the first eight placements: `a` the eye `<< 32` or the stream's low
+  bits; `b` the output's width `<< 32` or height, as placed (the window's);
+  `c` the placed vector rectangle (x, y, width, height in eighths of a
+  texel, 16 bits each).
 - 845, an eye's choice when a stream is shared without the anchor: `a` eye << 32
   | publication; `b` the two cameras' sides; `c` method (1 cameras apart, 2
   equal, 3 unknown) - the evaluation order decides, the cameras never.

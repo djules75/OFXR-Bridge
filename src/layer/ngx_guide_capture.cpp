@@ -1990,6 +1990,29 @@ void skip_anchor(std::uint32_t reason, std::uint64_t detail = 0) noexcept {
     return {place(index % 4U, width), place(index / 4U, height)};
 }
 
+// V533: where an output patch's texel (0, 0) lies on eye `eye`'s image: the
+// eye rectangle's origin, or - where the eye image is a window of a wider
+// output (R.E.A.L. VR's Ghost of Tsushima, dlss_inset_origin) - the output's
+// origin on it, so a patch is compared with the same picture.
+[[nodiscard]] std::pair<std::int32_t, std::int32_t> eye_patch_origin(
+    std::uint64_t stream, std::uint32_t eye, const NgxEyeImage& image) noexcept {
+    std::int32_t x = image.x, y = image.y;
+    if (!dlss_inset_origin(stream, eye, &x, &y)) return {image.x, image.y};
+    return {x, y};
+}
+
+// Whether a patch at (x, y) of the output, `margin` wider either way, lies
+// on the eye's rectangle once moved by `origin`.
+[[nodiscard]] bool patch_on_eye(std::pair<std::int32_t, std::int32_t> origin,
+    std::uint32_t x, std::uint32_t y, std::uint32_t margin, const NgxEyeImage& image) noexcept {
+    const std::int64_t left = static_cast<std::int64_t>(origin.first) + x - margin;
+    const std::int64_t top = static_cast<std::int64_t>(origin.second) + y;
+    return left >= image.x && top >= image.y &&
+        left + kAnchorPatch + 2 * static_cast<std::int64_t>(margin) <=
+            static_cast<std::int64_t>(image.x) + image.width &&
+        top + kAnchorPatch <= static_cast<std::int64_t>(image.y) + image.height;
+}
+
 // The typeless families read as their typed members: a runtime's images are
 // typeless (R8G8B8A8_TYPELESS on Virtual Desktop and Pimax), and so are the
 // bridge's shared textures made from them.
@@ -3630,7 +3653,7 @@ void read_measure(MeasureJob& job) noexcept {
 // the next when one is due and the last four evaluations are in the history.
 void measure_eyes(const std::shared_ptr<GuideTransport12>& transport, ID3D12Device* device,
     ID3D12CommandQueue* queue, const std::array<NgxEyeImage, 2>& eyes,
-    std::uint64_t released_at) noexcept {
+    std::uint64_t released_at, std::uint64_t stream) noexcept {
     try {
         MeasureJob& job = measure_job();
         if (job.pending) {
@@ -3657,6 +3680,7 @@ void measure_eyes(const std::shared_ptr<GuideTransport12>& transport, ID3D12Devi
         }
         std::array<std::uint64_t, 2> eye_pitch{};
         std::array<DXGI_FORMAT, 2> eye_formats{};
+        std::array<std::pair<std::int32_t, std::int32_t>, 2> origins{};
         for (std::uint32_t k = 0; k < 2; ++k) {
             const NgxEyeImage& image = eyes[k];
             if (image.image == nullptr || image.x < 0 || image.y < 0) return;
@@ -3665,12 +3689,10 @@ void measure_eyes(const std::shared_ptr<GuideTransport12>& transport, ID3D12Devi
             if (bytes == 0 || (description.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS) == 0) {
                 return;
             }
+            origins[k] = eye_patch_origin(stream, k, image);
             for (std::uint32_t p = 0; p < kAnchorPatches; ++p) {
                 const auto [x, y] = anchor_patch_origin(p, samples[0].width, samples[0].height);
-                if (x < static_cast<std::uint32_t>(kMeasureShift) ||
-                    x + kAnchorPatch + kMeasureShift > image.width || y + kAnchorPatch > image.height) {
-                    return;
-                }
+                if (!patch_on_eye(origins[k], x, y, kMeasureShift, image)) return;
             }
             eye_formats[k] = description.Format;
             eye_pitch[k] = align_up(static_cast<std::uint64_t>(kMeasureWindow) * bytes,
@@ -3714,8 +3736,9 @@ void measure_eyes(const std::shared_ptr<GuideTransport12>& transport, ID3D12Devi
         for (std::uint32_t k = 0; k < 2; ++k) {
             for (std::uint32_t p = 0; p < kAnchorPatches; ++p) {
                 const auto [x, y] = anchor_patch_origin(p, samples[0].width, samples[0].height);
-                const auto left = static_cast<UINT>(eyes[k].x) + x - kMeasureShift;
-                const auto top = static_cast<UINT>(eyes[k].y) + y;
+                const auto left = static_cast<UINT>(origins[k].first + static_cast<std::int32_t>(x) -
+                    static_cast<std::int32_t>(kMeasureShift));
+                const auto top = static_cast<UINT>(origins[k].second + static_cast<std::int32_t>(y));
                 D3D12_TEXTURE_COPY_LOCATION from{};
                 from.pResource = eyes[k].image;
                 from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -5488,7 +5511,7 @@ void anchor_ngx_alternating_eyes(
             return;
         }
         std::scoped_lock lock(anchor_mutex());
-        measure_eyes(transport, device.Get(), queue.Get(), eyes, released_at);
+        measure_eyes(transport, device.Get(), queue.Get(), eyes, released_at, stream);
         AnchorJob& job = anchor_job();
         if (job.pending) {
             if (job.fence->GetCompletedValue() < job.value) return;
@@ -5524,6 +5547,7 @@ void anchor_ngx_alternating_eyes(
         // barrier; every patch where it lies on the output, from the eye's
         // origin.
         std::array<std::uint64_t, 2> patch_pitch{};
+        std::array<std::pair<std::int32_t, std::int32_t>, 2> origins{};
         for (std::uint32_t eye = 0; eye < 2; ++eye) {
             const NgxEyeImage& image = eyes[eye];
             if (image.image == nullptr || image.x < 0 || image.y < 0) {
@@ -5541,9 +5565,10 @@ void anchor_ngx_alternating_eyes(
                     (static_cast<std::uint64_t>(description.Flags) << 32U));
                 return;
             }
+            origins[eye] = eye_patch_origin(stream, eye, image);
             for (std::uint32_t patch = 0; patch < kAnchorPatches; ++patch) {
                 const auto [x, y] = anchor_patch_origin(patch, older.width, older.height);
-                if (x + kAnchorPatch > image.width || y + kAnchorPatch > image.height) {
+                if (!patch_on_eye(origins[eye], x, y, 0, image)) {
                     skip_anchor(5, (static_cast<std::uint64_t>(image.width) << 32U) | image.height);
                     return;
                 }
@@ -5599,8 +5624,8 @@ void anchor_ngx_alternating_eyes(
         for (std::uint32_t eye = 0; eye < 2; ++eye) {
             for (std::uint32_t patch = 0; patch < kAnchorPatches; ++patch) {
                 const auto [x, y] = anchor_patch_origin(patch, older.width, older.height);
-                const auto left = static_cast<UINT>(eyes[eye].x) + x;
-                const auto top = static_cast<UINT>(eyes[eye].y) + y;
+                const auto left = static_cast<UINT>(origins[eye].first + static_cast<std::int32_t>(x));
+                const auto top = static_cast<UINT>(origins[eye].second + static_cast<std::int32_t>(y));
                 D3D12_TEXTURE_COPY_LOCATION from{};
                 from.pResource = eyes[eye].image;
                 from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;

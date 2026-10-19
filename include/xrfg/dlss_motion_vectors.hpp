@@ -206,6 +206,8 @@ struct DlssMotionVectorStatistics {
     std::uint64_t view_unmatched{};
     // V516: eye pairs joined by cameras whose insets were found too.
     std::uint64_t inset_matched{};
+    // V533: evaluations placed on an eye image that is a window of them.
+    std::uint64_t inset_placed{};
     // V519: let-go snapshot sets still waiting for the GPU to finish with
     // them (a retired stream, a reallocated slot), counted when read.
     std::uint64_t retired_snapshots_held{};
@@ -306,6 +308,18 @@ struct DlssStreamPosition {
 };
 // Where a stream stands: its newest publication's epoch, serial and number.
 DlssStreamPosition dlss_motion_vector_stream_position(std::uint64_t stream) noexcept;
+// V533: each eye's view as the layer submits it (its field and its
+// rectangle on the eye image), set at every xrEndFrame mapping. An eye image
+// can be a window of a wider DLSS output: R.E.A.L. VR's Ghost of Tsushima
+// renders 4192 x 3360 with a camera of +-1.2043 and submits each eye as its
+// middle 4003 x 3360, +-1.1501. A stream whose camera holds the eye's field
+// is then that eye's guide, placed on the window (place_guide_in_view).
+void set_dlss_eye_view(std::uint32_t eye, const DlssEyeView& view) noexcept;
+// V533: where the newest evaluation of `stream` puts its output's origin on
+// eye `eye`'s image, in that image's pixels, when the eye is such a window
+// at the output's own scale (within a percent); false otherwise.
+bool dlss_inset_origin(std::uint64_t stream, std::uint32_t eye,
+    std::int32_t* x, std::int32_t* y) noexcept;
 void report_dlss_motion_vector_status(DlssMotionVectorStatus status) noexcept;
 void report_dlss_motion_vector_use() noexcept;
 // A pair the hybrid composition used: counted as used, and as hybrid.
