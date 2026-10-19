@@ -153,6 +153,10 @@ rotation are still possible.
    the game and leave it armed while the VR mod is injected.
 6. Select **Disarm bridge** or close the tray application when finished.
 
+On Linux under Proton the tray cannot stay running beside the game: see
+[OFXR Bridge on Linux (Proton)](docs/LINUX.md) for arming it with
+`--arm-and-exit` instead.
+
 ### Pause and resume
 
 To compare with and without generated frames while you play, use **Pause
