@@ -593,6 +593,15 @@ struct PresenterSlot {
     XrTime display_time{};
 };
 
+// A flat panel the application submits beside its projection - a quad or a
+// cylinder: UEVR's HUD, a game's menu - as one frame places it (V508).
+struct PanelPose {
+    XrStructureType type{};
+    XrSwapchain swapchain{XR_NULL_HANDLE};
+    XrSpace space{XR_NULL_HANDLE};
+    XrPosef pose{};
+};
+
 struct ProjectionLayerSnapshot {
     std::uint32_t layer_index{};
     XrCompositionLayerFlags layer_flags{};
@@ -811,6 +820,12 @@ struct SessionState {
     xrfg::NgxGuideCaptureStatistics hybrid_capture_before{};
     xrfg::DlssMotionVectorStatistics hybrid_guides_before{};
     int hybrid_status{-1};
+    // The application's flat panels as its last frame and the one before
+    // placed them, for the generated frames between them (V508); and those
+    // already recorded as 760. frame_call_mutex.
+    std::vector<PanelPose> panel_poses_current;
+    std::vector<PanelPose> panel_poses_previous;
+    std::vector<XrSwapchain> panels_recorded;
     // Whether the flight recorder was writing when apply_embedded_control
     // last ran. A change rebuilds each synthesizer with or without its GPU
     // timing, so a log switched on in a running session has the timings.
@@ -7531,6 +7546,9 @@ struct GeneratedFrameEndInfo {
     XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
     std::vector<ProjectionLayerCopy> projections;
     std::vector<OwnedCompositionLayer> composition_layers;
+    // A synthetic's flat panels placed between the two frames (V508),
+    // reserved up front so the pointers into it hold; moved with the frame.
+    std::vector<OwnedCompositionLayer> adjusted_layers;
     std::vector<const XrCompositionLayerBaseHeader*> layer_pointers;
     // Synthesizers whose current copy is recorded but not yet submitted.
     // Only the synthetic half of a pair carries these: the copy must reach
@@ -11183,6 +11201,121 @@ struct ProjectionResourceDestination {
     XrSwapchain destination_swapchain{XR_NULL_HANDLE};
 };
 
+// A flat panel's place in one frame: quad and cylinder layers carry a pose
+// in a space; the others are left as they are.
+[[nodiscard]] std::optional<PanelPose> panel_pose(
+    const XrCompositionLayerBaseHeader* layer) noexcept {
+    if (layer == nullptr) return std::nullopt;
+    if (layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+        const auto* quad = reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+        return PanelPose{layer->type, quad->subImage.swapchain, quad->space, quad->pose};
+    }
+    if (layer->type == XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR) {
+        const auto* cylinder = reinterpret_cast<const XrCompositionLayerCylinderKHR*>(layer);
+        return PanelPose{layer->type, cylinder->subImage.swapchain, cylinder->space,
+                         cylinder->pose};
+    }
+    return std::nullopt;
+}
+
+void note_panel_poses(const XrFrameEndInfo* info, std::vector<PanelPose>* poses) {
+    poses->clear();
+    if (info == nullptr || info->layers == nullptr) return;
+    for (std::uint32_t index = 0; index < info->layerCount; ++index) {
+        if (const auto pose = panel_pose(info->layers[index])) poses->push_back(*pose);
+    }
+}
+
+// Between two poses at `fraction` of the way from `from` to `to`: the
+// position along the line, the orientation by normalised lerp on the short
+// arc (two frames apart, the arc is small).
+[[nodiscard]] XrPosef pose_between(const XrPosef& from, const XrPosef& to, float fraction) {
+    XrPosef pose{};
+    pose.position.x = from.position.x + (to.position.x - from.position.x) * fraction;
+    pose.position.y = from.position.y + (to.position.y - from.position.y) * fraction;
+    pose.position.z = from.position.z + (to.position.z - from.position.z) * fraction;
+    const XrQuaternionf& a = from.orientation;
+    XrQuaternionf b = to.orientation;
+    if (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w < 0.0F) {
+        b = {-b.x, -b.y, -b.z, -b.w};
+    }
+    XrQuaternionf q{a.x + (b.x - a.x) * fraction, a.y + (b.y - a.y) * fraction,
+                    a.z + (b.z - a.z) * fraction, a.w + (b.w - a.w) * fraction};
+    const float length = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    if (!(length > 1.0e-6F) || !std::isfinite(length)) return to;
+    pose.orientation = {q.x / length, q.y / length, q.z / length, q.w / length};
+    return pose;
+}
+
+// A synthetic's flat panels between where the previous frame and this one
+// placed them (V508). Generated frames carried this frame's panels as they
+// were, so a panel the application moves every frame - UEVR's HUD, which
+// follows the head - moved on every second frame shown in 2X and every third
+// in 3X while the world around it moved on every frame: double vision of the
+// HUD whenever the head moved, and none with generation paused. The
+// synthetic depicts the moment `fraction` of the way from the previous frame
+// to this one, so its panels go there too. A panel that did not move - one
+// fixed in the view space, or a still menu - is left as it is. Each panel is
+// recorded once, as presenter_transition 760: a its layer type | 1 << 32
+// where it moved, b its swapchain, c how far it moved between the two
+// frames, micrometres | microradians << 32.
+void place_panels_between(
+    SessionState& state,
+    std::span<const PanelPose> previous,
+    float fraction,
+    GeneratedFrameEndInfo* output) {
+    if (previous.empty() || !(fraction > 0.0F && fraction < 1.0F)) return;
+    output->adjusted_layers.reserve(output->layer_pointers.size());
+    for (std::size_t index = 0; index < output->layer_pointers.size(); ++index) {
+        const XrCompositionLayerBaseHeader* layer = output->layer_pointers[index];
+        const auto now = panel_pose(layer);
+        if (!now) continue;
+        const auto before = std::find_if(previous.begin(), previous.end(),
+            [&](const PanelPose& candidate) {
+                return candidate.type == now->type && candidate.swapchain == now->swapchain &&
+                    candidate.space == now->space;
+            });
+        if (before == previous.end()) continue;
+        const XrVector3f& a = before->pose.position;
+        const XrVector3f& b = now->pose.position;
+        const float distance = std::sqrt((b.x - a.x) * (b.x - a.x) +
+            (b.y - a.y) * (b.y - a.y) + (b.z - a.z) * (b.z - a.z));
+        const XrQuaternionf& qa = before->pose.orientation;
+        const XrQuaternionf& qb = now->pose.orientation;
+        const float dot = std::min(1.0F, std::abs(
+            qa.x * qb.x + qa.y * qb.y + qa.z * qb.z + qa.w * qb.w));
+        const float angle = 2.0F * std::acos(dot);
+        const bool moved = std::isfinite(distance) && std::isfinite(angle) &&
+            (distance > 1.0e-5F || angle > 1.0e-5F);
+        if (std::find(state.panels_recorded.begin(), state.panels_recorded.end(),
+                now->swapchain) == state.panels_recorded.end() &&
+            state.panels_recorded.size() < 8) {
+            state.panels_recorded.push_back(now->swapchain);
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::presenter_transition,
+                760,
+                static_cast<std::uint64_t>(now->type) | (moved ? 1ULL << 32U : 0ULL),
+                handle_value(now->swapchain),
+                static_cast<std::uint64_t>(std::min(distance * 1.0e6F, 4.0e9F)) |
+                    (static_cast<std::uint64_t>(std::min(angle * 1.0e6F, 4.0e9F)) << 32U));
+        }
+        if (!moved) continue;
+        const XrPosef between = pose_between(before->pose, now->pose, fraction);
+        if (layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+            XrCompositionLayerQuad copy = *reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+            copy.pose = between;
+            output->adjusted_layers.emplace_back(copy);
+        } else {
+            XrCompositionLayerCylinderKHR copy =
+                *reinterpret_cast<const XrCompositionLayerCylinderKHR*>(layer);
+            copy.pose = between;
+            output->adjusted_layers.emplace_back(copy);
+        }
+        output->layer_pointers[index] = composition_layer_header(output->adjusted_layers.back());
+    }
+    output->info.layers = output->layer_pointers.data();
+}
+
 [[nodiscard]] bool build_generated_frame_end_info(
     const XrFrameEndInfo* source,
     const ProjectionSnapshot& current_snapshot,
@@ -13100,6 +13233,10 @@ XrResult layer_end_frame_impl(
     // must not keep the application's other thread out of xrWaitFrame while it
     // waits. Everything this mutex protects is finished by then.
     std::unique_lock frame_call_lock(state->frame_call_mutex);
+    // This frame's flat panels, and the frame before's for the generated
+    // frames between the two (V508).
+    state->panel_poses_previous.swap(state->panel_poses_current);
+    note_panel_poses(end_info, &state->panel_poses_current);
     state->application_end_thread_id = GetCurrentThreadId();
     state->application_end_thread.store(
         state->application_end_thread_id, std::memory_order_relaxed);
@@ -13687,6 +13824,18 @@ XrResult layer_end_frame_impl(
                 extra_destinations.data(), extra_destinations.size()),
             &extra_generated);
         if (synthetic_built && current_built) {
+            // The synthetics' flat panels between the two frames (V508), at
+            // the moments their images show; the synthesizer's own guard on
+            // a degenerate fraction applies here too.
+            const auto usable_fraction = [](float fraction) noexcept {
+                return fraction > 0.05F && fraction < 0.95F ? fraction : 0.5F;
+            };
+            place_panels_between(*state, state->panel_poses_previous,
+                usable_fraction(interpolation_fraction), &first_generated);
+            if (extra_ready && extra_interpolation_fraction) {
+                place_panels_between(*state, state->panel_poses_previous,
+                    usable_fraction(*extra_interpolation_fraction), &extra_generated);
+            }
             // The synthetic frame owns the deferred copies: they must reach
             // the queue after it has been handed to the runtime.
             for (const PreparedProjectionResource& resource :

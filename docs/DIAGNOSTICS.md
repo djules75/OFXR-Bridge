@@ -74,6 +74,17 @@ that stopped:
 | 828 | vectors captured, but not matched to the eye images |
 | 815 | matched, but the hybrid rejected the pairs |
 
+### Flat panels in generated frames (V508)
+
+`presenter_transition` result 760, once per flat panel (quad or cylinder
+layer) the application submits beside its projection, at most eight a
+session: `a` the layer's XrStructureType, plus bit 32 where the panel moved
+between two frames; `b` its swapchain; `c` how far it moved between the two
+frames, micrometres in the low 32 bits and microradians in the high. A panel
+that moves (UEVR's HUD follows the head) is placed between its two positions
+in each generated frame, at the moment the generated image shows; one that
+does not is left as it is.
+
 ### Per-eye guides and capture diagnostics
 
 `presenter_transition` result 751, per eye after xrEndFrame's mapping, for

@@ -336,6 +336,8 @@ struct EndFrameRecord {
     std::uint32_t quad_layer_count{};
     std::uint32_t quad_layer_index{
         std::numeric_limits<std::uint32_t>::max()};
+    // The quad's x, which the flight scenario moves every frame (V508).
+    float quad_x{};
 };
 
 struct LocateViewsRecord {
@@ -759,6 +761,8 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_end_frame(
                 layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
                 ++record.quad_layer_count;
                 record.quad_layer_index = layer_index;
+                record.quad_x =
+                    reinterpret_cast<const XrCompositionLayerQuad*>(layer)->pose.position.x;
             }
             if (layer == nullptr || layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
                 continue;
@@ -3074,6 +3078,9 @@ int main(int argc, char** argv) {
             projection_views[index].fov = submitted.fov;
         }
 
+        // The quad moves 0.1 m a frame, as UEVR's HUD follows the head:
+        // the generated frames have to place it between (V508).
+        flight_quad.pose.position.x += 0.1F;
         XrFrameEndInfo frame_end_info{XR_TYPE_FRAME_END_INFO};
         frame_end_info.displayTime = display_time;
         frame_end_info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
@@ -3261,6 +3268,44 @@ int main(int argc, char** argv) {
         std::size_t matched_targets = 0;
         std::size_t empty_frames = 0;
         bool composition_preserved = true;
+        // V508: a synthetic's quad lies strictly between the quads of the
+        // real frames on either side of it; a real frame's is its own.
+        std::size_t panels_checked = 0;
+        bool panels_between = true;
+        for (std::size_t index = 1; index + 1 < end_records.size(); ++index) {
+            const EndFrameRecord& record = end_records[index];
+            if (record.target != SubmittedTarget::synthetic || record.quad_layer_count != 1) {
+                continue;
+            }
+            std::size_t before = index, after = index;
+            while (before > 0 && (end_records[before].target != SubmittedTarget::current ||
+                                  end_records[before].quad_layer_count != 1)) --before;
+            while (after + 1 < end_records.size() &&
+                   (end_records[after].target != SubmittedTarget::current ||
+                    end_records[after].quad_layer_count != 1)) ++after;
+            if (end_records[before].target != SubmittedTarget::current ||
+                end_records[after].target != SubmittedTarget::current ||
+                end_records[after].quad_x - end_records[before].quad_x < 0.05F) {
+                continue;
+            }
+            ++panels_checked;
+            panels_between = panels_between &&
+                record.quad_x > end_records[before].quad_x + 0.01F &&
+                record.quad_x < end_records[after].quad_x - 0.01F;
+        }
+        if (g_flight_simulator_mode && (panels_checked == 0 || !panels_between)) {
+            std::cerr << "flat panel not placed between the frames: checked="
+                      << panels_checked << " between=" << panels_between << '\n';
+            for (const EndFrameRecord& record : end_records) {
+                std::cerr << "  target=" << static_cast<int>(record.target)
+                          << " quad_x=" << record.quad_x << '\n';
+            }
+            return EXIT_FAILURE;
+        }
+        if (g_flight_simulator_mode) {
+            std::cout << "flat panels between the frames in " << panels_checked
+                      << " synthetics\n";
+        }
         for (const EndFrameRecord& record : end_records) {
             if (matched_targets < expected_generated_order.size() &&
                 record.target == expected_generated_order[matched_targets]) {
