@@ -68,15 +68,15 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
     default:
         if (mode == 3) return motion_source == 1 ? "Hybrid: game motion vectors + FidelityFX optical flow" :
             "Hybrid fallback: FidelityFX optical flow; no complete native stereo guides";
-        if (mode == 1) return "FSR: generating with native stereo motion and depth guides";
-        if (mode == 2) return "DLSS-G: generating with native stereo motion and depth guides";
+        if (mode == 1) return "FSR: native stereo motion and depth guides active";
+        if (mode == 2) return "DLSS-G: native stereo motion and depth guides active";
         return motion_source == 1 ? "OFXR: using compatible game motion vectors (optical flow bypassed)" :
             "OFXR: optical flow active";
     }
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465852;
-constexpr std::uint32_t kAbi = 57701;
+constexpr std::uint32_t kAbi = 60401;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==72); // V471 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==69); // previously reserved padding
@@ -187,7 +187,7 @@ public:
             identity ^= static_cast<std::uint64_t>(std::towlower(character));
             identity *= 1099511628211ULL;
         }
-        const auto prefix = L"Local\\OFXRAutonomousV577-" + std::to_wstring(identity);
+        const auto prefix = L"Local\\OFXRAutonomousV604-" + std::to_wstring(identity);
         mutex = CreateMutexW(nullptr, FALSE, (prefix + L"-mutex").c_str());
         if (!mutex) return;
         const DWORD waited = WaitForSingleObject(mutex, 2000);
@@ -831,10 +831,27 @@ void report_runtime(RuntimeStatus status) noexcept {
 #endif
         status.overlay_limit_mask=overlay_limits.load(std::memory_order_relaxed);
         status.message[sizeof(status.message) - 1] = '\0';
-        if (connection.data->snapshot.runtime.process_id == status.process_id)
+        if (connection.data->snapshot.runtime.process_id == status.process_id) {
             status.telemetry = connection.data->snapshot.runtime.telemetry;
+            status.video_memory = connection.data->snapshot.runtime.video_memory;
+        }
         connection.data->snapshot.runtime = status;
     } catch (...) {}
+}
+void report_video_memory(VideoMemoryStatus value) noexcept {
+    try {
+        auto& c=channel(); Lock lock(c); if(!lock.acquired)return;
+        auto& runtime=c.data->snapshot.runtime;
+        if(runtime.process_id && runtime.process_id!=GetCurrentProcessId())return;
+        runtime.video_memory=value;
+    } catch(...) {}
+}
+std::string interface_vram_text(const Snapshot& value) {
+    const auto& memory=value.runtime.video_memory;
+    if(!value.connected || !memory.updated_ms || !memory.budget_bytes)return "VRAM N/A";
+    char text[48]{};
+    std::snprintf(text,sizeof(text),"VRAM %.0f%%",100.*double(memory.used_bytes)/double(memory.budget_bytes));
+    return text;
 }
 void report_overlay_limit(OverlaySwapchain surface, bool refused) noexcept {
     const auto bit=static_cast<unsigned>(surface);
@@ -896,14 +913,25 @@ std::string_view interface_state_text(const Snapshot& s) noexcept {
         const bool fresh=r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000;
         const bool afw=fresh && r.afw_running && s.desired.afw_mode!=0;
         const bool nr=fresh && r.nr_running && s.desired.nr_enabled;
-        if (r.generation_mode==1) return afw ? (nr ? "Generating FSR + AFW + Neural" : "Generating FSR + AFW")
-            : (nr ? "Generating FSR + Neural" : "Generating FSR");
-        if (r.generation_mode==2) return afw ? (nr ? "Generating DLSS-G + AFW + Neural" : "Generating DLSS-G + AFW")
-            : (nr ? "Generating DLSS-G + Neural" : "Generating DLSS-G");
-        return afw ? (nr ? "Generating OFXR + AFW + Neural" : "Generating OFXR + AFW")
-            : (nr ? "Generating OFXR + Neural" : "Generating OFXR");
+        // Static views retain noexcept/zero allocation on both UI surfaces.
+        static constexpr std::string_view names[7][4]={
+            {"FidelityFX","FidelityFX + AFW","FidelityFX + Neural","FidelityFX + AFW + Neural"},
+            {"OFXR 0.2.1","OFXR 0.2.1 + AFW","OFXR 0.2.1 + Neural","OFXR 0.2.1 + AFW + Neural"},
+            {"OFXR 0.3.0","OFXR 0.3.0 + AFW","OFXR 0.3.0 + Neural","OFXR 0.3.0 + AFW + Neural"},
+            {"OFXR 0.2.13","OFXR 0.2.13 + AFW","OFXR 0.2.13 + Neural","OFXR 0.2.13 + AFW + Neural"},
+            {"Hybrid","Hybrid + AFW","Hybrid + Neural","Hybrid + AFW + Neural"},
+            {"FSR","FSR + AFW","FSR + Neural","FSR + AFW + Neural"},
+            {"DLSS-G","DLSS-G + AFW","DLSS-G + Neural","DLSS-G + AFW + Neural"}};
+        const int route=r.generation_mode==1 ? 5 : r.generation_mode==2 ? 6 :
+            r.generation_mode==3 ? 4 : std::clamp(s.desired.backend,0,3);
+        return names[route][(afw?1:0)+(nr?2:0)];
     }
     return r.ready ? "Real frames only" : "Waiting";
+}
+bool interface_generation_active(const Snapshot& s) noexcept {
+    const auto text=interface_state_text(s);
+    return s.desired.enabled && (text.starts_with("FidelityFX") || text.starts_with("OFXR ") ||
+        text.starts_with("Hybrid") || text.starts_with("FSR") || text.starts_with("DLSS-G"));
 }
 std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) noexcept {
     if (value.fallback) return "Swapchain fallback: auxiliary allocation refused; synchronous Luke delivery is active until the game restarts.";

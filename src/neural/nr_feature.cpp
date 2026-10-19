@@ -9,6 +9,7 @@
 #include "NrRetirementCadence.h"
 #include "NrHistoryContract.h"
 #include "NrGuideSnapshot.h"
+#include "DeviceRemovalDred.h"
 #include "NrForwarderContract.h"
 #include "NrCommandListIdentity.h"
 
@@ -136,6 +137,7 @@ struct NrPerHandle
 {
     void* feature = nullptr;
     Microsoft::WRL::ComPtr<ID3D12Device> device;
+    std::shared_ptr<DeviceRemovalDred::Monitor> removalMonitor;
     std::shared_ptr<DlssNr_Dx12> compose;
 
     // Creation state stays owned by the feature for its complete lifetime.
@@ -758,13 +760,20 @@ void ParkNrCodec(std::shared_ptr<DlssNr_Dx12>& compose)
 
 void BindNrDevice(NrPerHandle& nr,ID3D12Device* device)
 {
-    if(nr.device.Get()==device)return;
+    if(nr.device.Get()==device) {
+        // F9 may be enabled after this feature/device was first bound.
+        if(NrFlightTrace::Enabled() && !nr.removalMonitor)
+            nr.removalMonitor=DeviceRemovalDred::Monitor::Observe(device,Util::DllPath().parent_path());
+        return;
+    }
     // The caller already admitted exact prior-submission retirement. A native
     // D3D11/Vulkan handle can survive a recreated OpenXR D3D12 transport owner.
     ParkNrFeature(nr.feature);ParkNrParams(nr.params);ParkNrEvaluateParams(nr);ParkNrCodec(nr.compose);
     for(ID3D12Resource** resource:{&nr.output,&nr.colorCopy,&nr.hdrCopy,&nr.colorSmall,
         &nr.resolveCopy,&nr.depthClone,&nr.motionClone})ParkNrResource(*resource);
     const bool source_reset=nr.sourceReset;nr={};nr.device=device;nr.sourceReset=source_reset;
+    if(NrFlightTrace::Enabled())
+        nr.removalMonitor=DeviceRemovalDred::Monitor::Observe(device,Util::DllPath().parent_path());
 }
 
 struct NrCodecRecording
@@ -2487,6 +2496,7 @@ void configure(const Settings& settings) {
     c.DlssNrWhitePointScale=std::max(.001f,settings.white_point_scale);
     c.LogToFile=settings.diagnostic_logging;
     NrFlightTrace::SetEnabled(settings.diagnostic_logging);
+    DeviceRemovalDred::EnableDiagnosticsOnce();
 }
 void before_sr(unsigned int handle,ID3D12GraphicsCommandList* list,
     const NVSDK_NGX_Parameter* parameters,ID3D12CommandQueue* queue) {

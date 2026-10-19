@@ -147,11 +147,27 @@ void wording() {
     s.runtime.generation_state=GenerationState::ready;s.runtime.pending=1;
     check(interface_state_text(s)=="Applying settings", "pending state");
     s.runtime.pending=0;s.runtime.telemetry.updated_ms=GetTickCount64();s.runtime.telemetry.generating=true;
-    check(interface_state_text(s)=="Generating FSR", "confirmed generated content identifies producer");
+    check(interface_state_text(s)=="FSR", "confirmed generated content identifies producer");
+    for(int backend=0;backend<4;++backend) {
+        auto route=s;route.runtime.generation_mode=0;route.desired.backend=backend;
+        const char* expected[]={"FidelityFX","OFXR 0.2.1","OFXR 0.3.0","OFXR 0.2.13"};
+        check(interface_state_text(route)==expected[backend],"state identifies the applied OFXR framework");
+        check(interface_generation_active(route),"framework label preserves active colour");
+    }
+    auto hybrid=s;hybrid.runtime.generation_mode=3;hybrid.runtime.motion_source=0;
+    check(interface_state_text(hybrid)=="Hybrid","hybrid label");
+    auto dlssg=s;dlssg.runtime.generation_mode=2;
+    check(interface_state_text(dlssg)=="DLSS-G","DLSS-G label");
+    auto memory=s;
+    check(interface_vram_text(memory)=="VRAM N/A","missing cached VRAM stays unknown");
+    memory.runtime.video_memory={1,6ULL<<30,8ULL<<30};
+    check(interface_vram_text(memory)=="VRAM 75%","percent uses cached process usage and DXGI budget");
+    memory.runtime.video_memory.budget_bytes=0;
+    check(interface_vram_text(memory)=="VRAM N/A","zero budget cannot invent a percent");
     s.runtime.heartbeat_ms=GetTickCount64();s.runtime.afw_running=true;
-    check(interface_state_text(s)=="Generating FSR + AFW", "actual AFW is explicit");
+    check(interface_state_text(s)=="FSR + AFW", "actual AFW is explicit");
     s.desired.nr_enabled=true;s.runtime.nr_running=true;
-    check(interface_state_text(s)=="Generating FSR + AFW + Neural", "actual neural processing is explicit");
+    check(interface_state_text(s)=="FSR + AFW + Neural", "actual neural processing is explicit");
     check(interface_status_text(s).find("AFW: Active | Neural Render: Active")!=std::string::npos, "all active effects reported independently");
     s.runtime.afw_running=false;s.runtime.nr_running=false;
     check(interface_status_text(s).find("AFW: Waiting | Neural Render: Waiting")!=std::string::npos, "enabled without output is waiting");

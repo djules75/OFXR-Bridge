@@ -2095,6 +2095,8 @@ void log_video_memory(
                 0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local))) {
             return;
         }
+        // Publish this existing read only; no UI-specific query or new poll.
+        xrfg::autonomous::report_video_memory({GetTickCount64(),local.CurrentUsage,local.Budget});
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::vram_usage,
             static_cast<std::int64_t>(stage),

@@ -1,3 +1,10 @@
+## V604: framework labels, existing-memory display and removal evidence
+
+The accepted Witcher rendering protections are present. Restore the missing
+automatic NR/DRED removal report; the latest GPU-hang cause remains unresolved.
+UI percentage reuses existing DXGI reads with no additional sampling.
+[Audit](docs/V604_NR_REMOVAL_AUDIT.md), [checks](docs/V604_VALIDATION.json).
+
 ## V599: GPU allocations retired across AFW resets
 
 Six actual 2048x2048 beta6 resets return to the exact measured VRAM baseline.

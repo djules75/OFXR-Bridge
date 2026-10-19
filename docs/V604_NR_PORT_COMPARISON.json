@@ -1,0 +1,95 @@
+{
+  "accepted_optiscaler_base": "V33034 / 6c36e598b9027a852ce2b759a1851378468a0938; published Witcher V23244 included",
+  "autonomous_base": "V599 / 61119a3ad3cbc079684e63ecf210456836500e71",
+  "byte_comparisons": [
+    {
+      "file": "NrBeforeSrContract.h",
+      "accepted_optiscaler_sha256": "77ea97c57468a5b424d56daf1e55fdf1d2d8bbf27d0153b7d66921006a0033ba",
+      "autonomous_sha256": "77ea97c57468a5b424d56daf1e55fdf1d2d8bbf27d0153b7d66921006a0033ba",
+      "identical": true
+    },
+    {
+      "file": "NrHistoryContract.h",
+      "accepted_optiscaler_sha256": "da5f51254cd3f2cc109a1f78000b3fede53377ebf2600a8b2b333632b9ee6e3c",
+      "autonomous_sha256": "da5f51254cd3f2cc109a1f78000b3fede53377ebf2600a8b2b333632b9ee6e3c",
+      "identical": true
+    },
+    {
+      "file": "NrRetirementCadence.h",
+      "accepted_optiscaler_sha256": "11e18c2b44e555874f96ea0e3d058c5d81dcfebc5c94eed8b66624d78c5de58c",
+      "autonomous_sha256": "11e18c2b44e555874f96ea0e3d058c5d81dcfebc5c94eed8b66624d78c5de58c",
+      "identical": true
+    },
+    {
+      "file": "NrGuideSnapshot.h",
+      "accepted_optiscaler_sha256": "95df09e286d5295801779212bfd5a4b5b3b8a573cfc3439004807cfbec9a2a6f",
+      "autonomous_sha256": "95df09e286d5295801779212bfd5a4b5b3b8a573cfc3439004807cfbec9a2a6f",
+      "identical": true
+    },
+    {
+      "file": "NrForwarderContract.h",
+      "accepted_optiscaler_sha256": "2d6bdde4fd16ff9dbacef0f9f3bce259b1757dc4b11d6633a2e59ca863f14bef",
+      "autonomous_sha256": "2d6bdde4fd16ff9dbacef0f9f3bce259b1757dc4b11d6633a2e59ca863f14bef",
+      "identical": true
+    },
+    {
+      "file": "NrCommandListIdentity.h",
+      "accepted_optiscaler_sha256": "d4fc88727452f1f17e6b3dd619e59f286e439bfdba40288e29e5b5c90d575722",
+      "autonomous_sha256": "d4fc88727452f1f17e6b3dd619e59f286e439bfdba40288e29e5b5c90d575722",
+      "identical": true
+    },
+    {
+      "file": "NR_codec_HLSL_source",
+      "accepted_optiscaler_sha256": "fcc24dfa4cb0cd7c5c43d5685e7d071d022ade70ae787fb91a52b811a8ff04b9",
+      "autonomous_sha256": "fcc24dfa4cb0cd7c5c43d5685e7d071d022ade70ae787fb91a52b811a8ff04b9",
+      "identical": true
+    }
+  ],
+  "render_protections_present": [
+    "per-source-handle history and scratch",
+    "per-command-list immutable NGX evaluate parameters protected by exact submission fence",
+    "recording serial detached before native Execute; native Streamline identity",
+    "removed-device UINT64_MAX never counts as successful retirement",
+    "private typed and typeless depth/motion snapshots",
+    "immutable resource/descriptor/constants codec bindings",
+    "separate creation and first evaluation recordings",
+    "source history reset OR local pending reset",
+    "active extent / zero-origin 2D validation and native MV scales",
+    "debounced feature tuning rebuild",
+    "failed recordings retained until exact retirement; explicit abandonment",
+    "shutdown retains outstanding work"
+  ],
+  "intentional_adaptations": [
+    "old guessed 32-evaluation release delay replaced with exact queue-fence tokens",
+    "codec is per native feature/device and retires unused bindings only after prior exact fence",
+    "old Luke no-submission exception absent because Autonomous observes actual native queue submissions",
+    "Witcher host renderer and HUD export are separate; applicable HUDless export consumer remains in d3d12_frame_synthesizer.cpp"
+  ],
+  "missing_in_v599": [
+    "accepted device-removal notification monitor",
+    "persistence of retained NR RAM ring on device removal",
+    "DRED breadcrumbs, contexts, live/recently freed allocation collection; no normal-game always-on force enable"
+  ],
+  "v604_action": "restore accepted monitor, gated by diagnostic logging; no NR math/pacing/queue changes",
+  "latest_incident": {
+    "process": 12360,
+    "local_time": "2026-10-19 21:36:53",
+    "reason": "DXGI_ERROR_DEVICE_HUNG 0x887A0006",
+    "owner_trigger": "ordinary play, no settings or menu change",
+    "benchmark": "18/18 completed before crash",
+    "vram_last_sample_mib": 16079,
+    "budget_mib": 23370,
+    "gpu_temperature_c": 49,
+    "secondary_cpu_exceptions": "game intentionally writes 0x887A0006 to null; later sl.dlss_g access violations occur after REAL VR tears down",
+    "nr_ring_in_minidump": false,
+    "dred_artifact_in_v599": false,
+    "root_cause": "unresolved; same HRESULT cannot establish the same old defect",
+    "not_claimed": [
+      "proven VRAM exhaustion",
+      "AFW reset caused this incident",
+      "missing old NR rendering protection proved",
+      "vendor NR kernel identified",
+      "V604 prevents device hung"
+    ]
+  }
+}

@@ -320,7 +320,7 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     const bool optional_ready=(!state.desired.nr_enabled || (fresh && r.nr_running)) &&
         (!r.luke_detected || state.desired.afw_mode==0 || (fresh && r.afw_running));
     const bool healthy=current && m.generating && state.desired.enabled &&
-        status.starts_with("Generating") && !r.provider_error && optional_ready;
+        autonomous::interface_generation_active(state) && !r.provider_error && optional_ready;
     const auto tone=healthy ? PanelTone::good : PanelTone::bad;
     const auto metric_tone=[&](bool valid){return healthy && valid ? PanelTone::good : PanelTone::bad;};
     const auto value=[](float v,bool valid,bool rate){
@@ -347,7 +347,10 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     if(used_height)*used_height=unsigned(used);
     Canvas c(w,h,bgra,linear);c.panel(used,16,2);
     c.text(margin,18,"OFXR 0.3.0",body,PanelTone::accent);
-    c.text(w-margin-16*int(status.size()),18,status,body,tone);
+    const auto vram=autonomous::interface_vram_text(state);
+    c.text(w/2-8*int(vram.size()),18,vram,body,PanelTone::dim);
+    const int header_status_scale=status.size()>24 ? 1 : body;
+    c.text(w-margin-8*header_status_scale*int(status.size()),18,status,header_status_scale,tone);
     c.rule(margin,w-margin,50,2);
     const int column=(w-2*margin)/4;
     for(int i=0;i<8;++i){

@@ -98,6 +98,10 @@ struct SwapchainBudgetStatus {
 };
 std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) noexcept;
 
+// Last existing DXGI read in the game process. UI never queries the adapter.
+struct VideoMemoryStatus {
+    std::uint64_t updated_ms{}, used_bytes{}, budget_bytes{};
+};
 struct RuntimeStatus {
     std::uint32_t process_id{};
     int afw_shading_rate{-1}; // active after successful evaluation; desired can be pending
@@ -126,6 +130,7 @@ struct RuntimeStatus {
     char message[192]{};
     SwapchainBudgetStatus swapchains{};
     unsigned dlssg_preset_request{}; // frozen process-start profile, not active NGX model proof
+    VideoMemoryStatus video_memory{};
 };
 enum class BenchmarkPhase : unsigned { idle, applying, running, complete, stopped, error, restart_required };
 struct BenchmarkStatus {
@@ -165,6 +170,9 @@ bool request(Settings desired) noexcept;
 bool request_changes(const Settings& base, const Settings& desired) noexcept;
 Settings merge_changes(Settings current, const Settings& base, const Settings& desired) noexcept;
 void report_runtime(RuntimeStatus status) noexcept;
+void report_video_memory(VideoMemoryStatus value) noexcept;
+std::string interface_vram_text(const Snapshot& value);
+bool interface_generation_active(const Snapshot& value) noexcept;
 enum class OverlaySwapchain : unsigned { fps=1, meter=2, menu=4 };
 void report_overlay_limit(OverlaySwapchain surface, bool refused) noexcept;
 std::string_view overlay_limit_text(std::uint32_t mask) noexcept;

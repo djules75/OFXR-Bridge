@@ -30,7 +30,14 @@ void status(const Snapshot& state) {
     const auto& m = state.runtime.telemetry;
     const auto now = GetTickCount64();
     const bool current = state.connected && m.updated_ms && now >= m.updated_ms && now - m.updated_ms < 2000;
+    const float header_x=ImGui::GetCursorPosX(),header_width=ImGui::GetContentRegionAvail().x;
     ImGui::TextDisabled("OFXR Autonomous V%d",XRFG_IMPLEMENTATION_VERSION);
+    const auto vram=interface_vram_text(state);
+    const auto vram_width=ImGui::CalcTextSize(vram.c_str()).x;
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(header_x+(header_width-vram_width)*.5F);
+    ImGui::TextUnformatted(vram.c_str());
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("Last existing sample: game-process dedicated VRAM / DXGI budget. No extra memory queries.");
     const auto value = [](const char* label, float number, bool valid, bool rate,
                           const char* tip, bool late = false) {
         ImGui::TableNextColumn();
@@ -64,7 +71,7 @@ void status(const Snapshot& state) {
         ImGui::TableNextColumn();
         ImGui::TextDisabled("State");
         const auto text = interface_state_text(state);
-        const auto color = text.starts_with("Generating") ? ImVec4(.36F,.88F,.56F,1) :
+        const auto color = interface_generation_active(state) ? ImVec4(.36F,.88F,.56F,1) :
             text == "Fallback" || text == "Applying settings" ? ImVec4(1,.75F,.28F,1) : ImVec4(.75F,.8F,.88F,1);
         ImGui::PushStyleColor(ImGuiCol_Text, color);
         ImGui::PushTextWrapPos();

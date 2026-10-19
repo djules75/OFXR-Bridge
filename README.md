@@ -1,3 +1,10 @@
+## V604: explicit framework labels and cached VRAM
+
+Display the active framework in F10/Elliott and show the existing VRAM sample
+as a percentage. Restore the accepted OptiScaler automatic NR/DRED removal
+report behind F9. The latest DLSS5 GPU-hang root cause remains unresolved;
+this candidate does not claim to prevent it. [Audit](docs/V604_NR_REMOVAL_AUDIT.md).
+
 ## V599: AFW reset memory retirement
 
 Retain fresh-provider resets while releasing their abandoned D3D12 allocations

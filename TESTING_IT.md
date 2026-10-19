@@ -1,3 +1,15 @@
+## V604: interfaccia e report automatico del device hung
+
+Avvia tray e gioco V604 insieme. Nei due pannelli lo stato mostra il framework
+attivo, con AFW/Neural quando funzionano, e in alto al centro la VRAM percentuale.
+Il dato usa solo campioni esistenti: senza campione valido resta N/A; non ci
+sono nuove letture GPU. La percentuale e del processo rispetto al budget DXGI.
+
+Per il crash Ghost con DLSS5 gioca normalmente con F9 acceso. Non serve F8 o
+un nuovo benchmark completo. Al device hung viene scritto automaticamente
+ofxr-dred-V604-... accanto alla DLL nel RuntimeLayer/v604. Riporta il crash;
+la causa precisa non e ancora risolta e questa build non e una cura dichiarata.
+
 ## V599: memoria AFW durante i cambi
 
 Corregge il rilascio delle allocazioni GPU del provider AFW dopo un reset.
