@@ -32,6 +32,10 @@ struct FpsSnapshot {
     // The latency the layer adds to the game's frames, in whole
     // milliseconds, drawn as "11ms" below the number; negative draws nothing.
     int latency_ms{-1};
+    // Hybrid's state, drawn above the number while Hybrid is selected:
+    // negative nothing, 0 "HYBRID OK" in green, otherwise "HYBRID KO (n)" in
+    // red with n the flight-log record that explains it (V506).
+    int hybrid{-1};
 };
 
 // The compositor's delivered rate, less the share of it that was repeats.
@@ -98,9 +102,10 @@ struct OverlayPlacement {
 [[nodiscard]] OverlayPlacement overlay_placement(
     FpsOverlayPosition position, float left, float right, float down, float up) noexcept;
 [[nodiscard]] std::uint32_t overlay_texture_width(std::uint32_t eye_width) noexcept;
-// The number is centred in a 24x12 grid; an image 16 rows of that grid tall
-// keeps the number where the 12-row one has it and draws the latency, at half
-// the number's size, in the rows below.
+// The number is centred in a 24x12 grid. An image 20 rows of that grid tall
+// keeps it in rows 4-16 and draws Hybrid's state in the four rows above and
+// the latency, at half the number's size, in the four below; a 16-row image
+// has no rows above (the layout before V506).
 [[nodiscard]] std::vector<std::uint32_t> rasterize_fps_overlay(
     std::uint32_t width, std::uint32_t height, const FpsSnapshot& snapshot, bool bgra,
     FpsOverlaySize size = FpsOverlaySize::big);

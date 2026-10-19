@@ -36,6 +36,9 @@ public:
     // The tray's "Pause frame generation": the counter carries a pause symbol
     // while set, so a screenshot says which state it was taken in.
     void set_paused(bool paused) noexcept;
+    // Hybrid's state above the number (FpsSnapshot::hybrid): negative
+    // nothing, 0 OK, otherwise the flight-log record behind a failure.
+    void set_hybrid_status(int status) noexcept;
     // The headset's scanout period as the layer knows it, so the counter can
     // draw the refresh rate for a rate within 2% of it (displayed_rate). Any
     // thread; 0 clears it.

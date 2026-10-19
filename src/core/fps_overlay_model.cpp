@@ -135,6 +135,16 @@ std::array<unsigned, 7> glyph(char c) noexcept {
     case '8': return {14,17,17,14,17,17,14};
     case '9': return {14,17,17,15,1,1,14};
     case 'p': return {27,27,27,27,27,27,27}; // pause: two vertical bars
+    case 'H': return {17,17,17,31,17,17,17};
+    case 'Y': return {17,17,10,4,4,4,4};
+    case 'B': return {30,17,17,30,17,17,30};
+    case 'R': return {30,17,17,30,20,18,17};
+    case 'I': return {14,4,4,4,4,4,14};
+    case 'D': return {28,18,17,17,17,18,28};
+    case 'O': return {14,17,17,17,17,17,14};
+    case 'K': return {17,18,20,24,20,18,17};
+    case '(': return {2,4,8,8,8,4,2};
+    case ')': return {8,4,2,2,2,4,8};
     case 'm': return {0,0,26,21,21,21,21};
     case 's': return {0,0,15,16,14,1,30};
     default: return {};
@@ -165,8 +175,10 @@ std::vector<std::uint32_t> rasterize_fps_overlay(
     const auto pause = color(255, 150, 0);
     // One centred line of glyphs, each glyph pixel `cell` texture pixels on a
     // side; fractional below big, where each texture pixel takes the glyph
-    // pixel under its centre. Returns the row below the line.
-    const auto draw = [&](const char* line, unsigned count, float cell, unsigned top) {
+    // pixel under its centre. Returns the row below the line. `ink`, when
+    // non-zero, colours the whole line.
+    const auto draw = [&](const char* line, unsigned count, float cell, unsigned top,
+                          std::uint32_t ink = 0) {
         const auto line_width = static_cast<unsigned>(std::ceil((count * 6 - 1) * cell));
         const auto line_height = static_cast<unsigned>(std::ceil(7 * cell));
         const unsigned left = (width - line_width) / 2;
@@ -179,7 +191,7 @@ std::vector<std::uint32_t> rasterize_fps_overlay(
                 if (index >= count || column == 5) continue;
                 if ((glyph(line[index])[y] & (1u << (4 - column))) == 0) continue;
                 pixels[static_cast<std::size_t>(py) * width + px] =
-                    line[index] == 'p' ? pause : status;
+                    ink != 0 ? ink : line[index] == 'p' ? pause : status;
             }
         }
         return top + line_height;
@@ -187,10 +199,33 @@ std::vector<std::uint32_t> rasterize_fps_overlay(
     const float cell = std::max(1.0f, static_cast<float>(scale) *
         (size == FpsOverlaySize::little ? 1.0f / 3.0f
          : size == FpsOverlaySize::medium ? 0.5f : 1.0f));
-    // The number keeps the 12-row grid's centre in a taller image too.
+    // The number keeps the 12-row grid's centre in a taller image too: rows
+    // 0-12 of a 16-row image, rows 4-16 of a 20-row one.
+    const unsigned above = height >= 20 * scale ? 4 * scale : 0;
     const unsigned band = height >= 16 * scale ? 12 * scale : height;
     const auto text_height = static_cast<unsigned>(std::ceil(7 * cell));
-    const unsigned below = draw(text, length, cell, (band - text_height) / 2);
+    const unsigned number_top = above + (band - text_height) / 2;
+    const unsigned below = draw(text, length, cell, number_top);
+    if (snapshot.hybrid >= 0 && above != 0) {
+        char hybrid[24]{};
+        const auto hybrid_length = static_cast<unsigned>(snapshot.hybrid == 0
+            ? std::snprintf(hybrid, sizeof(hybrid), "HYBRID OK")
+            : std::snprintf(hybrid, sizeof(hybrid), "HYBRID KO (%d)",
+                  std::min(snapshot.hybrid, 999)));
+        // Half the number's size where the longest form, "HYBRID KO (999)",
+        // fits nine tenths of the panel's width, smaller otherwise, so the
+        // line keeps its size between OK and KO; one of its own glyph pixels
+        // above the number.
+        constexpr unsigned longest = 15;
+        const float hybrid_cell = std::max(1.0f, std::min(cell * 0.5f,
+            static_cast<float>(width) * 0.9f / static_cast<float>(longest * 6 - 1)));
+        const auto hybrid_height = static_cast<unsigned>(std::ceil(7 * hybrid_cell));
+        const auto gap = static_cast<unsigned>(std::ceil(hybrid_cell));
+        if (number_top >= hybrid_height + gap) {
+            draw(hybrid, hybrid_length, hybrid_cell, number_top - hybrid_height - gap,
+                snapshot.hybrid == 0 ? color(64, 235, 112) : color(255, 80, 80));
+        }
+    }
     if (snapshot.latency_ms >= 0) {
         char latency[8]{};
         const auto latency_length = static_cast<unsigned>(std::snprintf(

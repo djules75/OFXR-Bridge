@@ -87,6 +87,9 @@ struct LauncherSettings {
     FpsOverlaySize overlay_size{FpsOverlaySize::big};
     // "Show latency": the latency the layer adds, below the number.
     bool overlay_latency{true};
+    // "Show Hybrid status": "HYBRID OK" or "HYBRID KO (n)" above the number
+    // while Hybrid is selected (V506). On by default.
+    bool overlay_hybrid{true};
     // The system-wide key for "Pause frame generation" while armed, in
     // parse_hotkey's form. No menu entry; edit tray.ini. Empty, "off" or
     // anything parse_hotkey refuses means no key.

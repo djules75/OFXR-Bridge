@@ -55,6 +55,7 @@ struct OpenXrFpsOverlay::Impl {
     FpsOverlayPosition position{FpsOverlayPosition::upper_right};
     FpsOverlaySize size{FpsOverlaySize::big};
     bool show_latency{true};
+    bool show_hybrid{true};
     // Added-latency samples from whichever thread submits the real frame,
     // drained into a window at every redraw; the figure is the mean of the
     // last four windows, about a second.
@@ -66,6 +67,8 @@ struct OpenXrFpsOverlay::Impl {
     std::int64_t next_refresh{};
     bool attempted{}, initialized{}, image_valid{}, acquired{}, waited{}, disabled{};
     bool paused{};
+    // Hybrid's state as the layer judged it (FpsSnapshot::hybrid).
+    int hybrid{-1};
     std::atomic<std::int64_t> display_period_ns{0};
     // The number the overlay draws is what the headset received where that
     // can be known, and what was submitted everywhere else. Only SteamVR
@@ -143,9 +146,9 @@ struct OpenXrFpsOverlay::Impl {
         }
         if (format == DXGI_FORMAT_UNKNOWN) return false;
         width = overlay_texture_width(eye_width);
-        // 24x16 of the number's grid: its 24x12 and four rows below for the
-        // latency (rasterize_fps_overlay).
-        height = width * 2 / 3;
+        // 24x20 of the number's grid: its 24x12, four rows above for Hybrid's
+        // state and four below for the latency (rasterize_fps_overlay).
+        height = width * 5 / 6;
         if (width > properties.graphicsProperties.maxSwapchainImageWidth ||
             height > properties.graphicsProperties.maxSwapchainImageHeight) return false;
         XrReferenceSpaceCreateInfo space_info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
@@ -315,6 +318,7 @@ struct OpenXrFpsOverlay::Impl {
         for (wchar_t c : setting) { if (!c) break; value += c < 128 ? static_cast<char>(c) : '?'; }
         size = parse_overlay_size(value);
         show_latency = GetPrivateProfileIntW(L"overlay", L"latency", 1, ini.c_str()) != 0;
+        show_hybrid = GetPrivateProfileIntW(L"overlay", L"hybrid", 1, ini.c_str()) != 0;
         if (position == FpsOverlayPosition::off || disabled || !info->layerCount || !info->layers) return;
         float left = -1, right = 1, down = -1, up = 1;
         std::uint32_t eye_width = 0;
@@ -355,15 +359,18 @@ struct OpenXrFpsOverlay::Impl {
         // head turns enough to move it off. Reproduced in Callisto Protocol,
         // and reported as the counter vanishing, so rule it out before
         // suspecting the upload path.
-        // The texture is a third taller than the number's panel, the extra
-        // below it, so the number stays where the placement puts it.
-        quad.pose.position = {placement.x, placement.y - placement.height / 6.0f, placement.z};
-        quad.size = {placement.width, placement.height * 4.0f / 3.0f};
+        // The texture is two thirds taller than the number's panel, a third
+        // above it and a third below, so the number stays where the placement
+        // puts it.
+        quad.pose.position = {placement.x, placement.y, placement.z};
+        quad.size = {placement.width, placement.height * 5.0f / 3.0f};
         auto snapshot = displayed_snapshot(now);
         snapshot.paused = paused;
         // Only while generation runs: nothing beside a red or paused number.
         snapshot.latency_ms = show_latency && snapshot.active && !paused
             ? latency_ms() : -1;
+        // Likewise Hybrid's state: only while generation runs.
+        snapshot.hybrid = show_hybrid && snapshot.active && !paused ? hybrid : -1;
         upload(snapshot);
     }
 
@@ -444,6 +451,13 @@ void OpenXrFpsOverlay::set_paused(bool paused) noexcept {
     if (impl_->paused == paused) return;
     impl_->paused = paused;
     impl_->next_refresh = 0; // Redraw now, not at the next quarter second.
+}
+
+void OpenXrFpsOverlay::set_hybrid_status(int status) noexcept {
+    std::scoped_lock lock(impl_->mutex);
+    if (impl_->hybrid == status) return;
+    impl_->hybrid = status;
+    impl_->next_refresh = 0;
 }
 
 void OpenXrFpsOverlay::suspend() noexcept {

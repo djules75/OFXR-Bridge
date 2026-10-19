@@ -211,12 +211,45 @@ int main(int argc, char** argv) {
                 "latency drawn below the number, at half its size");
         require(rasterize_fps_overlay(240, 120, with_latency, false) == green,
                 "no room, no latency");
+        // V506: Hybrid's state just above the number of a 20-row image - green
+        // OK, red KO. The number sits in rows 4-16 of the grid; its glyphs
+        // start at texture row 65 here.
+        constexpr std::size_t number_glyphs_top = 65;
+        const auto rows_above = [&](const std::vector<std::uint32_t>& image, std::uint32_t colour) {
+            std::size_t ink = 0;
+            for (std::size_t i = 0; i < 240 * number_glyphs_top; ++i) {
+                require(image[i] == 0 || image[i] == colour, "Hybrid status in one colour");
+                ink += image[i] != 0;
+            }
+            return ink;
+        };
+        FpsSnapshot hybrid_ok = snapshot, hybrid_ko = snapshot;
+        hybrid_ok.hybrid = 0;
+        hybrid_ko.hybrid = 821;
+        const auto tall_none = rasterize_fps_overlay(240, 200, snapshot, false);
+        const auto tall_ok = rasterize_fps_overlay(240, 200, hybrid_ok, false);
+        const auto tall_ko = rasterize_fps_overlay(240, 200, hybrid_ko, false);
+        require(rows_above(tall_none, 0) == 0, "no Hybrid status, nothing above");
+        require(rows_above(tall_ok, 0xff70eb40u) > 0, "HYBRID OK in green above the number");
+        require(rows_above(tall_ko, 0xff5050ffu) > 0, "HYBRID KO in red above the number");
+        require(std::equal(tall_none.begin() + 240 * 40, tall_none.begin() + 240 * 160, green.begin()),
+                "a 20-row image keeps the number in rows 4-16");
+        require(std::equal(tall_ok.begin() + 240 * number_glyphs_top, tall_ok.end(),
+                    tall_none.begin() + 240 * number_glyphs_top) &&
+                std::equal(tall_ko.begin() + 240 * number_glyphs_top, tall_ko.end(),
+                    tall_none.begin() + 240 * number_glyphs_top),
+                "Hybrid status leaves the number as it was");
+        require(rasterize_fps_overlay(240, 160, hybrid_ok, false) == tall_plain,
+                "a 16-row image has no room for Hybrid status");
         // Optional visual artifact, not a live image or runtime dependency.
         if (argc > 1) {
             std::ofstream file(argv[1], std::ios::binary);
-            file << "P6\n240 240\n255\n";
+            file << "P6\n240 640\n255\n";
             // Checkerboard is preview-only, to visualize transparent pixels.
-            for (const auto* pixels : {&green, &red}) for (unsigned y = 0; y < 120; ++y) for (unsigned x = 0; x < 240; ++x) {
+            // The two numbers, then HYBRID OK and HYBRID KO above one (V506).
+            const std::pair<const std::vector<std::uint32_t>*, unsigned> previews[]{
+                {&green, 120u}, {&red, 120u}, {&tall_ok, 200u}, {&tall_ko, 200u}};
+            for (const auto& [pixels, rows] : previews) for (unsigned y = 0; y < rows; ++y) for (unsigned x = 0; x < 240; ++x) {
                 const auto pixel = (*pixels)[y * 240 + x];
                 const char checker = ((x / 12 + y / 12) % 2) ? 48 : 32;
                 const char rgb[]{pixel ? static_cast<char>(pixel) : checker,

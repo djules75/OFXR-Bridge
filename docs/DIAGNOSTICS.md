@@ -56,6 +56,24 @@ module, an 821 per eye, an 822 per eye and then 814. Without 821 the game
 never created a DLSS feature in this process (DLSS off, or not a D3D12 game);
 without 814 the pairs were not valid guide pairs and the flow ran alone.
 
+### Hybrid status on the FPS overlay (V506)
+
+With **FPS overlay > Show Hybrid status** on (the default) and Hybrid selected,
+the overlay draws a line above the number while generation runs, judged every
+half second: **HYBRID OK** in green while Hybrid composes pairs, otherwise
+**HYBRID KO (n)** in red, where n is the record that explains the first step
+that stopped:
+
+| n | meaning |
+| --- | --- |
+| 702 | not a native D3D12 session (a D3D11 or Vulkan game): the capture cannot run |
+| 820 | no DLSS module found or hooked in the game |
+| 821 | DLSS modules hooked, but no DLSS evaluation: the game is not running DLSS (DI2: the F8 FSR2 toggle) |
+| 824 | DLSS runs, but its evaluations were skipped |
+| 827 | vectors captured, but the guide registry refused them (snapshot failed) |
+| 828 | vectors captured, but not matched to the eye images |
+| 815 | matched, but the hybrid rejected the pairs |
+
 ### Per-eye guides and capture diagnostics
 
 `presenter_transition` result 751, per eye after xrEndFrame's mapping, for

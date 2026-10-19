@@ -805,6 +805,12 @@ struct SessionState {
     // The tray's pause as last applied by apply_embedded_control, which
     // folds it into menu_enabled.
     bool pause_applied{}; // frame_call_mutex
+    // The FPS overlay's Hybrid line (V506), judged every half second from the
+    // capture's and the resolver's counters; frame_call_mutex.
+    std::int64_t hybrid_status_due_ns{};
+    xrfg::NgxGuideCaptureStatistics hybrid_capture_before{};
+    xrfg::DlssMotionVectorStatistics hybrid_guides_before{};
+    int hybrid_status{-1};
     // Whether the flight recorder was writing when apply_embedded_control
     // last ran. A change rebuilds each synthesizer with or without its GPU
     // timing, so a log switched on in a running session has the timings.
@@ -12469,6 +12475,46 @@ void consume_application_frame(
     state->pending_frames.erase(state->pending_frames.begin(), std::next(frame));
 }
 
+// The FPS overlay's Hybrid line (V506): -1 while Hybrid is not selected, 0
+// while it composes pairs, otherwise the first step that stopped in the last
+// half second, as the flight-log record that explains it - 702 not a native
+// D3D12 session, 820 no DLSS module hooked, 821 no DLSS evaluation (the game
+// is not running DLSS), 824 evaluations skipped, 827 publications refused,
+// 828 vectors not matched to the eye images, 815 pairs rejected. The
+// counters are the process's; one session runs at a time.
+int judge_hybrid_status(SessionState& state) noexcept {
+    if (!state.nvidia_options.hybrid) {
+        state.hybrid_status_due_ns = 0;
+        state.hybrid_status = -1;
+        return -1;
+    }
+    const std::int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now_ns < state.hybrid_status_due_ns) return state.hybrid_status;
+    const auto capture = xrfg::ngx_guide_capture_statistics();
+    const auto guides = xrfg::dlss_motion_vector_statistics();
+    const bool first = state.hybrid_status_due_ns == 0;
+    state.hybrid_status_due_ns = now_ns + 500'000'000;
+    const auto& capture_before = state.hybrid_capture_before;
+    const auto& guides_before = state.hybrid_guides_before;
+    const bool native = state.graphics_binding == SessionGraphicsBinding::d3d12 &&
+        !state.d3d11_bridge && !state.vulkan_bridge && state.d3d12_queue;
+    int status = -1;
+    if (!native) status = 702;
+    else if (first) status = -1;  // nothing to compare with yet
+    else if (guides.hybrid_used > guides_before.hybrid_used) status = 0;
+    else if (capture.modules_hooked == 0) status = 820;
+    else if (capture.evaluations == capture_before.evaluations) status = 821;
+    else if (capture.publications == capture_before.publications) status = 824;
+    else if (guides.published == guides_before.published) status = 827;
+    else if (guides.matched == guides_before.matched) status = 828;
+    else status = 815;
+    state.hybrid_capture_before = capture;
+    state.hybrid_guides_before = guides;
+    state.hybrid_status = status;
+    return status;
+}
+
 // Called with frame ownership and presenter content excluded. No GUI thread
 // touches GPU objects; no new captures may enter during this transaction.
 //
@@ -13151,6 +13197,7 @@ XrResult layer_end_frame_impl(
     if (state->fps_overlay && !manually_disarmed) {
         std::scoped_lock gpu_lock(state->gpu_mutex);
         state->fps_overlay->set_paused(state->pause_applied);
+        state->fps_overlay->set_hybrid_status(judge_hybrid_status(*state));
         state->fps_overlay->application_frame(end_info);
     }
 
