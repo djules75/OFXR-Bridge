@@ -97,6 +97,10 @@ every frame (UEVR's quest markers) moves between the frames as well.
   declined; `b` the swapchain; `c` its width | height << 32.
 - `presenter_transition` 762, once per panel swapchain at its first
   generated pair: `b` the swapchain; `c` its width | height << 32.
+- `presenter_transition` 763 (V511), once per panel swapchain when it is
+  given the panel's own flow, FidelityFX at full resolution whatever the
+  eye images run: `a` the HRESULT; `b` the swapchain. Live settings changes
+  leave it alone.
 
 A panel's own `synthesis_prime`/`synthesis_pair` records carry its
 swapchain in `a`, next to the eye images'. Its GPU timing records

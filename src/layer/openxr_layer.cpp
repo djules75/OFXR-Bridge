@@ -2033,6 +2033,10 @@ struct FrameGenerationSwapchainState {
     std::size_t synthetic_slot{};
     std::shared_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
     std::shared_ptr<xrfg::SwapchainInterop> interop;
+    // A flat panel's synthesizer has been given the panel's own flow
+    // (V511: FidelityFX at full resolution), or tried to; the live settings
+    // leave it alone from then on. Frame path only (frame_call_mutex).
+    bool panel_flow{};
     // Single-swapchain rings: current[0] and synthetic[0] are the swapchains,
     // the staging textures are what the synthesizer writes, indexed by
     // current_slot / synthetic_slot, and the runtime images are what the
@@ -12283,10 +12287,60 @@ constexpr std::size_t kMaxGeneratedPanels = 2;
             if (swapchain->generation_eligible_pending && !swapchain->generation_declined) {
                 return true;
             }
+            // Armed elsewhere (a live settings change arms every candidate)
+            // but not yet given the panel's flow (V511).
+            std::scoped_lock lock(swapchain->mutex);
+            if (swapchain->frame_generation && swapchain->frame_generation->synthesizer &&
+                !swapchain->frame_generation->panel_flow) {
+                return true;
+            }
         }
         return false;
     } catch (...) {
         return false;
+    }
+}
+
+// A flat panel's own optical flow (V511): FidelityFX at full resolution,
+// whatever the eye images run. A HUD icon is a few dozen pixels on a clear
+// background; at half resolution FidelityFX lost a 24 px marker at any speed
+// and NVIDIA's flow at any resolution, and the icon came out as a blend of
+// its two frames - the smear on lateral moves. At full resolution FidelityFX
+// follows it to about 12-16 px per frame. A 1280x720 panel's pair cost
+// 0.15 ms on a 5090 against 0.11 ms at half. No Hybrid: a panel has no game
+// vectors. Applied once, after the frame that named the panel has gone down
+// (a rebuild costs a hitch), and recorded as presenter_transition 763: a the
+// HRESULT, b the swapchain. A failure leaves the eye images' flow in place.
+void configure_panel_flow(
+    SessionState& state,
+    const std::shared_ptr<SwapchainState>& swapchain) noexcept {
+    try {
+        std::scoped_lock call_lock(swapchain->call_mutex);
+        std::shared_ptr<FrameGenerationSwapchainState> generation;
+        {
+            std::scoped_lock lock(swapchain->mutex);
+            generation = swapchain->frame_generation;
+        }
+        if (!generation || !generation->synthesizer || generation->panel_flow) return;
+        generation->panel_flow = true;
+        xrfg::D3D12NvidiaOpticalFlowOptions options = state.nvidia_options;
+        options.input_scale = xrfg::D3D12OpticalFlowInputScale::full;
+        options.hybrid = false;
+        HRESULT result = S_OK;
+        {
+            std::scoped_lock gpu_lock(state.gpu_mutex);
+            result = generation->synthesizer->wait_for_idle();
+            if (SUCCEEDED(result)) {
+                result = generation->synthesizer->reconfigure(
+                    xrfg::D3D12OpticalFlowBackend::fidelity_fx, options);
+            }
+        }
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::presenter_transition,
+            763,
+            static_cast<std::uint64_t>(static_cast<std::uint32_t>(result)),
+            handle_value(swapchain->handle));
+    } catch (...) {
     }
 }
 
@@ -12306,25 +12360,27 @@ void arm_panel_generation(
         for (const PanelSource& source : sources) {
             const auto swapchain = find_swapchain(source.swapchain);
             if (!swapchain) continue;
+            bool pending = false;
             {
                 std::scoped_lock call_lock(swapchain->call_mutex);
-                if (!swapchain->generation_eligible_pending || swapchain->generation_declined) {
-                    continue;
+                pending = swapchain->generation_eligible_pending && !swapchain->generation_declined;
+            }
+            if (pending) {
+                static_cast<void>(ensure_frame_generation(swapchain));
+                bool armed = false;
+                {
+                    std::scoped_lock lock(swapchain->mutex);
+                    armed = swapchain->frame_generation != nullptr;
                 }
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::presenter_transition,
+                    761,
+                    armed ? 1u : 0u,
+                    handle_value(source.swapchain),
+                    static_cast<std::uint64_t>(swapchain->create_info.width) |
+                        (static_cast<std::uint64_t>(swapchain->create_info.height) << 32U));
             }
-            static_cast<void>(ensure_frame_generation(swapchain));
-            bool armed = false;
-            {
-                std::scoped_lock lock(swapchain->mutex);
-                armed = swapchain->frame_generation != nullptr;
-            }
-            xrfg::bridge_flight_logger().event(
-                xrfg::BridgeFlightOperation::presenter_transition,
-                761,
-                armed ? 1u : 0u,
-                handle_value(source.swapchain),
-                static_cast<std::uint64_t>(swapchain->create_info.width) |
-                    (static_cast<std::uint64_t>(swapchain->create_info.height) << 32U));
+            configure_panel_flow(*state, swapchain);
         }
     } catch (...) {
     }
@@ -12351,7 +12407,8 @@ void prepare_panel_generation(
         bool has_generation = false;
         {
             std::scoped_lock lock(swapchain->mutex);
-            has_generation = swapchain->frame_generation != nullptr;
+            has_generation = swapchain->frame_generation != nullptr &&
+                swapchain->frame_generation->panel_flow;
         }
         const std::uint32_t width = swapchain->create_info.width;
         const std::uint32_t height = swapchain->create_info.height;
@@ -13092,7 +13149,9 @@ void apply_embedded_control(
         if (chain->frame_generation && chain->frame_generation->synthesizer) {
             auto& synthesis = chain->frame_generation->synthesizer;
             result = synthesis->wait_for_idle();
-            if (SUCCEEDED(result) && changed) {
+            // A flat panel keeps its own flow whatever the eye images use
+            // (V511).
+            if (SUCCEEDED(result) && changed && !chain->frame_generation->panel_flow) {
                 result = synthesis->reconfigure(backend, options);
                 if (FAILED(result) &&
                     backend == xrfg::D3D12OpticalFlowBackend::nvidia) {

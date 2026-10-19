@@ -5003,11 +5003,14 @@ void test_flat_panel_marker_synthesis(
     xrfg::D3D12OpticalFlowBackend backend,
     bool hybrid,
     bool require_motion,
-    UINT move = 16) {
+    UINT move = 16,
+    // V511: a 24 px quest-marker glyph (a diamond with a dark rim and a clear
+    // hole) with the layer's panel flow, FidelityFX at full resolution.
+    bool glyph = false) {
     constexpr UINT kPanelWidth = 1024;
     constexpr UINT kPanelHeight = 512;
-    constexpr UINT kMarker = 64;
-    constexpr UINT kMarkerY = kPanelHeight / 2 - kMarker / 2;
+    const UINT kMarker = glyph ? 24U : 64U;
+    const UINT kMarkerY = kPanelHeight / 2 - kMarker / 2;
     constexpr UINT kPreviousX = 256;
     const UINT kCurrentX = kPreviousX + move;
     const auto panel_image = [&](UINT marker_x) {
@@ -5015,13 +5018,27 @@ void test_flat_panel_marker_synthesis(
             static_cast<std::size_t>(kPanelWidth) * kPanelHeight * kBytesPerPixel, 0);
         for (UINT y = kMarkerY; y < kMarkerY + kMarker; ++y) {
             for (UINT x = marker_x; x < marker_x + kMarker; ++x) {
-                const RgbaBytes texel = motion_texel((x - marker_x) * 3U, (y - kMarkerY) * 3U, 0);
+                RgbaBytes texel = motion_texel((x - marker_x) * 3U, (y - kMarkerY) * 3U, 0);
+                texel[3] = 255;
+                if (glyph) {
+                    const int cx = static_cast<int>(x - marker_x) * 2 - static_cast<int>(kMarker) + 1;
+                    const int cy = static_cast<int>(y - kMarkerY) * 2 - static_cast<int>(kMarker) + 1;
+                    const int d = (std::abs(cx) + std::abs(cy)) / 2;
+                    const int r = static_cast<int>(kMarker) / 2;
+                    if (d >= r || d < r / 4) {
+                        texel = {0, 0, 0, 0};
+                    } else if (d >= r - 2 || d < r / 4 + 2) {
+                        texel = {20, 20, 20, 255};
+                    } else {
+                        texel = {250, 230, 120, 255};
+                    }
+                }
                 const std::size_t offset =
                     (static_cast<std::size_t>(y) * kPanelWidth + x) * kBytesPerPixel;
                 bytes[offset + 0] = texel[0];
                 bytes[offset + 1] = texel[1];
                 bytes[offset + 2] = texel[2];
-                bytes[offset + 3] = 255;
+                bytes[offset + 3] = texel[3];
             }
         }
         return bytes;
@@ -5053,6 +5070,9 @@ void test_flat_panel_marker_synthesis(
         "flat panel history initialization failed");
     xrfg::D3D12NvidiaOpticalFlowOptions options{};
     options.hybrid = hybrid;
+    if (glyph) {
+        options.input_scale = xrfg::D3D12OpticalFlowInputScale::full;
+    }
     xrfg::D3D12FrameSynthesizer synthesizer;
     require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(), history,
                 std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
@@ -5115,7 +5135,11 @@ void test_flat_panel_marker_synthesis(
     blend_error /= samples;
     const double centroid = alpha_sum > 0.0 ? alpha_x / alpha_sum : 0.0;
     const double expected = (kPreviousX + kCurrentX) * 0.5 + kMarker * 0.5;
-    const double area = static_cast<double>(kMarker) * kMarker;
+    std::size_t opaque_at_midpoint = 0;
+    for (std::size_t offset = 3; offset < midpoint_image.size(); offset += kBytesPerPixel) {
+        if (midpoint_image[offset] > 200) ++opaque_at_midpoint;
+    }
+    const double area = static_cast<double>(opaque_at_midpoint);
     std::cout << "flat panel marker backend=" << static_cast<int>(backend)
               << (hybrid ? " hybrid" : "") << " move=" << move << ": opaque=" << opaque << "/" << area
               << " centroid=" << centroid << " expected=" << expected << " stray=" << stray
@@ -5125,7 +5149,7 @@ void test_flat_panel_marker_synthesis(
         "flat panel marker is not between the frames");
     if (require_motion) {
         // V510: the icon's edge strips follow the icon too.
-        require(static_cast<double>(opaque) >= 0.97 * area,
+        require(static_cast<double>(opaque) >= (glyph ? 0.9 : 0.97) * area,
             "flat panel marker is doubled or faded, not moved");
         require(synthetic_error < blend_error * 0.2,
             "flat panel synthetic is no closer to the midpoint than a blend");
@@ -5167,6 +5191,11 @@ int main(int argc, char** argv) {
                 test_flat_panel_marker_synthesis(gpu_fixture, backend, false, true);
                 test_flat_panel_marker_synthesis(gpu_fixture, backend, true, true);
                 test_flat_panel_marker_synthesis(gpu_fixture, backend, false, true, 32);
+            }
+            // The layer's panel flow (V511) on a marker-sized icon.
+            for (const UINT move : {6U, 10U}) {
+                test_flat_panel_marker_synthesis(gpu_fixture,
+                    xrfg::D3D12OpticalFlowBackend::fidelity_fx, false, true, move, true);
             }
             gpu_fixture.require_no_debug_errors();
             return 0;
