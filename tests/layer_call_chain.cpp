@@ -310,6 +310,14 @@ std::optional<XrTime> g_begun_display_time;
 // blocking fake would hang the suite, so the fake fails the call instead
 // and counts it; a scenario that provokes one has found a deadlock.
 std::atomic<std::uint32_t> g_waits_while_unbegun{0};
+// Runtime waits made on the test's application thread: none while a
+// presenter answers the application's waits itself.
+std::atomic<std::uint32_t> g_application_thread_waits{0};
+// SteamVR refuses a frame whose display time is older than one it has
+// already been given, with XR_ERROR_TIME_INVALID; Star Citizen exits on it.
+// Off by default: most scenarios label frames freely.
+std::atomic<bool> g_reject_stale_display_time{false};
+XrTime g_latest_end_display_time{}; // g_frame_loop_mutex
 // Who waited each queued frame, so a begin can be told apart by thread: the
 // application's (its render or wait thread) against the layer's presenter.
 // A frame waited by the application and begun by the presenter is one the
@@ -618,6 +626,9 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
         GetCurrentThreadId() != g_test_application_thread_id) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    if (GetCurrentThreadId() == g_test_application_thread_id) {
+        g_application_thread_waits.fetch_add(1, std::memory_order_relaxed);
+    }
     if (g_wait_begin_handoff_mode.load(std::memory_order_acquire) &&
         g_wait_begin_handoff_calls.fetch_add(1, std::memory_order_acq_rel) == 1) {
         g_second_handoff_wait_entered.store(true, std::memory_order_release);
@@ -740,6 +751,11 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_end_frame(
             return XR_ERROR_CALL_ORDER_INVALID;
         }
         g_begun_display_time.reset();
+        if (g_reject_stale_display_time.load(std::memory_order_relaxed) &&
+            end_info->displayTime < g_latest_end_display_time) {
+            return XR_ERROR_TIME_INVALID;
+        }
+        g_latest_end_display_time = std::max(g_latest_end_display_time, end_info->displayTime);
     }
     // The application's own frame, inline: the runtime considers its display
     // time past. The frame is consumed above as a runtime would, and the

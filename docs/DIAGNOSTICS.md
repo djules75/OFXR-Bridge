@@ -132,6 +132,14 @@ comes round again.
   Citizen admits no implicit Vulkan layer but the driver's). The copies are
   then published at the bridged release, behind the bridge's own wait for the
   game's queue. Reason 7 stage 3 no longer stops the capture.
+- `presenter_transition` 605: the tray's pause stopped the pipelined
+  presenter (MSFS 2024, Star Citizen), and the runtime paces the game until
+  the resume promotes it again. `a` 1 when the game's next wait had already
+  been answered, so its begin takes a runtime wait first.
+- `presenter_transition` 606: that game frame goes down at the time of the
+  runtime frame its begin waited for, not the older one the presenter had
+  handed it, which SteamVR refuses (XR_ERROR_TIME_INVALID; Star Citizen
+  exits on it). `a` the game's time, `b` the runtime frame's.
 - `presenter_transition` 752, once: one DLSS evaluation feeds both eyes,
   each in a swapchain of its own (No Man's Sky), so both take that
   evaluation: `c` 1 whole (each swapchain holds the whole side-by-side image,

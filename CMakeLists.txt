@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.516.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.517.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -706,6 +706,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> ${mode} pause)
             set_tests_properties(xrfg_manual_pause_${mode} PROPERTIES TIMEOUT 30)
         endforeach()
+        # The pause in a pipelined session stops its presenter, and the
+        # resume promotes it again (V517).
+        add_test(NAME xrfg_manual_pause_pipelined COMMAND xrfg_layer_manual_disarm_tests
+            $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> flight pause-pipelined)
+        set_tests_properties(xrfg_manual_pause_pipelined PROPERTIES TIMEOUT 30)
         # Overlay swapchains created and destroyed mid-session hold neither
         # generation nor the presenter off.
         add_test(NAME xrfg_overlay_swapchain_steamvr COMMAND xrfg_layer_manual_disarm_tests

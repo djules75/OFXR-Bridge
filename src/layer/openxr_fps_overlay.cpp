@@ -348,10 +348,17 @@ struct OpenXrFpsOverlay::Impl {
                 }
             }
         }
-        if (!eye_width) return;
-        placement = overlay_placement(position, left, right, down, up);
-        placement_valid = true;
-        if (!initialize(eye_width)) return;
+        if (!eye_width) {
+            // No 3D view - a menu, a loading screen: the counter stays where
+            // the last view put it. A pause or resume resets the image, and
+            // in Star Citizen's menu, a single flat layer, the counter then
+            // stayed hidden until the game showed its 3D view again (V517).
+            if (!initialized || !placement_valid) return;
+        } else {
+            placement = overlay_placement(position, left, right, down, up);
+            placement_valid = true;
+            if (!initialize(eye_width)) return;
+        }
         // A quad layer in front of the view, which the runtime composites in
         // the order the layer list gives. An application that submits its own
         // layer over the whole view - a HUD, a menu, a loading or fade overlay
@@ -434,7 +441,8 @@ void OpenXrFpsOverlay::reset_metrics() noexcept {
     impl_->clear_latency();
     impl_->image_valid = false;
     impl_->next_refresh = 0;
-    impl_->placement_valid = false;
+    // The placement is kept: it depends on the view, not on the counts, and a
+    // frame without a 3D view needs it to redraw (application_frame).
 }
 
 void OpenXrFpsOverlay::set_display_period(std::int64_t period_ns) noexcept {

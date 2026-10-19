@@ -89,6 +89,11 @@ int main(int argc, char** argv) {
     // "pause" as the third argument drives the tray's reversible pause in
     // place of the Disarm, and resumes afterwards.
     const bool pause_test = argc == 4 && std::string(argv[3]) == "pause";
+    // "flight pause-pipelined": the pause and resume in a session that keeps
+    // waiting for its next frame before it ends this one, on the pipelined
+    // presenter - MSFS 2024's and Star Citizen's shape (V517).
+    const bool pipelined_pause_test = argc == 4 && std::string(argv[3]) == "pause-pipelined";
+    if (pipelined_pause_test && mode != "flight") return 1;
     // "steamvr overlay": overlay swapchains created and destroyed while the
     // session generates on the presenter, as Skyrim VR's HUD panels are; the
     // presenter and generation carry on through them.
@@ -122,7 +127,8 @@ int main(int argc, char** argv) {
     else if (loop_runtime == "other") g_runtime_name_override = "XRFG fake runtime";
     else if (frame_loop_test) return 1;
     const std::string marker_mode =
-        argc == 4 && !pause_test && !overlay_test && !reload_test && !frame_loop_test ? argv[3] : "";
+        argc == 4 && !pause_test && !pipelined_pause_test && !overlay_test && !reload_test &&
+        !frame_loop_test ? argv[3] : "";
     if (!marker_mode.empty() && (mode != "d3d11" ||
         (marker_mode != "on" && marker_mode != "off" && marker_mode != "hidden"))) return 1;
     g_flight_simulator_mode = mode == "flight";
@@ -164,7 +170,7 @@ int main(int argc, char** argv) {
         std::filesystem::copy_file(argv[1], dll);
         signal = xrfg::implicit_layer::create_arm_signal(manifest);
         require(signal != nullptr, "create isolated arm signal");
-        if (pause_test || start_paused) {
+        if (pause_test || pipelined_pause_test || start_paused) {
             pause_signal = xrfg::implicit_layer::create_pause_signal(manifest);
             require(pause_signal != nullptr, "create isolated pause signal");
         }
@@ -759,6 +765,72 @@ int main(int argc, char** argv) {
         }
         if (g_steamvr_presenter_mode || g_flight_simulator_mode)
             require(current.predictedDisplayPeriod == kFakeDisplayPeriod * 2, "presenter active before Disarm");
+        if (pipelined_pause_test) {
+            // Star Citizen on SteamVR at 53-57 frames a second against 72 Hz:
+            // kept through a pause, the pipelined presenter mispresented every
+            // frame. A pause stops it and the runtime paces the game; the
+            // resume promotes it again on the next overlapping wait.
+            const auto waits_while_unbegun = g_waits_while_unbegun.load();
+            // The game labels each frame with the time it was handed, as
+            // Star Citizen does, and the runtime refuses one older than a
+            // frame it already has: the presenter's last frame before the
+            // pause stopped it is later than the time the game was handed
+            // for the frame in flight, which crashed Star Citizen.
+            g_reject_stale_display_time = true;
+            const auto frame = [&](const char* what) {
+                require(XR_SUCCEEDED(begin(session, nullptr)), what);
+                capture();
+                XrFrameState following{XR_TYPE_FRAME_STATE};
+                require(XR_SUCCEEDED(wait(session, nullptr, &following)), what);
+                submit(current.predictedDisplayTime);
+                require(wait_for_queue_idle(), what);
+                current = following;
+                return following.predictedDisplayPeriod;
+            };
+            const auto pause = [&](const char* what) {
+                require(SetEvent(pause_signal) != FALSE, what);
+                // The wait inside this frame was answered before its end
+                // applied the pause, so it still carries the virtual period.
+                frame(what);
+                const auto synthetic_paused = g_synthetic_release_calls.load();
+                const auto own_waits = g_application_thread_waits.load();
+                for (int i = 0; i < 6; ++i)
+                    require(frame(what) == kFakeDisplayPeriod, "native period while paused");
+                require(g_synthetic_release_calls.load() == synthetic_paused,
+                    "nothing generated while paused");
+                // A presenter left running hands the native period too; what
+                // tells it apart is who waits on the runtime. Paused, the
+                // game does, once a frame - the replacement wait at the
+                // first begin included.
+                require(g_application_thread_waits.load() - own_waits >= 6,
+                    "the runtime paces the game while paused, not the presenter");
+            };
+            pause("first pause");
+            require(ResetEvent(pause_signal) != FALSE, "resume");
+            const auto synthetic_resumed = g_synthetic_release_calls.load();
+            int presenter_back_at = -1;
+            for (int i = 0; i < 10; ++i)
+                if (frame("resumed frame") == kFakeDisplayPeriod * 2 && presenter_back_at < 0)
+                    presenter_back_at = i;
+            const auto own_waits_resumed = g_application_thread_waits.load();
+            for (int i = 0; i < 4; ++i) frame("resumed frame on the presenter");
+            require(g_application_thread_waits.load() == own_waits_resumed,
+                "the presenter answers the game's waits again after the resume");
+            std::cout << "flight pipelined pause: presenter back at resumed frame "
+                      << presenter_back_at << ", "
+                      << g_synthetic_release_calls.load() - synthetic_resumed
+                      << " synthetics after the resume" << std::endl;
+            require(presenter_back_at >= 0 && presenter_back_at <= 3,
+                "the pipelined presenter comes back straight after the resume");
+            require(g_synthetic_release_calls.load() > synthetic_resumed,
+                "generation resumes after the pause");
+            pause("second pause");
+            require(g_waits_while_unbegun.load() == waits_while_unbegun,
+                "no runtime frame left waited and unbegun across the hand-overs");
+            // Left paused: the session ends and is destroyed from here.
+            result = 0;
+            throw FinishedEarly{};
+        }
         if (overlay_test) {
             // Skyrim VR (Mad God's Overhaul) creates and destroys 160x272 HUD
             // panels every second or two in some scenes. Each creation held

@@ -320,6 +320,28 @@ int main(int argc, char** argv) {
             write_position(ini, L"upper_right");
             std::this_thread::sleep_for(std::chrono::milliseconds(260));
             overlay.application_frame(&info);
+            check(overlay.end_frame(&info, false) == XR_SUCCESS && observed_count == 2, "overlay placed by the 3D view");
+            const auto placed_pose = last_pose;
+            {
+                // Star Citizen's menu (V517): one flat layer and no 3D view.
+                // A pause or resume there resets the image; the counter is
+                // redrawn where the last 3D view put it, not hidden until
+                // the game shows that view again.
+                XrCompositionLayerQuad menu{XR_TYPE_COMPOSITION_LAYER_QUAD};
+                const auto* menu_layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&menu);
+                XrFrameEndInfo menu_frame = info; menu_frame.layerCount = 1; menu_frame.layers = &menu_layer;
+                expected_layer = menu_layer;
+                overlay.reset_metrics();
+                overlay.application_frame(&menu_frame);
+                check(overlay.end_frame(&menu_frame, false) == XR_SUCCESS && observed_count == 2,
+                      "a reset in a menu hides the counter");
+                check(std::abs(last_pose.position.x - placed_pose.position.x) < 1.0e-6f &&
+                      std::abs(last_pose.position.y - placed_pose.position.y) < 1.0e-6f,
+                      "the menu moved the counter");
+                expected_layer = reinterpret_cast<XrCompositionLayerBaseHeader*>(&projection);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(260));
+            overlay.application_frame(&info);
             check(overlay.end_frame(&info, true) == XR_SUCCESS && observed_count == 2, "overlay visible before manual stop");
             const auto uploads_before_stop = releases;
             overlay.suspend();

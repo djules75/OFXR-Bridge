@@ -961,6 +961,13 @@ struct SessionState {
     // the render thread begins, on every frame, and passing those through
     // meant generating nothing.
     bool application_begin_needs_wait{};
+    // The pause's hand-over from the pipelined presenter (V517): the begin's
+    // replacement wait is for the frame the presenter had already answered,
+    // and handover_display_time is that wait's time, for the frame's end.
+    // The time the game was handed is older than the presenter's last frame,
+    // and SteamVR refuses it (XR_ERROR_TIME_INVALID; Star Citizen exits).
+    bool pause_handover_wait{};
+    XrTime handover_display_time{};
     std::uint32_t pipelined_wait_streak{};
     bool pipelined_presenter_mode{};
     bool pipelined_presenter_start_requested{};
@@ -5497,6 +5504,8 @@ void reset_frame_bookkeeping(const std::shared_ptr<SessionState>& state) {
         state->presenter_restore_after_bypass = false;
         state->runtime_frame_waited_unbegun = false;
         state->application_begin_needs_wait = false;
+        state->pause_handover_wait = false;
+        state->handover_display_time = 0;
         state->split_frame_loop = false;
         state->application_end_thread_id = 0;
         state->application_end_thread.store(0, std::memory_order_relaxed);
@@ -5638,8 +5647,12 @@ XrResult layer_wait_frame_impl(
             state->application_frame_has_overlapping_wait = true;
             ++state->pipelined_wait_streak;
         }
+        // Not while paused (V517): a pause hands a pipelined session's frame
+        // loop back to the runtime, and the first overlapping wait after the
+        // resume promotes it again.
         if (state->pipelined_wait_streak >= 2 &&
             state->last_inline_frame_state_valid &&
+            !state->pause_applied &&
             !presenter_forbidden(*state)) {
             // The current runtime frame is still owned by the render thread,
             // so the transition cannot start its presenter until xrEndFrame
@@ -5962,7 +5975,11 @@ XrResult layer_begin_frame_impl(
                     state->last_inline_frame_state = replacement;
                     state->last_inline_frame_state.next = nullptr;
                     state->last_inline_frame_state_valid = true;
+                    if (state->pause_handover_wait) {
+                        state->handover_display_time = replacement.predictedDisplayTime;
+                    }
                 }
+                state->pause_handover_wait = false;
             }
             result = XR_FAILED(replacement_wait)
                 ? replacement_wait
@@ -13799,6 +13816,26 @@ XrResult layer_end_frame_impl(
     // must not keep the application's other thread out of xrWaitFrame while it
     // waits. Everything this mutex protects is finished by then.
     std::unique_lock frame_call_lock(state->frame_call_mutex);
+    // The frame in flight when a pause stopped the pipelined presenter
+    // (V517) goes down at the time of the runtime frame its begin waited for,
+    // not the older one the presenter handed the game. 606: a the game's
+    // time, b the runtime frame's.
+    XrFrameEndInfo handover_end_info{};
+    if (state->handover_display_time != 0) {
+        if (end_info != nullptr && end_info->type == XR_TYPE_FRAME_END_INFO &&
+            end_info->displayTime < state->handover_display_time) {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::presenter_transition,
+                606,
+                static_cast<std::uint64_t>(end_info->displayTime),
+                static_cast<std::uint64_t>(state->handover_display_time),
+                0);
+            handover_end_info = *end_info;
+            handover_end_info.displayTime = state->handover_display_time;
+            end_info = &handover_end_info;
+        }
+        state->handover_display_time = 0;
+    }
     // This frame's flat panels, and the frame before's for the generated
     // frames between the two (V508).
     state->panel_poses_previous.swap(state->panel_poses_current);
@@ -14003,9 +14040,36 @@ XrResult layer_end_frame_impl(
                     return start_result;
                 }
             }
-            if (use_continuous_presenter && !pipelined_presenter_mode) {
+            // A pause stops the pipelined presenter as well (V517). Kept
+            // through the pause, it paced a game that could not reach the
+            // virtual period: Star Citizen at 53-57 frames a second against
+            // SteamVR's 72 Hz had every one mispresented, and the overlay
+            // read 30-35 delivered. Off, the runtime paces the game as it
+            // would without the layer.
+            if (use_continuous_presenter &&
+                (!pipelined_presenter_mode || state->pause_applied)) {
                 stop_continuous_presenter(state);
-                if (state->pause_applied) {
+                if (pipelined_presenter_mode) {
+                    // The application's next wait, already answered by the
+                    // presenter, has no runtime frame behind it: its begin
+                    // takes one first. The resume comes back through the
+                    // promotion the session started with, on its next
+                    // overlapping wait.
+                    state->pipelined_presenter_mode = false;
+                    state->pipelined_presenter_start_requested = false;
+                    if (state->application_wait_pending_begin) {
+                        state->application_begin_needs_wait = true;
+                        state->pause_handover_wait = true;
+                    }
+                    // 605: a pause stopped the pipelined presenter. a 1 when
+                    // the application's next wait was already answered.
+                    xrfg::bridge_flight_logger().event(
+                        xrfg::BridgeFlightOperation::presenter_transition,
+                        605,
+                        state->application_begin_needs_wait ? 1 : 0,
+                        0,
+                        0);
+                } else if (state->pause_applied) {
                     state->presenter_restore_after_pause = true;
                 } else if (reason != GenerationPrepareReason::manual_disarmed) {
                     state->presenter_restore_after_bypass = true;
