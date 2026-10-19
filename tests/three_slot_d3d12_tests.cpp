@@ -721,6 +721,105 @@ int main(int argc,char** argv) {
         auto right=array?left:source(0x202,1,true);if(!array)chains.push_back(right);
         auto dynamic=source(0x203,2,false);auto fixed=source(0x204,2,false,true);
         chains.push_back(dynamic);chains.push_back(fixed);
+        if(mode=="resource-cleanup") {
+            restore_route.previous=xrfg::embedded::snapshot().desired;
+            // Three full-size UI histories reproduce UEVR's enumerated targets.
+            // Start with owned outputs too, simulating a previous admission.
+            std::vector<std::shared_ptr<SwapchainState>> unused;
+            for(unsigned id:{0x205u,0x206u,0x207u}) {
+                auto chain=source(id,1,true);chains.push_back(chain);unused.push_back(chain);
+                chain->diagnostic_layer_roles=2;
+            }
+            fill(left->enumerated_d3d12_images[0].Get(),1,80);release(left);
+            fill(right->enumerated_d3d12_images[0].Get(),1,160);release(right);
+            const auto history=left->d3d12_history;
+            const auto serial=left->last_released_capture->serial;
+            XrCompositionLayerProjectionView views[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+            views[0].subImage.swapchain=left->handle;views[1].subImage.swapchain=right->handle;
+            XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.views=views;projection.viewCount=2;
+            const auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+            XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO};frame.layerCount=1;frame.layers=&layer;
+            std::array<ProjectionResourceMapping,2> projected{};
+            projected[0].application_swapchain=left->handle;projected[1].application_swapchain=right->handle;
+            auto desired=*restore_route.previous;desired.enabled=true;desired.backend=2;
+            desired.frame_generation=0;desired.hybrid=false;desired.separate_synthesis=0;desired.lower_vram=0;
+            require(ensure_projection_frame_generation(s,projected),"new projection admission cleanup");
+            require(images.size()==8,"old projection/UI outputs survive new projection admission");
+            for(bool steam:{true,false}) {
+                dispatch->steamvr_runtime=steam;dispatch->virtual_desktop_runtime=!steam;
+                for(unsigned generator:{0u,1u,2u}) {
+                    desired.frame_generation=generator;
+                    desired.preset=desired.preset==0?1:0;
+                    require(xrfg_fixture::request_control(desired),"cleanup route request");
+                    hr(apply_embedded_control(s,false,&frame),"cleanup applied route");
+                    for(const auto& chain:unused)
+                        require(!chain->frame_generation && chain->generation_eligible_pending,
+                            "unused UI outputs retained or eagerly recreated");
+                    require(images.size()<=8,"route switch spent nonprojected budget");
+                    require(ensure_projection_frame_generation(s,projected) && left->frame_generation && right->frame_generation,
+                        "projected eyes unavailable after cleanup");
+                    require(images.size()==8 && !private_budget_refusals,"normal allocation silently reduced or exceeded");
+                    require(left->d3d12_history==history && left->last_released_capture->serial==serial,
+                        "cleanup discarded application history/capture");
+                }
+            }
+            // AER can alternate eye source identities: a formerly projected
+            // source remains useful even when absent from this one frame.
+            desired.frame_generation=0;desired.backend=1;
+            require(xrfg_fixture::request_control(desired),"cleanup optical return");
+            hr(apply_embedded_control(s,false,&frame),"cleanup optical control");
+            for(unsigned i=0;i<2;++i) {
+                unused[i]->generation_eligible_pending=true;
+                require(ensure_frame_generation(unused[i]) && unused[i]->frame_generation,"AER extra fixture");
+            }
+            unused[0]->diagnostic_layer_roles=1;unused[1]->diagnostic_layer_roles=2;
+            s->luke_afw_enabled=true;
+            desired.preset=desired.preset==0?1:0;
+            require(xrfg_fixture::request_control(desired),"AER cleanup request");
+            hr(apply_embedded_control(s,false,&frame),"AER cleanup control");
+            require(unused[0]->frame_generation && !unused[1]->frame_generation,
+                "AER eye history retired or proven auxiliary output retained");
+            s->luke_outlaws_preframe=true;s->luke_outlaws_frame_started=false;
+            require(!projection_owned_outputs(*s),"Outlaws startup admission contract removed");
+            s->luke_outlaws_preframe=false;
+            desired.enabled=false;
+            require(xrfg_fixture::request_control(desired),"cleanup Off request");
+            hr(apply_embedded_control(s,false,&frame),"cleanup Off");
+            require(!images.empty(),"OFXR Off destroyed outputs still required by AFW");
+            const auto prior_afw=xrfg::embedded::afw_snapshot().desired;
+            auto afw_off=prior_afw;afw_off.mode=0;
+            require(xrfg::embedded::request_afw(afw_off),"AFW-only Off request");
+            hr(apply_embedded_control(s,false,&frame),"AFW Off without an OFXR revision");
+            require(images.empty(),"disabled generation retains output swapchains");
+            require(xrfg::embedded::request_afw(prior_afw),"AFW fixture restore");
+            s->luke_afw_enabled=false;
+            // A real refusal must rearm only on an explicit changed revision,
+            // for vector providers too, preserving the existing budget gate.
+            dispatch->steamvr_runtime=true;dispatch->virtual_desktop_runtime=false;
+            desired.enabled=true;desired.frame_generation=1;desired.separate_synthesis=0;desired.lower_vram=0;
+            require(xrfg_fixture::request_control(desired),"vector refusal request");
+            hr(apply_embedded_control(s,false,&frame),"vector refusal control");
+            private_budget_limit=3;
+            require(!ensure_projection_frame_generation(s,projected),"vector refusal fixture");
+            release_session_generation_budget(s);
+            const auto refusals=private_budget_refusals, allocations=created.load();
+            hr(apply_embedded_control(s,false,&frame),"same vector refusal revision");
+            require(private_budget_refusals==refusals && created==allocations,"unchanged refusal retried");
+            private_budget_limit=4;desired.separate_synthesis=1;desired.lower_vram=1;
+            require(xrfg_fixture::request_control(desired),"vector reduced recovery request");
+            hr(apply_embedded_control(s,false,&frame),"vector reduced recovery control");
+            require(!s->generation_budget_exhausted && ensure_projection_frame_generation(s,projected) &&
+                left->frame_generation && right->frame_generation && images.size()==4,
+                "vector budget refusal remains latched after explicit reduction");
+            private_budget_limit=0;desired.frame_generation=0;desired.backend=2;
+            desired.separate_synthesis=0;desired.lower_vram=0;
+            require(xrfg_fixture::request_control(desired),"cleanup oracle route");
+            hr(apply_embedded_control(s,false,&frame),"cleanup oracle control");
+            require(ensure_projection_frame_generation(s,projected),"cleanup oracle eyes");
+            for(const auto& chain:{left,right})for(const auto& image:chain->frame_generation->synthetic)
+                if(image.handle)synthetic_handles.insert(image.handle);
+            std::cout<<"All-runtime/provider projected admission, drained unused output cleanup, AER history preservation, Off retirement and vector budget recovery PASS\n";
+        }
         if(mode=="composition-failures") {
             const auto directory=xrfg::autonomous::configuration_path().parent_path();
             {std::ofstream ini(directory/L"ofxr_bridge.ini");ini<<"[diagnostics]\nlogging_enabled=1\n";}
@@ -1040,13 +1139,25 @@ int main(int argc,char** argv) {
             auto& logger=xrfg::bridge_flight_logger();
             logger.initialize(std::filesystem::path(executable).parent_path());
             restore_route.previous=xrfg::embedded::snapshot().desired;
+            std::array<ProjectionResourceMapping,2> projected{};
+            projected[0].application_swapchain=left->handle;projected[1].application_swapchain=right->handle;
             for(unsigned attempt=0;attempt<2;++attempt) {
+                // Shipping intentionally does not retain diagnostics while F9
+                // is Off. Enable it before the failure we want to observe.
+                auto diagnostic=xrfg::autonomous::snapshot().desired;diagnostic.diagnostics=true;
+                require(xrfg::autonomous::request(diagnostic),"enable provider diagnostic");
+                xrfg::autonomous::apply_runtime_settings();
+                for(unsigned poll=0;poll<3;++poll) {
+                    logger.refresh_settings();std::this_thread::sleep_for(std::chrono::milliseconds(270));
+                }
                 auto desired=*restore_route.previous;
                 desired.enabled=true;desired.backend=2;desired.frame_generation=2;
-                desired.motion_vectors=1;desired.lower_vram=1;
+                desired.motion_vectors=1;desired.lower_vram=1;desired.separate_synthesis=1;
                 require(xrfg_fixture::request_control(desired),"request missing native provider");
-                require(apply_embedded_control(s)==DXGI_ERROR_UNSUPPORTED,"missing native provider must refuse initialization");
-                require(!s->menu_enabled && s->control_reconfigure_required,"failed native provider must bypass");
+                hr(apply_embedded_control(s),"missing provider control defers output admission");
+                require(ensure_projection_frame_generation(s,projected),"provider failure mislabeled runtime swapchain budget");
+                require(s->generation_initialization_result==DXGI_ERROR_UNSUPPORTED &&
+                    !left->frame_generation && !right->frame_generation,"missing native provider must refuse projected initialization");
                 require(left->generation_declined || right->generation_declined,"provider refusal not retained");
                 xrfg::autonomous::publish_runtime_status(0,xrfg::autonomous::GenerationState::waiting,
                     s->generation_initialization_result.load());
@@ -1067,13 +1178,14 @@ int main(int argc,char** argv) {
                 if(profile.diagnostics) {
                     logger.flush();std::ifstream log(logger.log_path());
                     const std::string contents{std::istreambuf_iterator<char>(log),{}};
-                    require(contents.find("phase=M op=swapchain_eligibility result=13")!=std::string::npos &&
-                        contents.find("phase=M op=native_dlssg_provider")!=std::string::npos,
-                        "late logging lost the actual native provider refusal");
+                    require(contents.find("op=swapchain_eligibility result=13")!=std::string::npos &&
+                        contents.find("op=native_dlssg_provider")!=std::string::npos,
+                        "enabled logging lost the actual native provider refusal");
                 }
-                desired.frame_generation=0;desired.motion_vectors=0;desired.lower_vram=0;
+                desired.frame_generation=0;desired.motion_vectors=0;desired.lower_vram=0;desired.separate_synthesis=0;
                 require(xrfg_fixture::request_control(desired),"return to optical flow after native refusal");
                 hr(apply_embedded_control(s),"apply recovery after native refusal");
+                require(ensure_projection_frame_generation(s,projected),"projected optical-flow recovery");
                 for(const auto& chain:{left,right}) {
                     require(chain->frame_generation!=nullptr,"provider refusal poisoned optical-flow recovery");
                     require(!chain->generation_declined,"recovered generator remains declined");
@@ -1109,7 +1221,10 @@ int main(int argc,char** argv) {
             const auto history=left->d3d12_history;
             const auto capture=left->last_released_capture;
             require(capture.has_value(),"owned capture before route change");
-            for(const int lower:{0,1}) for(const int separate:{0,1}) for(const int route:{1,3,2,1,3,2}) {
+            std::array<ProjectionResourceMapping,2> projected{};
+            projected[0].application_swapchain=left->handle;projected[1].application_swapchain=right->handle;
+            // Shipping UI exposes Normal and the combined Lower VRAM control.
+            for(const int lower:{0,1}) for(const int separate:{lower}) for(const int route:{1,3,2,1,3,2}) {
                 auto desired=*restore_route.previous;
                 desired.enabled=true;desired.backend=route;desired.frame_generation=0;desired.separate_synthesis=separate;desired.lower_vram=lower;
                 if(mode=="paused-route-shapes") {
@@ -1129,6 +1244,7 @@ int main(int argc,char** argv) {
                 }
                 require(xrfg_fixture::request_control(desired),"GPU route request");
                 hr(apply_embedded_control(s),"apply GPU route request");
+                require(ensure_projection_frame_generation(s,projected),"projected GPU route admission");
                 require(!s->control_reconfigure_required && s->menu_enabled,"GPU route reconfiguration");
                 require(left->d3d12_history==history && left->last_released_capture.has_value(),"route replaced source ownership");
                 for(const auto& chain:{left,right}) {
@@ -1145,6 +1261,7 @@ int main(int argc,char** argv) {
             final.separate_synthesis=0;final.lower_vram=0;
             require(xrfg_fixture::request_control(final),"restore full direct output after matrix switches");
             hr(apply_embedded_control(s),"restore full direct output after matrix switches");
+            require(ensure_projection_frame_generation(s,projected),"final projected shape admission");
             for(const auto& chain:{left,right}) for(const auto& image:chain->frame_generation->synthetic)
                 if(image.handle) synthetic_handles.insert(image.handle);
             // The frame path below must deliver eight real and seven generated
@@ -1646,7 +1763,7 @@ int main(int argc,char** argv) {
         if(publication_test) require(publication_releases>0,"no consumer publication was exercised");
         if(reference_readiness_test)
             require(!reference_wait_before_gpu_complete,"Reference opened XR cycle before exact GPU output was ready");
-        if(mode=="steamvr-output-retire") {
+        if(mode=="steamvr-output-retire" || mode=="resource-cleanup") {
             require(dynamic->composition_capture && fixed->composition_capture,"quad budget fixture missing");
             const auto live_handles=images.size();
             auto held=dynamic->composition_capture->outputs[0];
@@ -1669,6 +1786,22 @@ int main(int argc,char** argv) {
             require(XR_SUCCEEDED(own_composition_images(s,returned)) && !returned.composition_images.empty(),
                 "returning quad could not use its preserved source capture");
             returned={};retire_unused_composition_outputs(s,&current);
+            for(bool steam:{true,false}) for(auto generator:{xrfg::D3D12FrameGenerationMode::ofxr,
+                xrfg::D3D12FrameGenerationMode::fsr3,xrfg::D3D12FrameGenerationMode::native_dlss}) {
+                s->dispatch->steamvr_runtime=steam;s->frame_generation_mode=generator;
+                GeneratedFrameEndInfo packet;
+                auto quad=XrCompositionLayerQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};quad.subImage.swapchain=dynamic->handle;
+                packet.composition_layers.push_back(quad);
+                require(XR_SUCCEEDED(own_composition_images(s,packet)),"all-route auxiliary recreation");
+                const auto before=images.size();
+                retire_unused_composition_outputs(s,&current);
+                require(images.size()==before,"cleanup destroyed a queued auxiliary output");
+                packet={};
+                for(const auto& slot:dynamic->composition_capture->outputs)if(slot)
+                    hr(wait_composition_fence(slot->fence12.Get(),slot->ready_value),"auxiliary output copy completion");
+                retire_unused_composition_outputs(s,&current);
+                require(images.size()<before,"unused auxiliary output retained outside optical SteamVR");
+            }
         }
         for(auto& c:chains){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
         require(created==destroyed,"private XR swapchain leak");

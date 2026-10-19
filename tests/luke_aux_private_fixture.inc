@@ -154,7 +154,7 @@ void luke_aux_private_test(bool private_path=true, bool afw=true) {
         }
 
         // A/B remain independent settings; none changes retained color ownership.
-        const std::array<std::shared_ptr<GeneratedFrameEndInfo>,5> order{a,b,a,c,c};
+        std::array<std::shared_ptr<GeneratedFrameEndInfo>,5> order{a,b,a,c,c};
         const unsigned colors[]={0xff123456,0xffabcdef,0xff123456,0xff987654,0xff987654};
         for(unsigned i=0;i<5;++i) {
             s->separate_synthesis=i&1;s->lower_vram=(i>>1)&1;
@@ -230,7 +230,32 @@ void luke_aux_private_test(bool private_path=true, bool afw=true) {
                 "retained auxiliary pixels unavailable after producer teardown");
         }
         a.reset();b.reset();c.reset();
-        // 'order' retains all snapshots until this scope ends, checked below.
+        order={};
+        // Exercise idle auxiliary retirement on SteamVR and other runtimes,
+        // including Luke's one-XR publication sink and legacy D11 outputs.
+        for(bool steam:{true,false}) {
+            s->dispatch->steamvr_runtime=steam;
+            auto retained=capture(0xff123456);
+            XrFrameEndInfo empty{XR_TYPE_FRAME_END_INFO};
+            const auto before=runtime.chains.size();
+            retire_unused_composition_outputs(s,&empty);
+            check(runtime.chains.size()==before,"cleanup destroyed a leased auxiliary image");
+            retained.reset();
+            check(SUCCEEDED(wait_composition_fence(app->composition_capture->fence.Get(),
+                app->composition_capture->fence_value)),"auxiliary capture completion");
+            XrCompositionLayerQuad visible{XR_TYPE_COMPOSITION_LAYER_QUAD};visible.subImage.swapchain=app->handle;
+            const auto* visible_layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&visible);
+            auto frame=empty;frame.layerCount=1;frame.layers=&visible_layer;
+            retire_unused_composition_outputs(s,&frame);
+            check(runtime.chains.size()==before,"cleanup destroyed a currently submitted auxiliary output");
+            for(auto generator:{xrfg::D3D12FrameGenerationMode::ofxr,
+                xrfg::D3D12FrameGenerationMode::fsr3,xrfg::D3D12FrameGenerationMode::native_dlss}) {
+                s->frame_generation_mode=generator;
+                retire_unused_composition_outputs(s,&empty);
+            }
+            check(runtime.chains.empty() && app->composition_capture->valid,
+                "unused D11 auxiliary XR output retained or source capture discarded");
+        }
     } catch(...) {cleanup();throw;}
     cleanup();
     check(runtime.valid && runtime.chains.empty() && runtime.destroys==runtime.creates,

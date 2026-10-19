@@ -79,7 +79,10 @@ void depth_history_test() {
         release_depth(false);
         enumerate(); enumerate();
         check(bool(chain->d3d12_history) == color, "enumeration allocated new depth ring");
-        check(!chain->generation_eligible_pending && !chain->frame_generation, "depth/budget generation armed");
+        // A route revision may reopen a valid color source, but enumeration
+        // still cannot create any interpolation output until projection use.
+        check(!chain->frame_generation && (color || !chain->generation_eligible_pending),
+            "depth generation armed or enumeration spent an output budget");
         select(1);
         check(chain->d3d12_history && chain->d3d12_history->initialized(), "reverse switch lost reference history");
         release_depth(true);

@@ -768,6 +768,7 @@ struct SessionState {
     std::uint64_t control_id{xrfg::embedded::attach()};
     std::uint64_t control_revision{}; // frame_call_mutex
     bool control_reconfigure_required{};
+    std::optional<bool> generation_outputs_needed; // initialized with control ownership
     std::atomic<bool> menu_enabled{true};
     std::atomic<bool> generation_steady_state_established{false};
     bool manual_stop_applied{}; // frame_call_mutex; terminal for this XrSession.
@@ -1545,6 +1546,13 @@ private:
 }
 [[nodiscard]] bool reduced_native_outputs(const SessionState& state) noexcept {
     return configurable_native_outputs(state) && state.lower_vram > 0;
+}
+
+// Enumeration admits source images, not interpolation outputs. All runtimes,
+// bindings and providers spend output capacity only on submitted projections.
+// Outlaws alone requires its existing pre-frame initialization rendezvous.
+[[nodiscard]] bool projection_owned_outputs(const SessionState& state) noexcept {
+    return !(state.luke_outlaws_preframe && !state.luke_outlaws_frame_started);
 }
 [[nodiscard]] bool direct_reduced_outputs(const SessionState& state) noexcept {
     return reduced_native_outputs(state) && !staged_native_outputs(state);
@@ -3812,6 +3820,33 @@ void release_session_generation_budget(
         session->generation_budget_exhausted.load(std::memory_order_acquire)) {
         return true;
     }
+    // The arming caller has drained old submissions and released its retained
+    // repeat. Retire older projection output sets before admitting the new
+    // set (loading/menu -> level), even without a settings revision. AER eye
+    // identities can alternate, so only auxiliary-only AER sources are proven
+    // unused; their temporal eye resources remain admitted.
+    if (projection_owned_outputs(*session) && !mappings.empty()) {
+        for (const auto& chain:find_swapchains(session)) {
+            const bool projected=std::any_of(mappings.begin(),mappings.end(),[&](const auto& mapping) {
+                return mapping.application_swapchain==chain->handle;
+            });
+            if (projected) continue;
+            std::scoped_lock call_lock(chain->call_mutex);
+            bool unused{};
+            { std::scoped_lock lock(chain->mutex);
+              unused=chain->frame_generation && (!session->luke_afw_enabled ||
+                  (chain->diagnostic_layer_roles&3)==2); }
+            if (!unused) continue;
+            drain_swapchain_gpu(chain);
+            destroy_frame_generation_swapchains(chain);
+            std::scoped_lock lock(chain->mutex);
+            chain->generation_eligible_pending=true;
+            chain->generation_declined=false;
+            chain->generation_refusal=SwapchainEligibilityReason::ready;
+            chain->generation_refusal_detail=0;
+            log_swapchain_eligibility(chain,SwapchainEligibilityReason::awaiting_projection_use);
+        }
+    }
     for (const ProjectionResourceMapping& mapping : mappings) {
         const auto swapchain = find_swapchain(mapping.application_swapchain);
         if(swapchain && session->luke_afw_enabled && swapchain->create_info.arraySize==1)
@@ -5310,6 +5345,8 @@ XrResult layer_create_session_impl(
     if (state->luke_afw_enabled) state->dlss_motion_vectors = true;
     state->djules_history_wait_enabled.store(ordinary_djules_route(*state), std::memory_order_relaxed);
     state->control_revision = initial_control.revision;
+    state->generation_outputs_needed=state->menu_enabled ||
+        (state->luke_afw_enabled && xrfg::embedded::afw_snapshot().desired.mode!=0);
     state->separate_synthesis = effective_memory_control(*state,initial_control.desired.separate_synthesis);
     state->lower_vram = effective_memory_control(*state,initial_control.desired.lower_vram);
     xrfg::embedded::applied(state->control_id, state->control_revision, state->menu_enabled, 0);
@@ -12389,10 +12426,8 @@ xrfg::autonomous::SwapchainBudgetStatus luke_swapchain_inventory(
 // preserve the application's handles and captured source for a later return.
 void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& state,
     const XrFrameEndInfo* current) noexcept {
-    if (!current || current->type!=XR_TYPE_FRAME_END_INFO || !current->layerCount || !current->layers ||
-        !state->dispatch->steamvr_runtime || !state->dispatch->destroy_swapchain ||
-        state->graphics_binding!=SessionGraphicsBinding::d3d12 || state->luke_afw_enabled ||
-        state->luke_outlaws_preframe || state->frame_generation_mode!=xrfg::D3D12FrameGenerationMode::ofxr) return;
+    if (!current || current->type!=XR_TYPE_FRAME_END_INFO ||
+        (current->layerCount && !current->layers) || !state->dispatch->destroy_swapchain) return;
     try {
         std::vector<XrSwapchain> referenced;
         for(unsigned i=0;i<current->layerCount;++i) {
@@ -12409,8 +12444,17 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
             for(auto& slot:chain->composition_capture->outputs) {
                 if(!slot || slot.use_count()!=1 || !slot->image.handle ||
                     slot->image.phase!=PrivateOwnershipPhase::idle)continue;
-                const auto completed=slot->fence12 ? slot->fence12->GetCompletedValue() : 0;
+                const auto completed=slot->fence12 ? slot->fence12->GetCompletedValue() :
+                    slot->fence ? slot->fence->GetCompletedValue() : 0;
                 if(completed==UINT64_MAX || completed<slot->ready_value)continue;
+                if(slot->public_output) {
+                    // This is a private snapshot token, never an XR handle.
+                    // Its last publication may still be reading its color.
+                    const auto published=slot->public_output->fence->GetCompletedValue();
+                    if(slot->copy_failed || published==UINT64_MAX ||
+                        published<slot->last_publication.load())continue;
+                    slot.reset();continue;
+                }
                 const auto retired=slot->image.handle;
                 const auto result=with_runtime_entry(state.get(),[&] {
                     return state->dispatch->destroy_swapchain(retired);
@@ -12420,6 +12464,12 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
                         S_FALSE,handle_value(chain->handle),handle_value(retired),slot->ready_value);
                     slot->image.handle=XR_NULL_HANDLE;slot.reset();
                 }
+            }
+            auto& output=chain->composition_capture->public_output;
+            if(output && output.use_count()==1 && !output->unproven_copy &&
+                output->image.phase==PrivateOwnershipPhase::idle) {
+                const auto completed=output->fence->GetCompletedValue();
+                if(completed!=UINT64_MAX && completed>=output->serial)output.reset();
             }
         }
     } catch(...) {}
@@ -13930,7 +13980,8 @@ HRESULT reconcile_multiplier_outputs(const std::shared_ptr<SessionState>& state)
 // Called with frame ownership and presenter content excluded. No GUI thread
 // touches GPU objects; no new captures may enter during this transaction.
 HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
-                               bool force_startup_rendezvous = false) {
+                               bool force_startup_rendezvous = false,
+                               const XrFrameEndInfo* current = nullptr) {
     const auto control = xrfg::embedded::snapshot();
     // A concurrent GUI enable cancels the Off-only startup request; ordinary
     // control application will take that revision on the next safe entry.
@@ -13939,7 +13990,12 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     const bool hybrid_ready=control.desired.hybrid &&
         !(state->luke_afw_enabled && xrfg::embedded::afw_snapshot().desired.mode != 0) &&
         xrfg::dlss_motion_vector_publications()!=0;
-    if (state->control_revision == control.revision && !force_startup_rendezvous &&
+    const bool outputs_needed=control.desired.enabled ||
+        (state->luke_afw_enabled && xrfg::embedded::afw_snapshot().desired.mode!=0);
+    const bool output_use_changed=state->generation_outputs_needed &&
+        outputs_needed!=*state->generation_outputs_needed;
+    if (!state->generation_outputs_needed) state->generation_outputs_needed=outputs_needed;
+    if (state->control_revision == control.revision && !force_startup_rendezvous && !output_use_changed &&
         hybrid_ready==state->nvidia_options.hybrid) return S_OK;
     const bool explicit_revision = state->control_revision != control.revision;
     const bool previously_enabled = state->menu_enabled;
@@ -13979,15 +14035,12 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         generation_mode != state->frame_generation_mode ||
         nvidia_new_route != state->nvidia_new_route || djules_route != state->djules_route ||
         state->separate_synthesis != effective_separation || state->lower_vram != effective_reduction;
-    // SteamVR native OFXR can enumerate more eye targets than the current
-    // projection uses. Reconfiguration must not spend their deferred budget.
-    // AFW/Outlaws keep their separately validated initialization contracts.
-    const bool projected_budget_control = state->dispatch->steamvr_runtime &&
-        state->graphics_binding == SessionGraphicsBinding::d3d12 &&
-        !state->luke_afw_enabled && !state->luke_outlaws_preframe &&
-        generation_mode == xrfg::D3D12FrameGenerationMode::ofxr;
-    const bool retry_budget = projected_budget_control && explicit_revision &&
-        (changed || (!previously_enabled && control.desired.enabled));
+    // UI/depth enumeration is not permission to allocate generator outputs.
+    // This applies equally to optical flow, Hybrid, FSR and DLSS-G, on every
+    // runtime. Keep only the separately required Outlaws startup exception.
+    const bool projected_budget_control = projection_owned_outputs(*state);
+    const bool retry_budget = projected_budget_control && (explicit_revision || output_use_changed) &&
+        (changed || (output_use_changed && outputs_needed) || (!previously_enabled && control.desired.enabled));
     if (retry_budget)
         state->generation_budget_exhausted.store(false, std::memory_order_release);
     // Enumeration is excluded by frame_call_mutex, so newly created contexts
@@ -14006,9 +14059,56 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         generation_mode != xrfg::D3D12FrameGenerationMode::ofxr ||
         state->luke_afw_enabled;
     if (changed) state->generation_initialization_result = S_OK;
+    std::vector<XrSwapchain> projected_sources, auxiliary_sources;
+    bool submitted_sources_known = current && current->type == XR_TYPE_FRAME_END_INFO &&
+        (!current->layerCount || current->layers);
+    if (submitted_sources_known) for (unsigned i=0; i<current->layerCount; ++i) {
+        const auto* header=current->layers[i];
+        if (!header) { submitted_sources_known=false; break; }
+        if (header->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+            const auto* projection=reinterpret_cast<const XrCompositionLayerProjection*>(header);
+            if (projection->viewCount && !projection->views) { submitted_sources_known=false; break; }
+            for (unsigned v=0; v<projection->viewCount; ++v)
+                projected_sources.push_back(projection->views[v].subImage.swapchain);
+        } else {
+            auto copy=copy_composition_layer_for_presenter(header);
+            if (auto* handle=copy ? composition_swapchain(*copy) : nullptr)
+                auxiliary_sources.push_back(*handle);
+        }
+    }
     for (const auto& chain : swapchains) {
         std::unique_lock lock(chain->mutex);
-        const bool valid_projection_source = chain->d3d12_history &&
+        const bool projected=std::find(projected_sources.begin(),projected_sources.end(),chain->handle)!=projected_sources.end();
+        const bool auxiliary=std::find(auxiliary_sources.begin(),auxiliary_sources.end(),chain->handle)!=auxiliary_sources.end();
+        if (projected) chain->diagnostic_layer_roles|=1;
+        if (auxiliary) chain->diagnostic_layer_roles|=2;
+        // A drained control revision is the safe retirement boundary. Ordinary
+        // stereo keeps only its submitted eye sources. AER may alternate source
+        // handles, so retain its observed/unknown eye histories; only proven
+        // auxiliary-only sources are redundant there. Off without AFW needs no
+        // interpolation outputs at all. Application images/captures survive.
+        const bool auxiliary_only=(chain->diagnostic_layer_roles&3)==2;
+        const bool unused_projection=submitted_sources_known && !projected &&
+            (!state->luke_afw_enabled || auxiliary_only);
+        if ((explicit_revision || output_use_changed) && projected_budget_control && chain->frame_generation &&
+            (unused_projection || !outputs_needed)) {
+            auto generation=chain->frame_generation;
+            result=generation->synthesizer ? generation->synthesizer->wait_for_idle() : S_OK;
+            if (SUCCEEDED(result) && generation->afw_temporal_synthesizer)
+                result=generation->afw_temporal_synthesizer->wait_for_idle();
+            if (SUCCEEDED(result) && generation->d3d11_interop)
+                result=generation->d3d11_interop->wait_for_idle();
+            if (FAILED(result)) break;
+            generation.reset();lock.unlock();
+            destroy_frame_generation_swapchains(chain);
+            lock.lock();
+            chain->generation_eligible_pending=true;
+            chain->generation_declined=false;
+            chain->generation_refusal=SwapchainEligibilityReason::ready;
+            chain->generation_refusal_detail=0;
+        }
+        const bool valid_projection_source =
+            (chain->d3d12_history || !chain->enumerated_d3d11_images.empty()) &&
             chain->enumerated_image_count &&
             (chain->create_info.usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) &&
             !(chain->create_info.usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
@@ -14026,7 +14126,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
             chain->generation_refusal = SwapchainEligibilityReason::ready;
             chain->generation_refusal_detail = 0;
         }
-        if (changed && chain->generation_declined &&
+        if (changed && valid_projection_source && chain->generation_declined &&
             chain->generation_refusal == SwapchainEligibilityReason::synthesis_initialize_failed &&
             !state->generation_budget_exhausted.load(std::memory_order_acquire)) {
             // This refusal belongs to the previous provider attempt, not to
@@ -14045,7 +14145,8 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
              chain->frame_generation->direct_extra_outputs != (!staged_native_outputs(*state) && extra_output_capacity(*state)) ||
              chain->frame_generation->staging_stride != (staged_native_outputs(*state) && extra_output_capacity(*state) ? 2U : 1U));
         if (admitted_shape_change) {
-            result = chain->frame_generation->synthesizer->wait_for_idle();
+            result = chain->frame_generation->synthesizer
+                ? chain->frame_generation->synthesizer->wait_for_idle() : S_OK;
             if (FAILED(result)) break;
             lock.unlock();
             // Replace the old private output shape; the already-admitted source
@@ -14145,7 +14246,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     // is owned and submitted by the game, so an OFXR fence cannot prove that an
     // open/not-yet-submitted producer list has finished referencing them.
     // Re-enable resets temporal ownership while reusing the retained slots.
-    if (changed || !state->dlss_motion_vectors) {
+    if (changed || output_use_changed || !state->dlss_motion_vectors) {
         std::scoped_lock guide_lock(state->luke_guide_mutex);
         state->luke_afw_released_eye.reset();
         state->luke_afw_last_guide_publication = {};
@@ -14166,6 +14267,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     }
     configure_session_guide_capture(*state);
     state->control_revision = control.revision;
+    state->generation_outputs_needed=outputs_needed;
     state->control_reconfigure_required = FAILED(result);
     if (FAILED(result)) state->generation_initialization_result = result;
     state->menu_enabled = SUCCEEDED(result) && control.desired.enabled;
@@ -14689,7 +14791,7 @@ XrResult layer_end_frame_impl(
             xrfg::BridgeFlightOperation::luke_frame_contract,
             S_OK, 126,
             startup_request->stream, startup_request->epoch);
-    const HRESULT control_result = apply_embedded_control(state, startup_request.has_value());
+    const HRESULT control_result = apply_embedded_control(state, startup_request.has_value(), end_info);
     if (startup_request) {
         state->luke_afw_startup.complete(*startup_request, SUCCEEDED(control_result));
         if (xrfg::bridge_flight_logger().ram_enabled())
@@ -14829,10 +14931,12 @@ XrResult layer_end_frame_impl(
         state->presenter_restore_after_bypass=false;
         if (state->fps_overlay) state->fps_overlay->suspend();
     }
-    if (state->fps_overlay && !manually_disarmed) {
+    if (!manually_disarmed) {
         retire_unused_composition_outputs(state,end_info);
-        std::scoped_lock gpu_lock(state->gpu_mutex);
-        state->fps_overlay->application_frame(end_info);
+        if (state->fps_overlay) {
+            std::scoped_lock gpu_lock(state->gpu_mutex);
+            state->fps_overlay->application_frame(end_info);
+        }
     }
 
     const auto submit_borrowed_to_presenter = [&]() -> XrResult {
@@ -15163,6 +15267,13 @@ XrResult layer_end_frame_impl(
         }
         // The application's frame is already downstream; nothing this costs is
         // on its deadline any more.
+        if (continuous_presenter_active(state)) {
+            const auto idle=wait_for_presenter_idle(state);
+            if (XR_FAILED(idle)) return idle;
+            presenter_content_lock=std::unique_lock<std::mutex>(state->presenter_content_mutex);
+        }
+        { std::scoped_lock lock(state->presenter_mutex);
+          state->presenter_last_frame.reset(); }
         if (!ensure_projection_frame_generation(state, projection_mappings)) {
             // A refusal means the runtime has no swapchains left for the
             // application either. A queued submission names a private

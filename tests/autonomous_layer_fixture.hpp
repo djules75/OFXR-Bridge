@@ -26,7 +26,8 @@ class ControlProfile {
 public:
     ControlProfile() {
         directory_=std::filesystem::temp_directory_path()/
-            (L"ofxr-autonomous-layer-test-"+std::to_wstring(GetCurrentProcessId()));
+            (L"ofxr-autonomous-layer-test-"+std::to_wstring(GetCurrentProcessId())+
+                L"-"+std::to_wstring(GetTickCount64()));
         std::filesystem::create_directories(directory_);
         SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",directory_.c_str());
         if (!request_control(xrfg::embedded::snapshot().desired))

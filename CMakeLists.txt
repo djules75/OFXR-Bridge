@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.604.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.605.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -867,6 +867,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         set_tests_properties(xrfg_native_delivery_observer_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         set_tests_properties(xrfg_steamvr_queue_choice_gpu PROPERTIES TIMEOUT 30)
         add_test(NAME xrfg_steamvr_budget_recovery_gpu COMMAND xrfg_three_slot_d3d12_tests steamvr-budget-recovery)
+        add_test(NAME xrfg_all_routes_resource_cleanup_gpu COMMAND xrfg_three_slot_d3d12_tests resource-cleanup)
+        set_tests_properties(xrfg_all_routes_resource_cleanup_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         set_tests_properties(xrfg_steamvr_budget_recovery_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         add_test(NAME xrfg_steamvr_djules_staged_gpu COMMAND xrfg_three_slot_d3d12_tests steamvr-djules-outputs)
         set_tests_properties(xrfg_steamvr_djules_staged_gpu PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
