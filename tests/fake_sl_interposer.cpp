@@ -44,6 +44,13 @@ __declspec(dllexport) __declspec(noinline) int slEvaluateFeature(
     return 0;
 }
 
+// Streamline 2.x's mark (V535): the capture detours 2.x only.
+__declspec(dllexport) __declspec(noinline) int slGetNewFrameToken(void** token, const std::uint32_t* index) {
+    static_cast<void>(index);
+    if (token != nullptr) *token = nullptr;
+    return 0;
+}
+
 __declspec(dllexport) void fake_sl_set_evaluate_callback(EvaluateCallback callback, void* context) {
     g_context.store(context);
     g_callback.store(callback);

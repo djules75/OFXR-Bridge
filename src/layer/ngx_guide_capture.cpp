@@ -430,10 +430,12 @@ constexpr TypeId kViewport{
     0x171b6435, 0x9b3c, 0x4fc8, {0x99, 0x94, 0xfb, 0xe5, 0x25, 0x69, 0xaa, 0xa4}};
 constexpr std::uint32_t kFeatureDlss = 0;
 
-// sl::Result is an int-sized enum; references arrive as pointers.
+// sl::Result is an int-sized enum; references arrive as pointers. V535: the
+// 32-bit arguments are taken and passed on as whole registers, so a call
+// of another shape reaches the original as it was made.
 using SetConstants = int (*)(const Constants*, const void* frame, const Viewport*);
-using EvaluateFeature = int (*)(std::uint32_t feature, const void* frame,
-    const Header* const* inputs, std::uint32_t input_count, void* command_buffer);
+using EvaluateFeature = int (*)(std::uint64_t feature, const void* frame,
+    const Header* const* inputs, std::uint64_t input_count, void* command_buffer);
 
 }  // namespace sl_abi
 
@@ -556,13 +558,14 @@ int hooked_sl_set_constants(
     return sl.set_constants(values, frame, viewport);
 }
 
-int hooked_sl_evaluate(std::uint32_t feature, const void* frame,
-    const sl_abi::Header* const* inputs, std::uint32_t input_count, void* command_buffer) {
+int hooked_sl_evaluate(std::uint64_t feature, const void* frame,
+    const sl_abi::Header* const* inputs, std::uint64_t input_count, void* command_buffer) {
     bool found = false;
     std::uint32_t viewport = 0;
     try {
-        if (feature == sl_abi::kFeatureDlss && inputs != nullptr) {
-            for (std::uint32_t index = 0; index < std::min(input_count, 64U) && !found; ++index) {
+        if (static_cast<std::uint32_t>(feature) == sl_abi::kFeatureDlss && inputs != nullptr) {
+            const std::uint32_t count = std::min(static_cast<std::uint32_t>(input_count), 64U);
+            for (std::uint32_t index = 0; index < count && !found; ++index) {
                 const sl_abi::Header* input = inputs[index];
                 for (unsigned chained = 0; input != nullptr && chained < 16 && !found;
                      ++chained, input = input->next) {
@@ -5316,6 +5319,20 @@ void install_streamline(HMODULE module) noexcept {
         auto* evaluate = GetProcAddress(module, "slEvaluateFeature");
         if (set_constants == nullptr || evaluate == nullptr) {
             sl.failed = true;
+            return;
+        }
+        // V535: Streamline 2.x only, the layouts above. 1.x (The Last of Us
+        // Part I ships 1.4.7) has the same two exports with other arguments:
+        // slEvaluateFeature(CommandBuffer*, Feature, frame index, id) and
+        // slSetConstants(const Constants&, frame index, id), its Constants
+        // without a header. Read as 2.x, the command buffer's pointer was
+        // passed on cut to 32 bits and the game crashed inside Streamline at
+        // its first evaluation with Hybrid on. 2.0 brought frame tokens;
+        // 1.x has no slGetNewFrameToken, and its exports are left alone
+        // (823 a = 31). Its NGX evaluations are still captured.
+        if (GetProcAddress(module, "slGetNewFrameToken") == nullptr) {
+            sl.failed = true;
+            record(kRecordHookFailed, 31U);
             return;
         }
         HMODULE pinned = nullptr;

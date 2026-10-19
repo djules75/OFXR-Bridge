@@ -49,7 +49,7 @@ composed from the game's vectors alone).
 | 820 | an NGX module's exports are detoured; `a` the module (0 nvngx_dlss.dll, 1 nvngx_dlssd.dll, 2 _nvngx.dll), `b` whether it had a separate `EvaluateFeature_C` |
 | 821 | the game created a DLSS super-resolution (1) or ray-reconstruction (13) feature: `a` the type, `b` its creation flags (bit 32: known), `c` render width `<< 32` or height |
 | 822 | a feature's first published motion-vector snapshot: `a` the stream's low bits (from V505 also bit 32 the game's depth came with it, bits 40-47 its DXGI format, bit 48 inverted, bit 49 its rectangle is the vectors' - the hybrid uses depth only then), `b` vector width `<< 32` or height, `c` output width `<< 32` or height |
-| 823 | detouring a module failed; `a` the module |
+| 823 | detouring a module failed; `a` the module (V535: 31, Streamline 1.x, whose exports are left alone - The Last of Us Part I ships 1.4.7) |
 
 With Hybrid on, a healthy DLSS game shows 702 with `c=1`, one 820 per NGX
 module, an 821 per eye, an 822 per eye and then 814. Without 821 the game
