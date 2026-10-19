@@ -128,6 +128,10 @@ comes round again.
   depth came | bit 33 the depth's format has no route; `b` vectors VkFormat
   << 32 | depth VkFormat; `c` output width << 32 | height.
 - 832, every 100th copy dropped unsubmitted: `a` the drops so far.
+- 833 (V514), once: the Vulkan capture started without the queue layer (Star
+  Citizen admits no implicit Vulkan layer but the driver's). The copies are
+  then published at the bridged release, behind the bridge's own wait for the
+  game's queue. Reason 7 stage 3 no longer stops the capture.
 - `presenter_transition` 752, once: one DLSS evaluation feeds both eyes,
   each in a swapchain of its own (No Man's Sky), so both take that
   evaluation: `c` 1 whole (each swapchain holds the whole side-by-side image,

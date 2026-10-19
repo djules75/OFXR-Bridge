@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.513.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.514.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -607,6 +607,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             NAME xrfg_ngx_guide_capture
             COMMAND xrfg_ngx_guide_capture_tests $<TARGET_FILE:xrfg_fake_nvngx_dlss>
                 $<TARGET_FILE:OFXR_vulkan_queue_layer>)
+        # V514: the Vulkan capture without the queue layer, as in Star Citizen.
+        add_test(
+            NAME xrfg_ngx_guide_capture_vulkan_untracked
+            COMMAND xrfg_ngx_guide_capture_tests $<TARGET_FILE:xrfg_fake_nvngx_dlss> untracked)
 
         add_executable(xrfg_layer_call_chain tests/layer_call_chain.cpp)
         target_include_directories(xrfg_layer_call_chain PRIVATE

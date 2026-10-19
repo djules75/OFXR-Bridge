@@ -65,6 +65,9 @@ struct NgxGuideCaptureStatistics {
     std::uint64_t vulkan_dropped{};
     // The stage the last Vulkan start failed at (824 reason 7), 0 none.
     std::uint64_t vulkan_start_stage{};
+    // V514: the Vulkan capture runs without the queue layer, publishing at
+    // the bridged release.
+    bool vulkan_untracked{};
     bool active{};
     bool d3d11_active{};
     bool vulkan_active{};

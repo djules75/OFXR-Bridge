@@ -151,7 +151,11 @@ using EvaluateFeatureVk = NVSDK_NGX_Result(NVSDK_CONV*)(
 // the frame rather than offered.
 const wchar_t* g_queue_layer_path = nullptr;
 
+// queue_layer_path null (V514): no queue layer in the chain, as in Star
+// Citizen; the copies are published at the flush after the game's
+// submission, which the layer makes at the bridged release.
 int run_vulkan(HMODULE module, const wchar_t* queue_layer_path) {
+    const bool tracked = queue_layer_path != nullptr;
     const auto create = reinterpret_cast<CreateFeatureVk>(
         GetProcAddress(module, "NVSDK_NGX_VULKAN_CreateFeature"));
     const auto evaluate = reinterpret_cast<EvaluateFeatureVk>(
@@ -167,7 +171,7 @@ int run_vulkan(HMODULE module, const wchar_t* queue_layer_path) {
     const std::wstring directory = std::wstring(temp) + L"xrfg-ngx-vk-" +
         std::to_wstring(GetCurrentProcessId());
     CreateDirectoryW(directory.c_str(), nullptr);
-    std::wstring library(queue_layer_path);
+    std::wstring library(tracked ? queue_layer_path : L"");
     std::string escaped;
     for (wchar_t c : library) {
         if (c == L'\\') escaped += "\\\\";
@@ -186,8 +190,10 @@ int run_vulkan(HMODULE module, const wchar_t* queue_layer_path) {
             escaped.c_str());
         std::fclose(manifest);
     }
-    SetEnvironmentVariableW(L"VK_LAYER_PATH", directory.c_str());
-    SetEnvironmentVariableW(L"VK_INSTANCE_LAYERS", L"VK_LAYER_OFXR_queue_serialize");
+    if (tracked) {
+        SetEnvironmentVariableW(L"VK_LAYER_PATH", directory.c_str());
+        SetEnvironmentVariableW(L"VK_INSTANCE_LAYERS", L"VK_LAYER_OFXR_queue_serialize");
+    }
     // The tray's own registration of the layer, while it is armed, is an
     // implicit layer of the same name from the build it armed: kept out, so
     // the layer under test is the one in the chain.
@@ -249,8 +255,9 @@ int run_vulkan(HMODULE module, const wchar_t* queue_layer_path) {
     device_info.ppEnabledExtensionNames = extensions;
     VkDevice device{};
     require(create_device(physical, &device_info, nullptr, &device) == VK_SUCCESS, "vkCreateDevice");
-    require(GetModuleHandleW(L"OFXR_vulkan_queue_layer.dll") != nullptr,
-        "the Vulkan queue layer is not in the chain");
+    require((GetModuleHandleW(L"OFXR_vulkan_queue_layer.dll") != nullptr) == tracked,
+        tracked ? "the Vulkan queue layer is not in the chain"
+                : "the Vulkan queue layer is in the chain of the untracked run");
     const auto load = [&](const char* name) { return gdpa(device, name); };
     const auto get_queue = reinterpret_cast<PFN_vkGetDeviceQueue>(load("vkGetDeviceQueue"));
     const auto create_image = reinterpret_cast<PFN_vkCreateImage>(load("vkCreateImage"));
@@ -287,6 +294,8 @@ int run_vulkan(HMODULE module, const wchar_t* queue_layer_path) {
                   << " failures=" << statistics.vulkan_transport_failures
                   << " stage=" << statistics.vulkan_start_stage << std::endl;
     }
+    require(statistics.vulkan_untracked == !tracked,
+        "the Vulkan capture did not report whether it tracks submissions");
     require(statistics.vulkan_active && statistics.vulkan_modules_hooked == 1,
         "the stand-in's Vulkan exports were not detoured, or the capture did not start");
 
@@ -433,9 +442,12 @@ int run_vulkan(HMODULE module, const wchar_t* queue_layer_path) {
     evaluate_eye(buffers[0], right, &right_resource);
     require(end(buffers[0]) == VK_SUCCESS, "vkEndCommandBuffer");
     // Recorded, not submitted: nothing is published yet, at any flush - a
-    // game recording ahead submits after the frame before ends.
-    xrfg::flush_ngx_guide_capture_vulkan(false);
-    xrfg::flush_ngx_guide_capture_vulkan(true);
+    // game recording ahead submits after the frame before ends. (Untracked,
+    // the layer flushes only at the bridged release, after the submission.)
+    if (tracked) {
+        xrfg::flush_ngx_guide_capture_vulkan(false);
+        xrfg::flush_ngx_guide_capture_vulkan(true);
+    }
     statistics = xrfg::ngx_guide_capture_statistics();
     require(statistics.vulkan_publications == 0 && statistics.vulkan_transport_failures == 0 &&
             statistics.vulkan_dropped == 0,
@@ -444,6 +456,9 @@ int run_vulkan(HMODULE module, const wchar_t* queue_layer_path) {
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &buffers[0];
     require(submit(queue, 1, &submit_info, VK_NULL_HANDLE) == VK_SUCCESS, "vkQueueSubmit");
+    // Untracked, the bridge's wait for the game's queue orders the D3D12
+    // queue behind the copy; the test waits for it instead.
+    if (!tracked) require(wait_idle(queue) == VK_SUCCESS, "vkQueueWaitIdle (untracked)");
     xrfg::flush_ngx_guide_capture_vulkan(false);
     require(wait_idle(queue) == VK_SUCCESS, "vkQueueWaitIdle");
     statistics = xrfg::ngx_guide_capture_statistics();
@@ -539,6 +554,8 @@ int run_vulkan(HMODULE module, const wchar_t* queue_layer_path) {
 
     // Copies whose command buffer the game never submits: never published,
     // and dropped when their slot comes round again (four slots a feature).
+    // Tracked only: untracked, nothing can tell.
+    if (tracked) {
     require(begin(buffers[1], &begin_info) == VK_SUCCESS, "vkBeginCommandBuffer (unsubmitted)");
     for (int round = 0; round < 5; ++round) evaluate_eye(buffers[1], left, &left_resource);
     require(end(buffers[1]) == VK_SUCCESS, "vkEndCommandBuffer (unsubmitted)");
@@ -546,11 +563,13 @@ int run_vulkan(HMODULE module, const wchar_t* queue_layer_path) {
     statistics = xrfg::ngx_guide_capture_statistics();
     require(statistics.vulkan_publications == 2 && statistics.vulkan_dropped == 1,
         "unsubmitted Vulkan copies were published, or not dropped when their slot came round");
+    }
 
     require(NVSDK_NGX_SUCCEED(release(left)) && NVSDK_NGX_SUCCEED(release(right)),
         "Vulkan release failed through the hook");
     xrfg::stop_ngx_guide_capture_vulkan(queue12.Get());
-    std::cout << "ngx guide capture Vulkan: publications=" << statistics.vulkan_publications
+    std::cout << "ngx guide capture Vulkan" << (tracked ? "" : " untracked")
+              << ": publications=" << statistics.vulkan_publications
               << " eye0=0x" << std::hex << eye0 << " eye1=0x" << eye1 << " depth=0x" << depth_bits
               << std::dec << "\n";
     return 0;
@@ -756,7 +775,11 @@ int run_d3d11(HMODULE module) {
     xrfg::stop_ngx_guide_capture_d3d11(queue12.Get());
     std::cout << "ngx guide capture D3D11: publications=" << statistics.d3d11_publications
               << " eye0=0x" << std::hex << eye0 << " eye1=0x" << eye1 << std::dec << "\n";
-    return g_queue_layer_path != nullptr ? run_vulkan(module, g_queue_layer_path) : 0;
+    // V514: "untracked" in place of the queue layer's path runs the Vulkan
+    // phase without it in the chain.
+    if (g_queue_layer_path == nullptr) return 0;
+    return run_vulkan(module,
+        std::wstring_view(g_queue_layer_path) == L"untracked" ? nullptr : g_queue_layer_path);
 }
 
 // V513: No Man's Sky's one evaluation for both eyes, split per eye.

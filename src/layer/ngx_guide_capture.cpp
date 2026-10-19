@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdint>
 #include <mutex>
+#include <limits>
 #include <memory>
 #include <thread>
 #include <unordered_map>
@@ -117,6 +118,9 @@ constexpr std::int64_t kRecordHookFailed = 823;
 constexpr std::int64_t kRecordD3D11Publication = 830;
 constexpr std::int64_t kRecordVulkanPublication = 831;
 constexpr std::int64_t kRecordVulkanDropped = 832;
+//   833 (V514) the Vulkan capture started without the queue layer: copies are
+//       published at the bridged release. Once a session.
+constexpr std::int64_t kRecordVulkanUntracked = 833;
 constexpr std::int64_t kRecordSkip = 824;
 constexpr std::int64_t kRecordShape = 825;
 constexpr std::int64_t kRecordSummary = 826;
@@ -1316,6 +1320,14 @@ void install11(HMODULE module) noexcept {
 // still unsubmitted when its slot comes round again is dropped, never
 // published. DLSS's inputs are taken to be in
 // VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, as NVIDIA asks of them.
+//
+// Without the queue layer (V514): Star Citizen admits no implicit Vulkan
+// layer but the driver's, so the submission cannot be seen. Its bridged
+// release runs at the end of the frame (V472), after the game has submitted
+// the frame's work, and the bridge makes the D3D12 queue wait for the game's
+// queue there; the copies are then published at that release, their snapshot
+// copies queued behind that wait, with no timeline of their own. Record 833
+// says the capture runs this way.
 
 struct VulkanApi {
     using Register = void (*)(VkCommandBuffer, VkSemaphore, std::uint64_t, volatile LONG64*);
@@ -1374,13 +1386,24 @@ struct VulkanApi {
             !load(copy_buffer_to_image, "vkCmdCopyBufferToImage")) {
             return 2;
         }
+        // The queue layer, where the game admits it: without it the copies
+        // are published at the bridged release (see above).
         HMODULE queue_layer = GetModuleHandleW(L"OFXR_vulkan_queue_layer.dll");
-        if (queue_layer == nullptr) return 3;
-        register_guide = reinterpret_cast<Register>(
-            GetProcAddress(queue_layer, "OFXR_vkRegisterGuideSubmission"));
-        forget_guides = reinterpret_cast<Forget>(
-            GetProcAddress(queue_layer, "OFXR_vkForgetGuideSubmissions"));
-        return register_guide != nullptr && forget_guides != nullptr ? 0 : 3;
+        if (queue_layer != nullptr) {
+            register_guide = reinterpret_cast<Register>(
+                GetProcAddress(queue_layer, "OFXR_vkRegisterGuideSubmission"));
+            forget_guides = reinterpret_cast<Forget>(
+                GetProcAddress(queue_layer, "OFXR_vkForgetGuideSubmissions"));
+        }
+        if (register_guide == nullptr || forget_guides == nullptr) {
+            register_guide = nullptr;
+            forget_guides = nullptr;
+        }
+        return 0;
+    }
+
+    [[nodiscard]] bool tracks_submissions() const noexcept {
+        return register_guide != nullptr;
     }
 
     [[nodiscard]] std::uint32_t device_memory_type(std::uint32_t bits) const noexcept {
@@ -1470,10 +1493,14 @@ public:
 
     ~GuideTransportVk() {
         try {
-            if (vk_ && semaphore_ != VK_NULL_HANDLE) vk_->forget_guides(semaphore_);
+            if (vk_ && semaphore_ != VK_NULL_HANDLE && vk_->tracks_submissions()) {
+                vk_->forget_guides(semaphore_);
+            }
             // Destroyed only once every copy recorded has run on the GPU and
             // every snapshot copy after it; otherwise kept for the process.
-            const bool copies_done = fence_ && fence_->GetCompletedValue() >= copied_;
+            // Untracked, the snapshot copies ran behind the copies.
+            const bool copies_done = (vk_ && !vk_->tracks_submissions()) ||
+                (fence_ && fence_->GetCompletedValue() >= copied_);
             bool snapshots_done = !done_ || done_->GetCompletedValue() >= submitted_;
             if (copies_done && !snapshots_done && event_ != nullptr &&
                 SUCCEEDED(done_->SetEventOnCompletion(submitted_, event_))) {
@@ -1586,7 +1613,9 @@ public:
             }
             record(buffer, motion, slot.motion, depth_ready ? depth : nullptr, slot.depth, route, slot.buffer);
             slot.copied = ++copied_;
-            vk_->register_guide(buffer, semaphore_, slot.copied, &submitted_value_);
+            if (vk_->tracks_submissions()) {
+                vk_->register_guide(buffer, semaphore_, slot.copied, &submitted_value_);
+            }
             recording_ = true;
             staged->motion = slot.motion.d3d12.Get();
             staged->depth = depth_ready ? slot.depth.d3d12.Get() : nullptr;
@@ -1613,7 +1642,9 @@ public:
     template <typename Publish>
     void flush(Publish&& publish) noexcept {
         std::scoped_lock lock(mutex_);
-        const std::uint64_t submitted = submitted_value();
+        // Untracked, every held copy counts as submitted at the flush.
+        const std::uint64_t submitted = vk_->tracks_submissions()
+            ? submitted_value() : std::numeric_limits<std::uint64_t>::max();
         std::array<Slot*, kSlots> ready{};
         std::uint32_t count = 0;
         for (Slot& slot : slots_) {
@@ -1665,7 +1696,9 @@ private:
     }
 
     void submit(Slot& slot) noexcept {
-        if (FAILED(queue_->Wait(fence_.Get(), slot.copied))) return;
+        // The timeline is the queue layer's to signal; untracked, the
+        // bridged release's own wait orders the queue instead.
+        if (vk_->tracks_submissions() && FAILED(queue_->Wait(fence_.Get(), slot.copied))) return;
         ID3D12CommandList* lists[]{slot.list.Get()};
         queue_->ExecuteCommandLists(1, lists);
         if (SUCCEEDED(queue_->Signal(done_.Get(), ++submitted_))) slot.read_done = submitted_;
@@ -2499,6 +2532,9 @@ void configure_ngx_guide_capture_vulkan(
                 return;
             }
             api = std::move(created);
+            if (!api->tracks_submissions()) {
+                record(kRecordVulkanUntracked, 1);
+            }
         }
         {
             std::scoped_lock lock(s.mutex);
@@ -2507,6 +2543,7 @@ void configure_ngx_guide_capture_vulkan(
             s.vulkan_d3d12_queue = queue;
             s.vulkan_active.store(true, std::memory_order_release);
             s.statistics.vulkan_active = true;
+            s.statistics.vulkan_untracked = !api->tracks_submissions();
         }
         configure_dlss_motion_vector_tracking(true);
         start_monitor();
