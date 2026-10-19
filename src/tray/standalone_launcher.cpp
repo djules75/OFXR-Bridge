@@ -219,6 +219,9 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "hybrid") {
                     settings.hybrid = value == "1" ||
                         lower_ascii(value) == "true";
+                } else if (key == "hybrid_depth_search") {
+                    settings.hybrid_depth_search = value == "1" ||
+                        lower_ascii(value) == "true";
                 } else if (key == "excluded_processes") {
                     settings.excluded_processes = value;
                 } else if (key == "single_swapchain_rings") {
@@ -334,6 +337,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
            "\r\ntriple_frame_gen=" + (settings.triple_frame_gen ? "1" : "0") +
            "\r\nhybrid=" + (settings.hybrid ? "1" : "0") +
+           "\r\nhybrid_depth_search=" + (settings.hybrid_depth_search ? "1" : "0") +
            "\r\nexcluded_processes=" + settings.excluded_processes +
            "\r\nsingle_swapchain_rings=" + (settings.single_swapchain_rings ? "1" : "0") +
            "\r\nvulkan_session_bridge=" + (settings.vulkan_session_bridge ? "1" : "0") +
@@ -577,6 +581,7 @@ std::string build_runtime_ini(
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
            "\r\ntriple_frame_gen=" + (settings.triple_frame_gen ? "1" : "0") +
            "\r\nhybrid=" + (settings.hybrid ? "1" : "0") +
+           "\r\nhybrid_depth_search=" + (settings.hybrid_depth_search ? "1" : "0") +
            "\r\nexcluded_processes=" + settings.excluded_processes +
            "\r\nsingle_swapchain_rings=" + (settings.single_swapchain_rings ? "1" : "0") +
            "\r\nvulkan_session_bridge=" + (settings.vulkan_session_bridge ? "1" : "0") +

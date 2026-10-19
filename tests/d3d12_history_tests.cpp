@@ -5421,6 +5421,8 @@ void test_flat_panel_marker_synthesis(
 }
 
 int main(int argc, char** argv) {
+    // V532: off by default in the product; the harness checks it on.
+    xrfg::set_hybrid_depth_search(true);
     const bool trace_test = std::getenv("XRFG_TEST_GPU_TRACE") != nullptr;
     const auto trace_dir = std::filesystem::temp_directory_path() /
         ("xrfg-v073-gpu-" + std::to_string(GetCurrentProcessId()));
@@ -5507,8 +5509,13 @@ int main(int argc, char** argv) {
                           << differing << " bytes differ\n";
                 require(differing == 0, "the depth tiles changed the generated frame");
             }
+            // V532: the menu's "Hybrid: depth search" off, the bars go again.
+            xrfg::set_hybrid_depth_search(false);
+            require(test_hybrid_bars(hybrid_fixture, true) <= 0.05,
+                "Hybrid: depth search off did not reach the shader");
+            xrfg::set_hybrid_depth_search(true);
             // V507: the tray's live tuning block reaches the shader. With a
-            // block that switches the depth search off, the bars go again.
+            // block whose depth reach is nothing, the bars go again.
             // Skipped where a tray already owns the block, so a live window
             // is not written over.
             {
@@ -5522,7 +5529,8 @@ int main(int argc, char** argv) {
                     require(block != nullptr, "mapping the live tuning block");
                     xrfg::live_tuning::Block values = xrfg::live_tuning::kDefaults;
                     values.sequence = 1;
-                    values.depth_search = 0;
+                    values.depth_near_reach_px = 0;
+                    values.depth_far_reach_px = 0;
                     *block = values;
                     // The synthesizer retries a failed open once a second.
                     SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", nullptr);
@@ -5530,8 +5538,8 @@ int main(int argc, char** argv) {
                     const double with_block = test_hybrid_bars(hybrid_fixture, true);
                     SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
                     require(with_block <= 0.05,
-                        "the live tuning block's depth switch did not reach the shader");
-                    values.depth_search = 1;
+                        "the live tuning block's depth reach did not reach the shader");
+                    values.depth_far_reach_px = xrfg::live_tuning::kDefaults.depth_far_reach_px;
                     values.sequence = 2;
                     *block = values;
                     UnmapViewOfFile(block);

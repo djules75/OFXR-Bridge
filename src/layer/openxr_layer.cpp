@@ -5028,6 +5028,7 @@ XrResult layer_create_session_impl(
 
     auto state = std::make_shared<SessionState>(dispatch);
     const auto initial_control = xrfg::embedded::reload();
+    xrfg::set_hybrid_depth_search(initial_control.hybrid_depth_search);
     state->optical_flow_backend = static_cast<xrfg::D3D12OpticalFlowBackend>(initial_control.desired.backend);
     state->nvidia_options = {
         static_cast<xrfg::D3D12NvidiaPerformancePreset>(initial_control.desired.preset),
@@ -13462,6 +13463,8 @@ void apply_embedded_control(
     bool use_continuous_presenter) {
     xrfg::embedded::follow_ini();
     const auto control = xrfg::embedded::snapshot();
+    // Changes nothing but the next pair's composition (V532).
+    xrfg::set_hybrid_depth_search(control.hybrid_depth_search);
     const bool paused = state->manual_control.pause_requested();
     const bool recording = xrfg::bridge_flight_logger().enabled();
     if (state->control_revision == control.revision &&

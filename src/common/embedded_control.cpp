@@ -32,6 +32,9 @@ Settings read_settings() {
     settings.hybrid = ini_file::read_int(ini(), L"ofxr", L"hybrid", 0) != 0;
     return settings;
 }
+bool read_hybrid_depth_search() {
+    return ini_file::read_int(ini(), L"ofxr", L"hybrid_depth_search", 0) != 0;
+}
 std::uint64_t ini_stamp() {
     WIN32_FILE_ATTRIBUTE_DATA data{};
     if (!GetFileAttributesExW(ini().c_str(), GetFileExInfoStandard, &data)) return 0;
@@ -42,6 +45,7 @@ struct Control {
     std::mutex mutex;
     std::uint64_t stamp{ini_stamp()};
     Settings settings{read_settings()};
+    bool hybrid_depth_search{read_hybrid_depth_search()};
     std::uint64_t revision{1}, next_id{1};
     std::map<std::uint64_t, Receipt> sessions;
     std::atomic<std::uint64_t> next_check{};
@@ -55,6 +59,7 @@ constexpr const wchar_t* positions[]{L"off", L"upper_left", L"upper_right", L"lo
 Snapshot snapshot() {
     auto& c = control(); std::scoped_lock lock(c.mutex);
     Snapshot s; s.desired = c.settings; s.revision = c.revision;
+    s.hybrid_depth_search = c.hybrid_depth_search;
     s.sessions = static_cast<unsigned>(c.sessions.size());
     for (auto& [id, r] : c.sessions) {
         if (r.revision != c.revision) ++s.pending;
@@ -80,11 +85,13 @@ void follow_ini(bool force) noexcept {
             if (stamp == c.stamp) return;
         }
         const auto settings = read_settings();
+        const bool hybrid_depth_search = read_hybrid_depth_search();
         // Written while being read: a half-written file is not a setting.
         // The next look reads it whole.
         if (ini_stamp() != stamp) return;
         std::scoped_lock lock(c.mutex);
         c.stamp = stamp;
+        c.hybrid_depth_search = hybrid_depth_search;
         if (settings != c.settings) { c.settings = settings; ++c.revision; }
     } catch (...) {
     }

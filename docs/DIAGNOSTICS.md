@@ -304,6 +304,13 @@ byte, motion along x and along y). The passes run inside the composition's
 GPU timing. Off with the depth search, without depth, or for a dilation
 past 7 tiles.
 
+The depth search itself runs only with the tray's "Hybrid: depth search" on
+(V532; off by default, `[ofxr] hybrid_depth_search`, followed live); the live
+tuning window no longer switches it, and 813's depth search field reports
+the menu's value.
+
+- `embedded_configuration` 857, at each change of "Hybrid: depth search": `a`
+  1 on, 0 off.
 - `embedded_configuration` 856, at an eye's first tiles and whenever its grid
   or dilation changes, per synthesizer (in MSFS each eye has its own, both
   recording as eye 0; V530 recorded only the first): `a` the eye `<< 48` or the dilation in tiles `<< 40`

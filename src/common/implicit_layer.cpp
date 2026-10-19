@@ -232,7 +232,7 @@ ConfiguredFlowBackend read_flow_backend(
             return ConfiguredFlowBackend::fidelity_fx;
         }
         const auto ini_path = module_directory / L"ofxr_bridge.ini";
-        const std::wstring value = ini_file::read_string(ini_path, L"ofxr", L"backend", L"nvidia");
+        const std::wstring value = ini_file::read_string(ini_path, L"ofxr", L"backend", L"fidelityfx");
         if (_wcsicmp(value.c_str(), L"nvidia") == 0 || _wcsicmp(value.c_str(), L"nvof") == 0) {
             return ConfiguredFlowBackend::nvidia;
         }

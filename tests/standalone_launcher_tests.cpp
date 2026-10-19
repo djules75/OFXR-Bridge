@@ -93,7 +93,7 @@ int main() {
             !contains(build_runtime_ini(option), std::string("[overlay]\r\nposition=") +
                 xrfg::overlay_position_name(position))) return 1;
     }
-    if (release_defaults.backend != FlowBackend::nvidia ||
+    if (release_defaults.backend != FlowBackend::fidelity_fx ||
         release_defaults.nvidia_preset != NvidiaPerformancePreset::medium ||
         release_defaults.nvidia_input_scale != NvidiaInputScale::half ||
         release_defaults.nvidia_bidirectional || release_defaults.diagnostics ||
@@ -101,6 +101,8 @@ int main() {
         release_defaults.triple_frame_gen ||
         release_defaults.hybrid ||
         !contains(default_runtime_ini, "hybrid=0") ||
+        release_defaults.hybrid_depth_search ||
+        !contains(default_runtime_ini, "hybrid_depth_search=0") ||
         release_defaults.excluded_processes != "PimaxHome-Win64-Shipping.exe" ||
         !contains(default_runtime_ini, "excluded_processes=PimaxHome-Win64-Shipping.exe") ||
         !release_defaults.single_swapchain_rings ||
@@ -115,7 +117,7 @@ int main() {
         !contains(default_runtime_ini, "d3d11_bridge=1") ||
         !release_defaults.capture_at_end_frame ||
         !contains(default_runtime_ini, "capture_at_end_frame=1") ||
-        !contains(default_runtime_ini, "[ofxr]\r\nbackend=nvidia") ||
+        !contains(default_runtime_ini, "[ofxr]\r\nbackend=fidelityfx") ||
         !contains(default_runtime_ini, "motion_vectors=dlss") ||
         !contains(default_runtime_ini, "nvidia_preset=medium") ||
         !contains(default_runtime_ini, "nvidia_input_scale=50") ||
@@ -142,13 +144,14 @@ int main() {
 
     LauncherSettings settings;
     // Every value away from its default, so the round trip proves parsing.
-    settings.backend = FlowBackend::fidelity_fx;
+    settings.backend = FlowBackend::nvidia;
     settings.nvidia_preset = NvidiaPerformancePreset::slow;
     settings.nvidia_input_scale = NvidiaInputScale::quarter;
     settings.nvidia_bidirectional = true;
     settings.deep_pipeline = false;
     settings.triple_frame_gen = true;
     settings.hybrid = true;
+    settings.hybrid_depth_search = true;
     settings.excluded_processes = "Home.exe; Other-Shipping.exe";
     settings.single_swapchain_rings = false;
     settings.vulkan_session_bridge = false;
@@ -162,11 +165,11 @@ int main() {
     settings.overlay_hybrid = false;
     const std::string serialized = serialize_settings(settings);
     const LauncherSettings parsed = parse_settings(serialized);
-    if (parsed.backend != FlowBackend::fidelity_fx ||
+    if (parsed.backend != FlowBackend::nvidia ||
         parsed.nvidia_preset != NvidiaPerformancePreset::slow ||
         parsed.nvidia_input_scale != NvidiaInputScale::quarter ||
         !parsed.nvidia_bidirectional || parsed.deep_pipeline ||
-        !parsed.triple_frame_gen || !parsed.hybrid ||
+        !parsed.triple_frame_gen || !parsed.hybrid || !parsed.hybrid_depth_search ||
         parsed.excluded_processes != "Home.exe; Other-Shipping.exe" ||
         parsed.single_swapchain_rings || parsed.vulkan_session_bridge ||
         parsed.vulkan_support || parsed.d3d11_bridge ||
@@ -252,13 +255,14 @@ int main() {
     }
 
     const std::string runtime_ini = build_runtime_ini(settings);
-    if (!contains(runtime_ini, "[ofxr]\r\nbackend=fidelityfx") ||
+    if (!contains(runtime_ini, "[ofxr]\r\nbackend=nvidia") ||
         !contains(runtime_ini, "nvidia_preset=slow") ||
         !contains(runtime_ini, "nvidia_input_scale=25") ||
         !contains(runtime_ini, "nvidia_bidirectional=1") ||
         !contains(runtime_ini, "deep_pipeline=0") ||
         !contains(runtime_ini, "triple_frame_gen=1") ||
         !contains(runtime_ini, "hybrid=1") ||
+        !contains(runtime_ini, "hybrid_depth_search=1") ||
         !contains(runtime_ini, "excluded_processes=Home.exe; Other-Shipping.exe") ||
         !contains(runtime_ini, "single_swapchain_rings=0") ||
         !contains(runtime_ini, "vulkan_session_bridge=0") ||

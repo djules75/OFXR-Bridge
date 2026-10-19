@@ -377,6 +377,8 @@ constexpr UINT kFlatPanelFlag = 4U;
 // its search, so the bit is recorded but changes nothing. The repeating-
 // pattern lock, bit 1, left with V507.
 std::atomic<std::uint32_t> g_composition_switches{0U};
+// set_hybrid_depth_search (V532).
+std::atomic<bool> g_hybrid_depth_search{false};
 
 // Which composition a draw's constants are laid out for. The vectors-only
 // composition carries the guide rectangle in the game-motion constants, and
@@ -465,6 +467,8 @@ xrfg::live_tuning::Block apply_live_composition_tuning(
     if (read_live_tuning(&live)) {
         values = xrfg::live_tuning::clamped(live);
     }
+    // The tray's menu switches the depth search (V532), not the window.
+    values.depth_search = g_hybrid_depth_search.load(std::memory_order_relaxed) ? 1U : 0U;
     std::memcpy(tuning_mapped, &values, sizeof(values));
     if (recorded.exchange(values.sequence, std::memory_order_relaxed) != values.sequence) {
         const std::uint32_t* field = xrfg::live_tuning::fields(values);
@@ -6665,6 +6669,14 @@ void set_composition_switches(bool edge_ghosting_reduction) noexcept {
     g_composition_switches.store(
         edge_ghosting_reduction ? 1U : 0U,
         std::memory_order_relaxed);
+}
+
+// 857 at each change: a 1 on, 0 off.
+void set_hybrid_depth_search(bool enabled) noexcept {
+    if (g_hybrid_depth_search.exchange(enabled, std::memory_order_relaxed) != enabled) {
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::embedded_configuration, 857, enabled ? 1U : 0U);
+    }
 }
 
 }  // namespace xrfg

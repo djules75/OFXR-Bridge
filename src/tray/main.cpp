@@ -69,6 +69,7 @@ enum MenuCommand : UINT {
     toggle_deep_pipeline = 118,
     toggle_lower_vram = 126,
     toggle_hybrid = 141,
+    toggle_hybrid_depth_search = 142,
     reset_defaults = 127,
     toggle_diagnostics = 120,
     overlay_off = 121,
@@ -119,7 +120,6 @@ struct AppState {
     // writes (xrfg::live_tuning). The block lives as long as the tray, so
     // values set once hold for every game started after them.
     HWND tuning_window{};
-    std::array<HWND, 1> tuning_switches{};
     std::array<HWND, 14> tuning_sliders{};
     std::array<HWND, 14> tuning_labels{};
     HANDLE tuning_mapping{};
@@ -1125,7 +1125,7 @@ constexpr std::array<TuningSlider, 14> kTuningSliders{{
     {L"Near reach", 0, 16,
      &xrfg::live_tuning::Block::depth_near_reach_px, 2U, 2.0, L"px",
      L"the game's depth read every 2 px out to here, either side",
-     L"Depth search for thin near surfaces (V505; the switch above)", false},
+     L"Depth search for thin near surfaces (V505; on with Hybrid: depth search)", false},
     {L"Far reach", 0, 20,
      &xrfg::live_tuning::Block::depth_far_reach_px, 4U, 4.0, L"px",
      L"then every 4 px out to here", nullptr, false},
@@ -1140,20 +1140,9 @@ constexpr std::array<TuningSlider, 14> kTuningSliders{{
      L"a nearer surface's two frames must agree within this (no cost)", nullptr, false},
 }};
 
-// Unticked, off, for an A/B in the same scene; off is the cheaper side.
-struct TuningSwitch {
-    const wchar_t* label;
-    std::uint32_t xrfg::live_tuning::Block::*field;
-};
-
-constexpr std::array<TuningSwitch, 1> kTuningSwitches{{
-    {L"Depth search (V505): nearer surfaces along the motion reach the generated pixel",
-     &xrfg::live_tuning::Block::depth_search},
-}};
+// The depth search's on/off is the menu's "Hybrid: depth search" (V532);
+// the block's field is left as the window found it and the layer ignores it.
 static_assert(kTuningSliders.size() == std::tuple_size_v<decltype(AppState::tuning_sliders)>);
-static_assert(kTuningSwitches.size() == std::tuple_size_v<decltype(AppState::tuning_switches)>);
-
-constexpr int kTuningSwitchBaseId = 2101;
 constexpr int kTuningResetId = 2120;
 
 // A slider's position for a block value, and the value's steps for a
@@ -1198,12 +1187,6 @@ void write_tuning(AppState& state) {
         SetWindowTextW(state.tuning_labels[index],
             tuning_slider_text(slider, steps).c_str());
     }
-    for (std::size_t index = 0; index < kTuningSwitches.size(); ++index) {
-        block->*kTuningSwitches[index].field =
-            SendMessageW(state.tuning_switches[index], BM_GETCHECK, 0, 0) == BST_CHECKED
-                ? 1U
-                : 0U;
-    }
     MemoryBarrier();
     InterlockedIncrement(reinterpret_cast<volatile LONG*>(&block->sequence));
 }
@@ -1214,11 +1197,6 @@ void reset_tuning_controls(AppState& state) {
         const TuningSlider& slider = kTuningSliders[index];
         SendMessageW(state.tuning_sliders[index], TBM_SETPOS, TRUE,
             static_cast<LPARAM>(tuning_position(slider, defaults.*slider.field)));
-    }
-    for (std::size_t index = 0; index < kTuningSwitches.size(); ++index) {
-        SendMessageW(state.tuning_switches[index], BM_SETCHECK,
-            defaults.*kTuningSwitches[index].field != 0U ? BST_CHECKED : BST_UNCHECKED,
-            0);
     }
 }
 
@@ -1298,12 +1276,9 @@ void show_tuning_window(AppState& state) {
         controls.dwICC = ICC_BAR_CLASSES;
         static_cast<void>(InitCommonControlsEx(&controls));
         constexpr int kCaptionHeight = 24;
-        constexpr int kSwitchHeight = 26;
         constexpr int kRowHeight = 44;
         constexpr int kSectionHeight = 30;
-        const int switches_top = 12 + kCaptionHeight;
-        const int sliders_top =
-            switches_top + static_cast<int>(kTuningSwitches.size()) * kSwitchHeight + 8;
+        const int sliders_top = 12 + kCaptionHeight + 8;
         // Each slider's row, with a section heading's height above the
         // sliders that open one.
         std::array<int, kTuningSliders.size()> slider_tops{};
@@ -1337,18 +1312,6 @@ void show_tuning_window(AppState& state) {
             WS_CHILD | WS_VISIBLE, 14, 12, 570, 18,
             state.tuning_window, nullptr, instance, nullptr);
         SendMessageW(caption, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-        for (std::size_t index = 0; index < kTuningSwitches.size(); ++index) {
-            state.tuning_switches[index] = CreateWindowExW(
-                0, L"BUTTON", kTuningSwitches[index].label,
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                14, switches_top + static_cast<int>(index) * kSwitchHeight, 570, 22,
-                state.tuning_window,
-                reinterpret_cast<HMENU>(static_cast<INT_PTR>(
-                    kTuningSwitchBaseId + static_cast<int>(index))),
-                instance, nullptr);
-            SendMessageW(state.tuning_switches[index], WM_SETFONT,
-                reinterpret_cast<WPARAM>(font), TRUE);
-        }
         for (std::size_t index = 0; index < kTuningSliders.size(); ++index) {
             const int top = slider_tops[index];
             if (kTuningSliders[index].section != nullptr) {
@@ -1377,13 +1340,6 @@ void show_tuning_window(AppState& state) {
             SendMessageW(state.tuning_sliders[index], TBM_SETPAGESIZE, 0, fine ? 4 : 1);
         }
         reset_tuning_controls(state);
-        for (std::size_t index = 0; index < kTuningSwitches.size(); ++index) {
-            SendMessageW(state.tuning_switches[index], BM_SETCHECK,
-                state.tuning_block->*kTuningSwitches[index].field != 0U
-                    ? BST_CHECKED
-                    : BST_UNCHECKED,
-                0);
-        }
         const HWND reset = CreateWindowExW(
             0, L"BUTTON", L"Reset to defaults",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -1582,6 +1538,13 @@ void show_context_menu(AppState& state) {
         MF_STRING | (state.settings.hybrid ? MF_CHECKED : MF_UNCHECKED),
         toggle_hybrid,
         L"Hybrid: game motion vectors + optical flow (DLSS games)");
+    // Greyed while Hybrid is off: only the hybrid composition runs it.
+    AppendMenuW(
+        menu,
+        MF_STRING | (state.settings.hybrid_depth_search ? MF_CHECKED : MF_UNCHECKED) |
+            (state.settings.hybrid ? MF_ENABLED : MF_GRAYED),
+        toggle_hybrid_depth_search,
+        L"Hybrid: depth search");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(
         menu,
@@ -1759,6 +1722,23 @@ void handle_command(AppState& state, UINT command) {
             L"and D3D11 and Vulkan games, are unchanged. A running game "
             L"switches within a second.");
         break;
+    case toggle_hybrid_depth_search:
+        if (!state.settings.hybrid) {
+            break;
+        }
+        state.settings.hybrid_depth_search = !state.settings.hybrid_depth_search;
+        update_runtime_options(state);
+        show_balloon(
+            state,
+            state.settings.hybrid_depth_search
+                ? L"Hybrid depth search: on"
+                : L"Hybrid depth search: off",
+            L"Hybrid also looks in the game's depth for thin near objects - "
+            L"bars, struts, cables - crossing a pixel between two frames, so "
+            L"they stay whole on sideways moves. It costs GPU time, a lot at "
+            L"high headset resolutions; leave it off if your frame rate drops "
+            L"with Hybrid. A running game switches within a second.");
+        break;
     case toggle_deep_pipeline:
         if (state.settings.triple_frame_gen) {
             break;
@@ -1795,10 +1775,11 @@ void handle_command(AppState& state, UINT command) {
         if (MessageBoxW(
                 state.window,
                 L"Reset every OFXR setting to its factory default?\n\n"
-                L"Optical flow: NVIDIA Medium at 50%, bidirectional "
-                L"consistency off. Prefer FPS over latency: on. Frame Gen "
+                L"Optical flow: FidelityFX (NVIDIA: Medium at 50%, bidirectional "
+                L"consistency off). Prefer FPS over latency: on. Frame Gen "
                 L"multiplier: 2X. Lower VRAM: on. FPS overlay: upper right, big, latency and Hybrid status shown. Bridge "
-                L"flight recorder: off. Pause key: Ctrl + Alt + F7. Hybrid: off. "
+                L"flight recorder: off. Pause key: Ctrl + Alt + F7. Hybrid: off, "
+                L"its depth search off. "
                 L"Settings "
                 L"only reachable in tray.ini go back to their defaults too.\n\n"
                 L"The FPS overlay, the flight recorder, the Frame Gen multiplier, "

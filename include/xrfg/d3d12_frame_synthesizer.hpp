@@ -314,4 +314,9 @@ private:
 // repeating-pattern lock left with V507: not needed beside the hybrid.)
 void set_composition_switches(bool edge_ghosting_reduction) noexcept;
 
+// V532: the hybrid's depth search (V505), for every synthesizer in the
+// process, from the tray's "Hybrid: depth search". Off until set; the live
+// tuning window no longer switches it.
+void set_hybrid_depth_search(bool enabled) noexcept;
+
 }  // namespace xrfg

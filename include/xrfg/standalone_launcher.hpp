@@ -31,10 +31,10 @@ enum class NvidiaInputScale {
 };
 
 struct LauncherSettings {
-    // NVIDIA optical flow, medium, is the default: the layer falls back to
-    // FidelityFX on its own where NVIDIA cannot initialise, so the default
-    // can be the better backend without a GPU check here.
-    FlowBackend backend{FlowBackend::nvidia};
+    // FidelityFX is the default (V532; NVIDIA Medium before): with Hybrid at
+    // high headset resolutions NVIDIA's flow costs about 4 ms per eye a game
+    // frame more, enough to saturate an RTX 5090 in MSFS 2024 3X (#33).
+    FlowBackend backend{FlowBackend::fidelity_fx};
     NvidiaPerformancePreset nvidia_preset{NvidiaPerformancePreset::medium};
     NvidiaInputScale nvidia_input_scale{NvidiaInputScale::half};
     bool nvidia_bidirectional{};
@@ -47,6 +47,12 @@ struct LauncherSettings {
     // the optical flow, on a D3D12 game that runs DLSS (V497). Off by
     // default; applies at the next game start.
     bool hybrid{};
+    // "Hybrid: depth search": the hybrid's search for thin near surfaces
+    // along the motion in the game's depth (V505), which keeps bars and
+    // struts whole on lateral moves. Off by default (V532): at high headset
+    // resolutions it is the hybrid's costliest part. Greyed in the menu
+    // while Hybrid is off; followed live in a running game.
+    bool hybrid_depth_search{};
     // Executables the layer declines to load in, ';'-separated; written to
     // the layer's ini as excluded_processes. Pimax Home by default (see
     // implicit_layer.hpp). No menu entry; edit tray.ini.
