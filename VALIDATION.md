@@ -1,3 +1,10 @@
+## V598: released-image ownership during acquire-ahead
+
+Exact V597 reproduces the observed -37 at End under held source-copy pressure.
+V598 passes D11/D12 with exact FIFO pixels, metadata, acquisition capacity and
+bounded exhaustion. No image budget or pacing change. Full suite and owner
+validation status: [V598_VALIDATION.json](docs/V598_VALIDATION.json).
+
 ## V597: actual End phase and native receipt headroom
 
 33 focused checks pass. Exact V596 fails the new final-call phase assertion;

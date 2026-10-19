@@ -1,3 +1,10 @@
+## V598: Luke Ross startup image ownership
+
+Preserve the latest released private image when REAL VR acquires its next
+target before End. Exact V597 reproduces the startup error -37; V598 passes
+the D3D11/D3D12 regression. V597 pacing remains included. Owner Crimson/Ghost
+retry pending. [Details](docs/V598_LUKE_RELEASED_IMAGE.md).
+
 ## V597: actual native EndFrame lead
 
 Advance the final SteamVR xrEndFrame phase by a fixed1ms while preserving the

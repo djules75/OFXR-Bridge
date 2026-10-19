@@ -851,10 +851,17 @@ XrResult PrivateOpenXrRuntime::acquire_image(XrSwapchain handle,const XrSwapchai
     if(!valid(info,XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO) || !output)return XR_ERROR_VALIDATION_FAILURE;
     auto& s=*impl_;std::unique_lock lock(s.mutex);auto it=s.chains.find(handle);if(it==s.chains.end())return XR_ERROR_HANDLE_INVALID;auto chain=it->second;
     if((chain->info.createFlags&XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) && chain->released)return XR_ERROR_CALL_ORDER_INVALID;
+    // End references the most recently released image, even when the app has
+    // already acquired its NEXT render target. Never choose that release as
+    // the next target under pressure while older images are still being read.
+    // Internal single-image outputs keep their explicit release/End/copy cycle.
+    const auto held_release=[&](unsigned index){return chain->images.size()>1 && chain->released==index;};
     auto available=[&]() -> std::optional<unsigned> {
-        for(unsigned n=0;n<chain->images.size();++n){auto index=(chain->cursor+n)%chain->images.size();auto& image=chain->images[index];if(!image.acquired && !image.readers)return static_cast<unsigned>(index);}return {};
+        for(unsigned n=0;n<chain->images.size();++n){auto index=(chain->cursor+n)%chain->images.size();auto& image=chain->images[index];if(!held_release(index) && !image.acquired && !image.readers)return static_cast<unsigned>(index);}return {};
     };
-    if(std::all_of(chain->images.begin(),chain->images.end(),[](auto& image){return image.acquired;}))return XR_ERROR_CALL_ORDER_INVALID;
+    bool all_acquired=true;
+    for(unsigned index=0;index<chain->images.size();++index)if(!held_release(index) && !chain->images[index].acquired){all_acquired=false;break;}
+    if(all_acquired)return XR_ERROR_CALL_ORDER_INVALID;
     s.changed.wait(lock,[&]{return (s.running && s.stopping) || chain->destroying || available().has_value();});
     if(s.running && s.stopping)return XR_FAILED(s.failure)?s.failure:XR_ERROR_SESSION_NOT_RUNNING;if(chain->destroying)return XR_ERROR_HANDLE_INVALID;
     auto index=*available();chain->images[index].acquired=true;chain->images[index].waited=false;chain->acquired.push_back(index);chain->cursor=(index+1)%chain->images.size();*output=index;return XR_SUCCESS;

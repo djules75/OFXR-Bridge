@@ -1,3 +1,12 @@
+## V598: avvio Luke Ross
+
+Corregge l'errore -37 riprodotto quando REAL VR acquisisce il prossimo target
+prima della consegna corrente. Conserva il pacing della V597. Avvia prima
+Crimson con il tray V598, poi Ghost: verifica ingresso VR e funzionamento
+OFXR/AFW con le impostazioni abituali. Non servono F8 o benchmark completo.
+Il risultato nel visore resta da verificare; confronto automatico con V597
+e copie GPU D11/D12 documentati in docs/V598_LUKE_RELEASED_IMAGE.md.
+
 ## V597: anticipo della consegna finale
 
 La chiamata xrEndFrame arriva1ms prima sullo stesso periodo del casco.

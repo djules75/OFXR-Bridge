@@ -291,6 +291,42 @@ void copied_source_reuse(bool d12) {
     check(f.positions==std::vector<float>({1,2}),"source reuse keeps per-packet metadata");
     std::printf("%s completed-copy source reuse, generation isolation and native chain lifetime PASS\n",d12?"D3D12":"D3D11");
 }
+void luke_acquire_ahead(bool d12) {
+    Fixture f(d12);auto chain=f.make_chain();
+    std::promise<void> entered,release;auto seen=entered.get_future();auto gate=release.get_future();
+    f.preparation_callback=[&](std::uint64_t sequence){if(sequence==1){entered.set_value();gate.wait();}};
+    f.write(chain,40);f.begin_virtual();xr_ok(f.submit(chain,1),"Luke first released frame");
+    check(seen.wait_for(3s)==std::future_status::ready,"hold first source read before copy");
+    f.write(chain,80);f.begin_virtual();xr_ok(f.submit(chain,2),"Luke second released frame");
+    f.write(chain,120); // index2 is released; indices0/1 still have source readers.
+    auto next=std::async(std::launch::async,[&]{unsigned index{};xr_ok(f.transport->acquire_image(chain,nullptr,&index),"Luke acquire next before End");return index;});
+    const auto pressure=next.wait_for(50ms);
+    release.set_value();f.wait_entered();
+    check(next.wait_for(3s)==std::future_status::ready,"completed older copy makes next producer target available");const auto acquired=next.get();
+    f.begin_virtual();xr_ok(f.submit(chain,3),"Luke release/acquire-next/End must retain the released image under copy pressure");
+    check(pressure==std::future_status::timeout && acquired!=2,"next target must wait for an older image, not reacquire the latest release");
+    XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wait.timeout=XR_INFINITE_DURATION;
+    xr_ok(f.transport->wait_image(chain,&wait),"wait next producer image");xr_ok(f.transport->release_image(chain,nullptr),"release next producer image after current End");
+    f.unblock();f.wait_count(3);xr_ok(f.transport->drain(),"Luke acquire-ahead drain");
+    check(f.pixels==std::vector<unsigned>({40,80,120}),"acquire-ahead must preserve every original released image");
+    check(f.positions==std::vector<float>({1,2,3}) && f.chains.size()==1,"Luke startup keeps metadata and unchanged swapchain budget");
+    xr_ok(f.transport->destroy_swapchain(chain),"destroy Luke startup chain");
+    std::printf("%s Luke released-image protection, next acquisition under source pressure, End success and exact FIFO pixels PASS\n",d12?"D3D12":"D3D11");
+}
+void acquired_capacity(bool d12) {
+    Fixture f(d12);auto chain=f.make_chain();unsigned indices[3]{};
+    for(auto& index:indices)xr_ok(f.transport->acquire_image(chain,nullptr,&index),"multiple outstanding acquisitions before release");
+    unsigned extra{};check(f.transport->acquire_image(chain,nullptr,&extra)==XR_ERROR_CALL_ORDER_INVALID,"fully acquired chain must fail rather than wait indefinitely");
+    XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wait.timeout=XR_INFINITE_DURATION;
+    xr_ok(f.transport->wait_image(chain,&wait),"oldest acquired wait");xr_ok(f.transport->release_image(chain,nullptr),"oldest acquired release");
+    check(f.transport->acquire_image(chain,nullptr,&extra)==XR_ERROR_CALL_ORDER_INVALID,"only latest release plus caller-owned images cannot cause an indefinite wait");
+    for(unsigned n=0;n<2;++n){xr_ok(f.transport->wait_image(chain,&wait),"remaining acquired wait");xr_ok(f.transport->release_image(chain,nullptr),"remaining acquired release");}
+    xr_ok(f.transport->acquire_image(chain,nullptr,&extra),"releasing another image permits producer reuse");
+    check(extra!=indices[2],"latest release remains reserved for End");
+    xr_ok(f.transport->wait_image(chain,&wait),"last acquired wait");xr_ok(f.transport->release_image(chain,nullptr),"last acquired release");
+    xr_ok(f.transport->destroy_swapchain(chain),"destroy no-frame acquisition test");
+    std::printf("%s multi-acquire capacity and bounded exhaustion without a latest-release alias PASS\n",d12?"D3D12":"D3D11");
+}
 void stop_wakeup() {
     Fixture f(true);auto chain=f.make_chain();f.write(chain,90);
     for(int n=0;n<3;++n){f.begin_virtual();xr_ok(f.submit(chain,n),"accept held image");if(!n)f.wait_entered();}
@@ -731,4 +767,4 @@ void queue_priority_policy() {
     std::puts("Final delivery priority: supported HIGH, descriptor preservation, original dedicated fallback, failure propagation PASS");
 }
 }
-int main(int argc,char** argv){std::setvbuf(stdout,nullptr,_IONBF,0);if(argc>1){if(std::string_view(argv[1])=="advance"){native_end_advance(true);native_end_advance(false);}else if(std::string_view(argv[1])=="source"){copied_source_reuse(true);copied_source_reuse(false);}else if(std::string_view(argv[1])=="clock"){stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);quiet_native_clock(true);quiet_native_clock(false);}else if(std::string_view(argv[1])=="phase"){physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();}else if(std::string_view(argv[1])=="margin"){native_margin_scope(true);native_margin_scope(false);}else if(std::string_view(argv[1])=="pipeline"){overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();}else if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();native_margin_scope(true);native_margin_scope(false);rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);quiet_native_clock(true);quiet_native_clock(false);copied_source_reuse(true);copied_source_reuse(false);native_end_advance(true);native_end_advance(false);return 0;}
+int main(int argc,char** argv){std::setvbuf(stdout,nullptr,_IONBF,0);if(argc>1){if(std::string_view(argv[1])=="luke"){luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);}else if(std::string_view(argv[1])=="advance"){native_end_advance(true);native_end_advance(false);}else if(std::string_view(argv[1])=="source"){copied_source_reuse(true);copied_source_reuse(false);}else if(std::string_view(argv[1])=="clock"){stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);quiet_native_clock(true);quiet_native_clock(false);}else if(std::string_view(argv[1])=="phase"){physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();}else if(std::string_view(argv[1])=="margin"){native_margin_scope(true);native_margin_scope(false);}else if(std::string_view(argv[1])=="pipeline"){overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();}else if(std::string_view(argv[1])=="fresh"){fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);}else{cadence_precision(true);cadence_precision(false);}return 0;}stale_native_clock(true);stale_native_clock(false);native_renewal_failure();nonrenderable_native_clock();bounded_native_window(true);bounded_native_window(false);queue_priority_policy();ownership(true);ownership(false);stop_wakeup();failure_wakeup();pending_gpu();preparation_overlap(true);preparation_overlap(false);future_work_dependency(false);future_work_dependency(true);cadence_precision(true);cadence_precision(false);preparation_independence(true);preparation_independence(false);stalled_preparer();unchanged_overlay();same_chain_lookahead(true);same_chain_lookahead(false);changing_overlay_lookahead();stop_prepared_target();reused_real_index(false);reused_real_index(true);static_image_repeat();stop_first_static_target();overlapped_native_wait(false);overlapped_native_wait(true);overlapped_wait_failure();physical_clock_pipeline(true);physical_clock_pipeline(false);late_physical_clock();native_margin_scope(true);native_margin_scope(false);rising_native_wait();fresh_runtime_window(true);fresh_runtime_window(false);fresh_runtime_window(true,5);fresh_runtime_window(false,5);adaptive_source_refill(true);adaptive_source_refill(false);quiet_native_clock(true);quiet_native_clock(false);copied_source_reuse(true);copied_source_reuse(false);native_end_advance(true);native_end_advance(false);luke_acquire_ahead(true);luke_acquire_ahead(false);acquired_capacity(true);acquired_capacity(false);return 0;}
