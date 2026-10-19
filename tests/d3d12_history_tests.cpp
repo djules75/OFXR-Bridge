@@ -3533,6 +3533,69 @@ void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
         require(!resolve_plain(0), "a lopsided eye field took a stream's middle");
         for (std::uint32_t eye = 0; eye < 2; ++eye) xrfg::set_dlss_eye_view(eye, {});
         xrfg::retire_dlss_motion_vector_stream(834);
+
+        // V537: Avatar, the output smaller than the eye image and of its
+        // shape - the whole image enlarged. A 36 x 16 output (vectors 30 x 15)
+        // on a 72 x 32 eye image (wider than every stream above) is placed
+        // over all of it; an output of another shape is refused.
+        const auto large_eye = texture(72);
+        const auto publish_small = [&](std::uint64_t stream, UINT width, UINT height) {
+            fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+                xrfg::DlssMotionVectorPublication p{};
+                p.stream = stream;
+                p.output = color.Get();
+                p.motion_vectors = motion.Get();
+                p.output_width = width;
+                p.output_height = height;
+                p.motion_width = 30;
+                p.motion_height = 15;
+                p.producer_queue = fixture.queue();
+                p.producer_command_list = list;
+                p.resource_state = D3D12_RESOURCE_STATE_COMMON;
+                if (stream == 838U) {
+                    p.view.known = true;
+                    p.view.tan_left = -kEyeTan;
+                    p.view.tan_right = kEyeTan;
+                    p.view.tan_up = 0.9656F;
+                    p.view.tan_down = -0.9656F;
+                    p.view.right = {0.0F, 0.0F, 1.0F};
+                }
+                xrfg::publish_dlss_motion_vectors(p);
+            });
+            return xrfg::dlss_motion_vector_publications();
+        };
+        // With a camera (Avatar evaluates inside Streamline) the camera
+        // places it: a field as wide as the eye's covers the whole image.
+        for (const auto& [stream, height, enlarged] : {std::tuple{836U, 16U, true},
+                 std::tuple{837U, 20U, false}, std::tuple{838U, 16U, true}}) {
+            for (int frame = 0; frame < 2; ++frame) {
+                publish_small(stream, 36, height);
+                wide_release = publish_small(stream, 36, height);
+            }
+            xrfg::anchor_dlss_alternating_eyes(
+                stream, xrfg::dlss_motion_vector_stream_position(stream).epoch, 1);
+            for (std::uint32_t eye = 0; eye < 2; ++eye) {
+                xrfg::set_dlss_eye_view(eye, {-kEyeTan, kEyeTan, 0.9656F, -0.9656F, 0, 0, 72, 32});
+            }
+            const auto placed_small = xrfg::resolve_dlss_motion_vectors(
+                large_eye.Get(), fixture.queue(), 0, wide_release, wide_release);
+            if (enlarged) {
+                require(placed_small && placed_small->eyes[0] && placed_small->eyes[0]->placed &&
+                        placed_small->eyes[0]->output_width == 72 && placed_small->eyes[0]->output_height == 32 &&
+                        placed_small->eyes[0]->placed_motion_rect[0] == 0.0F &&
+                        placed_small->eyes[0]->placed_motion_rect[1] == 0.0F &&
+                        placed_small->eyes[0]->placed_motion_rect[2] == 30.0F &&
+                        placed_small->eyes[0]->placed_motion_rect[3] == 15.0F,
+                    "an output smaller than the eye image, of its shape, was not enlarged over it");
+                std::int32_t origin_x = 0, origin_y = 0;
+                require(!xrfg::dlss_inset_origin(stream, 0, &origin_x, &origin_y),
+                    "an enlarged output was reported at the eye image's scale");
+            } else {
+                require(!placed_small, "an output of another shape was enlarged over the eye image");
+            }
+            for (std::uint32_t eye = 0; eye < 2; ++eye) xrfg::set_dlss_eye_view(eye, {});
+            xrfg::retire_dlss_motion_vector_stream(stream);
+        }
     }
     xrfg::configure_dlss_alternating_eyes(false);
     xrfg::configure_dlss_motion_vector_tracking(false);

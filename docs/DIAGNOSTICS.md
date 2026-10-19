@@ -189,7 +189,8 @@ Then:
   anchor's and the eye measurement's patches are read at the output's origin
   on the eye image (dlss_inset_origin), so they compare the same picture.
   858, the first eight placements: `a` the eye `<< 32` or the stream's low
-  bits, bit 63 placed in the middle without a camera (V534); `b` the
+  bits, bit 63 placed without a camera (V534), bit 62 an output smaller
+  than the image, enlarged over it (V537); `b` the
   output's width `<< 32` or height, as placed (the window's); `c` the placed
   vector rectangle (x, y, width, height in eighths of a texel, 16 bits each).
 - V534: without a camera (Kingdom Come calls NGX directly: output 3776 x
@@ -198,7 +199,16 @@ Then:
   image's middle at the output's scale, as Ghost of Tsushima's camera
   measured its window. 859, once per reason, a stream refused that window:
   `a` 1 not alternating eyes, 2 the eye's field not symmetric, 3 the output
-  too large, 4 smaller than the eye image. The eye measurement (851) reads
+  too large, 4 smaller than the eye image and not of its shape, 5 (V537)
+  an alternating stream's camera does not hold the eye's field, `b` the
+  eye's tangents and `c` the camera's (as 836's).
+- V537: an output smaller than the eye image, of its aspect within 1% and
+  at most 3 times smaller, is the whole eye image enlarged (Avatar: Frontiers
+  of Pandora evaluates DLSS 1902 x 1596 into a 3280 x 2752 texture, eyes
+  3278 x 2752) and is placed over all of it. The output's true size is 840's
+  output rectangle, not the output texture's size in 825. With a camera
+  (Avatar evaluates inside Streamline), an alternating stream's smaller
+  output is placed by its camera instead (place_guide_in_view). The eye measurement (851) reads
   around the same middle: its correlations say whether the guess holds.
 - 845, an eye's choice when a stream is shared without the anchor: `a` eye << 32
   | publication; `b` the two cameras' sides; `c` method (1 cameras apart, 2

@@ -316,7 +316,9 @@ DlssStreamPosition dlss_motion_vector_stream_position(std::uint64_t stream) noex
 // is then that eye's guide, placed on the window (place_guide_in_view).
 // V534: without a camera (Kingdom Come calls NGX directly), an alternating
 // stream at most 6% larger per axis than a symmetric eye's image is placed
-// on its middle, at the output's scale.
+// on its middle, at the output's scale. V537: one smaller than the image, of
+// its shape within 1% and at most 3 times smaller, is placed over the whole
+// image (Avatar: Frontiers of Pandora under R.E.A.L. VR).
 void set_dlss_eye_view(std::uint32_t eye, const DlssEyeView& view) noexcept;
 // V533: where the newest evaluation of `stream` puts its output's origin on
 // eye `eye`'s image, in that image's pixels, when the eye is such a window

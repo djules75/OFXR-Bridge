@@ -1066,8 +1066,19 @@ void anchor_dlss_alternating_eyes(
 // way. Only for alternating-eye streams (configure_dlss_alternating_eyes),
 // a symmetric eye field, and an output at most kCentredWindowMargin larger
 // per axis; otherwise null, the reason recorded once each (859: a 1 not
-// alternating, 2 the field not symmetric, 3 the output too large, 4 smaller).
+// alternating, 2 the field not symmetric, 3 the output too large, 4 smaller
+// and not of the image's shape).
+//
+// V537: an output smaller than the eye image, of its shape, is the whole eye
+// image enlarged. R.E.A.L. VR's Avatar: Frontiers of Pandora evaluates DLSS
+// into the corner of a 3280 x 2752 texture, 1902 x 1596 from 1929 x 1619,
+// and the eyes are 3278 x 2752: the same aspect within 0.05%, 1.72 times the
+// size. Its whole output is placed over the whole eye image (the vectors
+// scale into the image's pixels as MSFS 2024's periphery does, V515), up to
+// kStretchLimit times and within kStretchAspect of the image's aspect.
 constexpr double kCentredWindowMargin = 0.06;
+constexpr double kStretchLimit = 3.0;
+constexpr double kStretchAspect = 0.01;
 
 std::shared_ptr<const DlssMotionVectorFrame> place_centred_window(
     const DlssMotionVectorFrame& frame, const DlssEyeView& view) noexcept {
@@ -1084,6 +1095,31 @@ std::shared_ptr<const DlssMotionVectorFrame> place_centred_window(
             return std::shared_ptr<const DlssMotionVectorFrame>{};
         };
         if (!g_alternating_eyes.load(std::memory_order_acquire)) return refuse(1);
+        if (view.x < 0 || view.y < 0 || view.width == 0 || view.height == 0 ||
+            frame.output_x != 0 || frame.output_y != 0 || frame.output_width == 0 ||
+            frame.output_height == 0 || frame.motion_width == 0 || frame.motion_height == 0) {
+            return {};
+        }
+        if (frame.output_width < view.width || frame.output_height < view.height) {
+            // V537: the whole image, enlarged.
+            const double scale_x = static_cast<double>(view.width) / frame.output_width;
+            const double scale_y = static_cast<double>(view.height) / frame.output_height;
+            if (!(scale_x >= 1.0) || !(scale_y >= 1.0) || scale_x > kStretchLimit ||
+                scale_y > kStretchLimit ||
+                std::fabs(scale_x / scale_y - 1.0) > kStretchAspect) {
+                return refuse(4);
+            }
+            auto placed = std::make_shared<DlssMotionVectorFrame>(frame);
+            placed->output_x = static_cast<std::uint32_t>(view.x);
+            placed->output_y = static_cast<std::uint32_t>(view.y);
+            placed->output_width = view.width;
+            placed->output_height = view.height;
+            placed->placed = true;
+            placed->placed_motion_rect = {static_cast<float>(frame.motion_x),
+                static_cast<float>(frame.motion_y), static_cast<float>(frame.motion_width),
+                static_cast<float>(frame.motion_height)};
+            return placed;
+        }
         const double width = static_cast<double>(view.tan_right) - view.tan_left;
         const double height = static_cast<double>(view.tan_up) - view.tan_down;
         if (!(width > 0.0) || !(height > 0.0) ||
@@ -1091,12 +1127,6 @@ std::shared_ptr<const DlssMotionVectorFrame> place_centred_window(
             !(std::fabs(static_cast<double>(view.tan_up) + view.tan_down) <= 0.01 * height)) {
             return refuse(2);
         }
-        if (view.x < 0 || view.y < 0 || view.width == 0 || view.height == 0 ||
-            frame.output_x != 0 || frame.output_y != 0 ||
-            frame.motion_width == 0 || frame.motion_height == 0) {
-            return {};
-        }
-        if (frame.output_width < view.width || frame.output_height < view.height) return refuse(4);
         if (frame.output_width - view.width > kCentredWindowMargin * view.width ||
             frame.output_height - view.height > kCentredWindowMargin * view.height) {
             return refuse(3);
@@ -1123,10 +1153,25 @@ std::shared_ptr<const DlssMotionVectorFrame> place_centred_window(
 }
 
 // The eye's window of `frame`: by its camera (V533), else in its middle (V534).
+// V537: an alternating stream whose camera does not hold the eye's field is
+// recorded once (859 a = 5, b the eye's tangents, c the camera's, as 836's).
 std::shared_ptr<const DlssMotionVectorFrame> place_on_eye_window(
     const DlssMotionVectorFrame& frame, const DlssEyeView& view) noexcept {
-    if (frame.view.known) return place_guide_in_view(frame, view);
-    return place_centred_window(frame, view);
+    if (!frame.view.known) return place_centred_window(frame, view);
+    auto placed = place_guide_in_view(frame, view);
+    if (!placed && g_alternating_eyes.load(std::memory_order_acquire)) {
+        static std::atomic_bool recorded{false};
+        if (!recorded.exchange(true)) {
+            try {
+                bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 859, 5U,
+                    pack_view_tangents(view.tan_left, view.tan_right, view.tan_up, view.tan_down),
+                    pack_view_tangents(frame.view.tan_left, frame.view.tan_right,
+                        frame.view.tan_up, frame.view.tan_down));
+            } catch (...) {
+            }
+        }
+    }
+    return placed;
 }
 
 void set_dlss_eye_view(std::uint32_t eye, const DlssEyeView& view) noexcept {
@@ -1155,7 +1200,11 @@ bool dlss_inset_origin(std::uint64_t stream, std::uint32_t eye,
         if (!frame.view.known) {
             // V534: the middle window, at the output's scale.
             const DlssEyeView& view = state.eye_views[eye];
-            if (!place_centred_window(frame, view)) return false;
+            // V537: an enlarged output is not at the image's scale.
+            if (frame.output_width < view.width || frame.output_height < view.height ||
+                !place_centred_window(frame, view)) {
+                return false;
+            }
             *x = static_cast<std::int32_t>(std::lround(
                 view.x - (static_cast<double>(frame.output_width) - view.width) / 2.0));
             *y = static_cast<std::int32_t>(std::lround(
@@ -1270,19 +1319,29 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 output_fits_extent(frame.output_width, description.Width) &&
                 output_fits_extent(frame.output_height, description.Height);
         };
+        // V537: an output smaller than the image too, without a camera or -
+        // for R.E.A.L. VR's alternating streams - with one (Avatar: Frontiers
+        // of Pandora evaluates inside Streamline, its camera +-1.1560 x
+        // +-0.9702 the whole 1902 x 1596 output's). Elsewhere a camera-placed
+        // smaller output is the per-view join's (MSFS 2024's periphery).
+        const bool alternating = g_alternating_eyes.load(std::memory_order_acquire);
         const auto inset_of_image = [&](const DlssMotionVectorFrame& frame) {
             return eye_view && frame.output_x == 0 && frame.output_y == 0 &&
-                frame.output_width >= description.Width &&
-                frame.output_height >= description.Height &&
+                (!frame.view.known || alternating ||
+                    (frame.output_width >= description.Width &&
+                        frame.output_height >= description.Height)) &&
                 place_on_eye_window(frame, state.eye_views[static_cast<std::size_t>(eye)]) != nullptr;
         };
         // 858, the first eight placements: a the eye << 32 | the stream's low
-        // bits | bit 63 placed in the middle without a camera (V534), b the
+        // bits | bit 63 placed without a camera (V534), bit 62 an output
+        // smaller than the image, enlarged over it (V537), b the
         // output's width << 32 | height, c the placed vector rectangle (x, y,
         // width, height in eighths of a texel, 16 bits each).
         const auto place_inset = [&](DlssMotionVectorFrame& frame) {
             if (!eye_view || fits_image(frame)) return;
             const bool centred = !frame.view.known;
+            const bool enlarged =
+                frame.output_width < state.eye_views[static_cast<std::size_t>(eye)].width;
             const auto placed =
                 place_on_eye_window(frame, state.eye_views[static_cast<std::size_t>(eye)]);
             if (!placed) return;
@@ -1294,7 +1353,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 try {
                     bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 858,
                         (static_cast<std::uint64_t>(eye) << 32U) | (frame.stream & 0xFFFFFFFFULL) |
-                            (centred ? 1ULL << 63U : 0ULL),
+                            (centred ? 1ULL << 63U : 0ULL) | (enlarged ? 1ULL << 62U : 0ULL),
                         (static_cast<std::uint64_t>(frame.output_width) << 32U) | frame.output_height,
                         eighths(frame.placed_motion_rect[0]) | (eighths(frame.placed_motion_rect[1]) << 16U) |
                             (eighths(frame.placed_motion_rect[2]) << 32U) |
