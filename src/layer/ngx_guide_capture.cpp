@@ -12,6 +12,8 @@
 
 #include <safetyhook.hpp>
 
+#include "depth_unpack_shader.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -101,7 +103,8 @@ constexpr std::int64_t kRecordHookFailed = 823;
 //       << 32 | height
 //   830 (V512) the D3D11 path's first publication of a stream: a its low bits
 //       | bit 32 the depth was shared | bit 33 the depth's format cannot be
-//       shared (packed depth-stencil), b vectors format << 32 | depth format,
+//       shared (packed depth-stencil) | bit 34 (V521) it went over unpacked
+//       to a float, b vectors format << 32 | depth format,
 //       c output width << 32 | height
 //   824 reasons 5 (the evaluation's D3D11 context is not the bridged
 //       session's immediate context) and 6 (the copy into the shared textures
@@ -146,6 +149,15 @@ constexpr std::int64_t kRecordStreamlineStream = 835;
 //       vector texture's DXGI format << 48 | its width << 24 | its height
 constexpr std::int64_t kRecordParameters = 839;
 constexpr std::int64_t kRecordParametersMore = 840;
+//   841 (V521) an input rectangle moved back onto its eye's render region,
+//       the first sixteen: a the stream's low 32 bits, b the vectors' shift
+//       x << 32 | y, c the depth's, each a signed 32-bit count of render
+//       texels removed
+constexpr std::int64_t kRecordRealigned = 841;
+//   842 (V521) with each 839: a the depth rectangle, x << 48 | y << 32 |
+//       width << 16 | height, b 1 when the depth came with the publication,
+//       c 1 when it is inverted
+constexpr std::int64_t kRecordDepthRect = 842;
 constexpr std::int64_t kRecordSkip = 824;
 constexpr std::int64_t kRecordShape = 825;
 constexpr std::int64_t kRecordSummary = 826;
@@ -290,6 +302,39 @@ T get(const NVSDK_NGX_Parameter* parameters, const char* name, T fallback = {}) 
 
 [[nodiscard]] unsigned available(UINT64 extent, unsigned base) noexcept {
     return static_cast<unsigned>(extent - std::min<UINT64>(base, extent));
+}
+
+// How far DLSS's input rectangle starts off its eye's render region, in
+// render texels (V521); 0 when it does not. The eye image is the game's own
+// render of its field, so an eye pixel maps to its region's origin, not to
+// wherever an upscaler chose to start reading: PureDark's Skyrim upscaler
+// keeps its foveated offsets (0.02, 0.04) at foveated scale 1.0, reads from
+// (56, 88) and (2768, 88) of a 2824-wide region per eye while saying its
+// output starts at (0, 0), and places its output back by the same offset.
+// Hybrid then read every vector about 97 px across and 152 px down from its
+// pixel - a halo round everything that moved against its background. The
+// regions are taken to lie on a grid of their own size; a start within a
+// tenth of a region of a grid line is that line, anything further (an eye at
+// the half of a larger allocation) is left as it is.
+[[nodiscard]] long input_offset_within_region(
+    unsigned base, unsigned output_base, unsigned extent, unsigned output_extent) noexcept {
+    if (extent == 0 || output_extent == 0) return 0;
+    const double ratio = static_cast<double>(extent) / static_cast<double>(output_extent);
+    const double start = static_cast<double>(base) - static_cast<double>(output_base) * ratio;
+    const double origin = std::round(start / static_cast<double>(extent)) * static_cast<double>(extent);
+    const double offset = start - origin;
+    if (std::abs(offset) < 0.5 || std::abs(offset) > 0.1 * static_cast<double>(extent)) return 0;
+    return std::lround(offset);
+}
+
+// Moves base back by the offset when the result stays inside the texture.
+[[nodiscard]] long realign(unsigned& base, unsigned output_base, unsigned extent,
+    unsigned output_extent) noexcept {
+    const long offset = input_offset_within_region(base, output_base, extent, output_extent);
+    const long moved = static_cast<long>(base) - offset;
+    if (offset == 0 || moved < 0) return 0;
+    base = static_cast<unsigned>(moved);
+    return offset;
 }
 
 // A texture's shape, from either API.
@@ -599,6 +644,37 @@ void fill_publication(
         publication.depth_inverted =
             (feature.flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
     }
+    // V521: the input rectangles back on the eye's render region.
+    const long motion_dx = realign(publication.motion_x, publication.output_x,
+        publication.motion_width, publication.output_width);
+    const long motion_dy = realign(publication.motion_y, publication.output_y,
+        publication.motion_height, publication.output_height);
+    publication.motion_width = std::min(publication.motion_width,
+        available(motion.width, publication.motion_x));
+    publication.motion_height = std::min(publication.motion_height,
+        available(motion.height, publication.motion_y));
+    long depth_dx = 0, depth_dy = 0;
+    if (depth != nullptr) {
+        depth_dx = realign(publication.depth_x, publication.output_x,
+            publication.depth_width, publication.output_width);
+        depth_dy = realign(publication.depth_y, publication.output_y,
+            publication.depth_height, publication.output_height);
+        publication.depth_width = std::min(publication.depth_width,
+            available(depth->width, publication.depth_x));
+        publication.depth_height = std::min(publication.depth_height,
+            available(depth->height, publication.depth_y));
+    }
+    if (motion_dx != 0 || motion_dy != 0 || depth_dx != 0 || depth_dy != 0) {
+        static std::atomic<unsigned> recorded{0};
+        if (recorded.fetch_add(1, std::memory_order_relaxed) < 16) {
+            const auto pair = [](long x, long y) {
+                return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 32U) |
+                    static_cast<std::uint32_t>(y);
+            };
+            record(kRecordRealigned, feature.stream & 0xFFFFFFFFULL, pair(motion_dx, motion_dy),
+                pair(depth_dx, depth_dy));
+        }
+    }
 }
 
 [[nodiscard]] std::uint64_t float_bits(float value) noexcept {
@@ -628,6 +704,10 @@ void record_parameters(const DlssMotionVectorPublication& publication, const Fea
         (float_bits(publication.scale_x) << 32U) | float_bits(publication.scale_y),
         pack_rect(publication.motion_x, publication.motion_y, publication.motion_width,
             publication.motion_height));
+    record(kRecordDepthRect,
+        pack_rect(publication.depth_x, publication.depth_y, publication.depth_width,
+            publication.depth_height),
+        publication.depth != nullptr ? 1U : 0U, publication.depth_inverted ? 1U : 0U);
     record(kRecordParametersMore,
         pack_rect(publication.output_x, publication.output_y, publication.output_width,
             publication.output_height),
@@ -1033,6 +1113,9 @@ public:
         ID3D12Resource* depth{};
         ID3D12GraphicsCommandList* list{};
         bool depth_unshareable{};
+        // V521: the depth went over as a float unpacked from a packed
+        // depth-stencil buffer.
+        bool depth_unpacked{};
     };
 
     GuideTransport11() = default;
@@ -1103,6 +1186,7 @@ public:
         ID3D11DeviceContext* context,
         ID3D11Texture2D* motion,
         ID3D11Texture2D* depth,
+        const D3D11_RECT& depth_rect,
         Staged* staged) noexcept {
         try {
             *staged = {};
@@ -1126,12 +1210,21 @@ public:
             if (FAILED(result)) return result;
             bool depth_ready = false;
             if (depth != nullptr) {
-                const HRESULT depth_result = prepare(slot.depth, depth, true);
+                HRESULT depth_result = prepare(slot.depth, depth, true);
+                // V521: a packed depth-stencil goes over unpacked to a float.
+                if (depth_result == DXGI_ERROR_UNSUPPORTED) {
+                    depth_result = prepare_unpacked(slot.depth, depth);
+                }
                 depth_ready = SUCCEEDED(depth_result);
                 staged->depth_unshareable = depth_result == DXGI_ERROR_UNSUPPORTED;
             }
             copy(context, slot.motion, motion);
-            if (depth_ready) copy(context, slot.depth, depth);
+            if (depth_ready && slot.depth.unpacked) {
+                depth_ready = SUCCEEDED(unpack(context, slot.depth, depth, depth_rect));
+                staged->depth_unpacked = depth_ready;
+            } else if (depth_ready) {
+                copy(context, slot.depth, depth);
+            }
             result = context4->Signal(to12_11_.Get(), ++copied_);
             if (FAILED(result)) return result;
             context->Flush();
@@ -1176,6 +1269,13 @@ private:
         ComPtr<ID3D11Texture2D> d3d11;
         ComPtr<ID3D12Resource> d3d12;
         D3D11_TEXTURE2D_DESC source{};
+        // V521, an unpacked depth: the float texture written through
+        // `target`, from the game's depth read through `read_view`, made for
+        // `read_from` (held, so its address cannot come back as another).
+        bool unpacked{};
+        ComPtr<ID3D11UnorderedAccessView> target;
+        ComPtr<ID3D11ShaderResourceView> read_view;
+        ComPtr<ID3D11Texture2D> read_from;
     };
     struct Slot {
         Shared motion;
@@ -1239,6 +1339,174 @@ private:
         return S_OK;
     }
 
+    // The depth plane's view of a packed depth-stencil format a shader can
+    // read; unknown where there is none (a typed format: no shader view).
+    [[nodiscard]] static DXGI_FORMAT unpack_view_format(DXGI_FORMAT format) noexcept {
+        switch (format) {
+            case DXGI_FORMAT_R24G8_TYPELESS:
+                return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+            case DXGI_FORMAT_R32G8X24_TYPELESS:
+                return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+            default:
+                return DXGI_FORMAT_UNKNOWN;
+        }
+    }
+
+    // V521: for a packed depth-stencil buffer, a shared R32_FLOAT texture of
+    // its size the unpack writes through a view of its own.
+    [[nodiscard]] HRESULT prepare_unpacked(Shared& shared, ID3D11Texture2D* source) noexcept {
+        try {
+            D3D11_TEXTURE2D_DESC description{};
+            source->GetDesc(&description);
+            if (description.SampleDesc.Count != 1 || description.ArraySize != 1 ||
+                (description.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0 ||
+                unpack_view_format(description.Format) == DXGI_FORMAT_UNKNOWN) {
+                return DXGI_ERROR_UNSUPPORTED;
+            }
+            HRESULT result = S_OK;
+            if (!unpack_shader_) {
+                result = d3d11_->CreateComputeShader(g_xrfg_depth_unpack_shader,
+                    sizeof(g_xrfg_depth_unpack_shader), nullptr, unpack_shader_.GetAddressOf());
+                if (FAILED(result)) return result;
+                D3D11_BUFFER_DESC region{};
+                region.ByteWidth = 16;
+                region.Usage = D3D11_USAGE_DEFAULT;
+                region.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+                result = d3d11_->CreateBuffer(&region, nullptr, unpack_region_.GetAddressOf());
+                if (FAILED(result)) {
+                    unpack_shader_.Reset();
+                    return result;
+                }
+            }
+            D3D12_RESOURCE_DESC desc{};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            desc.Width = description.Width;
+            desc.Height = description.Height;
+            desc.DepthOrArraySize = 1;
+            desc.MipLevels = 1;
+            desc.Format = DXGI_FORMAT_R32_FLOAT;
+            desc.SampleDesc.Count = 1;
+            desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS |
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS |
+                D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            D3D12_HEAP_PROPERTIES heap{};
+            heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+            Shared replacement;
+            result = device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc,
+                D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(replacement.d3d12.GetAddressOf()));
+            if (FAILED(result)) return result;
+            HANDLE handle = nullptr;
+            result = device_->CreateSharedHandle(replacement.d3d12.Get(), nullptr, GENERIC_ALL,
+                nullptr, &handle);
+            if (FAILED(result)) return result;
+            result = d3d11_->OpenSharedResource1(handle, IID_PPV_ARGS(replacement.d3d11.GetAddressOf()));
+            CloseHandle(handle);
+            if (FAILED(result)) return result;
+            D3D11_UNORDERED_ACCESS_VIEW_DESC view{};
+            view.Format = DXGI_FORMAT_R32_FLOAT;
+            view.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+            result = d3d11_->CreateUnorderedAccessView(replacement.d3d11.Get(), &view,
+                replacement.target.GetAddressOf());
+            if (FAILED(result)) return result;
+            replacement.source = description;
+            replacement.unpacked = true;
+            shared = std::move(replacement);
+            return S_OK;
+        } catch (...) {
+            return E_FAIL;
+        }
+    }
+
+    // V521: the depth plane over `rect` into the shared float texture, on the
+    // game's context. Its compute bindings are put back after; a depth buffer
+    // still bound for writing cannot be read, so it is unbound for the
+    // dispatch and bound again.
+    [[nodiscard]] HRESULT unpack(ID3D11DeviceContext* context, Shared& shared,
+        ID3D11Texture2D* source, const D3D11_RECT& rect) noexcept {
+        try {
+            if (!shared.read_view || shared.read_from.Get() != source) {
+                D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+                view.Format = unpack_view_format(shared.source.Format);
+                view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                view.Texture2D.MipLevels = 1;
+                shared.read_view.Reset();
+                shared.read_from.Reset();
+                const HRESULT result = d3d11_->CreateShaderResourceView(source, &view,
+                    shared.read_view.GetAddressOf());
+                if (FAILED(result)) return result;
+                shared.read_from = source;
+            }
+            const LONG width = static_cast<LONG>(shared.source.Width);
+            const LONG height = static_cast<LONG>(shared.source.Height);
+            LONG left = std::clamp<LONG>(rect.left, 0, width);
+            LONG top = std::clamp<LONG>(rect.top, 0, height);
+            LONG right = std::clamp<LONG>(rect.right, 0, width);
+            LONG bottom = std::clamp<LONG>(rect.bottom, 0, height);
+            if (right <= left || bottom <= top) {
+                left = 0;
+                top = 0;
+                right = width;
+                bottom = height;
+            }
+            const std::array<UINT, 4> region{static_cast<UINT>(left), static_cast<UINT>(top),
+                static_cast<UINT>(right - left), static_cast<UINT>(bottom - top)};
+
+            ComPtr<ID3D11ComputeShader> shader;
+            context->CSGetShader(shader.GetAddressOf(), nullptr, nullptr);
+            ComPtr<ID3D11ShaderResourceView> read;
+            context->CSGetShaderResources(0, 1, read.GetAddressOf());
+            ComPtr<ID3D11UnorderedAccessView> write;
+            context->CSGetUnorderedAccessViews(0, 1, write.GetAddressOf());
+            ComPtr<ID3D11Buffer> constants;
+            context->CSGetConstantBuffers(0, 1, constants.GetAddressOf());
+            std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> targets{};
+            ID3D11DepthStencilView* depth_view = nullptr;
+            context->OMGetRenderTargets(static_cast<UINT>(targets.size()), targets.data(), &depth_view);
+            bool unbound = false;
+            if (depth_view != nullptr) {
+                ComPtr<ID3D11Resource> bound;
+                depth_view->GetResource(bound.GetAddressOf());
+                if (same_object(bound.Get(), source)) {
+                    context->OMSetRenderTargetsAndUnorderedAccessViews(
+                        static_cast<UINT>(targets.size()), targets.data(), nullptr, 0,
+                        D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
+                    unbound = true;
+                }
+            }
+
+            context->UpdateSubresource(unpack_region_.Get(), 0, nullptr, region.data(), 0, 0);
+            ID3D11ShaderResourceView* depth_read = shared.read_view.Get();
+            ID3D11UnorderedAccessView* depth_write = shared.target.Get();
+            ID3D11Buffer* region_buffer = unpack_region_.Get();
+            const UINT keep_counter = static_cast<UINT>(-1);
+            context->CSSetShader(unpack_shader_.Get(), nullptr, 0);
+            context->CSSetShaderResources(0, 1, &depth_read);
+            context->CSSetUnorderedAccessViews(0, 1, &depth_write, &keep_counter);
+            context->CSSetConstantBuffers(0, 1, &region_buffer);
+            context->Dispatch((region[2] + 7U) / 8U, (region[3] + 7U) / 8U, 1);
+
+            ID3D11ShaderResourceView* old_read = read.Get();
+            ID3D11UnorderedAccessView* old_write = write.Get();
+            ID3D11Buffer* old_constants = constants.Get();
+            context->CSSetShader(shader.Get(), nullptr, 0);
+            context->CSSetShaderResources(0, 1, &old_read);
+            context->CSSetUnorderedAccessViews(0, 1, &old_write, &keep_counter);
+            context->CSSetConstantBuffers(0, 1, &old_constants);
+            if (unbound) {
+                context->OMSetRenderTargetsAndUnorderedAccessViews(
+                    static_cast<UINT>(targets.size()), targets.data(), depth_view, 0,
+                    D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
+            }
+            for (auto* target : targets) {
+                if (target != nullptr) target->Release();
+            }
+            if (depth_view != nullptr) depth_view->Release();
+            return S_OK;
+        } catch (...) {
+            return E_FAIL;
+        }
+    }
+
     static void copy(ID3D11DeviceContext* context, const Shared& shared, ID3D11Texture2D* source) {
         if (shared.source.MipLevels == 1) {
             context->CopyResource(shared.d3d11.Get(), source);
@@ -1256,6 +1524,9 @@ private:
     ComPtr<ID3D11Fence> to12_11_;
     ComPtr<ID3D12Fence> to12_12_;
     ComPtr<ID3D12Fence> to11_12_;
+    // V521: the depth unpack, made on the game's device at its first use.
+    ComPtr<ID3D11ComputeShader> unpack_shader_;
+    ComPtr<ID3D11Buffer> unpack_region_;
     std::array<Slot, 2> slots_{};
     std::uint32_t next_{};
     std::uint64_t copied_{};
@@ -1429,20 +1700,25 @@ void capture11(
             skip_d3d11(6, static_cast<std::uint32_t>(E_OUTOFMEMORY));
             return;
         }
-        GuideTransport11::Staged staged{};
-        const HRESULT staged_result =
-            transport->stage(context, motion.Get(), depth.Get(), &staged);
-        if (FAILED(staged_result)) {
-            skip_d3d11(6, static_cast<std::uint32_t>(staged_result));
-            return;
-        }
-
+        // The publication's rectangles first (V521): the depth's is what the
+        // unpack of a packed depth covers.
         DlssMotionVectorPublication publication{};
         Shape depth_shape{depth_description.Width, depth_description.Height};
         fill_publication(publication, feature, parameters,
             {output_description.Width, output_description.Height},
             {motion_description.Width, motion_description.Height},
-            staged.depth != nullptr ? &depth_shape : nullptr);
+            depth ? &depth_shape : nullptr);
+        const D3D11_RECT depth_rect{static_cast<LONG>(publication.depth_x),
+            static_cast<LONG>(publication.depth_y),
+            static_cast<LONG>(publication.depth_x + publication.depth_width),
+            static_cast<LONG>(publication.depth_y + publication.depth_height)};
+        GuideTransport11::Staged staged{};
+        const HRESULT staged_result =
+            transport->stage(context, motion.Get(), depth.Get(), depth_rect, &staged);
+        if (FAILED(staged_result)) {
+            skip_d3d11(6, static_cast<std::uint32_t>(staged_result));
+            return;
+        }
         publication.output = placeholder.Get();
         publication.motion_vectors = staged.motion;
         publication.producer_queue = queue.Get();
@@ -1479,7 +1755,8 @@ void capture11(
             record(kRecordD3D11Publication,
                 (feature.stream & 0xFFFFFFFFULL) |
                     (staged.depth != nullptr ? 1ULL << 32U : 0ULL) |
-                    (staged.depth_unshareable ? 1ULL << 33U : 0ULL),
+                    (staged.depth_unshareable ? 1ULL << 33U : 0ULL) |
+                    (staged.depth_unpacked ? 1ULL << 34U : 0ULL),
                 (static_cast<std::uint64_t>(motion_description.Format) << 32U) |
                     static_cast<std::uint64_t>(depth ? depth_description.Format : 0),
                 (static_cast<std::uint64_t>(publication.output_width) << 32U) |
@@ -2985,6 +3262,11 @@ NgxGuideCaptureStatistics ngx_guide_capture_statistics() noexcept {
     } catch (...) {
         return {};
     }
+}
+
+long dlss_input_offset_within_region(
+    unsigned base, unsigned output_base, unsigned extent, unsigned output_extent) noexcept {
+    return input_offset_within_region(base, output_base, extent, output_extent);
 }
 
 }  // namespace xrfg

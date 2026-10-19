@@ -658,11 +658,13 @@ int run_d3d11(HMODULE module) {
         D3D11_BIND_SHADER_RESOURCE, 0x3F000000U);
 
     const auto vectors_before = xrfg::dlss_motion_vector_statistics();
-    const auto evaluate_frame = [&](NVSDK_NGX_Handle* handle, ID3D11Texture2D* vectors, float jitter) {
+    const auto evaluate_frame = [&](NVSDK_NGX_Handle* handle, ID3D11Texture2D* vectors, float jitter,
+                                    ID3D11Texture2D* frame_depth = nullptr) {
         Parameters frame;
         frame.Set(NVSDK_NGX_Parameter_Output, static_cast<ID3D11Resource*>(output.Get()));
         frame.Set(NVSDK_NGX_Parameter_MotionVectors, static_cast<ID3D11Resource*>(vectors));
-        frame.Set(NVSDK_NGX_Parameter_Depth, static_cast<ID3D11Resource*>(depth.Get()));
+        frame.Set(NVSDK_NGX_Parameter_Depth,
+            static_cast<ID3D11Resource*>(frame_depth != nullptr ? frame_depth : depth.Get()));
         frame.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, kRenderWidth);
         frame.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, kRenderHeight);
         frame.Set(NVSDK_NGX_Parameter_Jitter_Offset_X, jitter);
@@ -769,6 +771,89 @@ int run_d3d11(HMODULE module) {
     readback->Unmap(0, nullptr);
     require((eye0 == kLeftVector && eye1 == kRightVector) || (eye0 == kRightVector && eye1 == kLeftVector),
         "the D3D12 snapshots do not hold the vectors the game wrote in D3D11");
+
+    // V521: a packed depth-stencil buffer (Skyrim's R24G8), which D3D11
+    // cannot share, goes over unpacked to a float. Cleared to 0.25 and left
+    // bound for writing, as a game may leave it at its DLSS call: the unpack
+    // unbinds it for its read and binds it back.
+    {
+        D3D11_TEXTURE2D_DESC packed_description{};
+        packed_description.Width = kRenderWidth;
+        packed_description.Height = kRenderHeight;
+        packed_description.MipLevels = 1;
+        packed_description.ArraySize = 1;
+        packed_description.Format = DXGI_FORMAT_R24G8_TYPELESS;
+        packed_description.SampleDesc.Count = 1;
+        packed_description.Usage = D3D11_USAGE_DEFAULT;
+        packed_description.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+        ComPtr<ID3D11Texture2D> packed;
+        require_hresult(device11->CreateTexture2D(&packed_description, nullptr, packed.GetAddressOf()),
+            "packed depth");
+        D3D11_DEPTH_STENCIL_VIEW_DESC write_description{};
+        write_description.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        write_description.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        ComPtr<ID3D11DepthStencilView> write_view;
+        require_hresult(device11->CreateDepthStencilView(packed.Get(), &write_description,
+            write_view.GetAddressOf()), "packed depth view");
+        context11->ClearDepthStencilView(write_view.Get(),
+            D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 0.25F, 7);
+        context11->OMSetRenderTargets(0, nullptr, write_view.Get());
+        evaluate_frame(left, motion_left.Get(), 0.25F, packed.Get());
+        evaluate_frame(right, motion_right.Get(), 0.25F, packed.Get());
+        ComPtr<ID3D11DepthStencilView> still_bound;
+        context11->OMGetRenderTargets(0, nullptr, still_bound.GetAddressOf());
+        require(still_bound.Get() == write_view.Get(), "the unpack did not bind the game's depth back");
+        context11->OMSetRenderTargets(0, nullptr, nullptr);
+        context11->Flush();
+        xrfg::flush_ngx_guide_capture_d3d11();
+        const auto packed_set = xrfg::resolve_dlss_motion_vectors(image.Get(), queue12.Get());
+        require(packed_set != nullptr && packed_set->eye_count == 2, "no guide set with the packed depth");
+
+        require_hresult(allocator->Reset(), "allocator reset");
+        require_hresult(list->Reset(allocator.Get(), nullptr), "list reset");
+        for (unsigned eye = 0; eye < 2; ++eye) {
+            const auto& frame = packed_set->eyes[eye];
+            require(frame && frame->depth &&
+                    frame->depth->GetDesc().Format == DXGI_FORMAT_R32_FLOAT,
+                "an eye's packed depth did not go over as a float");
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = frame->depth.Get();
+            barrier.Transition.StateBefore = frame->depth_resource_state;
+            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            list->ResourceBarrier(1, &barrier);
+            D3D12_TEXTURE_COPY_LOCATION source{};
+            source.pResource = frame->depth.Get();
+            source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            D3D12_TEXTURE_COPY_LOCATION destination{};
+            destination.pResource = readback.Get();
+            destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            destination.PlacedFootprint.Offset = eye * 256ULL * kRenderHeight;
+            destination.PlacedFootprint.Footprint = {DXGI_FORMAT_R32_FLOAT, kRenderWidth, kRenderHeight, 1, 256};
+            list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+            std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+            list->ResourceBarrier(1, &barrier);
+        }
+        require_hresult(list->Close(), "Close packed");
+        ID3D12CommandList* packed_lists[]{list.Get()};
+        queue12->ExecuteCommandLists(1, packed_lists);
+        require_hresult(queue12->Signal(fence.Get(), 2), "Signal packed");
+        HANDLE packed_done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        require_hresult(fence->SetEventOnCompletion(2, packed_done), "SetEventOnCompletion packed");
+        require(WaitForSingleObject(packed_done, 10000) == WAIT_OBJECT_0, "the packed depth readback did not finish");
+        CloseHandle(packed_done);
+        float* depths = nullptr;
+        require_hresult(readback->Map(0, nullptr, reinterpret_cast<void**>(&depths)), "Map packed");
+        const float depth0 = depths[0];
+        const float depth1 = depths[256U * kRenderHeight / 4U];
+        const float depth_last = depths[(kRenderHeight - 1U) * 64U + kRenderWidth - 1U];
+        readback->Unmap(0, nullptr);
+        require(std::abs(depth0 - 0.25F) < 1.0e-4F && std::abs(depth1 - 0.25F) < 1.0e-4F &&
+                std::abs(depth_last - 0.25F) < 1.0e-4F,
+            "the unpacked depth does not read what the game's depth buffer holds");
+        std::cout << "ngx guide capture D3D11 packed depth: " << depth0 << " " << depth1 << "\n";
+    }
 
     const auto released_before = xrfg::ngx_guide_capture_statistics().features_released;
     require(NVSDK_NGX_SUCCEED(release(left)) && NVSDK_NGX_SUCCEED(release(right)),
@@ -1111,8 +1196,29 @@ void run_streamline_views(const wchar_t* ngx_path, CreateFeature create, Evaluat
               << "publications with a camera=" << 8 << "\n";
 }
 
+// V521: an upscaler's input offset inside its eye's render region, removed;
+// regions elsewhere on the texture left alone.
+void test_input_offset_within_region() {
+    // Skyrim, PureDark's upscaler with its foveated offsets at scale 1.0:
+    // 2824 x 2212 per eye side by side, output 4870 x 3813 at (0, 0).
+    require(xrfg::dlss_input_offset_within_region(56, 0, 2824, 4870) == 56, "left eye x");
+    require(xrfg::dlss_input_offset_within_region(2768, 0, 2824, 4870) == -56, "right eye x");
+    require(xrfg::dlss_input_offset_within_region(88, 0, 2212, 3813) == 88, "y");
+    // On the grid: nothing.
+    require(xrfg::dlss_input_offset_within_region(0, 0, 2824, 4870) == 0, "left at origin");
+    require(xrfg::dlss_input_offset_within_region(2824, 0, 2824, 4870) == 0, "right at its region");
+    // An eye at the half of a larger allocation (4870 of 9740, rendering
+    // 2824): a third of a region off the grid, not an offset.
+    require(xrfg::dlss_input_offset_within_region(4870, 0, 2824, 4870) == 0, "allocation half");
+    // An output placed where its input is: consistent, nothing to remove.
+    require(xrfg::dlss_input_offset_within_region(58, 100, 2824, 4870) == 0, "placed output");
+    require(xrfg::dlss_input_offset_within_region(100, 100, 4870, 4870) == 0, "full resolution");
+    require(xrfg::dlss_input_offset_within_region(10, 0, 0, 4870) == 0, "no extent");
+}
+
 int run(const wchar_t* module_path) {
     test_split_both_eyes_guide();
+    test_input_offset_within_region();
     // WARP: the capture only records copies, which WARP executes.
     ComPtr<IDXGIFactory4> factory;
     require_hresult(CreateDXGIFactory2(0, IID_PPV_ARGS(factory.GetAddressOf())), "CreateDXGIFactory2");

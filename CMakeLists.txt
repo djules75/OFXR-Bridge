@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.520.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.521.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -359,11 +359,24 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         GIT_TAG c3f3f306a0f12d1811c0b713ad2ed2a8ddc6cf55)
     FetchContent_MakeAvailable(ofxr_safetyhook)
 
+    # V521: a bridged D3D11 game's packed depth unpacked on its own device.
+    set(XRFG_DEPTH_UNPACK_HEADER "${XRFG_GENERATED_SHADER_DIR}/depth_unpack_shader.hpp")
+    add_custom_command(
+        OUTPUT "${XRFG_DEPTH_UNPACK_HEADER}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_0 /E UnpackDepth
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_DEPTH_UNPACK_HEADER}" /Vn g_xrfg_depth_unpack_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/layer/depth_unpack.hlsl"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/layer/depth_unpack.hlsl"
+        VERBATIM)
     add_library(xrfg_ngx_guide_capture STATIC
         src/layer/ngx_guide_capture.cpp
-        include/xrfg/ngx_guide_capture.hpp)
+        include/xrfg/ngx_guide_capture.hpp
+        "${XRFG_DEPTH_UNPACK_HEADER}")
     target_include_directories(xrfg_ngx_guide_capture
-        PUBLIC include "${XRFG_DLSS_SDK_INCLUDE_DIR}")
+        PUBLIC include "${XRFG_DLSS_SDK_INCLUDE_DIR}"
+        PRIVATE "${XRFG_GENERATED_SHADER_DIR}")
     target_link_libraries(xrfg_ngx_guide_capture
         PUBLIC xrfg_d3d12_history xrfg_bridge_flight_logger d3d11
         PRIVATE safetyhook)

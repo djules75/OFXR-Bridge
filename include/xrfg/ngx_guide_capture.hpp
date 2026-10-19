@@ -120,5 +120,10 @@ void flush_ngx_guide_capture_d3d11() noexcept;
 // test need not wait for it.
 void poll_ngx_guide_capture() noexcept;
 NgxGuideCaptureStatistics ngx_guide_capture_statistics() noexcept;
+// V521: how far an input rectangle starting at base (with its output at
+// output_base, extents in their own texels) sits off its eye's render
+// region, in render texels; 0 when on it or too far to be an offset.
+long dlss_input_offset_within_region(
+    unsigned base, unsigned output_base, unsigned extent, unsigned output_extent) noexcept;
 
 }  // namespace xrfg
