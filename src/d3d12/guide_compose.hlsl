@@ -15,7 +15,7 @@
 // measured every frame: both readings are compared with the periphery's
 // vectors over the inset, and the composition takes the one that agrees.
 //
-// Same root signature as frame_synthesis.hlsl: an SRV table t0-t8, a UAV
+// Same root signature as frame_synthesis.hlsl: an SRV table t0-t9, a UAV
 // table u0-u2 and root constants at b0.
 
 Texture2DArray<float2> PeripheryVectors : register(t0);

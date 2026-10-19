@@ -8,6 +8,9 @@ Texture2DArray<float2> GameMotionVectors : register(t6);
 #ifdef XRFG_HYBRID
 // The game's depth beside its vectors, at the same render resolution (V505).
 Texture2DArray<float> GameDepth : register(t7);
+// V530: the nearest of the game's depth within a few 16-texel tiles of each
+// tile (depth_tiles.hlsl), for skipping the depth search.
+Texture2DArray<float> DepthTiles : register(t9);
 #endif
 // Linear filtering with clamped addressing, a static sampler in the root
 // signature: one fetch per bilinear tap where four loads and three lerps used
@@ -70,6 +73,15 @@ uint repeated_capture_flag() {
 // The images are a flat panel's (V510): see choose_midpoint_motion.
 bool flat_panel() {
     return (SynthesisFlags & 4u) != 0u;
+}
+
+// V530: bit 3, this eye's depth tiles are at t9; bits 24-26 their dilation
+// in tiles.
+bool depth_tiles_available() {
+    return (SynthesisFlags & 8u) != 0u;
+}
+int depth_tiles_radius() {
+    return int((SynthesisFlags >> 24) & 7u);
 }
 
 // The tray's live tuning window (xrfg::live_tuning), for the hybrid
@@ -1258,14 +1270,40 @@ bool game_depth_available() { return (GameMotionPadding & 0x8000u) != 0u; }
 // How near the surface B shows at `pixel` is, larger nearer, from the game's
 // depth at the vectors' texel: inverted depth as it comes, conventional
 // depth turned round. Only its order is used.
-float game_nearness(float2 pixel) {
+// The depth texel game_nearness reads for `pixel`.
+int2 game_depth_texel(float2 pixel) {
     float4 output_rect = game_motion_output_rect();
     float2 uv = (pixel - output_rect.xy + 0.5) / max(output_rect.zw, float2(1.0, 1.0));
     float2 maximum = GameMotionRect.xy + GameMotionRect.zw - 1.0;
-    int2 texel = int2(clamp(GameMotionRect.xy + uv * GameMotionRect.zw,
+    return int2(clamp(GameMotionRect.xy + uv * GameMotionRect.zw,
         GameMotionRect.xy, maximum));
-    float depth = GameDepth.Load(int4(texel, 0, 0));
+}
+
+float game_nearness(float2 pixel) {
+    float depth = GameDepth.Load(int4(game_depth_texel(pixel), 0, 0));
     return (GameMotionPadding & 0x80000000u) != 0u ? depth : 1.0 - depth;
+}
+
+// V530: whether any depth texel between the segment's two ends could be
+// nearer than `threshold`. The ends' texels, a texel wider either way, bound
+// every point between them (the mapping is monotonic along each axis); when
+// all their tiles lie within this pixel's dilated tile, that tile's nearest
+// value bounds every one of those texels. False only when none can be.
+bool depth_tiles_may_hold_nearer(float2 pixel, float2 a, float2 b, float threshold) {
+    bool may = true;
+    [branch] if (depth_tiles_available()) {
+        int2 lowest = int2(GameMotionRect.xy);
+        int2 highest = int2(GameMotionRect.xy + GameMotionRect.zw - 1.0);
+        int2 ta = game_depth_texel(a), tb = game_depth_texel(b);
+        int2 low = clamp(min(ta, tb) - 1, lowest, highest) >> 4;
+        int2 high = clamp(max(ta, tb) + 1, lowest, highest) >> 4;
+        int2 centre = game_depth_texel(pixel) >> 4;
+        int radius = depth_tiles_radius();
+        [branch] if (all(low >= centre - radius) && all(high <= centre + radius)) {
+            may = DepthTiles.Load(int4(centre, 0, 0)) > threshold;
+        }
+    }
+    return may;
 }
 
 bool nearer(float a, float b) { return a > b * depth_nearer_factor() + 1.0e-6; }
@@ -1730,6 +1768,18 @@ float4 synthesize_midpoint(
                                 ? (depth_far_reach() - depth_near_reach()) / 4u : 0u;
                             uint depth_steps = 2u * (near_steps + far_steps);
                             uint depth_limit = depth_solve_limit();
+                            // V530: a start is nearer above this; where the
+                            // tiles say no point can be, the search is
+                            // skipped and its answer stands.
+                            float start_threshold = here * depth_nearer_factor() + 1.0e-6;
+                            float farthest = far_steps != 0u
+                                ? float(depth_near_reach()) + 4.0 * float(far_steps)
+                                : 2.0 * float(near_steps);
+                            if (depth_steps != 0u && !depth_tiles_may_hold_nearer(pixel,
+                                    pixel + farthest * along, pixel + (-farthest) * along,
+                                    start_threshold)) {
+                                depth_steps = 0u;
+                            }
                             [loop] for (uint k = 0; k < depth_steps && !depth_found &&
                                         depth_solves < depth_limit; ++k) {
                                 uint step = k >> 1u;
@@ -1737,7 +1787,7 @@ float4 synthesize_midpoint(
                                     ? 2.0 * float(step + 1u)
                                     : float(depth_near_reach()) + 4.0 * float(step - near_steps + 1u);
                                 float2 start = pixel + ((k & 1u) != 0u ? -distance : distance) * along;
-                                if (nearer(game_nearness(start), here)) {
+                                if (game_nearness(start) > start_threshold) {
                                     ++depth_solves;
                                     float4 a, b;
                                     float2 endpoint;

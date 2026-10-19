@@ -290,6 +290,23 @@ inset, or if the pass cannot run, the pair keeps the periphery alone (V515).
   left eye's flags `<< 32` or the right's (bit 0 inset, 1 its previous field
   known, 2 periphery depth, 3 inset depth).
 
+### Depth search tiles (V530)
+
+Before a hybrid pair's draws, each eye whose guide brings the game's depth
+gets a map of the nearest depth per 16 x 16 depth texels, dilated by a few
+tiles to cover the depth search's reach. A pixel whose search points all lie
+within its dilated tile, and whose tile holds nothing nearer than its answer,
+skips the search: no point could have started a solve, so the image is the
+one the search gives (the harness checks it byte for byte). The passes run
+inside the composition's GPU timing. Off with the depth search, without
+depth, or for a dilation past 7 tiles.
+
+- `embedded_configuration` 856, at an eye's first tiles and whenever its grid
+  or dilation changes: `a` the eye `<< 48` or the dilation in tiles `<< 40`
+  or the columns `<< 20` or the rows; `b` the first tile column `<< 32` or
+  row; `c` the search's reach in image pixels `<< 32` or the depth texels per
+  image pixel in 1000ths.
+
 ### Generated images for flat panels (V509)
 
 A flat panel on a swapchain of its own (not one a projection view uses),

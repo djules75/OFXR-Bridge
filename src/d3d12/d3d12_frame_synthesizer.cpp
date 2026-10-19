@@ -9,6 +9,8 @@
 #include <FidelityFX/host/ffx_opticalflow.h>
 #include <nvOpticalFlowD3D12.h>
 
+#include "depth_tiles_build_shader.hpp"
+#include "depth_tiles_dilate_shader.hpp"
 #include "fullscreen_vertex_shader.hpp"
 #include "game_motion_synthesize_midpoint_pixel_shader.hpp"
 #include "guide_compose_clear_shader.hpp"
@@ -83,8 +85,8 @@ struct NvidiaInputScaleRatio {
 }
 constexpr UINT kMaxReprojectionViews = 2;
 // t7: the game's depth for the hybrid (V505); t8: the live tuning block
-// for the hybrid (V507).
-constexpr UINT kSrvDescriptorCount = 9;
+// for the hybrid (V507); t9: the depth search's dilated tiles (V530).
+constexpr UINT kSrvDescriptorCount = 10;
 // The tuning block's upload buffer, per work slot; the block is 72 bytes.
 constexpr UINT kTuningBufferBytes = 256;
 static_assert(sizeof(xrfg::live_tuning::Block) <= kTuningBufferBytes);
@@ -96,8 +98,19 @@ constexpr UINT kDescriptorCount =
 // V516: a block per eye after them for the inset composition's dispatches,
 // written while the pair's own blocks still wait for the GPU.
 constexpr UINT kComposeDescriptorBase = kDescriptorCount;
+// V530: two blocks per eye after those for the depth search's tile passes:
+// the first's t9 is the eye's undilated tiles and its UAVs the dilated ones,
+// the second's UAVs the undilated ones.
+constexpr UINT kTileDescriptorBase =
+    kComposeDescriptorBase + kDescriptorBlockSize * kMaxReprojectionViews;
 constexpr UINT kSlotDescriptorCount =
-    kDescriptorCount + kDescriptorBlockSize * kMaxReprojectionViews;
+    kTileDescriptorBase + 2U * kDescriptorBlockSize * kMaxReprojectionViews;
+// The depth search's tiles: 16 depth texels a side, dilated by at most 7
+// (synthesis_flags bits 24-26); bit 3 says they are bound.
+constexpr UINT kDepthTileSize = 16;
+constexpr UINT kDepthTilesFlag = 8U;
+constexpr UINT kDepthTilesRadiusShift = 24U;
+constexpr UINT kDepthTilesRadiusMask = 7U << kDepthTilesRadiusShift;
 // The composition's per-eye verdict words (guide_compose.hlsl): four each.
 constexpr UINT kComposeVerdictBytes = 256;
 constexpr UINT kNvidiaTimestampCount = 5;
@@ -436,14 +449,15 @@ void record_composition_switches() noexcept {
 // each from bit 0; b the remaining seven, likewise; c the window's sequence
 // (0 without the window). (811 was V475-V494's record, with the edge
 // ghosting reduction values that left with the feature; V497-V506's 813
-// packed the pattern lock and three hybrid values.)
-void apply_live_composition_tuning(
+// packed the pattern lock and three hybrid values.) Returns the values
+// the hybrid's draws read (V530: the depth tiles are sized from them).
+xrfg::live_tuning::Block apply_live_composition_tuning(
     void* tuning_mapped,
     CompositionLayout layout) noexcept {
     static std::atomic<std::uint64_t> recorded{~0ULL};
     record_composition_switches();
     if (layout != CompositionLayout::hybrid || tuning_mapped == nullptr) {
-        return;
+        return xrfg::live_tuning::kDefaults;
     }
     xrfg::live_tuning::Block values = xrfg::live_tuning::kDefaults;
     xrfg::live_tuning::Block live{};
@@ -464,6 +478,7 @@ void apply_live_composition_tuning(
             xrfg::BridgeFlightOperation::embedded_configuration,
             813, a, b, values.sequence);
     }
+    return values;
 }
 
 constexpr UINT kSynthesisConstantCount =
@@ -878,6 +893,12 @@ struct D3D12FrameSynthesizer::Impl {
         std::shared_ptr<const DlssMotionVectorSet> composed_guides;
         bool compose_pending{};
         std::array<float, kMaxReprojectionViews> compose_shift{};
+        // V530: the depth search's tiles, a slice per eye, undilated then
+        // dilated; replaced only while the slot is idle (reset_work_slot).
+        ComPtr<ID3D12Resource> depth_tiles;
+        ComPtr<ID3D12Resource> depth_tiles_dilated;
+        UINT depth_tiles_width{};
+        UINT depth_tiles_height{};
         std::array<NvidiaEyeResources, kMaxReprojectionViews> nvidia_eyes;
         D3D12NvidiaGpuTiming timing_metadata{};
         D3D12NvidiaGpuTiming cached_timing{};
@@ -938,6 +959,9 @@ struct D3D12FrameSynthesizer::Impl {
     ComPtr<ID3D12PipelineState> compose_clear_pipeline;
     ComPtr<ID3D12PipelineState> compose_measure_pipeline;
     ComPtr<ID3D12PipelineState> compose_pipeline;
+    // V530: the depth search's tile passes (depth_tiles.hlsl), hybrid only.
+    ComPtr<ID3D12PipelineState> depth_tiles_build_pipeline;
+    ComPtr<ID3D12PipelineState> depth_tiles_dilate_pipeline;
     ComPtr<ID3D12Resource> composed_vectors;
     ComPtr<ID3D12Resource> composed_depth;
     UINT composed_width{};
@@ -1230,7 +1254,7 @@ struct D3D12FrameSynthesizer::Impl {
 
         if (nvidia_options.hybrid) {
             // V516: the foveated inset's composition.
-            const std::array<std::pair<D3D12_SHADER_BYTECODE, ComPtr<ID3D12PipelineState>*>, 3>
+            const std::array<std::pair<D3D12_SHADER_BYTECODE, ComPtr<ID3D12PipelineState>*>, 5>
                 compose{{
                     {{g_xrfg_guide_compose_clear_shader, sizeof(g_xrfg_guide_compose_clear_shader)},
                         &compose_clear_pipeline},
@@ -1239,6 +1263,11 @@ struct D3D12FrameSynthesizer::Impl {
                         &compose_measure_pipeline},
                     {{g_xrfg_guide_compose_shader, sizeof(g_xrfg_guide_compose_shader)},
                         &compose_pipeline},
+                    // V530: the depth search's tiles.
+                    {{g_xrfg_depth_tiles_build_shader, sizeof(g_xrfg_depth_tiles_build_shader)},
+                        &depth_tiles_build_pipeline},
+                    {{g_xrfg_depth_tiles_dilate_shader, sizeof(g_xrfg_depth_tiles_dilate_shader)},
+                        &depth_tiles_dilate_pipeline},
                 }};
             for (const auto& [code, pipeline] : compose) {
                 compute_description.CS = code;
@@ -2240,6 +2269,10 @@ struct D3D12FrameSynthesizer::Impl {
                     offset_cpu_handle(cpu_start,
                         block * kDescriptorBlockSize + 8U,
                         descriptor_increment));
+                device->CreateShaderResourceView(nullptr, &null_depth,
+                    offset_cpu_handle(cpu_start,
+                        block * kDescriptorBlockSize + 9U,
+                        descriptor_increment));
             }
         }
         return S_OK;
@@ -2594,7 +2627,7 @@ struct D3D12FrameSynthesizer::Impl {
                 rtv_descriptors->GetCPUDescriptorHandleForHeapStart();
             device->CreateRenderTargetView(target.Get(), &rtv_view, rtv);
 
-            // Null views of the shapes the shader declares (t0-t7, u0-u2):
+            // Null views of the shapes the shader declares (t0-t9, u0-u2):
             // every read returns zero, which is all a warm-up needs.
             D3D12_DESCRIPTOR_HEAP_DESC shader_description{};
             shader_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -2616,10 +2649,11 @@ struct D3D12FrameSynthesizer::Impl {
                 DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R32_UINT,
                 DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R32_UINT,
                 DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT,
-                DXGI_FORMAT_R32_TYPELESS,
+                DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R32_FLOAT,
             };
             for (UINT index = 0; index < kSrvDescriptorCount; ++index) {
-                const bool array = index == 0 || index == 1 || index == 6 || index == 7;
+                const bool array = index == 0 || index == 1 || index == 6 || index == 7 ||
+                    index == 9;
                 D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
                 srv.Format = kSrvFormats[index];
                 srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -3423,6 +3457,231 @@ struct D3D12FrameSynthesizer::Impl {
         return count;
     }
 
+    // V530: the depth search's tiles (depth_tiles.hlsl) for each eye whose
+    // guide brings depth, recorded on `list` before the pair's draws; the
+    // eye's block gets the dilated ones at t9. Returns per eye the
+    // synthesis_flags bits its draws carry, 0 where the search runs as
+    // before. create_game_motion_views has bound each eye's depth at t7.
+    [[nodiscard]] std::array<UINT, kMaxReprojectionViews> record_depth_tiles(
+        WorkSlot& slot,
+        ID3D12GraphicsCommandList* list,
+        const DlssMotionVectorSet& guides,
+        const xrfg::live_tuning::Block& tuning) noexcept {
+        std::array<UINT, kMaxReprojectionViews> flags{};
+        // The harness compares the composition with and without them.
+        const bool disabled =
+            GetEnvironmentVariableW(L"XRFG_DISABLE_DEPTH_TILES", nullptr, 0) != 0;
+        // The farthest point the search reads, in image pixels.
+        const UINT reach = std::max(tuning.depth_near_reach_px, tuning.depth_far_reach_px);
+        if (disabled || !depth_tiles_build_pipeline || !depth_tiles_dilate_pipeline ||
+            tuning.depth_search == 0U || reach == 0U) {
+            return flags;
+        }
+        struct EyeTiles {
+            SynthesisParameters parameters{};
+            UINT first_x{}, first_y{}, columns{}, rows{}, radius{};
+        };
+        std::array<EyeTiles, kMaxReprojectionViews> eyes{};
+        std::array<bool, kMaxReprojectionViews> built{};
+        UINT width = 0, height = 0;
+        const UINT eye_count = std::min<UINT>(guides.eye_count, kMaxReprojectionViews);
+        for (UINT eye = 0; eye < eye_count; ++eye) {
+            const auto& guide = guides.eyes[eye];
+            if (!guide || !usable_guide_depth(*guide) ||
+                !same_device(device.Get(), guide->depth.Get()) ||
+                guide->output_width == 0 || guide->output_height == 0) {
+                continue;
+            }
+            EyeTiles& tiles = eyes[eye];
+            // The draw's own rectangle, so the texels match game_depth_texel's.
+            apply_hybrid_guide_constants(tiles.parameters, *guide);
+            const auto& rect = tiles.parameters.game_motion_rect;
+            if (!(rect[2] >= 1.0F) || !(rect[3] >= 1.0F) || rect[0] < 0.0F || rect[1] < 0.0F) {
+                continue;
+            }
+            const UINT lowest_x = static_cast<UINT>(rect[0]);
+            const UINT lowest_y = static_cast<UINT>(rect[1]);
+            const UINT highest_x = static_cast<UINT>(rect[0] + rect[2] - 1.0F);
+            const UINT highest_y = static_cast<UINT>(rect[1] + rect[3] - 1.0F);
+            if (highest_x < lowest_x || highest_y < lowest_y) continue;
+            // Depth texels a pixel's farthest point can lie from its own, one
+            // more for the shader's margin, in tiles.
+            const float per_pixel = std::max(
+                rect[2] / static_cast<float>(guide->output_width),
+                rect[3] / static_cast<float>(guide->output_height));
+            const UINT texels = static_cast<UINT>(
+                std::ceil(static_cast<float>(reach) * per_pixel + 0.01F)) + 1U;
+            const UINT radius = (texels + kDepthTileSize - 1U) / kDepthTileSize;
+            if (radius > (kDepthTilesRadiusMask >> kDepthTilesRadiusShift)) continue;
+            tiles.first_x = lowest_x / kDepthTileSize;
+            tiles.first_y = lowest_y / kDepthTileSize;
+            tiles.columns = highest_x / kDepthTileSize + 1U;
+            tiles.rows = highest_y / kDepthTileSize + 1U;
+            tiles.radius = radius;
+            tiles.parameters.width = tiles.columns;
+            tiles.parameters.height = tiles.rows;
+            tiles.parameters.packed_width = radius;
+            tiles.parameters.slice = eye;
+            width = std::max(width, tiles.columns);
+            height = std::max(height, tiles.rows);
+            built[eye] = true;
+        }
+        if (width == 0 || height == 0) return flags;
+        if (!slot.depth_tiles || !slot.depth_tiles_dilated ||
+            slot.depth_tiles_width < width || slot.depth_tiles_height < height) {
+            D3D12_HEAP_PROPERTIES heap{};
+            heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+            heap.CreationNodeMask = 1;
+            heap.VisibleNodeMask = 1;
+            D3D12_RESOURCE_DESC texture{};
+            texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            texture.Width = std::max(width, slot.depth_tiles_width);
+            texture.Height = std::max(height, slot.depth_tiles_height);
+            texture.DepthOrArraySize = kMaxReprojectionViews;
+            texture.MipLevels = 1;
+            texture.Format = DXGI_FORMAT_R32_FLOAT;
+            texture.SampleDesc.Count = 1;
+            texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            ComPtr<ID3D12Resource> tiles, dilated;
+            if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texture,
+                    kShaderReadState, nullptr, IID_PPV_ARGS(tiles.GetAddressOf()))) ||
+                FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texture,
+                    kShaderReadState, nullptr, IID_PPV_ARGS(dilated.GetAddressOf())))) {
+                return flags;
+            }
+            tiles->SetName(L"OFXR Depth Tiles");
+            dilated->SetName(L"OFXR Depth Tiles Dilated");
+            slot.depth_tiles = std::move(tiles);
+            slot.depth_tiles_dilated = std::move(dilated);
+            slot.depth_tiles_width = static_cast<UINT>(texture.Width);
+            slot.depth_tiles_height = texture.Height;
+        }
+
+        const D3D12_CPU_DESCRIPTOR_HANDLE cpu_start =
+            slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+        const D3D12_GPU_DESCRIPTOR_HANDLE gpu_start =
+            slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+        D3D12_SHADER_RESOURCE_VIEW_DESC slice_view{};
+        slice_view.Format = DXGI_FORMAT_R32_FLOAT;
+        slice_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        slice_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        slice_view.Texture2DArray.MipLevels = 1;
+        slice_view.Texture2DArray.ArraySize = 1;
+        D3D12_UNORDERED_ACCESS_VIEW_DESC array_view{};
+        array_view.Format = DXGI_FORMAT_R32_FLOAT;
+        array_view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+        array_view.Texture2DArray.ArraySize = kMaxReprojectionViews;
+        const auto tile_block = [](UINT eye, UINT which) {
+            return kTileDescriptorBase + (2U * eye + which) * kDescriptorBlockSize;
+        };
+        for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC view = slice_view;
+            view.Texture2DArray.FirstArraySlice = eye;
+            // The draw's t9: this eye's dilated tiles, or nothing.
+            device->CreateShaderResourceView(built[eye] ? slot.depth_tiles_dilated.Get() : nullptr,
+                &view, offset_cpu_handle(cpu_start, eye * kDescriptorBlockSize + 9U,
+                    descriptor_increment));
+            if (!built[eye]) continue;
+            device->CreateShaderResourceView(slot.depth_tiles.Get(), &view,
+                offset_cpu_handle(cpu_start, tile_block(eye, 0) + 9U, descriptor_increment));
+            device->CreateUnorderedAccessView(slot.depth_tiles_dilated.Get(), nullptr, &array_view,
+                offset_cpu_handle(cpu_start, tile_block(eye, 0) + kSrvDescriptorCount,
+                    descriptor_increment));
+            device->CreateUnorderedAccessView(slot.depth_tiles.Get(), nullptr, &array_view,
+                offset_cpu_handle(cpu_start, tile_block(eye, 1) + kSrvDescriptorCount,
+                    descriptor_increment));
+        }
+
+        dred_marker(list, "OFXR depth tiles begin");
+        // The depths into the shader-read state and back after, once a
+        // resource; the registry's snapshots and the composed field already are.
+        std::array<D3D12_RESOURCE_BARRIER, 2U + kMaxReprojectionViews> barriers{};
+        std::array<std::pair<ID3D12Resource*, D3D12_RESOURCE_STATES>, kMaxReprojectionViews> sources{};
+        UINT source_count = 0;
+        for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
+            if (!built[eye]) continue;
+            ID3D12Resource* const depth = guides.eyes[eye]->depth.Get();
+            const D3D12_RESOURCE_STATES state = guides.eyes[eye]->depth_resource_state;
+            bool known = state == kShaderReadState;
+            for (UINT index = 0; index < source_count; ++index) {
+                known = known || sources[index].first == depth;
+            }
+            if (!known) sources[source_count++] = {depth, state};
+        }
+        UINT barrier_count = 0;
+        barriers[barrier_count++] = transition_barrier(slot.depth_tiles.Get(),
+            kShaderReadState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        barriers[barrier_count++] = transition_barrier(slot.depth_tiles_dilated.Get(),
+            kShaderReadState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        for (UINT index = 0; index < source_count; ++index) {
+            barriers[barrier_count++] = transition_barrier(sources[index].first,
+                sources[index].second, kShaderReadState);
+        }
+        list->ResourceBarrier(barrier_count, barriers.data());
+        ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
+        list->SetDescriptorHeaps(1, heaps);
+        list->SetComputeRootSignature(root_signature.Get());
+        list->SetPipelineState(depth_tiles_build_pipeline.Get());
+        for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
+            if (!built[eye]) continue;
+            const EyeTiles& tiles = eyes[eye];
+            list->SetComputeRootDescriptorTable(0,
+                offset_gpu_handle(gpu_start, eye * kDescriptorBlockSize, descriptor_increment));
+            list->SetComputeRootDescriptorTable(1, offset_gpu_handle(gpu_start,
+                tile_block(eye, 1) + kSrvDescriptorCount, descriptor_increment));
+            list->SetComputeRoot32BitConstants(2, kSynthesisConstantCount, &tiles.parameters, 0);
+            list->Dispatch(tiles.columns - tiles.first_x, tiles.rows - tiles.first_y, 1);
+        }
+        const D3D12_RESOURCE_BARRIER tiles_written = transition_barrier(slot.depth_tiles.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kShaderReadState);
+        list->ResourceBarrier(1, &tiles_written);
+        list->SetPipelineState(depth_tiles_dilate_pipeline.Get());
+        for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
+            if (!built[eye]) continue;
+            const EyeTiles& tiles = eyes[eye];
+            list->SetComputeRootDescriptorTable(0,
+                offset_gpu_handle(gpu_start, tile_block(eye, 0), descriptor_increment));
+            list->SetComputeRootDescriptorTable(1, offset_gpu_handle(gpu_start,
+                tile_block(eye, 0) + kSrvDescriptorCount, descriptor_increment));
+            list->SetComputeRoot32BitConstants(2, kSynthesisConstantCount, &tiles.parameters, 0);
+            list->Dispatch((tiles.columns - tiles.first_x + 7U) / 8U,
+                (tiles.rows - tiles.first_y + 7U) / 8U, 1);
+            flags[eye] = kDepthTilesFlag | (tiles.radius << kDepthTilesRadiusShift);
+        }
+        barrier_count = 0;
+        barriers[barrier_count++] = transition_barrier(slot.depth_tiles_dilated.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kShaderReadState);
+        for (UINT index = 0; index < source_count; ++index) {
+            barriers[barrier_count++] = transition_barrier(sources[index].first,
+                kShaderReadState, sources[index].second);
+        }
+        list->ResourceBarrier(barrier_count, barriers.data());
+        dred_marker(list, "OFXR depth tiles complete");
+        // 856, the first tiles of the process and whenever an eye's grid or
+        // dilation changes: a the eye << 48 | the radius << 40 | columns << 20
+        // | rows, b the first tile x << 32 | y, c the reach in pixels << 32 |
+        // the depth texels per image pixel in 1000ths.
+        static std::atomic<std::uint64_t> recorded[kMaxReprojectionViews]{};
+        for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
+            if (!built[eye]) continue;
+            const EyeTiles& tiles = eyes[eye];
+            const std::uint64_t a = (static_cast<std::uint64_t>(eye) << 48U) |
+                (static_cast<std::uint64_t>(tiles.radius) << 40U) |
+                (static_cast<std::uint64_t>(tiles.columns & 0xFFFFFU) << 20U) | (tiles.rows & 0xFFFFFU);
+            if (recorded[eye].exchange(a + 1U, std::memory_order_relaxed) == a + 1U) continue;
+            const auto& rect = tiles.parameters.game_motion_rect;
+            const float per_pixel = std::max(
+                rect[2] / static_cast<float>(guides.eyes[eye]->output_width),
+                rect[3] / static_cast<float>(guides.eyes[eye]->output_height));
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::embedded_configuration, 856, a,
+                (static_cast<std::uint64_t>(tiles.first_x) << 32U) | tiles.first_y,
+                (static_cast<std::uint64_t>(reach) << 32U) |
+                    static_cast<std::uint64_t>(std::lround(per_pixel * 1000.0F)));
+        }
+        return flags;
+    }
+
     [[nodiscard]] HRESULT record_game_motion_pair(
         WorkSlot& slot,
         const RollingSource& previous_source,
@@ -3915,7 +4174,7 @@ struct D3D12FrameSynthesizer::Impl {
         SynthesisParameters parameters{};
         parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
             pack_input_flags(view_format) | (flat_panel ? kFlatPanelFlag : 0U);
-        apply_live_composition_tuning(slot.tuning_mapped,
+        const xrfg::live_tuning::Block tuning = apply_live_composition_tuning(slot.tuning_mapped,
             guides != nullptr ? CompositionLayout::hybrid : CompositionLayout::flow);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
@@ -4064,6 +4323,10 @@ struct D3D12FrameSynthesizer::Impl {
                 synthesis->ResourceBarrier(count, guide_transitions.data());
             }
         }
+        // V530: inside the composition's timing, which it is part of.
+        const std::array<UINT, kMaxReprojectionViews> depth_tiles = guides != nullptr
+            ? record_depth_tiles(slot, synthesis, *guides, tuning)
+            : std::array<UINT, kMaxReprojectionViews>{};
 
         synthesis->SetDescriptorHeaps(1, heaps);
         synthesis->SetGraphicsRootSignature(root_signature.Get());
@@ -4112,6 +4375,9 @@ struct D3D12FrameSynthesizer::Impl {
                         descriptor_increment));
                 if (guides != nullptr) {
                     apply_hybrid_guide_constants(parameters, *guides->eyes[eye]);
+                    parameters.synthesis_flags =
+                        (parameters.synthesis_flags & ~(kDepthTilesFlag | kDepthTilesRadiusMask)) |
+                        (eye < kMaxReprojectionViews ? depth_tiles[eye] : 0U);
                 }
                 synthesis->SetGraphicsRoot32BitConstants(
                     2,
@@ -4846,7 +5112,7 @@ struct D3D12FrameSynthesizer::Impl {
         SynthesisParameters parameters{};
         parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
             pack_input_flags(view_format) | (flat_panel ? kFlatPanelFlag : 0U);
-        apply_live_composition_tuning(slot.tuning_mapped,
+        const xrfg::live_tuning::Block tuning = apply_live_composition_tuning(slot.tuning_mapped,
             guides != nullptr ? CompositionLayout::hybrid : CompositionLayout::flow);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
@@ -4910,6 +5176,10 @@ struct D3D12FrameSynthesizer::Impl {
                 before_pixel.data());
         }
         flow_output_consumed = true;
+        // V530: the depth search's tiles.
+        const std::array<UINT, kMaxReprojectionViews> depth_tiles = guides != nullptr
+            ? record_depth_tiles(slot, slot.command_list.Get(), *guides, tuning)
+            : std::array<UINT, kMaxReprojectionViews>{};
 
         slot.command_list->SetDescriptorHeaps(1, heaps);
         slot.command_list->SetGraphicsRootSignature(root_signature.Get());
@@ -4955,6 +5225,9 @@ struct D3D12FrameSynthesizer::Impl {
                     slot.command_list->SetGraphicsRootDescriptorTable(1,
                         offset_gpu_handle(block, kSrvDescriptorCount, descriptor_increment));
                     apply_hybrid_guide_constants(parameters, *guides->eyes[eye]);
+                    parameters.synthesis_flags =
+                        (parameters.synthesis_flags & ~(kDepthTilesFlag | kDepthTilesRadiusMask)) |
+                        (eye < kMaxReprojectionViews ? depth_tiles[eye] : 0U);
                 }
                 slot.command_list->SetGraphicsRoot32BitConstants(
                     2,

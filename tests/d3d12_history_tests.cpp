@@ -5099,10 +5099,13 @@ void test_hybrid_side_by_side(D3D12WarpFixture& fixture, bool one_field = false)
 // finds that background, whose samples agree, and the bar is missing from
 // the generated frame - the bars look half transparent at 90 Hz. With the
 // game's depth the nearer surface reaching the pixel is found and kept.
-// Returns the share of the bars' true pixels that show bar.
+// Returns the share of the bars' true pixels that show bar. V530: `width`
+// past 256 adds background far from every bar, where the depth tiles skip
+// the search; `image` receives the generated frame.
 double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
-    xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx) {
-    constexpr UINT width = 256, height = 128;
+    xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+    UINT width = 256, StereoPattern* image = nullptr) {
+    constexpr UINT height = 128;
     constexpr int bar_width = 3, bar_spacing = 28, bar_first = 20, bar_count = 7;
     constexpr int bar_top = 16, bar_bottom = 112;
     constexpr int background_motion = 4, bar_motion = 16;
@@ -5229,9 +5232,10 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
         }
         const double coverage = static_cast<double>(shown) / static_cast<double>(bar_pixels);
         std::cout << "hybrid bars " << (with_depth ? "with" : "without") << " depth eye=" << eye
-                  << " bar_coverage=" << coverage << '\n';
+                  << " width=" << width << " bar_coverage=" << coverage << '\n';
         coverage_total += coverage;
     }
+    if (image != nullptr) *image = actual;
     require(operation_succeeded(synthesizer.wait_for_idle()), "bars final drain failed");
     require(operation_succeeded(history->invalidate()), "bars history invalidate failed");
     return coverage_total / kEyeCount;
@@ -5472,6 +5476,26 @@ int main(int argc, char** argv) {
             // generated frame (none of them without it).
             require(test_hybrid_bars(hybrid_fixture, true) >= 0.95,
                 "hybrid bars with depth are not whole in the generated frame");
+            // V530: the depth tiles skip the search only where it would
+            // have found nothing, so the frame is the same without them.
+            {
+                StereoPattern with_tiles, without_tiles;
+                require(test_hybrid_bars(hybrid_fixture, true,
+                            xrfg::D3D12OpticalFlowBackend::fidelity_fx, 512, &with_tiles) >= 0.95,
+                    "hybrid bars with depth tiles are not whole in the generated frame");
+                SetEnvironmentVariableW(L"XRFG_DISABLE_DEPTH_TILES", L"1");
+                test_hybrid_bars(hybrid_fixture, true,
+                    xrfg::D3D12OpticalFlowBackend::fidelity_fx, 512, &without_tiles);
+                SetEnvironmentVariableW(L"XRFG_DISABLE_DEPTH_TILES", nullptr);
+                std::size_t differing = 0;
+                for (UINT eye = 0; eye < kEyeCount; ++eye) {
+                    for (std::size_t index = 0; index < with_tiles[eye].size(); ++index) {
+                        if (with_tiles[eye][index] != without_tiles[eye][index]) ++differing;
+                    }
+                }
+                std::cout << "hybrid bars depth tiles: " << differing << " bytes differ\n";
+                require(differing == 0, "the depth tiles changed the generated frame");
+            }
             // V507: the tray's live tuning block reaches the shader. With a
             // block that switches the depth search off, the bars go again.
             // Skipped where a tray already owns the block, so a live window
