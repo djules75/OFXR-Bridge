@@ -142,6 +142,41 @@ comes round again.
   the session device's, or a resource not an image view), 9 (the transport
   failed, `c` its HRESULT).
 
+### DLSS views placed by their cameras (V515)
+
+MSFS 2024's foveated rendering evaluates DLSS once per view, four views a
+frame: per eye a periphery over the whole field at `FoveatedRenderingScale`
+of the eye's pixels, and an inset at full density. It composites them into
+the eye images itself, so no DLSS output is the eye image's size and the
+resolver matched nothing (Hybrid KO 828). The capture now detours
+`slSetConstants` and `slEvaluateFeature` in Streamline's `sl.interposer.dll`:
+each viewport's projection gives its camera's field, and an NGX evaluation
+made inside Streamline's DLSS evaluation carries its viewport's camera. When
+no evaluation matches the eye images, each eye takes the recent stream whose
+camera covers its field and fits it best (the cameras' positions decide
+between two that fit alike), placed scaled over the eye: the periphery. The
+inset is not used yet.
+
+- `embedded_configuration` 820 `a` = 30: Streamline's two exports detoured
+  (823 `a` = 30: they could not be).
+- 834, a viewport's camera, the first sixteen constants and every 4000th: `a`
+  the viewport `<< 32` or how the projection was read (1 row vectors, 2
+  column vectors, 3 no off-centre terms, 0 unreadable); `b` its edges'
+  tangents, left, right, up, down from the low bits, each a signed 16-bit
+  count of 4096ths; `c` the camera's position along its right vector (float
+  bits).
+- 835, a stream's first evaluation inside Streamline's: `a` the stream's low
+  bits or the viewport `<< 32`, bit 63 its camera is known; `b` the camera's
+  tangents as in 834.
+- 836, the first eight times cameras were known but none covered both eyes:
+  `a` the recent streams with a camera, or those covering the left eye `<< 8`,
+  the right `<< 16`; `b` and `c` the left and right eye's field, packed as in
+  834.
+- `presenter_transition` 753, per eye when the eyes were joined by cameras
+  (as often as 751): `a` the eye `<< 32` or the stream's low bits; `b` the
+  vector rectangle placed on the eye (x, y, width, height, eighths of a texel,
+  16 bits each); `c` the publication.
+
 ### Generated images for flat panels (V509)
 
 A flat panel on a swapchain of its own (not one a projection view uses),

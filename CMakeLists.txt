@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.514.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.515.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -593,6 +593,17 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             target_compile_options(xrfg_fake_nvngx_dlss PRIVATE /W4 /permissive- /EHsc)
             target_compile_definitions(xrfg_fake_nvngx_dlss PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         endif()
+        # V515: a stand-in sl.interposer.dll beside it, for Streamline's
+        # per-viewport cameras.
+        add_library(xrfg_fake_sl_interposer SHARED tests/fake_sl_interposer.cpp)
+        set_target_properties(xrfg_fake_sl_interposer PROPERTIES
+            OUTPUT_NAME sl.interposer
+            PREFIX ""
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/fake-ngx")
+        target_compile_features(xrfg_fake_sl_interposer PRIVATE cxx_std_20)
+        if(MSVC)
+            target_compile_options(xrfg_fake_sl_interposer PRIVATE /W4 /permissive- /EHsc)
+        endif()
         add_executable(xrfg_ngx_guide_capture_tests tests/ngx_guide_capture_tests.cpp)
         target_link_libraries(xrfg_ngx_guide_capture_tests PRIVATE
             xrfg_ngx_guide_capture d3d11 d3d12 dxgi)
@@ -601,7 +612,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             target_compile_options(xrfg_ngx_guide_capture_tests PRIVATE /W4 /permissive- /EHsc)
             target_compile_definitions(xrfg_ngx_guide_capture_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         endif()
-        add_dependencies(xrfg_ngx_guide_capture_tests xrfg_fake_nvngx_dlss)
+        add_dependencies(xrfg_ngx_guide_capture_tests xrfg_fake_nvngx_dlss xrfg_fake_sl_interposer)
         add_dependencies(xrfg_ngx_guide_capture_tests OFXR_vulkan_queue_layer)
         add_test(
             NAME xrfg_ngx_guide_capture

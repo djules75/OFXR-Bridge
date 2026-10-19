@@ -9,6 +9,38 @@
 
 namespace xrfg {
 
+// The camera a DLSS evaluation rendered (V515), from NVIDIA Streamline's
+// per-viewport constants: the tangents of its image's edges - left and
+// right where the image's x runs from its left to its right edge, up and
+// down at its top and bottom row - and where the camera sits. MSFS 2024's
+// foveated rendering evaluates DLSS once per view, four views for two eyes,
+// none of them the size of an eye image; this is what places each in the
+// eye it belongs to.
+struct DlssViewGeometry {
+    bool known{};
+    std::uint32_t viewport{};
+    float tan_left{};
+    float tan_right{};
+    float tan_up{};
+    float tan_down{};
+    std::array<float, 3> position{};
+    std::array<float, 3> right{};
+};
+
+// Four tangents in one flight-log word (V515): left, right, up, down from
+// the low bits, each a signed 16-bit count of 4096ths.
+[[nodiscard]] inline std::uint64_t pack_view_tangents(
+    float left, float right, float up, float down) noexcept {
+    const auto field = [](float value) -> std::uint64_t {
+        float scaled = value * 4096.0F;
+        if (!(scaled > -32768.0F)) scaled = -32768.0F;  // and NaN
+        if (scaled > 32767.0F) scaled = 32767.0F;
+        return static_cast<std::uint64_t>(static_cast<std::uint16_t>(
+            static_cast<std::int16_t>(scaled)));
+    };
+    return field(left) | (field(right) << 16U) | (field(up) << 32U) | (field(down) << 48U);
+}
+
 struct DlssMotionVectorPublication {
     std::uint64_t stream{};
     ID3D12Resource* output{};
@@ -48,6 +80,8 @@ struct DlssMotionVectorPublication {
     // A cooperating producer may supply the native D3D12 device after it has
     // unwrapped and identity-checked every object in the publication.
     ID3D12Device* verified_producer_device{};
+    // V515: the evaluation's camera, where the producer knows it.
+    DlssViewGeometry view{};
 };
 
 struct DlssMotionVectorFrame {
@@ -91,9 +125,30 @@ struct DlssMotionVectorFrame {
     float camera_far{1000.0F};
     bool depth_inverted{};
     bool depth_infinite{};
+    DlssViewGeometry view{};
+    // V515: a guide placed by its camera rather than pixel for pixel. The
+    // output rectangle is then the eye's image rectangle the guide covers,
+    // and placed_motion_rect (x, y, width, height in vector texels, not
+    // whole) the part of the vectors that lands on it: MSFS 2024's foveated
+    // periphery spreads 892 render columns over a 5092-pixel eye.
+    bool placed{};
+    std::array<float, 4> placed_motion_rect{};
 };
 
 constexpr std::uint32_t kDlssMotionVectorEyeCount = 2;
+
+// An eye's view in its XR image (V515): the tangents of its field of view
+// (XrFovf) and its image rectangle.
+struct DlssEyeView {
+    float tan_left{};
+    float tan_right{};
+    float tan_up{};
+    float tan_down{};
+    std::int32_t x{};
+    std::int32_t y{};
+    std::uint32_t width{};
+    std::uint32_t height{};
+};
 
 struct DlssMotionVectorSet {
     std::array<std::shared_ptr<const DlssMotionVectorFrame>,
@@ -128,6 +183,10 @@ struct DlssMotionVectorStatistics {
     std::uint64_t used{};
     // Pairs composed by the hybrid: vectors and optical flow both (V497).
     std::uint64_t hybrid_used{};
+    // V515: eye pairs joined by their cameras, and attempts that found
+    // cameras but no guide covering both eyes.
+    std::uint64_t view_matched{};
+    std::uint64_t view_unmatched{};
     std::uint64_t last_used_publication{};
     DlssMotionVectorStatus status{DlssMotionVectorStatus::waiting_for_dlss};
 };
@@ -171,6 +230,26 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
     int eye = -1,
     std::uint64_t released_at = 0,
     std::uint64_t other_released_at = 0) noexcept;
+// A guide placed into an eye's view by its camera (V515): the copy whose
+// output rectangle is the view's rectangle and whose placed_motion_rect is
+// the part of its vectors (and depth) that lands there. Null unless the
+// guide's camera covers the view, to within a hundredth of its field.
+std::shared_ptr<const DlssMotionVectorFrame> place_guide_in_view(
+    const DlssMotionVectorFrame& frame,
+    const DlssEyeView& view) noexcept;
+// Both eyes' guides from evaluations whose cameras are known (V515), for a
+// game whose DLSS outputs are views of their own rather than its eye images
+// - MSFS 2024's foveated rendering: per eye a periphery over the whole field
+// at a fraction of its pixels, and an inset. Each eye takes the recent
+// stream whose camera covers its field and fits it best (the cameras'
+// positions decide between two that fit alike), placed scaled; the
+// evaluation is the stream's newest by the eye's release watermark. Both
+// eyes or neither, from two streams.
+std::array<std::shared_ptr<const DlssMotionVectorSet>, kDlssMotionVectorEyeCount>
+resolve_view_placed_dlss_guides(
+    ID3D12CommandQueue* consumer_queue,
+    const std::array<DlssEyeView, kDlssMotionVectorEyeCount>& eyes,
+    const std::array<std::uint64_t, kDlssMotionVectorEyeCount>& released_at) noexcept;
 // The process-monotonic publication count: a release watermark.
 std::uint64_t dlss_motion_vector_publications() noexcept;
 void report_dlss_motion_vector_status(DlssMotionVectorStatus status) noexcept;

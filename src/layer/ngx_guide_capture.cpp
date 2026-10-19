@@ -16,7 +16,9 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <limits>
 #include <memory>
@@ -121,6 +123,19 @@ constexpr std::int64_t kRecordVulkanDropped = 832;
 //   833 (V514) the Vulkan capture started without the queue layer: copies are
 //       published at the bridged release. Once a session.
 constexpr std::int64_t kRecordVulkanUntracked = 833;
+//   834 (V515) a Streamline viewport's camera, the first sixteen constants
+//       and every 4000th after: a the viewport << 32 | how the projection
+//       was read (1 row vectors, 2 column vectors, 3 no off-centre terms, 0
+//       not a perspective it can read), b its edges' tangents
+//       (pack_view_tangents), c the camera's position along its right
+//       vector (float bits)
+//   835 (V515) a stream's first evaluation inside Streamline's DLSS
+//       evaluation: a the stream's low bits | the viewport << 32 | bit 63 its
+//       camera is known, b the camera's tangents
+//   820 a = 30: sl.interposer.dll's slSetConstants and slEvaluateFeature
+//       are detoured (823 a = 30: they could not be)
+constexpr std::int64_t kRecordStreamlineCamera = 834;
+constexpr std::int64_t kRecordStreamlineStream = 835;
 constexpr std::int64_t kRecordSkip = 824;
 constexpr std::int64_t kRecordShape = 825;
 constexpr std::int64_t kRecordSummary = 826;
@@ -151,6 +166,7 @@ struct Feature {
     std::uint64_t stream{};
     std::uint64_t publications{};
     bool shape_recorded{};
+    bool viewport_recorded{};
     // D3D11 (V512): the shared textures this feature's evaluations go
     // through, and a stand-in for its output on the D3D12 device.
     std::shared_ptr<GuideTransport11> transport;
@@ -271,6 +287,243 @@ struct Shape {
     UINT64 width{};
     UINT height{};
 };
+
+// ------------------------------------------------------------- Streamline
+// V515. A title on NVIDIA Streamline (MSFS 2024) hands Streamline each
+// viewport's camera every frame (slSetConstants), then evaluates DLSS for a
+// viewport (slEvaluateFeature), inside which Streamline's DLSS plugin makes
+// the NGX evaluation the capture sees. Both exports of sl.interposer.dll are
+// detoured: the cameras are kept per viewport, and the viewport an
+// evaluation runs for is held on its thread for the nested NGX call, whose
+// publication then carries that camera. MSFS 2024's foveated rendering
+// evaluates four viewports a frame - per eye a periphery and an inset, none
+// the eye image's size - and the camera is what places each in its eye.
+//
+// The layouts are Streamline 2.x's (sl_struct.h, sl_consts.h,
+// sl_core_types.h; MSFS 2024 ships 2.11.1): every structure starts with a
+// next pointer, a 16-byte type id and a version; Constants' row-major
+// cameraViewToClip comes first after that, the camera's position and right
+// vector after the five matrices and three pairs.
+namespace sl_abi {
+
+struct TypeId {
+    std::uint32_t data1;
+    std::uint16_t data2;
+    std::uint16_t data3;
+    std::array<std::uint8_t, 8> data4;
+    bool operator==(const TypeId&) const = default;
+};
+
+struct Header {
+    const Header* next;
+    TypeId type;
+    std::size_t version;
+};
+
+struct Constants {
+    Header header;
+    float view_to_clip[4][4];
+    float clip_to_view[4][4];
+    float clip_to_lens_clip[4][4];
+    float clip_to_previous_clip[4][4];
+    float previous_clip_to_clip[4][4];
+    float jitter_offset[2];
+    float motion_vector_scale[2];
+    float pinhole_offset[2];
+    float position[3];
+    float up[3];
+    float right[3];
+    float forward[3];
+};
+static_assert(offsetof(Constants, view_to_clip) == 32);
+static_assert(offsetof(Constants, position) == 376);
+static_assert(offsetof(Constants, right) == 400);
+
+struct Viewport {
+    Header header;
+    std::uint32_t value;
+};
+static_assert(offsetof(Viewport, value) == 32);
+
+// {DCD35AD7-4E4A-4BAD-A90C-E0C49EB23AFE}, {171B6435-9B3C-4FC8-9994-FBE52569AAA4}
+constexpr TypeId kConstants{
+    0xdcd35ad7, 0x4e4a, 0x4bad, {0xa9, 0x0c, 0xe0, 0xc4, 0x9e, 0xb2, 0x3a, 0xfe}};
+constexpr TypeId kViewport{
+    0x171b6435, 0x9b3c, 0x4fc8, {0x99, 0x94, 0xfb, 0xe5, 0x25, 0x69, 0xaa, 0xa4}};
+constexpr std::uint32_t kFeatureDlss = 0;
+
+// sl::Result is an int-sized enum; references arrive as pointers.
+using SetConstants = int (*)(const Constants*, const void* frame, const Viewport*);
+using EvaluateFeature = int (*)(std::uint32_t feature, const void* frame,
+    const Header* const* inputs, std::uint32_t input_count, void* command_buffer);
+
+}  // namespace sl_abi
+
+struct Streamline {
+    SafetyHookInline set_constants_hook;
+    SafetyHookInline evaluate_hook;
+    sl_abi::SetConstants set_constants{};
+    sl_abi::EvaluateFeature evaluate{};
+    bool installed{};
+    bool failed{};
+    std::mutex mutex;
+    std::unordered_map<std::uint32_t, DlssViewGeometry> cameras;
+    std::uint64_t constants_seen{};
+};
+
+// Never destroyed, as the capture's state.
+Streamline& streamline() noexcept {
+    static auto* value = new Streamline;
+    return *value;
+}
+
+// The viewport of the Streamline DLSS evaluation running on this thread.
+thread_local bool t_sl_dlss = false;
+thread_local std::uint32_t t_sl_viewport = 0;
+
+// The tangents of a view's image edges from its projection: x's left edge
+// at NDC -1, its right at +1, the top row at y +1, the bottom at -1. Either
+// vector convention: off-centre terms sit in the third row for row vectors
+// (D3D, w = z * m[2][3]) and in the third column for column vectors (w =
+// m[3][2] * z); w's sign is the handedness. A view direction with tangent t
+// and depth d > 0 has z = sign(w) d, so NDC = (t m00 + sign(w) offset) /
+// |w|, and t = (NDC |w| - sign(w) offset) / m00. method: 1 row vectors, 2
+// column vectors, 3 no off-centre terms, 0 not a perspective it reads.
+DlssViewGeometry camera_from_constants(
+    const sl_abi::Constants& c, std::uint32_t viewport, std::uint32_t* method) noexcept {
+    *method = 0;
+    const auto& m = c.view_to_clip;
+    for (const auto& row : m)
+        for (const float value : row)
+            if (!std::isfinite(value)) return {};
+    constexpr float kZero = 1e-6F;
+    if (std::fabs(m[3][3]) > kZero || std::fabs(m[0][0]) < kZero || std::fabs(m[1][1]) < kZero) {
+        return {};
+    }
+    const bool row_offsets = std::fabs(m[2][0]) > kZero || std::fabs(m[2][1]) > kZero;
+    const bool column_offsets = std::fabs(m[0][2]) > kZero || std::fabs(m[1][2]) > kZero;
+    float w = 0.0F, offset_x = 0.0F, offset_y = 0.0F;
+    if (row_offsets && !column_offsets) {
+        w = m[2][3];
+        offset_x = m[2][0];
+        offset_y = m[2][1];
+        *method = 1;
+    } else if (column_offsets && !row_offsets) {
+        w = m[3][2];
+        offset_x = m[0][2];
+        offset_y = m[1][2];
+        *method = 2;
+    } else if (!row_offsets && !column_offsets) {
+        // Symmetric: only |w| matters, the term of magnitude one.
+        w = std::fabs(std::fabs(m[2][3]) - 1.0F) < 1e-4F ? m[2][3]
+            : std::fabs(std::fabs(m[3][2]) - 1.0F) < 1e-4F ? m[3][2] : 0.0F;
+        *method = 3;
+    }
+    if (std::fabs(w) < kZero) {
+        *method = 0;
+        return {};
+    }
+    const float sign = w > 0.0F ? 1.0F : -1.0F;
+    const float magnitude = std::fabs(w);
+    DlssViewGeometry view;
+    view.known = true;
+    view.viewport = viewport;
+    view.tan_left = (-magnitude - sign * offset_x) / m[0][0];
+    view.tan_right = (magnitude - sign * offset_x) / m[0][0];
+    view.tan_up = (magnitude - sign * offset_y) / m[1][1];
+    view.tan_down = (-magnitude - sign * offset_y) / m[1][1];
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        view.position[axis] = std::isfinite(c.position[axis]) ? c.position[axis] : 0.0F;
+        view.right[axis] = std::isfinite(c.right[axis]) ? c.right[axis] : 0.0F;
+    }
+    return view;
+}
+
+int hooked_sl_set_constants(
+    const sl_abi::Constants* values, const void* frame, const sl_abi::Viewport* viewport) {
+    auto& sl = streamline();
+    try {
+        if (values != nullptr && viewport != nullptr &&
+            values->header.type == sl_abi::kConstants &&
+            viewport->header.type == sl_abi::kViewport) {
+            std::uint32_t method = 0;
+            const DlssViewGeometry camera =
+                camera_from_constants(*values, viewport->value, &method);
+            std::uint64_t seen = 0;
+            {
+                std::scoped_lock lock(sl.mutex);
+                if (camera.known) {
+                    sl.cameras[viewport->value] = camera;
+                } else {
+                    sl.cameras.erase(viewport->value);
+                }
+                seen = ++sl.constants_seen;
+            }
+            if (seen <= 16 || seen % 4000 == 0) {
+                const float side = camera.position[0] * camera.right[0] +
+                    camera.position[1] * camera.right[1] + camera.position[2] * camera.right[2];
+                std::uint32_t side_bits = 0;
+                std::memcpy(&side_bits, &side, sizeof(side_bits));
+                record(kRecordStreamlineCamera,
+                    (static_cast<std::uint64_t>(viewport->value) << 32U) | method,
+                    pack_view_tangents(camera.tan_left, camera.tan_right, camera.tan_up,
+                        camera.tan_down),
+                    side_bits);
+            }
+        }
+    } catch (...) {
+    }
+    return sl.set_constants(values, frame, viewport);
+}
+
+int hooked_sl_evaluate(std::uint32_t feature, const void* frame,
+    const sl_abi::Header* const* inputs, std::uint32_t input_count, void* command_buffer) {
+    bool found = false;
+    std::uint32_t viewport = 0;
+    try {
+        if (feature == sl_abi::kFeatureDlss && inputs != nullptr) {
+            for (std::uint32_t index = 0; index < std::min(input_count, 64U) && !found; ++index) {
+                const sl_abi::Header* input = inputs[index];
+                for (unsigned chained = 0; input != nullptr && chained < 16 && !found;
+                     ++chained, input = input->next) {
+                    if (input->type == sl_abi::kViewport) {
+                        viewport = reinterpret_cast<const sl_abi::Viewport*>(input)->value;
+                        found = true;
+                    }
+                }
+            }
+        }
+    } catch (...) {
+    }
+    const bool outer_dlss = t_sl_dlss;
+    const std::uint32_t outer_viewport = t_sl_viewport;
+    if (found) {
+        t_sl_dlss = true;
+        t_sl_viewport = viewport;
+    }
+    const int result =
+        streamline().evaluate(feature, frame, inputs, input_count, command_buffer);
+    t_sl_dlss = outer_dlss;
+    t_sl_viewport = outer_viewport;
+    return result;
+}
+
+// The camera of the Streamline DLSS evaluation this thread is inside, if
+// any: unknown (known = false) outside one or before its constants.
+[[nodiscard]] DlssViewGeometry current_streamline_camera(bool* inside) noexcept {
+    *inside = t_sl_dlss;
+    if (!t_sl_dlss) return {};
+    try {
+        auto& sl = streamline();
+        std::scoped_lock lock(sl.mutex);
+        const auto found = sl.cameras.find(t_sl_viewport);
+        if (found != sl.cameras.end()) return found->second;
+    } catch (...) {
+    }
+    DlssViewGeometry unknown;
+    unknown.viewport = t_sl_viewport;
+    return unknown;
+}
 
 // The rectangles, scale, jitter and flags of a publication, from the
 // feature's creation and the evaluation's parameters: the same for the
@@ -457,6 +710,9 @@ void capture(
             {output_description.Width, output_description.Height},
             {motion_description.Width, motion_description.Height},
             depth != nullptr ? &depth_shape : nullptr);
+        // V515: inside Streamline's DLSS evaluation, its viewport's camera.
+        bool inside_streamline = false;
+        publication.view = current_streamline_camera(&inside_streamline);
         publication.output = output;
         publication.motion_vectors = motion;
         publication.producer_queue = queue.Get();
@@ -484,7 +740,21 @@ void capture(
         }
         std::scoped_lock lock(s.mutex);
         ++s.statistics.publications;
+        if (publication.view.known) ++s.statistics.publications_with_camera;
         const auto found = s.features.find(handle);
+        if (found != s.features.end() && inside_streamline &&
+            (!found->second.viewport_recorded || found->second.publications == 0)) {
+            // Once with the camera, or once without when it never comes.
+            if (publication.view.known || found->second.publications == 0) {
+                record(kRecordStreamlineStream,
+                    (feature.stream & 0xFFFFFFFFULL) |
+                        (static_cast<std::uint64_t>(publication.view.viewport & 0x7FFFFFFFU) << 32U) |
+                        (publication.view.known ? 1ULL << 63U : 0ULL),
+                    pack_view_tangents(publication.view.tan_left, publication.view.tan_right,
+                        publication.view.tan_up, publication.view.tan_down));
+            }
+            found->second.viewport_recorded = publication.view.known;
+        }
         if (found != s.features.end() && found->second.publications++ == 0) {
             // a's upper bits (V505): 32 the game's depth came with it, 40-47
             // its DXGI format, 48 inverted, 49 its rectangle is the vectors'.
@@ -2378,11 +2648,59 @@ void install(HMODULE module) noexcept {
     }
 }
 
+// V515: Streamline's interposer, for the viewports' cameras.
+void install_streamline(HMODULE module) noexcept {
+    auto& sl = streamline();
+    if (module == nullptr || sl.installed || sl.failed) {
+        return;
+    }
+    try {
+        auto* set_constants = GetProcAddress(module, "slSetConstants");
+        auto* evaluate = GetProcAddress(module, "slEvaluateFeature");
+        if (set_constants == nullptr || evaluate == nullptr) {
+            sl.failed = true;
+            return;
+        }
+        HMODULE pinned = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_PIN,
+            reinterpret_cast<LPCWSTR>(set_constants), &pinned);
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_PIN,
+            reinterpret_cast<LPCWSTR>(&install_streamline), &pinned);
+        sl.set_constants_hook = safetyhook::create_inline(reinterpret_cast<void*>(set_constants),
+            reinterpret_cast<void*>(&hooked_sl_set_constants), SafetyHookInline::StartDisabled);
+        sl.evaluate_hook = safetyhook::create_inline(reinterpret_cast<void*>(evaluate),
+            reinterpret_cast<void*>(&hooked_sl_evaluate), SafetyHookInline::StartDisabled);
+        if (!sl.set_constants_hook || !sl.evaluate_hook) {
+            sl.set_constants_hook = {};
+            sl.evaluate_hook = {};
+            sl.failed = true;
+            record(kRecordHookFailed, 30U);
+            return;
+        }
+        sl.set_constants = sl.set_constants_hook.original<sl_abi::SetConstants>();
+        sl.evaluate = sl.evaluate_hook.original<sl_abi::EvaluateFeature>();
+        sl.installed = true;
+        static_cast<void>(sl.set_constants_hook.enable());
+        static_cast<void>(sl.evaluate_hook.enable());
+        {
+            auto& s = state();
+            std::scoped_lock lock(s.mutex);
+            s.statistics.streamline_hooked = true;
+        }
+        record(kRecordHooked, 30U);
+    } catch (...) {
+        sl.failed = true;
+    }
+}
+
 // Installation is serialised: the monitor and a poll may overlap.
 std::mutex g_install_mutex;
 
 void install_all() noexcept {
     std::scoped_lock lock(g_install_mutex);
+    install_streamline(GetModuleHandleW(L"sl.interposer.dll"));
     install<0>(GetModuleHandleW(kModuleNames[0]));
     install<1>(GetModuleHandleW(kModuleNames[1]));
     install<2>(GetModuleHandleW(kModuleNames[2]));

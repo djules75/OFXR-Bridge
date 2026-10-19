@@ -68,6 +68,11 @@ struct NgxGuideCaptureStatistics {
     // V514: the Vulkan capture runs without the queue layer, publishing at
     // the bridged release.
     bool vulkan_untracked{};
+    // V515: sl.interposer.dll's slSetConstants and slEvaluateFeature are
+    // detoured, so publications made inside Streamline's DLSS evaluation
+    // carry their viewport's camera; and how many did.
+    bool streamline_hooked{};
+    std::uint64_t publications_with_camera{};
     bool active{};
     bool d3d11_active{};
     bool vulkan_active{};

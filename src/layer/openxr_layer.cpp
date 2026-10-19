@@ -7423,6 +7423,7 @@ void refresh_projection_guides(
         std::array<std::shared_ptr<SwapchainState>, 2> chains{};
         std::array<std::uint64_t, 2> releases{};
         std::array<XrRect2Di, 2> rects{};
+        std::array<std::optional<XrFovf>, 2> fovs{};
         for (const auto& mapping : mappings.mappings) {
             const auto chain = find_swapchain(mapping.application_swapchain);
             if (!chain) continue;
@@ -7432,8 +7433,10 @@ void refresh_projection_guides(
                 mapping.views[0].projection_index < snapshot.layers.size() &&
                 mapping.views[0].view_index <
                     snapshot.layers[mapping.views[0].projection_index].views.size()) {
-                rects[eye] = snapshot.layers[mapping.views[0].projection_index]
-                                 .views[mapping.views[0].view_index].subImage.imageRect;
+                const auto& view = snapshot.layers[mapping.views[0].projection_index]
+                                       .views[mapping.views[0].view_index];
+                rects[eye] = view.subImage.imageRect;
+                fovs[eye] = view.fov;
             }
             std::scoped_lock lock(chain->mutex);
             if (!chain->last_released_capture || !chain->last_released_index ||
@@ -7517,18 +7520,67 @@ void refresh_projection_guides(
                 return;
             }
         }
+        std::array<std::shared_ptr<const xrfg::DlssMotionVectorSet>, 2> resolved{};
         for (std::size_t eye = 0; eye < chains.size(); ++eye) {
             std::scoped_lock lock(chains[eye]->mutex);
-            const auto guides = releases[eye] ? xrfg::resolve_dlss_motion_vectors(
+            resolved[eye] = releases[eye] ? xrfg::resolve_dlss_motion_vectors(
                 chains[eye]->enumerated_d3d12_images[*chains[eye]->last_released_index].Get(),
                 session.d3d12_queue.Get(), static_cast<int>(eye), releases[eye], releases[1 - eye])
                 : nullptr;
-            chains[eye]->last_released_motion_vectors = guides;
+        }
+        // No evaluation the eye images' size (V515): MSFS 2024's foveated
+        // rendering evaluates DLSS once per view - per eye a periphery over
+        // the whole field at FoveatedRenderingScale of its pixels and an
+        // inset - and composites them into the eye images itself. Each eye
+        // then takes the stream whose camera (Streamline's constants) covers
+        // its field, placed scaled. Record 753 per eye for the first frames
+        // and every 512th after: a the eye << 32 | the stream's low bits, b
+        // the vector rectangle placed on the view (x, y, width, height, each
+        // in eighths of a texel, 16 bits), c the publication.
+        bool by_view = false;
+        if ((!resolved[0] || !resolved[1]) && releases[0] != 0 && releases[1] != 0 &&
+            fovs[0] && fovs[1]) {
+            std::array<xrfg::DlssEyeView, 2> views{};
+            for (std::size_t eye = 0; eye < views.size(); ++eye) {
+                views[eye] = {std::tan(fovs[eye]->angleLeft), std::tan(fovs[eye]->angleRight),
+                    std::tan(fovs[eye]->angleUp), std::tan(fovs[eye]->angleDown),
+                    rects[eye].offset.x, rects[eye].offset.y,
+                    static_cast<std::uint32_t>(rects[eye].extent.width),
+                    static_cast<std::uint32_t>(rects[eye].extent.height)};
+            }
+            auto placed = xrfg::resolve_view_placed_dlss_guides(
+                session.d3d12_queue.Get(), views, {releases[0], releases[1]});
+            if (placed[0] && placed[1]) {
+                resolved = std::move(placed);
+                by_view = true;
+            }
+        }
+        for (std::size_t eye = 0; eye < chains.size(); ++eye) {
+            const auto& guides = resolved[eye];
+            {
+                std::scoped_lock lock(chains[eye]->mutex);
+                chains[eye]->last_released_motion_vectors = guides;
+            }
             if (log) {
                 xrfg::bridge_flight_logger().event(
                     xrfg::BridgeFlightOperation::presenter_transition,
                     751, eye, releases[eye],
                     guides && guides->eyes[0] ? guides->eyes[0]->publication : 0);
+                if (by_view) {
+                    const auto& frame = *guides->eyes[0];
+                    const auto eighths = [](float value) {
+                        return static_cast<std::uint64_t>(
+                            std::clamp(value * 8.0F, 0.0F, 65535.0F)) & 0xFFFFU;
+                    };
+                    xrfg::bridge_flight_logger().event(
+                        xrfg::BridgeFlightOperation::presenter_transition, 753,
+                        (static_cast<std::uint64_t>(eye) << 32U) | (frame.stream & 0xFFFFFFFFULL),
+                        eighths(frame.placed_motion_rect[0]) |
+                            (eighths(frame.placed_motion_rect[1]) << 16U) |
+                            (eighths(frame.placed_motion_rect[2]) << 32U) |
+                            (eighths(frame.placed_motion_rect[3]) << 48U),
+                        frame.publication);
+                }
             }
         }
     } catch (...) {

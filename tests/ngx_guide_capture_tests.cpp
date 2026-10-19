@@ -19,7 +19,10 @@
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_defs_vk.h>
 
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
@@ -806,6 +809,241 @@ void test_split_both_eyes_guide() {
     std::cout << "both-eyes guide split: right motion_x=" << right->motion_x << "\n";
 }
 
+// V515: Streamline's per-viewport cameras, as MSFS 2024's foveated rendering
+// gives them - four views a frame, per eye a periphery over a field a little
+// wider than the eye's and an inset, every DLSS output a third of the eye
+// image's size. The stand-in sl.interposer.dll's slEvaluateFeature makes the
+// NGX evaluation inside itself, as Streamline's DLSS plugin does. Checked:
+// both exports are detoured; every evaluation made inside carries its
+// viewport's camera, read from a row-vector (D3D, left-handed) projection
+// and from a column-vector right-handed one; the resolver gives each eye its
+// periphery - by fit for asymmetric eyes, by the cameras' positions when
+// both fit alike - placed scaled over the eye image; the insets alone cover
+// no eye.
+namespace sl_test {
+
+struct TypeId {
+    std::uint32_t data1;
+    std::uint16_t data2;
+    std::uint16_t data3;
+    std::array<std::uint8_t, 8> data4;
+};
+
+struct Header {
+    const Header* next;
+    TypeId type;
+    std::size_t version;
+};
+
+struct Constants {
+    Header header;
+    float view_to_clip[4][4];
+    float other_matrices[4][4][4];
+    float jitter_offset[2];
+    float motion_vector_scale[2];
+    float pinhole_offset[2];
+    float position[3];
+    float up[3];
+    float right[3];
+    float forward[3];
+    float near_far_fov_aspect_invalid[5];
+    char flags[7];
+};
+static_assert(offsetof(Constants, view_to_clip) == 32 && offsetof(Constants, position) == 376 &&
+    offsetof(Constants, right) == 400);
+
+struct Viewport {
+    Header header;
+    std::uint32_t value;
+};
+
+constexpr TypeId kConstants{
+    0xdcd35ad7, 0x4e4a, 0x4bad, {0xa9, 0x0c, 0xe0, 0xc4, 0x9e, 0xb2, 0x3a, 0xfe}};
+constexpr TypeId kViewport{
+    0x171b6435, 0x9b3c, 0x4fc8, {0x99, 0x94, 0xfb, 0xe5, 0x25, 0x69, 0xaa, 0xa4}};
+
+struct Field {
+    float left, right, up, down;
+};
+
+// A projection for the field: row vectors with w = +z (left-handed D3D), or
+// column vectors with w = -z (right-handed).
+Constants constants_for(const Field& f, float camera_x, bool column_right_handed) {
+    Constants c{};
+    c.header.type = kConstants;
+    c.header.version = 2;
+    auto& m = c.view_to_clip;
+    m[0][0] = 2.0F / (f.right - f.left);
+    m[1][1] = 2.0F / (f.up - f.down);
+    const float off_x = (f.right + f.left) / (f.right - f.left);
+    const float off_y = (f.up + f.down) / (f.up - f.down);
+    if (column_right_handed) {
+        // NDC = (t m00 - m02) / 1 for z = -depth.
+        m[0][2] = off_x;
+        m[1][2] = off_y;
+        m[3][2] = -1.0F;
+        m[2][3] = 0.05F;
+    } else {
+        m[2][0] = -off_x;
+        m[2][1] = -off_y;
+        m[2][3] = 1.0F;
+        m[3][2] = 0.05F;
+    }
+    c.position[0] = camera_x;
+    c.right[0] = 1.0F;
+    c.up[1] = 1.0F;
+    c.forward[2] = 1.0F;
+    return c;
+}
+
+struct Evaluation {
+    EvaluateFeature evaluate{};
+    ID3D12GraphicsCommandList* list{};
+    NVSDK_NGX_Handle* handle{};
+    ID3D12Resource* output{};
+    ID3D12Resource* motion{};
+    UINT render_width{}, render_height{};
+    bool ok{};
+};
+
+void evaluate_inside(void* context) {
+    auto* e = static_cast<Evaluation*>(context);
+    Parameters frame;
+    frame.Set(NVSDK_NGX_Parameter_Output, e->output);
+    frame.Set(NVSDK_NGX_Parameter_MotionVectors, e->motion);
+    frame.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, e->render_width);
+    frame.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, e->render_height);
+    frame.Set(NVSDK_NGX_Parameter_MV_Scale_X, 1.0F);
+    frame.Set(NVSDK_NGX_Parameter_MV_Scale_Y, 1.0F);
+    frame.Set(NVSDK_NGX_Parameter_Reset, 0);
+    e->ok = NVSDK_NGX_SUCCEED(e->evaluate(e->list, e->handle, &frame, nullptr));
+}
+
+}  // namespace sl_test
+
+template <class Execute>
+void run_streamline_views(const wchar_t* ngx_path, CreateFeature create, EvaluateFeature evaluate,
+    ReleaseFeature release, ID3D12Device* device, ID3D12CommandQueue* queue,
+    ID3D12GraphicsCommandList* list, Execute&& execute) {
+    using namespace sl_test;
+    std::wstring sl_path(ngx_path);
+    sl_path = sl_path.substr(0, sl_path.find_last_of(L"\\/") + 1) + L"sl.interposer.dll";
+    const HMODULE sl = LoadLibraryW(sl_path.c_str());
+    require(sl != nullptr && GetModuleHandleW(L"sl.interposer.dll") == sl,
+        "the stand-in sl.interposer.dll did not load");
+    using SetConstants = int (*)(const void*, const void*, const void*);
+    using EvaluateSl = int (*)(std::uint32_t, const void*, const void* const*, std::uint32_t, void*);
+    using SetCallback = void (*)(void (*)(void*), void*);
+    const auto set_constants = reinterpret_cast<SetConstants>(GetProcAddress(sl, "slSetConstants"));
+    const auto evaluate_sl = reinterpret_cast<EvaluateSl>(GetProcAddress(sl, "slEvaluateFeature"));
+    const auto set_callback =
+        reinterpret_cast<SetCallback>(GetProcAddress(sl, "fake_sl_set_evaluate_callback"));
+    const auto sl_evaluations = reinterpret_cast<Counter>(GetProcAddress(sl, "fake_sl_evaluations"));
+    require(set_constants && evaluate_sl && set_callback && sl_evaluations,
+        "the stand-in sl.interposer.dll lacks an export");
+    xrfg::poll_ngx_guide_capture();
+    require(xrfg::ngx_guide_capture_statistics().streamline_hooked,
+        "Streamline's exports were not detoured");
+
+    constexpr UINT kRender = 16, kRenderHeight = 12, kOutput = 32, kOutputHeight = 24;
+    constexpr UINT kEyeWidth = 96, kEyeHeight = 72;
+    Parameters creation;
+    creation.Set(NVSDK_NGX_Parameter_Width, kRender);
+    creation.Set(NVSDK_NGX_Parameter_Height, kRenderHeight);
+    creation.Set(NVSDK_NGX_Parameter_OutWidth, kOutput);
+    creation.Set(NVSDK_NGX_Parameter_OutHeight, kOutputHeight);
+    creation.Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,
+        static_cast<int>(NVSDK_NGX_DLSS_Feature_Flags_MVLowRes));
+    // Viewports 0 and 1 the left and right peripheries, 2 and 3 the insets.
+    const std::array<Field, 4> fields{{{-1.25F, 1.05F, 1.15F, -1.15F},
+        {-1.05F, 1.25F, 1.15F, -1.15F}, {-0.35F, 0.35F, 0.35F, -0.35F},
+        {-0.35F, 0.35F, 0.35F, -0.35F}}};
+    const std::array<float, 4> camera_x{-0.032F, 0.032F, -0.032F, 0.032F};
+    std::array<NVSDK_NGX_Handle*, 4> handles{};
+    std::array<ComPtr<ID3D12Resource>, 4> outputs, motions;
+    std::array<Constants, 4> constants{};
+    std::array<Viewport, 4> viewports{};
+    for (std::uint32_t v = 0; v < 4; ++v) {
+        require(NVSDK_NGX_SUCCEED(create(list, NVSDK_NGX_Feature_SuperSampling, &creation, &handles[v])) &&
+                handles[v], "a view's feature creation failed through the hook");
+        outputs[v] = create_texture(device, kOutput, kOutputHeight, 1, DXGI_FORMAT_R11G11B10_FLOAT,
+            D3D12_RESOURCE_STATE_COMMON);
+        motions[v] = create_texture(device, kRender, kRenderHeight, 1, DXGI_FORMAT_R16G16_FLOAT,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        constants[v] = constants_for(fields[v], camera_x[v], v == 1);
+        viewports[v].header.type = kViewport;
+        viewports[v].header.version = 1;
+        viewports[v].value = 40U + v;
+    }
+    const auto publications_before = xrfg::ngx_guide_capture_statistics().publications_with_camera;
+    int frame_token = 0;
+    for (UINT64 frame = 1; frame <= 2; ++frame) {
+        for (std::uint32_t v = 0; v < 4; ++v) {
+            require(set_constants(&constants[v], &frame_token, &viewports[v]) == 0,
+                "slSetConstants failed through the hook");
+        }
+        for (std::uint32_t v = 0; v < 4; ++v) {
+            Evaluation evaluation{evaluate, list, handles[v], outputs[v].Get(), motions[v].Get(),
+                kRender, kRenderHeight};
+            set_callback(&evaluate_inside, &evaluation);
+            const void* inputs[]{&viewports[v]};
+            require(evaluate_sl(0, &frame_token, inputs, 1, nullptr) == 0 && evaluation.ok,
+                "slEvaluateFeature or the NGX evaluation inside it failed");
+        }
+        set_callback(nullptr, nullptr);
+        execute(3 + frame);
+    }
+    require(sl_evaluations() == 8, "the original slEvaluateFeature did not run eight times");
+    require(xrfg::ngx_guide_capture_statistics().publications_with_camera == publications_before + 8,
+        "the evaluations inside Streamline's did not carry their cameras");
+
+    const std::uint64_t watermark = xrfg::dlss_motion_vector_publications();
+    const auto resolve = [&](const xrfg::DlssEyeView& left_eye, const xrfg::DlssEyeView& right_eye) {
+        return xrfg::resolve_view_placed_dlss_guides(queue, {left_eye, right_eye}, {watermark, watermark});
+    };
+    // Asymmetric eyes: each periphery fits its own eye best.
+    const xrfg::DlssEyeView left_eye{-1.2F, 1.0F, 1.1F, -1.1F, 0, 0, kEyeWidth, kEyeHeight};
+    const xrfg::DlssEyeView right_eye{-1.0F, 1.2F, 1.1F, -1.1F, 0, 0, kEyeWidth, kEyeHeight};
+    auto placed = resolve(left_eye, right_eye);
+    require(placed[0] && placed[1], "no view-placed guides for the two eyes");
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        const auto& f = *placed[eye]->eyes[0];
+        require(f.view.known && f.view.viewport == 40U + eye,
+            "an eye did not take its own periphery");
+        require(f.placed && f.output_x == 0 && f.output_y == 0 && f.output_width == kEyeWidth &&
+                f.output_height == kEyeHeight && f.serial == 2 && f.previous_serial == 1,
+            "the periphery was not placed over the eye image");
+        // The field reaches 0.05 beyond the eye's 2.2 each side: 2.18
+        // pixels of 96 left of the image, 16 texels over 100.36 pixels.
+        const float per_x = 16.0F / (96.0F * 2.3F / 2.2F);
+        const float per_y = 12.0F / (72.0F * 2.3F / 2.2F);
+        require(std::fabs(f.placed_motion_rect[0] - 96.0F * 0.05F / 2.2F * per_x) < 1e-3F &&
+                std::fabs(f.placed_motion_rect[2] - 96.0F * per_x) < 1e-3F &&
+                std::fabs(f.placed_motion_rect[1] - 72.0F * 0.05F / 2.2F * per_y) < 1e-3F &&
+                std::fabs(f.placed_motion_rect[3] - 72.0F * per_y) < 1e-3F,
+            "the placed vector rectangle is not the camera's");
+    }
+    // Symmetric eyes: both peripheries fit alike, and the camera further
+    // left is the left eye.
+    const xrfg::DlssEyeView symmetric{-1.0F, 1.0F, 1.1F, -1.1F, 0, 0, kEyeWidth, kEyeHeight};
+    placed = resolve(symmetric, symmetric);
+    require(placed[0] && placed[1] && placed[0]->eyes[0]->view.viewport == 40U &&
+            placed[1]->eyes[0]->view.viewport == 41U,
+        "the cameras' positions did not decide between two alike peripheries");
+    // A field wider than every camera's: no guide.
+    const auto unmatched_before = xrfg::dlss_motion_vector_statistics().view_unmatched;
+    const xrfg::DlssEyeView wide{-1.5F, 1.5F, 1.1F, -1.1F, 0, 0, kEyeWidth, kEyeHeight};
+    placed = resolve(wide, wide);
+    require(!placed[0] && !placed[1] &&
+            xrfg::dlss_motion_vector_statistics().view_unmatched == unmatched_before + 1,
+        "a guide was placed over a field no camera covers");
+    for (auto* handle : handles) {
+        require(NVSDK_NGX_SUCCEED(release(handle)), "a view's feature release failed");
+    }
+    std::cout << "streamline views: placed x=" << 96.0F * 0.05F / 2.2F << " px outside, "
+              << "publications with a camera=" << 8 << "\n";
+}
+
 int run(const wchar_t* module_path) {
     test_split_both_eyes_guide();
     // WARP: the capture only records copies, which WARP executes.
@@ -967,19 +1205,27 @@ int run(const wchar_t* module_path) {
     }
     require(set->eyes[0]->stream != set->eyes[1]->stream, "the eyes share a stream");
 
+    run_streamline_views(module_path, create, evaluate, release, device.Get(), queue.Get(),
+        list.Get(), execute);
+
     // Paused: evaluations run, nothing is published.
+    const auto evaluations_before_pause = evaluations();
+    const auto publications_before_pause = xrfg::ngx_guide_capture_statistics().publications;
     xrfg::stop_ngx_guide_capture(queue.Get());
     evaluate_frame(left, motion.Get(), 0.0F, false);
-    execute(3);
-    require(evaluations() == 3, "the original did not run while paused");
-    require(xrfg::ngx_guide_capture_statistics().publications == 4, "a paused capture published");
+    execute(10);
+    require(evaluations() == evaluations_before_pause + 1, "the original did not run while paused");
+    require(xrfg::ngx_guide_capture_statistics().publications == publications_before_pause,
+        "a paused capture published");
 
     // Release retires the features; the original runs.
+    const auto releases_before = releases();
+    const auto released_before = xrfg::ngx_guide_capture_statistics().features_released;
     require(NVSDK_NGX_SUCCEED(release(left)) && NVSDK_NGX_SUCCEED(release(right)) &&
             NVSDK_NGX_SUCCEED(release(other)),
         "release failed through the hook");
-    require(releases() == 3, "the original ReleaseFeature did not run three times");
-    require(xrfg::ngx_guide_capture_statistics().features_released == 2,
+    require(releases() == releases_before + 3, "the original ReleaseFeature did not run three times");
+    require(xrfg::ngx_guide_capture_statistics().features_released == released_before + 2,
         "the two guide features were not released");
     std::cout << "ngx guide capture: hooked=" << statistics.modules_hooked
               << " publications=" << statistics.publications << "\n";

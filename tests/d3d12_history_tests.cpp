@@ -4395,7 +4395,11 @@ void test_nvidia_serialized_eye_context_stress(
 // no motion at all would show.
 // occlusion_low_res: the occlusion scene with DLSS-style render-resolution
 // vectors, two thirds of the output (DI2 renders 2782 for a 4172 output).
-enum class HybridScene { occlusion, overlay, fade, occlusion_low_res };
+// occlusion_periphery (V515): the occlusion scene with a guide placed by its
+// camera, as MSFS 2024's foveated periphery is - its field a sixteenth wider
+// than the eye's on every side, its vectors a third of the eye's pixels
+// over that field - through place_guide_in_view as the resolver places it.
+enum class HybridScene { occlusion, overlay, fade, occlusion_low_res, occlusion_periphery };
 
 // backend nvidia: real OFA on the NVIDIA GPU ("hybrid nvidia"), measured
 // only - the bounds below are FidelityFX's on WARP.
@@ -4407,12 +4411,20 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
     constexpr int background_motion = 6;
     const bool overlay = kind == HybridScene::overlay, fade = kind == HybridScene::fade;
     const bool low_res = kind == HybridScene::occlusion_low_res;
-    const bool occluding = kind == HybridScene::occlusion || low_res;
+    const bool periphery = kind == HybridScene::occlusion_periphery;
+    const bool occluding = kind == HybridScene::occlusion || low_res || periphery;
     const int object_motion = overlay ? 0 : fade ? background_motion : 20;
     const char* const name = fade ? "fade" : overlay ? "overlay"
-        : low_res ? "occlusion low-res vectors" : "occlusion";
-    const UINT motion_width = low_res ? width * 2U / 3U : width;
-    const UINT motion_height = low_res ? height * 2U / 3U : height;
+        : low_res ? "occlusion low-res vectors"
+        : periphery ? "occlusion periphery vectors" : "occlusion";
+    // The vectors' field in image pixels: the image itself, or for the
+    // periphery 16 and 8 pixels wider each side.
+    const float field_left = periphery ? -16.0F : 0.0F;
+    const float field_top = periphery ? -8.0F : 0.0F;
+    const float field_width = periphery ? width + 32.0F : static_cast<float>(width);
+    const float field_height = periphery ? height + 16.0F : static_cast<float>(height);
+    const UINT motion_width = low_res ? width * 2U / 3U : periphery ? (width + 32U) / 3U : width;
+    const UINT motion_height = low_res ? height * 2U / 3U : periphery ? (height + 16U) / 3U : height;
     const auto make_scene = [&](int background_shift, int object_shift, float brightness = 1.0F) {
         StereoPattern pattern;
         for (UINT eye = 0; eye < kEyeCount; ++eye) {
@@ -4450,14 +4462,14 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
     auto game_motion = create_and_upload_game_motion_field(
         fixture, motion_width, motion_height, [&](UINT, UINT mx, UINT my) {
             // The output pixel under this render pixel's centre.
-            const int x = static_cast<int>(
-                (static_cast<float>(mx) + 0.5F) * width / motion_width);
-            const int y = static_cast<int>(
-                (static_cast<float>(my) + 0.5F) * height / motion_height);
+            const int x = static_cast<int>(std::floor(field_left +
+                (static_cast<float>(mx) + 0.5F) * field_width / motion_width));
+            const int y = static_cast<int>(std::floor(field_top +
+                (static_cast<float>(my) + 0.5F) * field_height / motion_height));
             const int ox = x - object_motion;
             const bool object = y >= object_top && y < object_bottom &&
                 ox >= object_left && ox < object_left + object_width;
-            const float scale = static_cast<float>(motion_width) / width;
+            const float scale = static_cast<float>(motion_width) / field_width;
             return std::array<float, 2>{
                 -scale * static_cast<float>(object && !overlay ? object_motion : background_motion),
                 0.0F};
@@ -4505,6 +4517,26 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
             frame->motion_height = motion_height;
             frame->motion_slice = frame->output_slice = eye;
             frame->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            if (periphery) {
+                // The eye's field is tangent +-1 each way; the camera's is
+                // the field above, in the same tangents.
+                frame->output_width = motion_width * 2U;
+                frame->output_height = motion_height * 2U;
+                frame->view.known = true;
+                frame->view.tan_left = -1.0F + 2.0F * field_left / width;
+                frame->view.tan_right = -1.0F + 2.0F * (field_left + field_width) / width;
+                frame->view.tan_up = 1.0F - 2.0F * field_top / height;
+                frame->view.tan_down = 1.0F - 2.0F * (field_top + field_height) / height;
+                const xrfg::DlssEyeView eye_view{-1.0F, 1.0F, 1.0F, -1.0F, 0, 0, width, height};
+                auto placed = xrfg::place_guide_in_view(*frame, eye_view);
+                require(placed != nullptr && placed->placed && placed->output_width == width &&
+                        placed->output_height == height &&
+                        std::fabs(placed->placed_motion_rect[0] - 16.0F / 3.0F) < 1e-3F &&
+                        std::fabs(placed->placed_motion_rect[2] - width / 3.0F) < 1e-3F,
+                    "the periphery guide was not placed over the eye");
+                set->eyes[eye] = placed;
+                continue;
+            }
             set->eyes[eye] = frame;
         }
         return set;
@@ -5199,7 +5231,7 @@ int main(int argc, char** argv) {
             SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
             D3D12WarpFixture nvidia_fixture(true);
             for (const auto scene : {HybridScene::occlusion, HybridScene::overlay, HybridScene::fade,
-                                     HybridScene::occlusion_low_res}) {
+                                     HybridScene::occlusion_low_res, HybridScene::occlusion_periphery}) {
                 test_hybrid_composition(nvidia_fixture, scene, xrfg::D3D12OpticalFlowBackend::nvidia);
             }
             return 0;
@@ -5227,7 +5259,7 @@ int main(int argc, char** argv) {
             SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
             D3D12WarpFixture hybrid_fixture;
             for (const auto scene : {HybridScene::occlusion, HybridScene::overlay, HybridScene::fade,
-                                     HybridScene::occlusion_low_res}) {
+                                     HybridScene::occlusion_low_res, HybridScene::occlusion_periphery}) {
                 test_hybrid_composition(hybrid_fixture, scene);
             }
             test_hybrid_side_by_side(hybrid_fixture);
