@@ -202,6 +202,9 @@ struct DlssMotionVectorStatistics {
     std::uint64_t view_unmatched{};
     // V516: eye pairs joined by cameras whose insets were found too.
     std::uint64_t inset_matched{};
+    // V519: let-go snapshot sets still waiting for the GPU to finish with
+    // them (a retired stream, a reallocated slot), counted when read.
+    std::uint64_t retired_snapshots_held{};
     std::uint64_t last_used_publication{};
     DlssMotionVectorStatus status{DlssMotionVectorStatus::waiting_for_dlss};
 };
@@ -217,8 +220,10 @@ void publish_dlss_motion_vectors(
 // pairs are remembered; the check never guesses.
 bool same_d3d12_device_backing(ID3D12Device* left, ID3D12Device* right) noexcept;
 void configure_dlss_motion_vector_tracking(bool enabled) noexcept;
-// Call only after all queue work that may reference published snapshots has
-// completed. A live disable intentionally retains them until this safe point.
+// Call only after all consumer queue work that may reference published
+// snapshots has completed. A live disable intentionally retains them until
+// this safe point. Since V519 the textures still wait for their producer
+// queues (retire_dlss_motion_vector_stream too) before they are freed.
 void retire_disabled_dlss_motion_vector_resources() noexcept;
 void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept;
 // One DLSS evaluation for both eyes side by side, each eye then in a

@@ -775,6 +775,59 @@ int run_d3d11(HMODULE module) {
         "D3D11 release failed through the hook");
     require(xrfg::ngx_guide_capture_statistics().features_released == released_before + 2,
         "the two D3D11 features were not released");
+
+    // V519: a feature the game created before the capture's hooks went in -
+    // Skyrim's DLSS started with Hybrid off and Hybrid was switched on later.
+    // It registers from its first evaluation and publishes from then on; the
+    // D3D12 capture is stopped here, as it is in a bridged session.
+    const auto create_unhooked = reinterpret_cast<NVSDK_NGX_Handle* (*)(int)>(
+        GetProcAddress(module, "fake_ngx_d3d11_create_unhooked"));
+    require(create_unhooked != nullptr, "the stand-in lacks fake_ngx_d3d11_create_unhooked");
+    const auto late_before = xrfg::ngx_guide_capture_statistics();
+    require(!late_before.active, "the D3D12 capture is still active in the D3D11 phase");
+    //
+    // Then its release (V519). The registry used to free a released
+    // feature's snapshots at once, with their copies possibly still queued -
+    // the GPU then wrote freed memory, and this test, releasing right after a
+    // flush, took the PC down three times. Here the release comes before the
+    // flush: the evaluations' copy lists are recorded but never submitted
+    // (the transport drops them), so no GPU work ever touches these
+    // snapshots whatever the registry does, and the test checks the
+    // registry's side - the snapshots held past the release, freed once the
+    // producer queue's fence and the grace have passed.
+    NVSDK_NGX_Handle* late = create_unhooked(NVSDK_NGX_Feature_SuperSampling);
+    require(late != nullptr &&
+            xrfg::ngx_guide_capture_statistics().features_created == late_before.features_created,
+        "the unhooked creation was seen");
+    evaluate_frame(late, motion_left.Get(), 0.25F);
+    evaluate_frame(late, motion_left.Get(), -0.25F);
+    const auto late_after = xrfg::ngx_guide_capture_statistics();
+    require(late_after.features_created == late_before.features_created + 1 &&
+            late_after.skipped_unknown_feature == late_before.skipped_unknown_feature &&
+            late_after.d3d11_publications == late_before.d3d11_publications + 2,
+        "a D3D11 feature created before the hooks was not registered from its evaluation");
+    // The D3D11 side's copies into the transport's shared textures done too.
+    {
+        D3D11_QUERY_DESC query_description{D3D11_QUERY_EVENT, 0};
+        ComPtr<ID3D11Query> query;
+        require_hresult(device11->CreateQuery(&query_description, query.GetAddressOf()), "event query");
+        context11->End(query.Get());
+        BOOL finished = FALSE;
+        for (int spin = 0; spin < 10000 &&
+                context11->GetData(query.Get(), &finished, sizeof(finished), 0) != S_OK; ++spin) {
+            Sleep(1);
+        }
+        require(finished == TRUE, "the D3D11 copies did not finish");
+    }
+    const auto held_before = xrfg::dlss_motion_vector_statistics().retired_snapshots_held;
+    require(NVSDK_NGX_SUCCEED(release(late)), "D3D11 release of the late feature failed");
+    require(xrfg::dlss_motion_vector_statistics().retired_snapshots_held == held_before + 1,
+        "the released feature's snapshots were freed at once, not held for their copies");
+    // Past the registry's grace, its fence long passed: a resolve frees them.
+    Sleep(2100);
+    static_cast<void>(xrfg::resolve_dlss_motion_vectors(image.Get(), queue12.Get()));
+    require(xrfg::dlss_motion_vector_statistics().retired_snapshots_held == 0,
+        "retired snapshots were kept after their copies finished");
     xrfg::stop_ngx_guide_capture_d3d11(queue12.Get());
     std::cout << "ngx guide capture D3D11: publications=" << statistics.d3d11_publications
               << " eye0=0x" << std::hex << eye0 << " eye1=0x" << eye1 << std::dec << "\n";

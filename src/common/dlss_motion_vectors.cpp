@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <mutex>
 #include <unordered_map>
@@ -38,11 +39,37 @@ struct StreamState {
     std::size_t next_snapshot{};
     std::array<SnapshotSlot, kSnapshotSlotCount> depth_snapshots;
     std::size_t next_depth_snapshot{};
+    // The queue the stream's snapshot copies run on (V519): the game's for a
+    // native D3D12 session, the layer's for a bridged one.
+    ComPtr<ID3D12CommandQueue> producer_queue;
+};
+
+// Snapshot textures the registry has let go of (V519): a retired stream, a
+// slot reallocated for a new size, the streams of a disabled capture. Their
+// copies may still be queued on the producer queue - in a bridged session
+// behind a wait for the game's D3D11 or Vulkan work - and freeing a texture
+// the GPU will still write corrupts memory: xrfg_ngx_guide_capture_tests
+// releasing a feature right after its evaluations took the PC down three
+// times (bugcheck 0x139 in NVIDIA's kernel driver, then two hard freezes),
+// the same bugcheck as games releasing DLSS at a VR exit or an upscaler
+// switch. They are kept until a fence signalled on the producer queue when
+// they were let go has passed, and kRetiredGrace has gone by: on a native
+// D3D12 session the copy sits in the game's command list, which the game may
+// submit after that signal.
+constexpr std::chrono::milliseconds kRetiredGrace{2000};
+constexpr std::chrono::milliseconds kRetiredGraceWithoutFence{10000};
+
+struct RetiredSnapshots {
+    StreamState stream;
+    ComPtr<ID3D12Resource> resource;
+    ComPtr<ID3D12Fence> fence;
+    std::chrono::steady_clock::time_point retired_at;
 };
 
 struct Registry {
     std::mutex mutex;
     std::unordered_map<std::uint64_t, StreamState> streams;
+    std::vector<RetiredSnapshots> retired;
     DlssMotionVectorStatistics statistics;
 };
 
@@ -226,6 +253,42 @@ D3D12_RESOURCE_BARRIER transition_barrier(
     return barrier;
 }
 
+// A fence signalled on the queue after everything queued there so far, or
+// null when the queue will not take one.
+ComPtr<ID3D12Fence> signal_after_queued_work(ID3D12CommandQueue* queue) noexcept {
+    if (queue == nullptr) return {};
+    ComPtr<ID3D12Device> device;
+    if (FAILED(queue->GetDevice(IID_PPV_ARGS(device.GetAddressOf())))) return {};
+    ComPtr<ID3D12Fence> fence;
+    if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf())))) {
+        return {};
+    }
+    if (FAILED(queue->Signal(fence.Get(), 1))) return {};
+    return fence;
+}
+
+// Registry mutex held.
+void retire_snapshots(Registry& state, StreamState stream, ComPtr<ID3D12Resource> resource,
+    ID3D12CommandQueue* queue) {
+    RetiredSnapshots retired;
+    retired.fence = signal_after_queued_work(queue);
+    retired.stream = std::move(stream);
+    retired.resource = std::move(resource);
+    retired.retired_at = std::chrono::steady_clock::now();
+    state.retired.push_back(std::move(retired));
+}
+
+// Registry mutex held: frees what the GPU is done with.
+void release_finished_snapshots(Registry& state) noexcept {
+    if (state.retired.empty()) return;
+    const auto now = std::chrono::steady_clock::now();
+    std::erase_if(state.retired, [&](const RetiredSnapshots& retired) {
+        const auto age = now - retired.retired_at;
+        if (!retired.fence) return age >= kRetiredGraceWithoutFence;
+        return age >= kRetiredGrace && retired.fence->GetCompletedValue() >= 1;
+    });
+}
+
 HRESULT snapshot_resource(
     std::array<SnapshotSlot, kSnapshotSlotCount>& snapshots,
     std::size_t& next_snapshot,
@@ -234,7 +297,8 @@ HRESULT snapshot_resource(
     ID3D12GraphicsCommandList* producer_command_list,
     ID3D12CommandQueue* producer_queue,
     ID3D12Device* verified_producer_device,
-    ComPtr<ID3D12Resource>* snapshot) noexcept {
+    ComPtr<ID3D12Resource>* snapshot,
+    ComPtr<ID3D12Resource>* replaced) noexcept {
     if (source == nullptr || producer_command_list == nullptr ||
         producer_queue == nullptr || snapshot == nullptr) return E_POINTER;
     snapshot->Reset();
@@ -282,6 +346,8 @@ HRESULT snapshot_resource(
             nullptr,
             IID_PPV_ARGS(resource.GetAddressOf()));
         if (FAILED(result)) return result;
+        // The texture it replaces may still be written by a queued copy.
+        if (replaced != nullptr) *replaced = std::move(slot.resource);
         slot.resource = std::move(resource);
         slot.description = description;
         slot.state = D3D12_RESOURCE_STATE_COMMON;
@@ -359,6 +425,7 @@ void publish_dlss_motion_vectors(
         if (!g_tracking_enabled.load(std::memory_order_acquire)) return;
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
+        release_finished_snapshots(state);
         if (!valid(publication)) {
             ++state.statistics.invalid_publications;
             state.statistics.status = DlssMotionVectorStatus::invalid_input;
@@ -374,11 +441,17 @@ void publish_dlss_motion_vectors(
         }
 
         ComPtr<ID3D12Resource> motion_snapshot;
-        if (FAILED(snapshot_resource(stream.snapshots, stream.next_snapshot,
+        ComPtr<ID3D12Resource> replaced;
+        const HRESULT motion_result = snapshot_resource(stream.snapshots, stream.next_snapshot,
                 publication.motion_vectors, publication.resource_state,
                 publication.producer_command_list, publication.producer_queue,
                 publication.verified_producer_device,
-                &motion_snapshot))) {
+                &motion_snapshot, &replaced);
+        if (replaced) {
+            retire_snapshots(state, {}, std::move(replaced), stream.producer_queue.Get());
+        }
+        if (SUCCEEDED(motion_result)) stream.producer_queue = publication.producer_queue;
+        if (FAILED(motion_result)) {
             ++state.statistics.snapshot_failures;
             state.statistics.status = DlssMotionVectorStatus::invalid_input;
             return;
@@ -387,12 +460,16 @@ void publish_dlss_motion_vectors(
 
         ComPtr<ID3D12Resource> depth_snapshot;
         if (valid_depth(publication)) {
-            if (FAILED(snapshot_resource(stream.depth_snapshots,
+            const HRESULT depth_result = snapshot_resource(stream.depth_snapshots,
                     stream.next_depth_snapshot, publication.depth,
                     publication.depth_resource_state,
                     publication.producer_command_list,
                     publication.producer_queue,
-                    publication.verified_producer_device, &depth_snapshot))) {
+                    publication.verified_producer_device, &depth_snapshot, &replaced);
+            if (replaced) {
+                retire_snapshots(state, {}, std::move(replaced), stream.producer_queue.Get());
+            }
+            if (FAILED(depth_result)) {
                 // The vectors go on without it.
                 ++state.statistics.snapshot_failures;
                 depth_snapshot.Reset();
@@ -497,7 +574,15 @@ void retire_disabled_dlss_motion_vector_resources() noexcept {
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
         if (g_tracking_enabled.load(std::memory_order_acquire)) return;
+        // The consumer queue is idle here, the producer queues not always
+        // (a native session's game queue): through the retired list.
+        for (auto& [unused_stream_id, stream] : state.streams) {
+            static_cast<void>(unused_stream_id);
+            ComPtr<ID3D12CommandQueue> queue = stream.producer_queue;
+            if (queue) retire_snapshots(state, std::move(stream), {}, queue.Get());
+        }
         state.streams.clear();
+        release_finished_snapshots(state);
         state.statistics = {};
         state.statistics.status = DlssMotionVectorStatus::disabled;
     } catch (...) {
@@ -508,7 +593,13 @@ void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept {
     try {
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
-        state.streams.erase(stream);
+        const auto found = state.streams.find(stream);
+        if (found == state.streams.end()) return;
+        ComPtr<ID3D12CommandQueue> queue = found->second.producer_queue;
+        // Never published: no copy of it was ever queued.
+        if (queue) retire_snapshots(state, std::move(found->second), {}, queue.Get());
+        state.streams.erase(found);
+        release_finished_snapshots(state);
     } catch (...) {
     }
 }
@@ -852,6 +943,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         }
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
+        release_finished_snapshots(state);
         ++state.statistics.resolve_calls;
         record_resolver_statistics(state.statistics);
         if (output == nullptr || consumer_queue == nullptr) {
@@ -1231,7 +1323,9 @@ DlssMotionVectorStatistics dlss_motion_vector_statistics() noexcept {
     try {
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
-        return state.statistics;
+        auto statistics = state.statistics;
+        statistics.retired_snapshots_held = state.retired.size();
+        return statistics;
     } catch (...) {
         return {};
     }

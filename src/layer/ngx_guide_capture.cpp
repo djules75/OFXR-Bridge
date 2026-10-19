@@ -823,16 +823,34 @@ NVSDK_NGX_Result NVSDK_CONV hooked_create(
 // type by itself, and the game's parameter object usually still carries the
 // creation keys, so the feature is registered from its evaluation. The
 // evaluation that registers it is not captured; the next one is.
+//
+// active is the capture of the API the evaluation came through: the native
+// D3D12 one, or a bridged session's D3D11 or Vulkan one (V519 - before, only
+// the D3D12 capture's flag was read, so a bridged game whose DLSS started
+// before Hybrid was switched on never registered: Skyrim, 824 reason 1 on
+// every evaluation). _nvngx.dll serves every feature type and is not typed;
+// in D3D11 (untyped_is_upscaling) the only feature evaluated with an output
+// and motion vectors is super resolution - there is no D3D11 frame
+// generation - so there it registers too. PureDark's Skyrim upscaler links
+// NGX statically, which makes _nvngx.dll the outermost call.
 template <unsigned Slot>
-void register_late(const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters) noexcept {
+void register_late(const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
+    const std::atomic<bool>& active, bool untyped_is_upscaling = false) noexcept {
     if constexpr (Slot >= 2) {
-        return;
-    } else {
+        if (!untyped_is_upscaling) return;
+    }
+    {
         try {
             auto& s = state();
-            if (!s.active.load(std::memory_order_acquire) || handle == nullptr ||
+            if (!active.load(std::memory_order_acquire) || handle == nullptr ||
                 parameters == nullptr) {
                 return;
+            }
+            if constexpr (Slot >= 2) {
+                if (get<void*>(parameters, NVSDK_NGX_Parameter_Output) == nullptr ||
+                    get<void*>(parameters, NVSDK_NGX_Parameter_MotionVectors) == nullptr) {
+                    return;
+                }
             }
             {
                 std::scoped_lock lock(s.mutex);
@@ -841,8 +859,8 @@ void register_late(const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* pa
                 }
             }
             Feature feature;
-            feature.type = Slot == 0 ? NVSDK_NGX_Feature_SuperSampling
-                                     : NVSDK_NGX_Feature_RayReconstruction;
+            feature.type = Slot == 1 ? NVSDK_NGX_Feature_RayReconstruction
+                                     : NVSDK_NGX_Feature_SuperSampling;
             int flags = 0;
             feature.flags_known = NVSDK_NGX_SUCCEED(
                 parameters->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &flags));
@@ -874,7 +892,7 @@ NVSDK_NGX_Result NVSDK_CONV hooked_evaluate(
     const NVSDK_NGX_Parameter* parameters,
     PFN_NVSDK_NGX_ProgressCallback callback) {
     DepthScope depth;
-    register_late<Slot>(handle, parameters);
+    register_late<Slot>(handle, parameters, state().active);
     if (depth.outermost()) {
         capture(list, handle, parameters);
     } else {
@@ -901,7 +919,7 @@ NVSDK_NGX_Result NVSDK_CONV hooked_evaluate_c(
     const NVSDK_NGX_Parameter* parameters,
     PFN_NVSDK_NGX_ProgressCallback_C callback) {
     DepthScope depth;
-    register_late<Slot>(handle, parameters);
+    register_late<Slot>(handle, parameters, state().active);
     if (depth.outermost()) {
         capture(list, handle, parameters);
     }
@@ -1468,7 +1486,7 @@ NVSDK_NGX_Result NVSDK_CONV hooked_evaluate11(
     const NVSDK_NGX_Parameter* parameters,
     PFN_NVSDK_NGX_ProgressCallback callback) {
     DepthScope depth;
-    register_late<Slot>(handle, parameters);
+    register_late<Slot>(handle, parameters, state().d3d11_active, true);
     if (depth.outermost()) {
         capture11(context, handle, parameters);
     }
@@ -1482,7 +1500,7 @@ NVSDK_NGX_Result NVSDK_CONV hooked_evaluate11_c(
     const NVSDK_NGX_Parameter* parameters,
     PFN_NVSDK_NGX_ProgressCallback_C callback) {
     DepthScope depth;
-    register_late<Slot>(handle, parameters);
+    register_late<Slot>(handle, parameters, state().d3d11_active, true);
     if (depth.outermost()) {
         capture11(context, handle, parameters);
     }
@@ -2437,7 +2455,7 @@ NVSDK_NGX_Result NVSDK_CONV hooked_evaluate_vk(
     VkCommandBuffer buffer, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
     PFN_NVSDK_NGX_ProgressCallback callback) {
     DepthScope depth;
-    register_late<Slot>(handle, parameters);
+    register_late<Slot>(handle, parameters, state().vulkan_active);
     if (depth.outermost()) capture_vk(buffer, handle, parameters);
     return state().modules_vk[Slot].evaluate(buffer, handle, parameters, callback);
 }
@@ -2447,7 +2465,7 @@ NVSDK_NGX_Result NVSDK_CONV hooked_evaluate_vk_c(
     VkCommandBuffer buffer, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
     PFN_NVSDK_NGX_ProgressCallback_C callback) {
     DepthScope depth;
-    register_late<Slot>(handle, parameters);
+    register_late<Slot>(handle, parameters, state().vulkan_active);
     if (depth.outermost()) capture_vk(buffer, handle, parameters);
     return state().modules_vk[Slot].evaluate_c(buffer, handle, parameters, callback);
 }

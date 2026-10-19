@@ -215,6 +215,14 @@ __declspec(dllexport) unsigned fake_ngx_evaluations() { return g_evaluations.loa
 __declspec(dllexport) unsigned fake_ngx_c_evaluations() { return g_c_evaluations.load(); }
 __declspec(dllexport) unsigned fake_ngx_releases() { return g_releases.load(); }
 __declspec(dllexport) unsigned fake_ngx_d3d11_evaluations() { return g_d3d11_evaluations.load(); }
+// V519: a D3D11 feature made without the exported CreateFeature - as one the
+// game created before the capture's hooks went in.
+__declspec(dllexport) NVSDK_NGX_Handle* fake_ngx_d3d11_create_unhooked(int feature) {
+    auto* fake = new FakeHandle{g_next_handle.fetch_add(1) + 1000U,
+        static_cast<NVSDK_NGX_Feature>(feature)};
+    g_creations.fetch_add(1);
+    return reinterpret_cast<NVSDK_NGX_Handle*>(fake);
+}
 __declspec(dllexport) unsigned fake_ngx_vulkan_evaluations() { return g_vulkan_evaluations.load(); }
 
 }  // extern "C"
