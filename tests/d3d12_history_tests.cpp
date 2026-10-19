@@ -5099,13 +5099,18 @@ void test_hybrid_side_by_side(D3D12WarpFixture& fixture, bool one_field = false)
 // finds that background, whose samples agree, and the bar is missing from
 // the generated frame - the bars look half transparent at 90 Hz. With the
 // game's depth the nearer surface reaching the pixel is found and kept.
-// Returns the share of the bars' true pixels that show bar. V530: `width`
+// Returns the share of the bars' true pixels that show bar. V530: `length`
 // past 256 adds background far from every bar, where the depth tiles skip
-// the search; `image` receives the generated frame.
+// the search; `image` receives the generated frame. V531: `vertical` turns
+// the scene a quarter round, bars and motion along y.
 double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
     xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx,
-    UINT width = 256, StereoPattern* image = nullptr) {
-    constexpr UINT height = 128;
+    UINT length = 256, StereoPattern* image = nullptr, bool vertical = false) {
+    const UINT width = vertical ? 128U : length;
+    const UINT height = vertical ? length : 128U;
+    // Along the motion (u) and across it (v), in image pixels.
+    const auto along = [&](UINT x, UINT y) { return static_cast<int>(vertical ? y : x); };
+    const auto across = [&](UINT x, UINT y) { return static_cast<int>(vertical ? x : y); };
     constexpr int bar_width = 3, bar_spacing = 28, bar_first = 20, bar_count = 7;
     constexpr int bar_top = 16, bar_bottom = 112;
     constexpr int background_motion = 4, bar_motion = 16;
@@ -5121,10 +5126,10 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
             bytes.resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
             for (UINT y = 0; y < height; ++y) {
                 for (UINT x = 0; x < width; ++x) {
-                    const int bx = static_cast<int>(x) - background_shift + 64;
-                    const RgbaBytes color = bar_at(static_cast<int>(x), static_cast<int>(y), bar_shift)
+                    const int bx = along(x, y) - background_shift + 64;
+                    const RgbaBytes color = bar_at(along(x, y), across(x, y), bar_shift)
                         ? RgbaBytes{20, 20, 24, 255}
-                        : RgbaBytes{static_cast<std::uint8_t>(80 + (bx * 13 + static_cast<int>(y) * 5) % 160),
+                        : RgbaBytes{static_cast<std::uint8_t>(80 + (bx * 13 + across(x, y) * 5) % 160),
                                     static_cast<std::uint8_t>(90 + ((bx / 3) % 7) * 20 + eye * 9),
                                     static_cast<std::uint8_t>(100 + (bx * 7) % 120), 255};
                     std::copy(color.begin(), color.end(), bytes.begin() +
@@ -5138,14 +5143,14 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
     const StereoPattern current = make_scene(background_motion, bar_motion);
     auto game_motion = create_and_upload_game_motion_field(
         fixture, width, height, [&](UINT, UINT x, UINT y) {
-            const bool bar = bar_at(static_cast<int>(x), static_cast<int>(y), bar_motion);
-            return std::array<float, 2>{
-                static_cast<float>(-(bar ? bar_motion : background_motion)), 0.0F};
+            const bool bar = bar_at(along(x, y), across(x, y), bar_motion);
+            const float motion = static_cast<float>(-(bar ? bar_motion : background_motion));
+            return vertical ? std::array<float, 2>{0.0F, motion} : std::array<float, 2>{motion, 0.0F};
         });
     // Inverted depth, as DI2's and MSFS's DLSS: larger is nearer.
     auto game_depth = create_and_upload_game_depth_field(
         fixture, width, height, [&](UINT, UINT x, UINT y) {
-            return bar_at(static_cast<int>(x), static_cast<int>(y), bar_motion) ? 0.5F : 0.01F;
+            return bar_at(along(x, y), across(x, y), bar_motion) ? 0.5F : 0.01F;
         });
     std::array<ComPtr<ID3D12Resource>, 2> sources{
         create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
@@ -5218,11 +5223,13 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
     double coverage_total = 0;
     for (UINT eye = 0; eye < kEyeCount; ++eye) {
         std::size_t bar_pixels = 0, shown = 0;
-        for (int y = bar_top + 4; y < bar_bottom - 4; ++y) {
-            for (int x = 0; x < static_cast<int>(width); ++x) {
-                if (!bar_at(x, y, bar_motion / 2)) continue;
+        for (int v = bar_top + 4; v < bar_bottom - 4; ++v) {
+            for (int u = 0; u < static_cast<int>(length); ++u) {
+                if (!bar_at(u, v, bar_motion / 2)) continue;
+                const UINT x = static_cast<UINT>(vertical ? v : u);
+                const UINT y = static_cast<UINT>(vertical ? u : v);
                 const std::size_t offset =
-                    (static_cast<std::size_t>(y) * width + static_cast<UINT>(x)) * kBytesPerPixel;
+                    (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
                 ++bar_pixels;
                 // Bar is near black, the background at least 80 a channel.
                 const int brightness = (actual[eye][offset] + actual[eye][offset + 1] +
@@ -5232,7 +5239,8 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
         }
         const double coverage = static_cast<double>(shown) / static_cast<double>(bar_pixels);
         std::cout << "hybrid bars " << (with_depth ? "with" : "without") << " depth eye=" << eye
-                  << " width=" << width << " bar_coverage=" << coverage << '\n';
+                  << " length=" << length << (vertical ? " vertical" : "")
+                  << " bar_coverage=" << coverage << '\n';
         coverage_total += coverage;
     }
     if (image != nullptr) *image = actual;
@@ -5477,15 +5485,17 @@ int main(int argc, char** argv) {
             require(test_hybrid_bars(hybrid_fixture, true) >= 0.95,
                 "hybrid bars with depth are not whole in the generated frame");
             // V530: the depth tiles skip the search only where it would
-            // have found nothing, so the frame is the same without them.
-            {
+            // have found nothing, so the frame is the same without them;
+            // V531 reads them by row or by column, so both orientations.
+            for (const bool vertical : {false, true}) {
                 StereoPattern with_tiles, without_tiles;
                 require(test_hybrid_bars(hybrid_fixture, true,
-                            xrfg::D3D12OpticalFlowBackend::fidelity_fx, 512, &with_tiles) >= 0.95,
+                            xrfg::D3D12OpticalFlowBackend::fidelity_fx, 512, &with_tiles,
+                            vertical) >= 0.95,
                     "hybrid bars with depth tiles are not whole in the generated frame");
                 SetEnvironmentVariableW(L"XRFG_DISABLE_DEPTH_TILES", L"1");
                 test_hybrid_bars(hybrid_fixture, true,
-                    xrfg::D3D12OpticalFlowBackend::fidelity_fx, 512, &without_tiles);
+                    xrfg::D3D12OpticalFlowBackend::fidelity_fx, 512, &without_tiles, vertical);
                 SetEnvironmentVariableW(L"XRFG_DISABLE_DEPTH_TILES", nullptr);
                 std::size_t differing = 0;
                 for (UINT eye = 0; eye < kEyeCount; ++eye) {
@@ -5493,7 +5503,8 @@ int main(int argc, char** argv) {
                         if (with_tiles[eye][index] != without_tiles[eye][index]) ++differing;
                     }
                 }
-                std::cout << "hybrid bars depth tiles: " << differing << " bytes differ\n";
+                std::cout << "hybrid bars depth tiles" << (vertical ? " vertical" : "") << ": "
+                          << differing << " bytes differ\n";
                 require(differing == 0, "the depth tiles changed the generated frame");
             }
             // V507: the tray's live tuning block reaches the shader. With a

@@ -105,9 +105,10 @@ constexpr UINT kTileDescriptorBase =
     kComposeDescriptorBase + kDescriptorBlockSize * kMaxReprojectionViews;
 constexpr UINT kSlotDescriptorCount =
     kTileDescriptorBase + 2U * kDescriptorBlockSize * kMaxReprojectionViews;
-// The depth search's tiles: 16 depth texels a side, dilated by at most 7
-// (synthesis_flags bits 24-26); bit 3 says they are bound.
-constexpr UINT kDepthTileSize = 16;
+// The depth search's tiles: 8 depth texels a side (V531; 16 in V530),
+// dilated along their row and column by at most 7 (synthesis_flags bits
+// 24-26); bit 3 says they are bound.
+constexpr UINT kDepthTileSize = 8;
 constexpr UINT kDepthTilesFlag = 8U;
 constexpr UINT kDepthTilesRadiusShift = 24U;
 constexpr UINT kDepthTilesRadiusMask = 7U << kDepthTilesRadiusShift;
@@ -962,6 +963,8 @@ struct D3D12FrameSynthesizer::Impl {
     // V530: the depth search's tile passes (depth_tiles.hlsl), hybrid only.
     ComPtr<ID3D12PipelineState> depth_tiles_build_pipeline;
     ComPtr<ID3D12PipelineState> depth_tiles_dilate_pipeline;
+    // What each eye's 850 last recorded (record_depth_tiles).
+    std::array<std::atomic<std::uint64_t>, kMaxReprojectionViews> depth_tiles_recorded{};
     ComPtr<ID3D12Resource> composed_vectors;
     ComPtr<ID3D12Resource> composed_depth;
     UINT composed_width{};
@@ -2269,7 +2272,9 @@ struct D3D12FrameSynthesizer::Impl {
                     offset_cpu_handle(cpu_start,
                         block * kDescriptorBlockSize + 8U,
                         descriptor_increment));
-                device->CreateShaderResourceView(nullptr, &null_depth,
+                D3D12_SHADER_RESOURCE_VIEW_DESC null_tiles = null_depth;
+                null_tiles.Format = DXGI_FORMAT_R32G32_FLOAT;
+                device->CreateShaderResourceView(nullptr, &null_tiles,
                     offset_cpu_handle(cpu_start,
                         block * kDescriptorBlockSize + 9U,
                         descriptor_increment));
@@ -2649,7 +2654,7 @@ struct D3D12FrameSynthesizer::Impl {
                 DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R32_UINT,
                 DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R32_UINT,
                 DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT,
-                DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R32_FLOAT,
+                DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R32G32_FLOAT,
             };
             for (UINT index = 0; index < kSrvDescriptorCount; ++index) {
                 const bool array = index == 0 || index == 1 || index == 6 || index == 7 ||
@@ -3504,14 +3509,16 @@ struct D3D12FrameSynthesizer::Impl {
             const UINT highest_x = static_cast<UINT>(rect[0] + rect[2] - 1.0F);
             const UINT highest_y = static_cast<UINT>(rect[1] + rect[3] - 1.0F);
             if (highest_x < lowest_x || highest_y < lowest_y) continue;
-            // Depth texels a pixel's farthest point can lie from its own, one
-            // more for the shader's margin, in tiles.
+            // The depth texels between a pixel's two farthest points, a
+            // texel more each way for the shader's margin; the tiles they
+            // span, from the middle one either way (V531).
             const float per_pixel = std::max(
                 rect[2] / static_cast<float>(guide->output_width),
                 rect[3] / static_cast<float>(guide->output_height));
             const UINT texels = static_cast<UINT>(
-                std::ceil(static_cast<float>(reach) * per_pixel + 0.01F)) + 1U;
-            const UINT radius = (texels + kDepthTileSize - 1U) / kDepthTileSize;
+                std::ceil(2.0F * static_cast<float>(reach) * per_pixel + 0.01F)) + 2U;
+            const UINT span = (texels + kDepthTileSize - 1U) / kDepthTileSize;
+            const UINT radius = (span + 1U) / 2U;
             if (radius > (kDepthTilesRadiusMask >> kDepthTilesRadiusShift)) continue;
             tiles.first_x = lowest_x / kDepthTileSize;
             tiles.first_y = lowest_y / kDepthTileSize;
@@ -3542,10 +3549,13 @@ struct D3D12FrameSynthesizer::Impl {
             texture.Format = DXGI_FORMAT_R32_FLOAT;
             texture.SampleDesc.Count = 1;
             texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            // Dilated along the row (x) and along the column (y).
+            D3D12_RESOURCE_DESC dilated_texture = texture;
+            dilated_texture.Format = DXGI_FORMAT_R32G32_FLOAT;
             ComPtr<ID3D12Resource> tiles, dilated;
             if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texture,
                     kShaderReadState, nullptr, IID_PPV_ARGS(tiles.GetAddressOf()))) ||
-                FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texture,
+                FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &dilated_texture,
                     kShaderReadState, nullptr, IID_PPV_ARGS(dilated.GetAddressOf())))) {
                 return flags;
             }
@@ -3577,14 +3587,18 @@ struct D3D12FrameSynthesizer::Impl {
         for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
             D3D12_SHADER_RESOURCE_VIEW_DESC view = slice_view;
             view.Texture2DArray.FirstArraySlice = eye;
+            D3D12_SHADER_RESOURCE_VIEW_DESC dilated_view = view;
+            dilated_view.Format = DXGI_FORMAT_R32G32_FLOAT;
             // The draw's t9: this eye's dilated tiles, or nothing.
             device->CreateShaderResourceView(built[eye] ? slot.depth_tiles_dilated.Get() : nullptr,
-                &view, offset_cpu_handle(cpu_start, eye * kDescriptorBlockSize + 9U,
+                &dilated_view, offset_cpu_handle(cpu_start, eye * kDescriptorBlockSize + 9U,
                     descriptor_increment));
             if (!built[eye]) continue;
             device->CreateShaderResourceView(slot.depth_tiles.Get(), &view,
                 offset_cpu_handle(cpu_start, tile_block(eye, 0) + 9U, descriptor_increment));
-            device->CreateUnorderedAccessView(slot.depth_tiles_dilated.Get(), nullptr, &array_view,
+            D3D12_UNORDERED_ACCESS_VIEW_DESC dilated_array = array_view;
+            dilated_array.Format = DXGI_FORMAT_R32G32_FLOAT;
+            device->CreateUnorderedAccessView(slot.depth_tiles_dilated.Get(), nullptr, &dilated_array,
                 offset_cpu_handle(cpu_start, tile_block(eye, 0) + kSrvDescriptorCount,
                     descriptor_increment));
             device->CreateUnorderedAccessView(slot.depth_tiles.Get(), nullptr, &array_view,
@@ -3657,18 +3671,20 @@ struct D3D12FrameSynthesizer::Impl {
         }
         list->ResourceBarrier(barrier_count, barriers.data());
         dred_marker(list, "OFXR depth tiles complete");
-        // 856, the first tiles of the process and whenever an eye's grid or
+        // 856, a synthesizer's first tiles for an eye and whenever its grid or
         // dilation changes: a the eye << 48 | the radius << 40 | columns << 20
         // | rows, b the first tile x << 32 | y, c the reach in pixels << 32 |
-        // the depth texels per image pixel in 1000ths.
-        static std::atomic<std::uint64_t> recorded[kMaxReprojectionViews]{};
+        // the depth texels per image pixel in 1000ths. Per synthesizer: in
+        // MSFS each eye has its own, both recording as eye 0.
         for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
             if (!built[eye]) continue;
             const EyeTiles& tiles = eyes[eye];
             const std::uint64_t a = (static_cast<std::uint64_t>(eye) << 48U) |
                 (static_cast<std::uint64_t>(tiles.radius) << 40U) |
                 (static_cast<std::uint64_t>(tiles.columns & 0xFFFFFU) << 20U) | (tiles.rows & 0xFFFFFU);
-            if (recorded[eye].exchange(a + 1U, std::memory_order_relaxed) == a + 1U) continue;
+            if (depth_tiles_recorded[eye].exchange(a + 1U, std::memory_order_relaxed) == a + 1U) {
+                continue;
+            }
             const auto& rect = tiles.parameters.game_motion_rect;
             const float per_pixel = std::max(
                 rect[2] / static_cast<float>(guides.eyes[eye]->output_width),

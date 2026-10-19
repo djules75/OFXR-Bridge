@@ -293,16 +293,20 @@ inset, or if the pass cannot run, the pair keeps the periphery alone (V515).
 ### Depth search tiles (V530)
 
 Before a hybrid pair's draws, each eye whose guide brings the game's depth
-gets a map of the nearest depth per 16 x 16 depth texels, dilated by a few
-tiles to cover the depth search's reach. A pixel whose search points all lie
-within its dilated tile, and whose tile holds nothing nearer than its answer,
-skips the search: no point could have started a solve, so the image is the
-one the search gives (the harness checks it byte for byte). The passes run
-inside the composition's GPU timing. Off with the depth search, without
-depth, or for a dilation past 7 tiles.
+gets a map of the nearest depth per 8 x 8 depth texels (16 x 16 in V530),
+dilated along each tile's row and along its column by the tiles the depth
+search's reach can span (V531; V530 dilated in a square). A pixel reads the
+row-dilated value of each tile row its search points can fall in (columns
+for a steep motion, at most eight reads) and skips the search when none
+holds anything nearer than its answer: no point could have started a solve,
+so the image is the one the search gives (the harness checks it byte for
+byte, motion along x and along y). The passes run inside the composition's
+GPU timing. Off with the depth search, without depth, or for a dilation
+past 7 tiles.
 
 - `embedded_configuration` 856, at an eye's first tiles and whenever its grid
-  or dilation changes: `a` the eye `<< 48` or the dilation in tiles `<< 40`
+  or dilation changes, per synthesizer (in MSFS each eye has its own, both
+  recording as eye 0; V530 recorded only the first): `a` the eye `<< 48` or the dilation in tiles `<< 40`
   or the columns `<< 20` or the rows; `b` the first tile column `<< 32` or
   row; `c` the search's reach in image pixels `<< 32` or the depth texels per
   image pixel in 1000ths.

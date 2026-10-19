@@ -8,9 +8,10 @@ Texture2DArray<float2> GameMotionVectors : register(t6);
 #ifdef XRFG_HYBRID
 // The game's depth beside its vectors, at the same render resolution (V505).
 Texture2DArray<float> GameDepth : register(t7);
-// V530: the nearest of the game's depth within a few 16-texel tiles of each
-// tile (depth_tiles.hlsl), for skipping the depth search.
-Texture2DArray<float> DepthTiles : register(t9);
+// V530: the nearest of the game's depth within a few 8-texel tiles of each
+// tile, along its row (x) and its column (y) (depth_tiles.hlsl), for
+// skipping the depth search.
+Texture2DArray<float2> DepthTiles : register(t9);
 #endif
 // Linear filtering with clamped addressing, a static sampler in the root
 // signature: one fetch per bilinear tap where four loads and three lerps used
@@ -1286,21 +1287,39 @@ float game_nearness(float2 pixel) {
 
 // V530: whether any depth texel between the segment's two ends could be
 // nearer than `threshold`. The ends' texels, a texel wider either way, bound
-// every point between them (the mapping is monotonic along each axis); when
-// all their tiles lie within this pixel's dilated tile, that tile's nearest
-// value bounds every one of those texels. False only when none can be.
-bool depth_tiles_may_hold_nearer(float2 pixel, float2 a, float2 b, float threshold) {
+// every point between them (the mapping is monotonic along each axis), so
+// every point's 8-texel tile lies in the box of the ends' tiles. V531: along
+// the box's longer side, one value per tile row (or column) covers the box
+// when the row's dilation reaches both of its ends from the middle tile; the
+// rows are read one by one, at most kDepthTileReads. False only when none of
+// those tiles holds a texel nearer than `threshold`.
+static const int kDepthTileReads = 8;
+bool depth_tiles_may_hold_nearer(float2 a, float2 b, float threshold) {
     bool may = true;
     [branch] if (depth_tiles_available()) {
         int2 lowest = int2(GameMotionRect.xy);
         int2 highest = int2(GameMotionRect.xy + GameMotionRect.zw - 1.0);
         int2 ta = game_depth_texel(a), tb = game_depth_texel(b);
-        int2 low = clamp(min(ta, tb) - 1, lowest, highest) >> 4;
-        int2 high = clamp(max(ta, tb) + 1, lowest, highest) >> 4;
-        int2 centre = game_depth_texel(pixel) >> 4;
+        int2 low = clamp(min(ta, tb) - 1, lowest, highest) >> 3;
+        int2 high = clamp(max(ta, tb) + 1, lowest, highest) >> 3;
+        int2 span = high - low;
         int radius = depth_tiles_radius();
-        [branch] if (all(low >= centre - radius) && all(high <= centre + radius)) {
-            may = DepthTiles.Load(int4(centre, 0, 0)) > threshold;
+        // Rows along x for a flat box, columns along y for a steep one.
+        bool rows = span.x >= span.y;
+        int long_low = rows ? low.x : low.y;
+        int long_high = rows ? high.x : high.y;
+        int short_low = rows ? low.y : low.x;
+        int short_high = rows ? high.y : high.x;
+        int middle = (long_low + long_high) >> 1;
+        [branch] if (middle - long_low <= radius && long_high - middle <= radius &&
+                     short_high - short_low < kDepthTileReads) {
+            float nearest = asfloat(0xff800000u);
+            [loop] for (int strip = short_low; strip <= short_high; ++strip) {
+                int2 tile = rows ? int2(middle, strip) : int2(strip, middle);
+                float2 dilated = DepthTiles.Load(int4(tile, 0, 0));
+                nearest = max(nearest, rows ? dilated.x : dilated.y);
+            }
+            may = nearest > threshold;
         }
     }
     return may;
@@ -1775,7 +1794,7 @@ float4 synthesize_midpoint(
                             float farthest = far_steps != 0u
                                 ? float(depth_near_reach()) + 4.0 * float(far_steps)
                                 : 2.0 * float(near_steps);
-                            if (depth_steps != 0u && !depth_tiles_may_hold_nearer(pixel,
+                            if (depth_steps != 0u && !depth_tiles_may_hold_nearer(
                                     pixel + farthest * along, pixel + (-farthest) * along,
                                     start_threshold)) {
                                 depth_steps = 0u;
