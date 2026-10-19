@@ -1,5 +1,6 @@
 #pragma once
 
+#include <d3d11.h>
 #include <d3d12.h>
 
 #include <cstdint>
@@ -49,7 +50,13 @@ struct NgxGuideCaptureStatistics {
     // The motion vectors, the command list and the session's queue did not
     // prove to share one device.
     std::uint64_t skipped_device_mismatch{};
+    // D3D11 (V512): exports detoured, evaluations published, and the copy
+    // into the shared textures failing or the context not the session's.
+    std::uint64_t d3d11_modules_hooked{};
+    std::uint64_t d3d11_publications{};
+    std::uint64_t d3d11_transport_failures{};
     bool active{};
+    bool d3d11_active{};
 };
 
 // Start (enabled) or pause capture for the session whose queue this is. The
@@ -59,6 +66,22 @@ struct NgxGuideCaptureStatistics {
 void configure_ngx_guide_capture(ID3D12CommandQueue* queue, bool enabled) noexcept;
 // Pause capture if it is running for this queue. The hooks stay.
 void stop_ngx_guide_capture(ID3D12CommandQueue* queue) noexcept;
+// A bridged D3D11 session (V512): the game runs DLSS on its D3D11 device,
+// the runtime and the synthesis on the layer's D3D12 device and queue. The
+// D3D11 exports are detoured as the D3D12 ones are; at each evaluation the
+// vectors (and the depth, where the driver shares its format) are copied
+// into textures shared with that D3D12 device, ordered by shared fences on
+// the GPU, and published on its queue. Pause by enabled = false.
+void configure_ngx_guide_capture_d3d11(
+    ID3D11Device* game_device,
+    ID3D12Device* device,
+    ID3D12CommandQueue* queue,
+    bool enabled) noexcept;
+void stop_ngx_guide_capture_d3d11(ID3D12CommandQueue* queue) noexcept;
+// At each image release of the bridged session, after the bridge's own wait
+// for the game's context: submits the snapshot copies the evaluations since
+// the last release recorded, so they never wait on the game mid-frame.
+void flush_ngx_guide_capture_d3d11() noexcept;
 // Look for the NGX modules now rather than on the monitor's next tick, so a
 // test need not wait for it.
 void poll_ngx_guide_capture() noexcept;

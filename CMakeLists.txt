@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.511.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.512.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -332,7 +332,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     target_include_directories(xrfg_ngx_guide_capture
         PUBLIC include "${XRFG_DLSS_SDK_INCLUDE_DIR}")
     target_link_libraries(xrfg_ngx_guide_capture
-        PUBLIC xrfg_d3d12_history xrfg_bridge_flight_logger
+        PUBLIC xrfg_d3d12_history xrfg_bridge_flight_logger d3d11
         PRIVATE safetyhook)
     target_compile_features(xrfg_ngx_guide_capture PUBLIC cxx_std_20)
     target_compile_definitions(xrfg_ngx_guide_capture PRIVATE
@@ -593,7 +593,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         endif()
         add_executable(xrfg_ngx_guide_capture_tests tests/ngx_guide_capture_tests.cpp)
         target_link_libraries(xrfg_ngx_guide_capture_tests PRIVATE
-            xrfg_ngx_guide_capture d3d12 dxgi)
+            xrfg_ngx_guide_capture d3d11 d3d12 dxgi)
         target_compile_features(xrfg_ngx_guide_capture_tests PRIVATE cxx_std_20)
         if(MSVC)
             target_compile_options(xrfg_ngx_guide_capture_tests PRIVATE /W4 /permissive- /EHsc)

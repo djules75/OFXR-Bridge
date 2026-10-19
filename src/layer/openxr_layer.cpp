@@ -5270,14 +5270,24 @@ XrResult layer_create_session_impl(
     if (ngx_capture) {
         xrfg::configure_ngx_guide_capture(state->d3d12_queue.Get(), true);
     }
+    // A bridged D3D11 session (V512): the game's DLSS runs on its D3D11
+    // device, and the capture carries its vectors across to the layer's
+    // D3D12 device and queue.
+    const bool d3d11_capture = state->d3d11_bridge && state->d3d11_bridge->device &&
+        state->d3d12_device && state->d3d12_queue && initial_control.desired.hybrid;
+    if (d3d11_capture) {
+        xrfg::configure_ngx_guide_capture_d3d11(state->d3d11_bridge->device.Get(),
+            state->d3d12_device.Get(), state->d3d12_queue.Get(), true);
+    }
     // 702: the game's vectors. a the hybrid asked for, b the vectors asked
-    // for, c the NGX capture started for this session.
+    // for, c the NGX capture started for this session: 1 native D3D12, 2 a
+    // bridged D3D11 session (V512).
     xrfg::bridge_flight_logger().event(
         xrfg::BridgeFlightOperation::presenter_transition,
         702,
         initial_control.desired.hybrid ? 1u : 0u,
         state->dlss_motion_vectors ? 1u : 0u,
-        ngx_capture ? 1u : 0u);
+        ngx_capture ? 1u : d3d11_capture ? 2u : 0u);
     if (dispatch->steamvr_runtime &&
         state->graphics_binding == SessionGraphicsBinding::d3d12 &&
         create_info != nullptr && state->d3d12_device && state->d3d12_queue) {
@@ -5446,6 +5456,7 @@ XrResult layer_destroy_session_impl(XrSession session) {
     drain_binding_queue(state.get());
     if (state->d3d12_queue) {
         xrfg::stop_ngx_guide_capture(state->d3d12_queue.Get());
+        xrfg::stop_ngx_guide_capture_d3d11(state->d3d12_queue.Get());
     }
 
     const XrResult result = state->dispatch->destroy_session(session);
@@ -7003,6 +7014,12 @@ XrResult release_swapchain_image_locked(
                 handle_value(state->handle),
                 *candidate_index,
                 static_cast<std::uint64_t>(static_cast<std::uint32_t>(copy_result)));
+        }
+        // The game's DLSS vectors since the last release (V512): their
+        // snapshot copies go on the queue now, behind the bridge's wait for
+        // the game's context, and ahead of this image's history capture.
+        if (state->session->dlss_motion_vectors) {
+            xrfg::flush_ngx_guide_capture_d3d11();
         }
     }
 
@@ -12972,8 +12989,8 @@ void consume_application_frame(
 
 // The FPS overlay's Hybrid line (V506): -1 while Hybrid is not selected, 0
 // while it composes pairs, otherwise the first step that stopped in the last
-// half second, as the flight-log record that explains it - 702 not a native
-// D3D12 session, 820 no DLSS module hooked, 821 no DLSS evaluation (the game
+// half second, as the flight-log record that explains it - 702 neither a
+// native D3D12 session nor a bridged D3D11 one (V512), 820 no DLSS module hooked, 821 no DLSS evaluation (the game
 // is not running DLSS), 824 evaluations skipped, 827 publications refused,
 // 828 vectors not matched to the eye images, 815 pairs rejected. The
 // counters are the process's; one session runs at a time.
@@ -12992,8 +13009,9 @@ int judge_hybrid_status(SessionState& state) noexcept {
     state.hybrid_status_due_ns = now_ns + 500'000'000;
     const auto& capture_before = state.hybrid_capture_before;
     const auto& guides_before = state.hybrid_guides_before;
+    // Native D3D12, or a bridged D3D11 session (V512); not Vulkan.
     const bool native = state.graphics_binding == SessionGraphicsBinding::d3d12 &&
-        !state.d3d11_bridge && !state.vulkan_bridge && state.d3d12_queue;
+        !state.vulkan_bridge && state.d3d12_queue;
     int status = -1;
     if (!native) status = 702;
     else if (first) status = -1;  // nothing to compare with yet
@@ -13069,13 +13087,19 @@ void apply_embedded_control(
     // creation, the capture serves the hybrid only.
     if (ngx_capture)
         xrfg::configure_ngx_guide_capture(state->d3d12_queue.Get(), options.hybrid);
+    const bool d3d11_capture = state->d3d11_bridge && state->d3d11_bridge->device &&
+        state->d3d12_device && state->d3d12_queue;
+    if (d3d11_capture) {
+        xrfg::configure_ngx_guide_capture_d3d11(state->d3d11_bridge->device.Get(),
+            state->d3d12_device.Get(), state->d3d12_queue.Get(), options.hybrid);
+    }
     if (hybrid_changed) {
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::presenter_transition,
             702,
             options.hybrid ? 1u : 0u,
             state->dlss_motion_vectors ? 1u : 0u,
-            ngx_capture && options.hybrid ? 1u : 0u);
+            !options.hybrid ? 0u : ngx_capture ? 1u : d3d11_capture ? 2u : 0u);
     }
     for (const auto& chain : swapchains) {
         std::unique_lock lock(chain->mutex);

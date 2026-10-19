@@ -5,10 +5,12 @@
 // resolver pairs the two streams into a stereo guide set whose fields are
 // the parameters' - rectangles, scale, jitter, the low-resolution vector
 // size from the creation flags.
+#include "xrfg/d3d11_d3d12_interop.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/ngx_guide_capture.hpp"
 
 #include <windows.h>
+#include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <wrl/client.h>
@@ -22,6 +24,8 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 
@@ -116,6 +120,222 @@ using EvaluateFeatureC = NVSDK_NGX_Result(NVSDK_CONV*)(
 using ReleaseFeature = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Handle*);
 using Counter = unsigned (*)();
 
+using CreateFeature11 = NVSDK_NGX_Result(NVSDK_CONV*)(
+    ID3D11DeviceContext*, NVSDK_NGX_Feature, NVSDK_NGX_Parameter*, NVSDK_NGX_Handle**);
+using EvaluateFeature11 = NVSDK_NGX_Result(NVSDK_CONV*)(
+    ID3D11DeviceContext*, const NVSDK_NGX_Handle*, const NVSDK_NGX_Parameter*,
+    PFN_NVSDK_NGX_ProgressCallback);
+
+// V512: a bridged D3D11 session. The game's DLSS runs on its D3D11 device;
+// the capture copies each evaluation's vectors and depth into textures shared
+// with the layer's D3D12 device and publishes them on its queue. Checked: the
+// D3D11 exports are detoured, every evaluation publishes with its depth, the
+// resolver pairs the two eye streams for a side-by-side image twice an
+// output's width (UEVR's Native Stereo, Ready or Not), and the snapshot on
+// the D3D12 side holds the very vectors the game wrote in D3D11.
+int run_d3d11(HMODULE module) {
+    const auto create = reinterpret_cast<CreateFeature11>(
+        GetProcAddress(module, "NVSDK_NGX_D3D11_CreateFeature"));
+    const auto evaluate = reinterpret_cast<EvaluateFeature11>(
+        GetProcAddress(module, "NVSDK_NGX_D3D11_EvaluateFeature"));
+    const auto release = reinterpret_cast<ReleaseFeature>(
+        GetProcAddress(module, "NVSDK_NGX_D3D11_ReleaseFeature"));
+    const auto d3d11_evaluations = reinterpret_cast<Counter>(
+        GetProcAddress(module, "fake_ngx_d3d11_evaluations"));
+    require(create && evaluate && release && d3d11_evaluations, "the stand-in lacks a D3D11 export");
+
+    // The game's device, and the layer's D3D12 device on its adapter, as the
+    // bridge makes them.
+    ComPtr<ID3D11Device> device11;
+    ComPtr<ID3D11DeviceContext> context11;
+    const D3D_FEATURE_LEVEL levels[]{D3D_FEATURE_LEVEL_11_1};
+    require_hresult(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, levels, 1,
+        D3D11_SDK_VERSION, device11.GetAddressOf(), nullptr, context11.GetAddressOf()),
+        "D3D11CreateDevice");
+    ComPtr<ID3D12Device> device12;
+    ComPtr<ID3D12CommandQueue> queue12;
+    require_hresult(xrfg::create_d3d12_device_for_d3d11(device11.Get(),
+        device12.GetAddressOf(), queue12.GetAddressOf()), "create_d3d12_device_for_d3d11");
+
+    xrfg::configure_ngx_guide_capture_d3d11(device11.Get(), device12.Get(), queue12.Get(), true);
+    xrfg::poll_ngx_guide_capture();
+    auto statistics = xrfg::ngx_guide_capture_statistics();
+    require(statistics.d3d11_active && statistics.d3d11_modules_hooked == 1,
+        "the stand-in's D3D11 exports were not detoured");
+
+    constexpr UINT kRenderWidth = 48, kRenderHeight = 32;
+    constexpr UINT kOutputWidth = 96, kOutputHeight = 64;
+    Parameters creation;
+    creation.Set(NVSDK_NGX_Parameter_Width, kRenderWidth);
+    creation.Set(NVSDK_NGX_Parameter_Height, kRenderHeight);
+    creation.Set(NVSDK_NGX_Parameter_OutWidth, kOutputWidth);
+    creation.Set(NVSDK_NGX_Parameter_OutHeight, kOutputHeight);
+    creation.Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,
+        static_cast<int>(NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+            NVSDK_NGX_DLSS_Feature_Flags_MVJittered | NVSDK_NGX_DLSS_Feature_Flags_DepthInverted));
+    const auto created_before = statistics.features_created;
+    NVSDK_NGX_Handle* left = nullptr;
+    NVSDK_NGX_Handle* right = nullptr;
+    require(NVSDK_NGX_SUCCEED(create(context11.Get(), NVSDK_NGX_Feature_SuperSampling, &creation, &left)) &&
+            left && NVSDK_NGX_SUCCEED(create(context11.Get(), NVSDK_NGX_Feature_SuperSampling, &creation, &right)) &&
+            right,
+        "D3D11 feature creation failed through the hook");
+    require(xrfg::ngx_guide_capture_statistics().features_created == created_before + 2,
+        "the two D3D11 features were not recorded");
+
+    const auto texture = [&](UINT width, UINT height, DXGI_FORMAT format, UINT bind, std::uint32_t fill) {
+        D3D11_TEXTURE2D_DESC description{};
+        description.Width = width;
+        description.Height = height;
+        description.MipLevels = 1;
+        description.ArraySize = 1;
+        description.Format = format;
+        description.SampleDesc.Count = 1;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.BindFlags = bind;
+        std::vector<std::uint32_t> pixels(static_cast<std::size_t>(width) * height, fill);
+        D3D11_SUBRESOURCE_DATA data{pixels.data(), width * 4U, 0};
+        ComPtr<ID3D11Texture2D> result;
+        require_hresult(device11->CreateTexture2D(&description, &data, result.GetAddressOf()),
+            "CreateTexture2D");
+        return result;
+    };
+    // R16G16_FLOAT: (1.5, -2.0) for the left eye, (3.0, 0.5) for the right.
+    constexpr std::uint32_t kLeftVector = 0x3E00U | (0xC000U << 16U);
+    constexpr std::uint32_t kRightVector = 0x4200U | (0x3800U << 16U);
+    const auto output = texture(kOutputWidth, kOutputHeight, DXGI_FORMAT_R8G8B8A8_UNORM,
+        D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, 0);
+    const auto motion_left = texture(kRenderWidth, kRenderHeight, DXGI_FORMAT_R16G16_FLOAT,
+        D3D11_BIND_SHADER_RESOURCE, kLeftVector);
+    const auto motion_right = texture(kRenderWidth, kRenderHeight, DXGI_FORMAT_R16G16_FLOAT,
+        D3D11_BIND_SHADER_RESOURCE, kRightVector);
+    const auto depth = texture(kRenderWidth, kRenderHeight, DXGI_FORMAT_R32_FLOAT,
+        D3D11_BIND_SHADER_RESOURCE, 0x3F000000U);
+
+    const auto vectors_before = xrfg::dlss_motion_vector_statistics();
+    const auto evaluate_frame = [&](NVSDK_NGX_Handle* handle, ID3D11Texture2D* vectors, float jitter) {
+        Parameters frame;
+        frame.Set(NVSDK_NGX_Parameter_Output, static_cast<ID3D11Resource*>(output.Get()));
+        frame.Set(NVSDK_NGX_Parameter_MotionVectors, static_cast<ID3D11Resource*>(vectors));
+        frame.Set(NVSDK_NGX_Parameter_Depth, static_cast<ID3D11Resource*>(depth.Get()));
+        frame.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, kRenderWidth);
+        frame.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, kRenderHeight);
+        frame.Set(NVSDK_NGX_Parameter_Jitter_Offset_X, jitter);
+        frame.Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, -jitter);
+        frame.Set(NVSDK_NGX_Parameter_Reset, 0);
+        require(NVSDK_NGX_SUCCEED(evaluate(context11.Get(), handle, &frame, nullptr)),
+            "D3D11 evaluation failed through the hook");
+    };
+    // Each frame's snapshot copies go to the queue at the bridged session's
+    // image release, as the layer flushes them.
+    for (int frame = 0; frame < 3; ++frame) {
+        evaluate_frame(left, motion_left.Get(), frame % 2 ? 0.25F : -0.25F);
+        evaluate_frame(right, motion_right.Get(), frame % 2 ? 0.25F : -0.25F);
+        context11->Flush();
+        xrfg::flush_ngx_guide_capture_d3d11();
+    }
+    require(d3d11_evaluations() == 6, "the original D3D11 EvaluateFeature did not run six times");
+    statistics = xrfg::ngx_guide_capture_statistics();
+    const auto vectors_after = xrfg::dlss_motion_vector_statistics();
+    require(statistics.d3d11_publications == 6 && statistics.d3d11_transport_failures == 0,
+        "the D3D11 evaluations were not all published");
+    require(vectors_after.published - vectors_before.published == 6 &&
+            vectors_after.depth_publications - vectors_before.depth_publications == 6,
+        "the registry did not take every D3D11 publication with its depth");
+
+    // The side-by-side image UEVR submits: both eyes' outputs in one.
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC image_description{};
+    image_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    image_description.Width = kOutputWidth * 2U;
+    image_description.Height = kOutputHeight;
+    image_description.DepthOrArraySize = 1;
+    image_description.MipLevels = 1;
+    image_description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    image_description.SampleDesc.Count = 1;
+    ComPtr<ID3D12Resource> image;
+    require_hresult(device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &image_description,
+        D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(image.GetAddressOf())), "eye image");
+    const auto set = xrfg::resolve_dlss_motion_vectors(image.Get(), queue12.Get());
+    require(set != nullptr && set->eye_count == 2, "no side-by-side guide set resolved from D3D11");
+
+    // Read each eye's snapshot back on the D3D12 queue.
+    ComPtr<ID3D12CommandAllocator> allocator;
+    require_hresult(device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+        IID_PPV_ARGS(allocator.GetAddressOf())), "allocator");
+    ComPtr<ID3D12GraphicsCommandList> list;
+    require_hresult(device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(),
+        nullptr, IID_PPV_ARGS(list.GetAddressOf())), "list");
+    D3D12_HEAP_PROPERTIES readback_heap{};
+    readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC buffer_description{};
+    buffer_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer_description.Width = 2U * 256U * kRenderHeight;
+    buffer_description.Height = 1;
+    buffer_description.DepthOrArraySize = 1;
+    buffer_description.MipLevels = 1;
+    buffer_description.SampleDesc.Count = 1;
+    buffer_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> readback;
+    require_hresult(device12->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE,
+        &buffer_description, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+        IID_PPV_ARGS(readback.GetAddressOf())), "readback");
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        const auto& frame = set->eyes[eye];
+        require(frame && frame->motion_vectors && frame->depth, "an eye lacks its vectors or depth");
+        require(frame->producer_queue.Get() == queue12.Get(), "the D3D11 frame is not on the layer's queue");
+        require(frame->motion_width == kRenderWidth && frame->depth_width == kRenderWidth &&
+                frame->depth_inverted,
+            "the D3D11 frame's rectangles or flags were not carried");
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = frame->motion_vectors.Get();
+        barrier.Transition.StateBefore = frame->resource_state;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1, &barrier);
+        D3D12_TEXTURE_COPY_LOCATION source{};
+        source.pResource = frame->motion_vectors.Get();
+        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION destination{};
+        destination.pResource = readback.Get();
+        destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        destination.PlacedFootprint.Offset = eye * 256ULL * kRenderHeight;
+        destination.PlacedFootprint.Footprint = {DXGI_FORMAT_R16G16_FLOAT, kRenderWidth, kRenderHeight, 1, 256};
+        list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        list->ResourceBarrier(1, &barrier);
+    }
+    require_hresult(list->Close(), "Close");
+    ID3D12CommandList* lists[]{list.Get()};
+    queue12->ExecuteCommandLists(1, lists);
+    ComPtr<ID3D12Fence> fence;
+    require_hresult(device12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf())), "fence");
+    require_hresult(queue12->Signal(fence.Get(), 1), "Signal");
+    HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    require_hresult(fence->SetEventOnCompletion(1, done), "SetEventOnCompletion");
+    require(WaitForSingleObject(done, 10000) == WAIT_OBJECT_0, "the D3D12 queue did not finish");
+    CloseHandle(done);
+    std::uint32_t* mapped = nullptr;
+    require_hresult(readback->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "Map");
+    const std::uint32_t eye0 = mapped[0];
+    const std::uint32_t eye1 = mapped[256U * kRenderHeight / 4U];
+    readback->Unmap(0, nullptr);
+    require((eye0 == kLeftVector && eye1 == kRightVector) || (eye0 == kRightVector && eye1 == kLeftVector),
+        "the D3D12 snapshots do not hold the vectors the game wrote in D3D11");
+
+    const auto released_before = xrfg::ngx_guide_capture_statistics().features_released;
+    require(NVSDK_NGX_SUCCEED(release(left)) && NVSDK_NGX_SUCCEED(release(right)),
+        "D3D11 release failed through the hook");
+    require(xrfg::ngx_guide_capture_statistics().features_released == released_before + 2,
+        "the two D3D11 features were not released");
+    xrfg::stop_ngx_guide_capture_d3d11(queue12.Get());
+    std::cout << "ngx guide capture D3D11: publications=" << statistics.d3d11_publications
+              << " eye0=0x" << std::hex << eye0 << " eye1=0x" << eye1 << std::dec << "\n";
+    return 0;
+}
+
 int run(const wchar_t* module_path) {
     // WARP: the capture only records copies, which WARP executes.
     ComPtr<IDXGIFactory4> factory;
@@ -165,7 +385,9 @@ int run(const wchar_t* module_path) {
     xrfg::poll_ngx_guide_capture();
     auto statistics = xrfg::ngx_guide_capture_statistics();
     require(statistics.active, "capture did not become active");
-    require(statistics.modules_hooked == 1 && statistics.modules_failed == 0,
+    // Its D3D12 exports, and since V512 its D3D11 ones.
+    require(statistics.modules_hooked == 2 && statistics.d3d11_modules_hooked == 1 &&
+            statistics.modules_failed == 0,
         "the stand-in's exports were not detoured");
 
     // A game's stereo DLSS: one feature per eye, low-resolution jittered
@@ -289,7 +511,7 @@ int run(const wchar_t* module_path) {
         "the two guide features were not released");
     std::cout << "ngx guide capture: hooked=" << statistics.modules_hooked
               << " publications=" << statistics.publications << "\n";
-    return 0;
+    return run_d3d11(module);
 }
 
 }  // namespace

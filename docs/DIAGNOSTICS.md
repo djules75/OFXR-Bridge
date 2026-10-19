@@ -85,6 +85,28 @@ that moves (UEVR's HUD follows the head) is placed between its two positions
 in each generated frame, at the moment the generated image shows; one that
 does not is left as it is.
 
+### DLSS vectors from D3D11 games (V512)
+
+A bridged D3D11 session (the game renders D3D11, the runtime gets the
+layer's D3D12 session) now captures the game's DLSS vectors for Hybrid: the
+D3D11 NGX exports are detoured beside the D3D12 ones, and each evaluation's
+vectors, and its depth where the driver can share the format, are copied
+into textures shared with the layer's D3D12 device and published on its
+queue.
+
+- `presenter_transition` 702 `c`: 1 the native D3D12 capture started, 2 the
+  D3D11 one.
+- `embedded_configuration` 820 `a` = slot + 10: a module's D3D11 exports are
+  detoured. 821 `a` = feature type + 200: a feature created through D3D11.
+- 830, a D3D11 stream's first publication: `a` the stream's low bits | bit 32
+  the depth came with it | bit 33 the depth's format cannot be shared (a
+  packed depth-stencil); `b` vectors format << 32 | depth format; `c` output
+  width << 32 | height.
+- 824 reasons 5 (the evaluation's context is not the bridged session's
+  immediate context) and 6 (the copy into the shared textures failed, `c`
+  its HRESULT).
+- The Hybrid status line no longer reports 702 for a bridged D3D11 session.
+
 ### Generated images for flat panels (V509)
 
 A flat panel on a swapchain of its own (not one a projection view uses),
