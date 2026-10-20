@@ -21,6 +21,8 @@ using Microsoft::WRL::ComPtr;
 struct Hooks {
     std::mutex mutex;
     SafetyHookInline execute, create_queue;
+    bool execute_probe_active{};
+    ULONGLONG execute_probe_retry_at{};
     using Execute=void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*,UINT,ID3D12CommandList* const*);
     using CreateQueue=HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*,const D3D12_COMMAND_QUEUE_DESC*,REFIID,void**);
     Execute submit{};
@@ -124,33 +126,76 @@ bool luke_detected() noexcept {
     }
     return false;
 }
+// Caller owns Hooks::mutex. Installing an entry point does not establish a
+// producer: only an observed SR/RR list submitted through it can do that.
+static bool install_execute_hook(Hooks& s, ID3D12CommandQueue* queue) {
+    if (!s.execute) {
+        auto** table=*reinterpret_cast<void***>(queue);
+        s.execute=safetyhook::create_inline(table[10],reinterpret_cast<void*>(&execute),SafetyHookInline::StartDisabled);
+        if(s.execute){s.submit=s.execute.original<Hooks::Execute>();(void)s.execute.enable();}
+    }
+    return bool(s.execute);
+}
 void configure_queue(ID3D12CommandQueue* input) noexcept {
     try {
         IUnknown* native{};ComPtr<ID3D12CommandQueue> queue;
         if(!d3d_native::get_borrowed(input,&native)||FAILED(native->QueryInterface(IID_PPV_ARGS(&queue))))return;
         auto& s=hooks();std::scoped_lock lock(s.mutex);
         if(std::none_of(s.queues.begin(),s.queues.end(),[&](auto& q){return q.Get()==queue.Get();}))s.queues.push_back(queue);
-        if(!s.execute) {
-            auto** table=*reinterpret_cast<void***>(queue.Get());
-            s.execute=safetyhook::create_inline(table[10],reinterpret_cast<void*>(&execute),SafetyHookInline::StartDisabled);
-            if(s.execute){s.submit=s.execute.original<Hooks::Execute>();(void)s.execute.enable();}
-        }
+        static_cast<void>(install_execute_hook(s,queue.Get()));
         ComPtr<ID3D12Device> device;if(SUCCEEDED(queue->GetDevice(IID_PPV_ARGS(&device)))&&kcd())
             luke_scene_camera::install(device.Get());
     }catch(...) {}
 }
 void install_device(ID3D12Device* input) noexcept {
+    bool probing=false;
     try {
         IUnknown* native{};ComPtr<ID3D12Device> device;
         if(!d3d_native::get_borrowed(input,&native)||FAILED(native->QueryInterface(IID_PPV_ARGS(&device))))return;
-        auto& s=hooks();std::scoped_lock lock(s.mutex);
-        if(!s.create_queue) {
-            auto** table=*reinterpret_cast<void***>(device.Get());
-            s.create_queue=safetyhook::create_inline(table[8],reinterpret_cast<void*>(&create_queue),SafetyHookInline::StartDisabled);
-            if(s.create_queue){s.make_queue=s.create_queue.original<Hooks::CreateQueue>();(void)s.create_queue.enable();}
+        auto& s=hooks();Hooks::CreateQueue create{};
+        {
+            std::scoped_lock lock(s.mutex);
+            if(!s.create_queue) {
+                auto** table=*reinterpret_cast<void***>(device.Get());
+                s.create_queue=safetyhook::create_inline(table[8],reinterpret_cast<void*>(&create_queue),SafetyHookInline::StartDisabled);
+                if(s.create_queue){s.make_queue=s.create_queue.original<Hooks::CreateQueue>();(void)s.create_queue.enable();}
+            }
+            // A failed D11 helper-device creation leaves no registered queue.
+            // The game may have created all its queues before hooks existed.
+            if(!s.execute && !s.execute_probe_active) {
+                const auto now=GetTickCount64();
+                if(now>=s.execute_probe_retry_at) {
+                    probing=s.execute_probe_active=true;
+                    s.execute_probe_retry_at=now+1000;
+                    create=s.make_queue;
+                }
+            }
+        }
+        if(probing) {
+            // Discover the existing native implementation through a temporary
+            // queue on the proven SR device, not another D3D12CreateDevice.
+            // No lists are executed; the probe is not retained or published.
+            D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
+            ComPtr<ID3D12CommandQueue> probe,canonical;
+            HRESULT result=create?create(device.Get(),&desc,IID_PPV_ARGS(&probe)):
+                device->CreateCommandQueue(&desc,IID_PPV_ARGS(&probe));
+            IUnknown* borrowed{};
+            if(SUCCEEDED(result)) {
+                if(!d3d_native::get_borrowed(probe.Get(),&borrowed))result=E_NOINTERFACE;
+                else result=borrowed->QueryInterface(IID_PPV_ARGS(&canonical));
+            }
+            {
+                std::scoped_lock lock(s.mutex);
+                if(SUCCEEDED(result) && !install_execute_hook(s,canonical.Get()))result=E_FAIL;
+                s.execute_probe_active=false;probing=false;
+            }
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,result,961,
+                reinterpret_cast<std::uintptr_t>(device.Get()),0);
         }
         if(kcd())luke_scene_camera::install(device.Get());
-    }catch(...) {}
+    }catch(...) {
+        if(probing){auto& s=hooks();std::scoped_lock lock(s.mutex);s.execute_probe_active=false;}
+    }
 }
 void observe_luke_production(ID3D12GraphicsCommandList* input) noexcept {
     if(!input || !luke_detected())return;

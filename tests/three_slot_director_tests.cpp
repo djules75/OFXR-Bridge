@@ -2201,6 +2201,10 @@ int main(int argc, char** argv) {
         try {luke_fresh_pacing_test();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
     }
+    if(argc>1 && std::string_view(argv[1])=="luke-no-helper-context") {
+        try {luke_standalone_context_test(false,true);return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
+    }
     if(argc>1 && std::string_view(argv[1])=="luke-standalone-context") {
         try {luke_standalone_context_test();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}

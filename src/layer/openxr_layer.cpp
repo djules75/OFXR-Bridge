@@ -5732,6 +5732,9 @@ XrResult layer_create_session_impl(
                     state->d3d11_device.Get(),
                     state->d3d12_device.ReleaseAndGetAddressOf(),
                     state->d3d12_queue.ReleaseAndGetAddressOf());
+            if (state->luke_afw_enabled)
+                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                    bridge_device_result,962,handle_value(created_session),0);
             if (SUCCEEDED(bridge_device_result)) {
                 state->graphics_binding_capabilities |= 4ULL;
             } else {

@@ -1,3 +1,11 @@
+## V617: Luke queue bootstrap without a helper device
+
+31 focused checks pass. The same actual-GPU fixture fails with V615 ingress
+and passes with V617: a game queue created before interception is discovered
+without a registered helper context, and the real AFW provider initializes.
+Base is V615; no V616 pacing changes. Ghost headset confirmation remains pending.
+[Scope](docs/V617_LUKE_NO_HELPER_BOOTSTRAP.md), [checks](docs/V617_VALIDATION.json).
+
 ## V611: pacing selection and observed producer origin
 
 The menu preserves V610 Director/combined behavior and offers session-start

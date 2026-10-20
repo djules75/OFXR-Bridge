@@ -1,5 +1,5 @@
 // Real original D12 Execute hook, COM ownership, and production layer bootstrap.
-void luke_standalone_context_test(bool active_alias_history=false) {
+void luke_standalone_context_test(bool active_alias_history=false, bool no_helper_context=false) {
     using Microsoft::WRL::ComPtr;
     ComPtr<ID3D11Device> d11;ComPtr<ID3D11DeviceContext> c11;
     check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,
@@ -8,18 +8,18 @@ void luke_standalone_context_test(bool active_alias_history=false) {
     check(SUCCEEDED(xrfg::create_d3d12_device_for_d3d11(d11.Get(),&d12,&private_queue)),"private bridge");
     D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
     check(SUCCEEDED(d12->CreateCommandQueue(&desc,IID_PPV_ARGS(&original_queue))),"pre-existing game queue");
-    xrfg::native_ingress::configure_queue(private_queue.Get());
+    if (!no_helper_context) xrfg::native_ingress::configure_queue(private_queue.Get());
     ComPtr<ID3D12Device> queried;ComPtr<ID3D12CommandQueue> q;
     check(!query_luke_ross_d3d12_context(&queried,&q),"ordinary host rejected");
     auto marker=LoadLibraryW((current_layer_directory()/L"luke-runtime-fixture.dll").c_str());
     check(marker && xrfg::native_ingress::luke_detected(),"Luke fixture detected");
     check(!query_luke_ross_d3d12_context(&queried,&q),"queue creation is not original production");
     auto state=session();state->presenter_active=false;state->three_slot_director=false;
-    state->luke_afw_enabled=true;state->graphics_binding_capabilities=7;
+    state->luke_afw_enabled=true;state->graphics_binding_capabilities=no_helper_context?3:7;
     state->d3d11_device=d11;state->d3d11_context=c11;
-    state->d3d12_device=d12;state->d3d12_queue=private_queue;
+    if (!no_helper_context) {state->d3d12_device=d12;state->d3d12_queue=private_queue;}
     initialize_late_luke_context(state);
-    check(!state->luke_afw && state->d3d12_queue==private_queue,"cold bootstrap stays bypass");
+    check(!state->luke_afw && state->d3d12_queue.Get()==(no_helper_context?nullptr:private_queue.Get()),"cold bootstrap stays bypass");
     auto pending=std::make_shared<SwapchainState>(state,XrSwapchainCreateInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO});
     pending->generation_eligible_pending=true;
     state->menu_enabled=false; // AFW-only still waits for the exact native producer.
@@ -70,7 +70,7 @@ void luke_standalone_context_test(bool active_alias_history=false) {
         check(d3d_owner::same(alias.Get(),d12.Get()),"alias does not share verified backing");
     }
     state->application_frame_in_progress=true;initialize_late_luke_context(state);
-    check(!state->luke_afw && state->d3d12_queue==private_queue,"in-flight frame defers binding");
+    check(!state->luke_afw && state->d3d12_queue.Get()==(no_helper_context?nullptr:private_queue.Get()),"in-flight frame defers binding");
     state->application_frame_in_progress=false;initialize_late_luke_context(state);
     check(state->luke_afw && (state->graphics_binding_capabilities&8) &&
         !(state->graphics_binding_capabilities&4) && state->d3d12_queue &&

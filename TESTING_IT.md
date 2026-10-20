@@ -1,3 +1,11 @@
+## V617: Luke AFW native-context recovery on V615
+
+Load matching V617 tray/game. In Ghost of Tsushima, use the intended Legacy
+mode, enter one level and enable AFW. Confirm AFW starts; no F8 or whole suite
+needed. If it still refuses, F9 includes the fallback/probe/producer stages.
+Pacing and AFW guide math are V615; V616/DOOM experiments are excluded.
+Details: docs/V617_LUKE_NO_HELPER_BOOTSTRAP.md.
+
 ## V615: SteamVR3X restart after Fast
 
 Load matching tray/game V615, same Valhalla scene. Re-run the optical suite

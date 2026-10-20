@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.615.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.617.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1488,6 +1488,7 @@ if(XRFG_BUILD_TESTS AND TARGET xrfg_three_slot_director_tests)
     file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/RealVR.ini" CONTENT "[Horizon]\nWorldScale=1.0\n")
     add_custom_command(TARGET xrfg_three_slot_director_tests POST_BUILD COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${XRFG_AFW_RUNTIME}" "$<TARGET_FILE_DIR:xrfg_three_slot_director_tests>/PDAFWPlugin.dll")
     add_test(NAME xrfg_luke_standalone_context COMMAND xrfg_three_slot_director_tests luke-standalone-context)
+    add_test(NAME xrfg_luke_no_helper_context COMMAND xrfg_three_slot_director_tests luke-no-helper-context)
     add_test(NAME xrfg_luke_late_alias_context COMMAND xrfg_three_slot_director_tests luke-late-alias-context)
     set_tests_properties(xrfg_luke_late_alias_context PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
     add_test(NAME xrfg_outlaws_startup COMMAND xrfg_three_slot_director_tests outlaws-startup

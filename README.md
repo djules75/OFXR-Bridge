@@ -1,3 +1,16 @@
+## V617 local candidate: Luke AFW without helper D12 context (2026-10-20)
+
+Owner selects V615 as base after correcting AERv2/Legacy comparison. Ghost V615
+PID23768 cannot arm AFW: fallback D3D12CreateDevice returns0x887A0036, leaving no
+queue to install Execute discovery, while game queues predate the hook. Native
+SR device now supplies one temporary entry-point probe, never a published
+producer; exact original-list submission still establishes owner/queue. Real
+AFW initializes late on that owner and a separate execution queue. No pacing,
+AFW math, marker, swapchain budget or benchmark change; V616 and paused DOOM
+experiments excluded. See autonomous/docs/V617_LUKE_NO_HELPER_BOOTSTRAP.md and
+V617_VALIDATION.json. CMake0.617.0; IPC61101/provider45601 unchanged.
+Local/runtime-pending; no install/settings/registry/push.
+
 ## V615 local candidate: SteamVR3X after Fast (2026-10-20)
 
 Actual GPU replay reproduces V614 Valhalla3X failure after Fast: retired
