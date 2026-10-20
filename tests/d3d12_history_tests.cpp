@@ -4821,8 +4821,17 @@ enum class HybridScene {
     occlusion_fast,
     // V539: the same, dark and low in contrast - the object within the
     // second-surface search's margin of the background (Returnal's wall).
-    occlusion_fast_dark
+    occlusion_fast_dark,
+    // V544: occlusion_fast with inverted depth far away, object and
+    // background both past 255 near planes (MSFS 2024's buildings over the
+    // terrain). The object moves right, the direction the mask's tie-break
+    // lost.
+    occlusion_fast_far
 };
+
+template <typename DepthForPixel>
+[[nodiscard]] ComPtr<ID3D12Resource> create_and_upload_game_depth_field(
+    D3D12WarpFixture& fixture, UINT width, UINT height, DepthForPixel&& depth_for_pixel);
 
 // backend nvidia: real OFA on the NVIDIA GPU ("hybrid nvidia"), measured
 // only - the bounds below are FidelityFX's on WARP.
@@ -4830,7 +4839,8 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
     xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx) {
     // The fast scene without the coverage mask measures the ghost it removes.
     const bool measure_only = backend == xrfg::D3D12OpticalFlowBackend::nvidia ||
-        ((kind == HybridScene::occlusion_fast || kind == HybridScene::occlusion_fast_dark) &&
+        ((kind == HybridScene::occlusion_fast || kind == HybridScene::occlusion_fast_dark ||
+          kind == HybridScene::occlusion_fast_far) &&
             GetEnvironmentVariableW(L"XRFG_DISABLE_COVERAGE_MASK", nullptr, 0) != 0);
     constexpr UINT width = 256, height = 128;
     constexpr int object_left = 72, object_width = 80, object_top = 32, object_bottom = 96;
@@ -4846,11 +4856,13 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
     constexpr float inset_x = 48.0F, inset_y = 16.0F, inset_width = 160.0F, inset_height = 96.0F;
     constexpr UINT inset_motion_width = 80, inset_motion_height = 48;
     const bool dark = kind == HybridScene::occlusion_fast_dark;
-    const bool fast = kind == HybridScene::occlusion_fast || dark;
+    const bool far_depth = kind == HybridScene::occlusion_fast_far;
+    const bool fast = kind == HybridScene::occlusion_fast || dark || far_depth;
     const bool occluding = kind == HybridScene::occlusion || low_res || periphery || fast;
     const int object_motion = overlay ? 0 : fade ? background_motion : fast ? 40 : 20;
     const char* const name = fade ? "fade" : overlay ? "overlay"
         : dark ? "occlusion fast, dark low contrast"
+        : far_depth ? "occlusion fast, far inverted depth"
         : fast ? "occlusion fast, flat background"
         : low_res ? "occlusion low-res vectors"
         : kind == HybridScene::occlusion_foveated ? "occlusion foveated inset"
@@ -4917,6 +4929,20 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
                 -scale * static_cast<float>(object && !overlay ? object_motion : background_motion),
                 0.0F};
         });
+    // V544: inverted depth, the near plane over the distance: the object at
+    // 600 near planes, the background at 1000 - both 0 in V539's linear byte.
+    ComPtr<ID3D12Resource> game_depth;
+    if (far_depth) {
+        game_depth = create_and_upload_game_depth_field(
+            fixture, motion_width, motion_height, [&](UINT, UINT mx, UINT my) {
+                const int x = static_cast<int>(std::floor((static_cast<float>(mx) + 0.5F) * width / motion_width));
+                const int y = static_cast<int>(std::floor((static_cast<float>(my) + 0.5F) * height / motion_height));
+                const int ox = x - object_motion;
+                const bool object = y >= object_top && y < object_bottom &&
+                    ox >= object_left && ox < object_left + object_width;
+                return object ? 1.0F / 600.0F : 1.0F / 1000.0F;
+            });
+    }
     // The inset's vectors, in its output pixels (one an image pixel) at two
     // output pixels a vector: the true motion, plus the inset's own move
     // where they lead into the previous inset.
@@ -4977,6 +5003,14 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
             frame->motion_height = motion_height;
             frame->motion_slice = frame->output_slice = eye;
             frame->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            if (far_depth) {
+                frame->depth = game_depth;
+                frame->depth_width = motion_width;
+                frame->depth_height = motion_height;
+                frame->depth_inverted = true;
+                frame->depth_resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            }
             if (periphery) {
                 // The eye's field is tangent +-1 each way; the camera's is
                 // the field above, in the same tangents.
@@ -5745,7 +5779,8 @@ int main(int argc, char** argv) {
                                      HybridScene::occlusion_foveated_moved,
                                      HybridScene::occlusion_foveated_moved_current,
                                      HybridScene::occlusion_fast,
-                                     HybridScene::occlusion_fast_dark}) {
+                                     HybridScene::occlusion_fast_dark,
+                                     HybridScene::occlusion_fast_far}) {
                 test_hybrid_composition(nvidia_fixture, scene, xrfg::D3D12OpticalFlowBackend::nvidia);
             }
             return 0;
@@ -5778,7 +5813,8 @@ int main(int argc, char** argv) {
                                      HybridScene::occlusion_foveated_moved,
                                      HybridScene::occlusion_foveated_moved_current,
                                      HybridScene::occlusion_fast,
-                                     HybridScene::occlusion_fast_dark}) {
+                                     HybridScene::occlusion_fast_dark,
+                                     HybridScene::occlusion_fast_far}) {
                 test_hybrid_composition(hybrid_fixture, scene);
             }
             test_hybrid_side_by_side(hybrid_fixture);

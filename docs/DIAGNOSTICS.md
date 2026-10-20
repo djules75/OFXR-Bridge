@@ -397,6 +397,10 @@ current frame's surface that came from there (its vector; the nearest by
 the game's depth, else the fastest, keeps a contested texel). A pixel whose
 previous-frame sample lies under another surface is revealed background
 whatever that surface's speed, and takes the current frame alone there.
+From V544 the depth is ranked on a log scale, 8 steps a doubling of
+distance; V539-V543 ranked it linearly in 8 bits, so everything past 255
+near planes tied (MSFS 2024's buildings and the terrain behind them) and
+the surface sliding left won, leaving a ghost behind one sliding right.
 
 - `embedded_configuration` 860, at a synthesizer's first mask for an eye
   and whenever its grid changes: `a` the eye `<< 48` or columns `<< 20` or

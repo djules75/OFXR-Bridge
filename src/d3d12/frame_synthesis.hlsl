@@ -1373,6 +1373,17 @@ int2 coverage_mask_texel(float2 coordinate) {
 // bits an axis from -512 to +512 (8 bits an axis, +-32, lost a fast strafe:
 // background and object both clamped to 32 read as one surface). The
 // largest word wins a texel; 0 is an empty one.
+// V544: the priority of a surface by the game's depth, on a log scale - 8
+// steps a doubling of distance over 32 doublings from the near plane. Taken
+// as it comes (V539), inverted depth is the near plane over the distance:
+// everything past 255 near planes read 0, a building and the terrain behind
+// it tied in MSFS 2024, and the vector bits below decided - the surface
+// sliding left won, so background uncovered by one sliding right kept the
+// ghost.
+float coverage_mask_depth_priority(float nearness) {
+    return saturate(1.0 + log2(max(nearness, 2.3283064e-10)) / 32.0);
+}
+
 uint coverage_mask_word(float2 motion, float priority) {
     uint2 quarter = uint2(clamp(round(motion * 4.0) + 2048.0, 0.0, 4095.0));
     return (uint(saturate(priority) * 255.0) << 24) | (quarter.x << 12) | quarter.y;
@@ -2132,7 +2143,7 @@ void BuildCoverageMask(uint3 id : SV_DispatchThreadID) {
     float2 motion = game_motion_for_pixel(pixel, Slice, ViewIndex);
     MappedCoordinate previous = map_source_to_target(pixel + motion, PreviousMappings[ViewIndex]);
     if (previous.valid < 0.5) return;
-    float priority = game_depth_available() ? game_nearness(pixel)
+    float priority = game_depth_available() ? coverage_mask_depth_priority(game_nearness(pixel))
                                             : min(length(motion), 255.0) / 255.0;
     uint word = coverage_mask_word(motion, priority);
     float2 per_pixel = extent / max(output_rect.zw, float2(1.0, 1.0));
