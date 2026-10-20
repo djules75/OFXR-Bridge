@@ -1,53 +1,21 @@
 # OFXR Bridge
 
-OFXR Bridge makes VR games look smoother when your PC cannot render as
-many frames as your headset displays. For every frame the game renders, it
-creates an extra in-between frame, so the headset gets **almost twice as
-many frames**, or **almost three times** with 3X Frame Gen. The goal is to
-reach your headset's refresh rate: a game running at 45 fps on a 90 Hz
-headset gets close to 90 frames a second.
+**Frame generation for VR: a smoother experience, at your headset's refresh
+rate.**
 
-It is "almost" because generating frames costs some GPU time, which lowers
-the game's own frame rate a little. Generated frames can also show small
-artifacts around fast-moving objects. OFXR runs in the background from a
-tray icon, and you switch it on or off there. It works with OpenXR games
-only (see below).
+OFXR Bridge creates extra frames between the ones your game renders, so you
+reach your headset's refresh rate even when your PC can't: a game at 45 FPS
+on a 90 Hz headset gets close to 90, and with 3X Frame Gen a game at 30 FPS
+too.
 
-Technically, OFXR Bridge is an experimental OpenXR API layer. It uses
-optical flow to generate frames between the ones the game renders.
+It runs from a tray icon: start it before your game and it works in the
+background, no game files touched. Generating frames costs a little GPU
+time, and fast-moving objects can show small artifacts. It works with OpenXR
+games only (see below).
 
-Current release: **v0.2.13.4 (internal build V464)**.
-See the [release notes](docs/releases/0.2.13.4.md). 0.2.13.4 is a patch
-release: on SteamVR, 0.2.13.3 could stutter and drop below half your
-refresh rate as soon as a scene got heavier, and with **Prefer FPS over
-latency** on it could do the same on Virtual Desktop and Pimax OpenXR;
-that is fixed, and the tray has a new **Reset to default** entry.
-[0.2.13.3](docs/releases/0.2.13.3.md) was a patch
-release: on Pimax OpenXR, Virtual Desktop and other runtimes that are not
-SteamVR, a demanding game (MSFS 2024 with 3X Frame Gen at a high
-resolution, for example) could show the full refresh rate on the overlay
-while the headset looked no smoother; the generated frames now arrive in
-time to be shown.
-[0.2.13.2](docs/releases/0.2.13.2.md) was a
-maintenance release: MSFS 2024 on SteamVR no longer drops to half rate
-because of a 0.2.13.1 change, D3D11 games such as IL-2 Great Battles no
-longer stutter in one eye without OpenXR Toolkit, windows and HUD panels
-that appear in the headset (CheekyFoveatedDLSS's settings, Skyrim VR's HUD)
-no longer pause frame generation or cost frame rate afterwards, and the
-long dips to about 50 fps on a Steam Frame are gone.
-[0.2.13.1](docs/releases/0.2.13.1.md) fixed the higher latency and the
-frame drops some games had on Virtual Desktop since 0.2.12.1, stopped
-hangars, menus and loading screens dropping to 60 fps after a hiccup, and
-added a tray switch for the VRAM saving of 0.2.10.1.
-0.2.12.2 removed a flicker in the left eye in MSFS 2024 with 3X Frame Gen,
-and 0.2.12.1 lets you pause and resume frame generation while you play,
-from the tray or with a key you choose.
-
-> [!TIP]
-> **Pimax headsets:** OFXR uses less VRAM through SteamVR with
-> [sboys3's native SteamVR driver](https://store.pimax.com/blogs/blogs/sboys3-native-steamvr-driver-setup-guide)
-> than through Pimax OpenXR, so we recommend it, especially in MSFS 2024.
-> [Details](docs/TROUBLESHOOTING.md#how-much-vram-ofxr-uses).
+Under the hood, OFXR Bridge is an OpenXR layer that uses optical flow to
+create the in-between frames. In games with DLSS, its **Hybrid** mode also
+uses the motion the game itself calculates, for cleaner results.
 
 ## 🛠️ Not working, or not feeling smoother?
 
@@ -57,100 +25,88 @@ It checks in one step whether OFXR is running in your game, then lists the
 usual causes and fixes: OpenVR games, running as administrator, the game's
 frame rate, frame smoothing in your VR software, and running out of VRAM.
 
+**More guides:** the [game compatibility guide](docs/GAME_COMPATIBILITY.md)
+(the games we tested, and settings for MSFS 2024, Skyrim VR, Fallout 4 VR
+and R.E.A.L. VR games) · [OFXR on Linux (Proton)](docs/LINUX.md)
+
 ---
 
 > [!IMPORTANT]
-> **OpenXR games only.** The bridge works only with games that talk to your
-> headset through **OpenXR**. Games built on **OpenVR**, SteamVR's older
-> system, are not supported, even though they run on SteamVR: the bridge
-> never loads in them and changes nothing.
->
-> It doesn't matter which headset you have or which VR software it runs
-> through (SteamVR, Pimax, Virtual Desktop): what matters is whether the game
-> itself uses OpenXR. Examples of OpenXR games: Microsoft Flight Simulator
-> 2020 and 2024, DCS World, Assetto Corsa EVO, and Unreal games played through
-> **UEVR with its OpenXR option selected** (not OpenVR). Some OpenVR-only
-> games can be run through OpenXR with
-> [OpenComposite](https://gitlab.com/znixian/OpenOVR), for example Elite
-> Dangerous, Skyrim VR and No Man's Sky.
-
-> [!WARNING]
-> This is experimental software. It may not work with your game, VR mod, GPU or OpenXR
-> runtime. It may produce visual artifacts, fail to activate, freeze the game
-> or cause a crash. Use it at your own risk.
+> **OpenXR games only.** OFXR works with games that use **OpenXR**, whatever
+> your headset or VR software. Games that use **OpenVR** (SteamVR's older
+> system) are not supported, but many run through OpenXR with
+> [OpenComposite](https://gitlab.com/znixian/OpenOVR). With **UEVR**, choose
+> its OpenXR option. See the [games we tested](docs/GAME_COMPATIBILITY.md#tested-games).
 
 > [!IMPORTANT]
-> The bridge runs on any Direct3D 12 GPU with Shader Model 6 support - GTX
-> 10-series and newer NVIDIA cards, AMD GCN and RDNA, Intel Arc - through one
-> of two optical-flow backends. The NVIDIA backend uses the Optical Flow hardware
-> engine of Turing-generation GPUs and newer (RTX 20/30/40/50-series and the
-> GTX 1660 family, with a compatible driver; not TU117 cards such as the
-> GTX 1650). On every other GPU - AMD, Intel, and older NVIDIA cards such as
-> the GTX 10 series - the bridge uses the AMD FidelityFX backend automatically.
-> FidelityFX computes the flow on the same GPU that renders the game, so it
-> costs more frame time than the NVIDIA engine and leaves less headroom.
+> **Works on most recent graphics cards:** NVIDIA GeForce GTX 10-series and
+> newer, AMD Radeon RX 400-series and newer, and Intel Arc. On NVIDIA RTX
+> cards and the GTX 1660, you can also choose NVIDIA's own optical flow in the
+> tray.
 
 > [!TIP]
-> A game that holds about half your headset's refresh rate can reach the full
-> rate: a game at 45–50 FPS on a 90 Hz headset typically delivers 90, a
-> **frame-rate increase of up to 100%**, with NVIDIA Medium at 50% optical-flow
-> resolution or FidelityFX. Actual results vary by game, GPU, resolution and
-> base frame rate; the bridge cannot recover frames the game does not render.
+> **What to expect:**
 >
-> A game that can only hold about a third of the refresh rate can reach it
-> too, with **3X Frame Gen**: 30 FPS on a 90 Hz headset delivers 90.
+> - **2X:** a game at about half your refresh rate reaches the full rate. 45
+>   FPS on a 90 Hz headset gives 90.
+> - **3X:** a game at about a third of your refresh rate reaches it too. 30
+>   FPS on a 90 Hz headset gives 90.
+> - Results vary by game, GPU and resolution. OFXR cannot make up frames the
+>   game does not render.
 
-The current build provides:
+## Features
 
-- AMD FidelityFX Optical Flow (the fallback: used automatically on GPUs where NVIDIA optical flow is unavailable)
-- NVIDIA Optical Flow with Fast (test), Medium and Slow presets (the default, Medium)
-- 100%, 75% and 50% optical-flow resolution, for both backends (50%, the
-  default, is the one to keep; see below)
-- NVIDIA bidirectional consistency (off by default; doubles the optical-flow
-  cost)
-- a tray icon that arms the bridge as soon as it starts, with manual
-  Arm/Disarm
-- **Pause frame generation**: switch generation off and back on while you
-  play, without restarting the game, from the tray or with a key
-  (Ctrl + Alt + F7 by default, changed from the tray menu)
+**Frame generation**
+
+- **2X and 3X Frame Gen**: one or two generated frames for every frame the
+  game renders, switchable while you play.
+- **Hybrid mode** for DLSS games: combines the game's own motion with OFXR's
+  optical flow, for cleaner moving objects, with an optional **depth search**
+  that keeps thin nearby objects solid.
+- **Optical flow**: AMD FidelityFX by default, or NVIDIA's Optical Flow
+  engine (Fast, Medium, Slow), at 100%, 75%, 50% or 25% resolution.
 - **Prefer FPS over latency** (on by default): one frame of extra latency in
-  exchange for reaching full frame rate from half, with smoother dips
-- **3X Frame Gen** (off by default): two generated frames per game frame,
-  for games at a third of your refresh rate, switchable live while you play
-- **Lower VRAM** (on by default): about half a gigabyte less VRAM at high
-  resolutions; untick it if that shows as stutter on your card
-- **Reset to default**: puts every OFXR setting back to its factory default
-  in one click, after asking
-- a pipeline built specifically for SteamVR's compositor
-- a **D3D11 bridge** (on by default): D3D11 games run on the same pipeline
-  as native D3D12 games, and the OpenXR runtime never touches the game's
-  D3D11 device. DCS World, Assetto Corsa, SkyrimVR and Cyberpunk 2077 run
-  through it
-- **Vulkan support (on by default)**: frame generation for Vulkan games,
-  tested with No Man's Sky through OpenComposite. Since 0.2.10.1 Vulkan
-  games run through a bridge like D3D11 games, on the same pipeline as
-  native D3D12 games
-- eye tracking that keeps working alongside Cheeky Foveated DLSS
-- an optional transparent in-headset FPS number with four corner positions;
-  green means recent synthetic submissions and red means inactive generation
-- an optional bridge flight recorder for diagnostics, which can be switched
-  on and off while you play
+  exchange for reaching full frame rate from half, with smoother dips.
+- **HUD and markers** in UEVR games move smoothly with the generated frames
+  instead of appearing twice.
 
-OFXR Bridge uses color-only optical flow. It does not receive game motion
-vectors or depth, so artifacts around moving objects, disocclusions and head
-rotation are still possible.
+**Games and platforms**
+
+- D3D12, D3D11 and Vulkan games, with a pipeline built specifically for
+  SteamVR's compositor.
+- **Star Citizen**, with Easy Anti-Cheat: OFXR's files are signed.
+- UEVR, OpenComposite, Luke Ross's R.E.A.L. VR mods and Cheeky Foveated
+  DLSS.
+- **Linux**, in games under Proton.
+
+**Tray and overlay**
+
+- A tray icon that arms the bridge as soon as it starts. Most settings change
+  in a running game, without restarting it.
+- **Pause frame generation** while you play, from the tray or with a key
+  (Ctrl + Alt + F7 by default).
+- **Lower VRAM** (on by default) and **Reset to default**, which puts every
+  setting back to its factory default in one click.
+- An in-headset **FPS overlay** that counts only new frames, with the latency
+  OFXR adds and Hybrid's status, in three sizes and four corners.
+- A **flight recorder** for diagnostics, switchable while you play.
+- A live status file for other tools, such as
+  [MSFS AutoFPS](https://github.com/ResetXPDR/MSFS_AutoFPS).
 
 ## Installation and use
 
 1. Download the latest release archive from GitHub Releases.
 2. Extract the complete archive to a writable folder.
-3. Run `OFXRBridgeTray.exe`. The bridge arms itself straight away.
+3. Run `OFXRBridgeTray.exe`. The bridge arms itself straight away. If it
+   cannot, the tray shows why; select **Arm bridge until manual disarm** to
+   retry.
 4. Right-click the tray icon to choose the optical-flow backend and options.
-   Most options take effect the next time the game starts. Pause, 3X Frame
-   Gen, the FPS overlay position and the flight recorder change in a running
-   game.
-5. Start the game normally. For injectors such as UEVR, start the tray before
-   the game and leave it armed while the VR mod is injected.
+   The optical flow, Hybrid, the Frame Gen multiplier, the FPS overlay and
+   the flight recorder change in a running game; **Prefer FPS over latency**
+   and **Lower VRAM** apply the next time the game starts.
+5. Start the game normally, **after** the tray: OFXR has to be armed when the
+   game starts, especially for Hybrid. For injectors such as UEVR, leave the
+   tray armed while the VR mod is injected.
 6. Select **Disarm bridge** or close the tray application when finished.
 
 On Linux under Proton the tray cannot stay running beside the game: see
@@ -159,108 +115,110 @@ On Linux under Proton the tray cannot stay running beside the game: see
 
 ### Pause and resume
 
-To compare with and without generated frames while you play, use **Pause
-frame generation** in the tray menu. The entry turns into **Resume frame
-generation** with an orange pause symbol, and the FPS number in the headset
-shows the same symbol (two vertical bars) until you resume. Every arm starts
-resumed.
+To compare with and without generated frames while you play:
 
-A paused game still runs through the bridge: it only stops making extra
-frames. To rule OFXR out of a problem, disarm it and restart the game
-instead.
-
-**Ctrl + Alt + F7** does the same from inside the game, while the bridge is
-armed. To change the key, select **Current key binding** in the tray menu,
-press the key or keys you want and confirm:
-
-- any key works, with or without Ctrl, Alt and Shift;
-- **Default** goes back to Ctrl + Alt + F7 and **No key** turns the key off;
-- a combination another program already uses is refused.
-
-The game still sees the key press, so pick keys your game and mods do not
-use. A key used on its own, without Ctrl, Alt or Shift, stops working in
-every other program while the bridge is armed. The setting is `pause_hotkey`
-under `[tray]` in `%LOCALAPPDATA%\OFXR Bridge\tray.ini`.
-
-If arming fails at start-up, the tray shows the reason and stays disarmed;
-select **Arm bridge until manual disarm** to retry.
+- **Pause frame generation** in the tray menu, or press **Ctrl + Alt + F7**
+  in the game. The FPS number shows two orange bars while paused. Do the
+  same again to resume.
+- **Change the key** with **Current key binding** in the tray menu. Pick a
+  key your game and mods do not use: the game still sees it.
+- **Pausing is not disarming:** a paused game still runs through OFXR. To
+  rule OFXR out of a problem, disarm it and restart the game.
 
 > [!IMPORTANT]
-> **Never run the game as administrator.** The bridge is registered for your
-> Windows user, and the OpenXR loader deliberately ignores per-user layers in a
-> program running as administrator. An elevated game runs in VR as normal but
-> never loads the bridge, with no error, no FPS number and no flight log.
-> Check the game's `.exe` and any shortcut or launcher you start it from
-> (Properties → Compatibility → "Run this program as an administrator").
+> **Never run the game as administrator.** OFXR does not load in it, with no
+> error and no FPS number.
 >
-> The same applies to anything that *starts* the game: a launcher or mod
-> manager running as administrator passes that on to the game. The UEVR
-> injector is fine as administrator, since it injects into a game you already
-> started normally; only a front-end that launches the game for you must not
-> run elevated.
+> - Check the game's `.exe`, shortcut and launcher: Properties →
+>   Compatibility → "Run this program as an administrator" must be off.
+> - A launcher or mod manager running as administrator starts the game as
+>   administrator too.
+> - The UEVR injector is fine as administrator.
 
-For supported NVIDIA GPUs, the suggested starting configuration is **NVIDIA
-Medium** with **50% optical flow resolution**. It should provide a decent
-performance boost with minimal visual-quality loss. Running the optical flow at
-100% resolution is usually too expensive and often produces only a small or
-negligible net performance gain, so it is not recommended for normal use.
-
-> [!NOTE]
-> **Use the OFXR FPS number, not other FPS tools, while the bridge is active.**
-> Other counters can be wrong in either direction:
->
-> - **fpsVR, SteamVR's frame timing and other compositor-side tools** count
->   every frame the bridge hands over. When the game runs below half the
->   refresh rate, the bridge repeats frames to fill the gaps, and these tools
->   count the repeats as new frames. They can show 90 on a 90 Hz headset while
->   far fewer new frames reach your eyes.
-> - **Counters inside the game or the VR mod**, and xrFPS in some setups,
->   count the game's own frames before the bridge adds any. While frame
->   generation is active they show about half of what reaches the headset.
->   This does not mean OFXR is inactive.
-
-The bridge's own optional FPS number counts only new frames: real and
-generated, but not repeats. On SteamVR it starts from what the compositor
-reports it actually showed, so frames SteamVR shows late are left out too.
-On other runtimes it counts the new frames the bridge submits. See
-[FPS overlay details](docs/FPS_OVERLAY.md).
-
-When both the **Bridge flight recorder** and an FPS overlay position are
-enabled, OFXR draws a small purple rectangle into synthetic frames near the FPS
-counter. Its purpose is to verify whether generated frames are actually
-reaching the headset: if the rectangle is visible there, the synthetic output
-has reached the displayed presentation path. The green FPS number alone only
-confirms accepted submissions. Disable the flight recorder after testing to
-remove the marker.
+Keep the default settings to start with: **FidelityFX** optical flow at
+**50% resolution**. They give a good performance boost with minimal
+visual-quality loss.
 
 The tray and bridge require the [Microsoft Visual C++ Redistributable
 x64](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
 OFXR Bridge does not replace your active OpenXR runtime.
 
-FidelityFX is the most performing one but will produce artifacts during headset rotation in dark areas, this is known and cannot be avoided.
+### FPS overlay and flight recorder
 
-### Optical flow resolution
+**FPS overlay:** in the tray menu, **FPS overlay** puts a frame counter in a
+corner of your headset view. It can also show the latency OFXR adds and
+Hybrid's status, in three sizes.
 
-Tray option **Optical flow resolution**, **50% by default**. Before it can
-make an in-between frame, OFXR works out how every part of the image moved
-between two game frames: that is the optical flow. This option sets the
-resolution it is worked out at, as a share of your per-eye resolution on
-each side, for both FidelityFX and NVIDIA. 100% means four times as many
-pixels as 50%, and costs GPU time to match: NVIDIA Slow at 100% on a Pimax
-Crystal Light at 120 Hz took about 26 ms per frame pair, three times the
-8.3 ms a refresh lasts, and the result was choppier, not smoother. 50% gives
-almost the same image, because the motion is smoothed over areas anyway.
-**Keep 50%** unless your game has plenty of headroom and you see artifacts
-on fine detail.
+> [!NOTE]
+> **Use OFXR's own FPS number.** Other FPS tools (fpsVR, SteamVR's frame
+> timing, counters in the game or VR mod) can misreport while OFXR runs,
+> too high or too low. OFXR's number counts only the new frames that reach
+> your headset. See [FPS overlay details](docs/FPS_OVERLAY.md).
 
-### NVIDIA bidirectional consistency
+**Bridge flight recorder:** in the tray menu, it writes a diagnostic log
+of what OFXR does, which is what we need to look into a problem (see
+[Reporting problems](#reporting-problems)). It can be switched on and off
+while you play. While it runs, OFXR also draws two small squares next to
+the FPS number, so you can check which frames reach your headset: a purple
+one on the generated frames and a green one, just to its right, on the
+game's own frames. Turn the recorder off when you are done.
 
-Tray option under **Optical flow backend**, **off by default**, NVIDIA only.
-On, the optical flow is worked out twice, forward and backward, and the two
-are checked against each other, which slightly improves the edges of moving
-objects. It doubles the cost of the optical flow. **Leave it off** unless
-your game has headroom to spare. Both options take effect the next time the
-game starts, and **Reset to default** puts both back.
+| In the headset | It means |
+|---|---|
+| A **red** FPS number | OFXR is loaded but not generating frames |
+| A **green** FPS number | OFXR is generating frames and handing them to your VR software |
+| A **purple** square (flight recorder on) | The generated frames are shown in your headset |
+| A **green** square, right of the purple one (flight recorder on) | The game's own frames are shown in your headset |
+| Both squares, flickering | Generated and game frames alternate, as they should |
+
+### Hybrid
+
+Tray option **Hybrid: game motion vectors + optical flow (DLSS games)**,
+**off by default**. Inspired by Eliott's and
+[tig3rmast3r](https://github.com/tig3rmast3r)'s work. In games that use DLSS,
+OFXR reads the motion the game calculates for DLSS and combines it with its
+own optical flow, so moving objects keep their shape with less warping. OFXR
+adds two improvements of its own: the background revealed behind a
+fast-moving object no longer shows a ghost of it, and **Hybrid: depth
+search** (off by default) uses the game's depth to keep thin nearby objects,
+such as cockpit frames and railings, from breaking up.
+
+- **Start OFXR before the game**: it has to be running when the game sets up
+  DLSS.
+- **The FPS overlay** shows **HYBRID OK** in green when Hybrid is working,
+  or **HYBRID KO** with a code in red when it cannot work in that game. The
+  [troubleshooting guide](docs/TROUBLESHOOTING.md#d-hybrid-shows-hybrid-ko)
+  says what each code means.
+- **GPU cost:** Hybrid adds GPU time to every generated frame, and the depth
+  search adds more, especially at high headset resolutions. Turn the depth
+  search off first if your frame rate drops.
+- **Switch it while you play**, without restarting the game.
+- Some games need a setting changed: see the
+  [game compatibility guide](docs/GAME_COMPATIBILITY.md).
+
+### Star Citizen
+
+OFXR's files are digitally signed, so Easy Anti-Cheat lets OFXR load in Star
+Citizen. 2X and 3X both work, and Hybrid works with the game's DLSS. Start
+OFXR before the game.
+
+> [!CAUTION]
+> OFXR is an independent project, not endorsed by Cloud Imperium Games or
+> Easy Anti-Cheat. Using it with an anti-cheat protected game is at your own
+> risk: we accept no responsibility for any account action, ban or other
+> consequence. Check the game's terms of service before you play.
+
+### Optical flow
+
+To make an in-between frame, OFXR first works out how the image moved
+between two game frames: the optical flow. Keep the defaults unless you need
+more performance. These settings change while you play.
+
+| Setting | Default | Notes |
+|---|---|---|
+| **Optical flow backend** | FidelityFX | Similar quality to NVIDIA's, and lighter on the GPU. NVIDIA's options work on RTX cards. |
+| **Optical flow resolution** | 50% | 25% is lighter, for very high headset resolutions. 100% costs about four times more for almost the same image. |
+| **NVIDIA bidirectional consistency** | Off | Slightly cleaner edges, at twice the cost. |
 
 ### Prefer FPS over latency
 
@@ -280,207 +238,84 @@ The change applies the next time the game starts.
 
 ### 3X Frame Gen
 
-Tray option **3X Frame Gen [live change]**, **off by default**. The bridge
-generates two frames for every frame the game renders instead of one, so a
-game running at a third of your headset's refresh rate (30 FPS at 90 Hz)
-reaches the full rate. If your game already holds about half the refresh
-rate, the normal 2X mode looks better: leave this off.
+Tray menu **Frame Gen multiplier**: **2X** by default, or **3X**. 3X makes
+two in-between frames for every game frame, for games at about a third of
+your refresh rate (30 FPS at 90 Hz). If your game holds half the refresh
+rate, 2X looks better.
 
-- **Live switch:** toggle it while you play. No need to restart the game,
-  the VR session or OFXR; you will see one short hitch at the switch.
-- **Prefer FPS over latency** is switched on with 3X and greyed out while 3X
-  is on. If the game you are playing was started with it off, 3X cannot
-  switch live: a **"game restart needed"** window opens on your desktop, and
-  3X applies the next time the game starts. Some games close and reopen
-  their VR session (on loading, for example); the new session uses the
-  settings in force at that moment.
-- **Artefacts:** more than OFXR's 2X mode, fewer than SteamVR Motion Smoothing at 3X, and
-  mostly in sideways motion such as strafing or flying past something close.
-- **Latency**, at 90 Hz, from the game finishing a frame to that frame
-  reaching the headset: 31 ms with 2X and Prefer FPS over latency, 39 ms with
-  3X in a game with headroom (The Callisto Protocol), up to 49 ms in a very
-  heavy one (MSFS 2024 at very high resolution). OFXR tunes this by itself
-  over the first 15 seconds or so. Head rotation is corrected at display
-  time in every mode.
-- **Games:** D3D12, D3D11 (through the D3D11 bridge, on by default) and
-  Vulkan. Tested in MSFS 2024, The Callisto Protocol, Cyberpunk 2077 and
-  No Man's Sky.
+- **Change it while you play**, with one short hitch at the switch. If the
+  game was started with **Prefer FPS over latency** off, 3X applies the next
+  time the game starts.
+- **Best results** in DLSS games where Hybrid works (**HYBRID OK** on the
+  overlay): turn on **Hybrid** and **Hybrid: depth search**, if your GPU has
+  the headroom.
+- **Expect more artifacts than 2X**, mostly in sideways motion, and a little
+  more latency.
+- **R.E.A.L. VR games stay at 2X**: see the
+  [game compatibility guide](docs/GAME_COMPATIBILITY.md#real-vr-games).
 
 ### Lower VRAM
 
-Tray option **Lower VRAM (may cause stuttering)**, **on by default**. Since
-0.2.10.1 the bridge keeps one working image per output instead of two,
-which saves about half a gigabyte of VRAM at high resolutions (the VRAM
-table in the troubleshooting guide assumes it on). On most cards it costs
-nothing. On some it shows as stutter that an older version did not have:
-an AMD RX 9070 XT running AMS2 at the edge of its GPU budget was smooth on
-0.2.9.1 and not on later versions, with nothing in the flight log to show
-for it, and unticking this brought the smoothness back.
-
-Untick it if you see that and have VRAM to spare. It is not a live change:
-the bridge decides the layout when the game creates its VR session, so it
-takes effect the next time the game starts.
+Tray option **Lower VRAM (may cause stuttering)**, **on by default**. The
+bridge keeps fewer working images, which saves about half a gigabyte of VRAM
+at high resolutions. On most cards it costs nothing; if you see stutter with
+VRAM to spare, untick it. It takes effect the next time the game starts.
 
 ### Reset to default
 
 Tray entry **Reset to default...**, in its own section below **Open bridge
 logs**. After you confirm, it puts every OFXR setting back to its factory
-default: optical flow **NVIDIA Medium** at **50%** resolution, **NVIDIA
-bidirectional consistency** off, **Prefer FPS over latency** on, **3X Frame
-Gen** off, **Lower VRAM** on, the FPS overlay in the upper right, the flight
-recorder off and the pause key back to **Ctrl + Alt + F7**. Settings only
-reachable by editing `tray.ini` go back to their defaults too.
+default: optical flow **FidelityFX** at **50%** resolution, **Prefer FPS
+over latency** on, the Frame Gen multiplier at **2X**, **Lower VRAM** on,
+**Hybrid** and its depth search off, the FPS overlay big in the upper right
+with the latency and Hybrid status shown, the flight recorder off and the
+pause key back to **Ctrl + Alt + F7**. Settings only reachable by editing
+`tray.ini` go back to their defaults too.
 If OFXR runs worse than you expected and you have changed any settings,
-start here. The FPS overlay, the flight recorder and 3X Frame Gen change in
-a running game at once; the rest applies the next time the game starts.
-
-### D3D12 and D3D11 games: both eyes taken at the end of the frame
-
-Since 0.2.12.2 the bridge takes its copy of each eye's image when the game
-ends its frame, not when the game hands each eye over. A game that hands the
-first eye over before it has finished drawing it otherwise gave the bridge a
-picture of that eye that was one frame old, which showed as flicker in one
-eye only: reported in MSFS 2024 with 3X Frame Gen.
-
-Since 0.2.13.2 the same applies to D3D11 games on the D3D11 bridge, where
-the copy handed to your headset moves to the end of the frame as well. It
-showed as stutter in one eye in IL-2 Great Battles, which OpenXR Toolkit
-hid because it hands both eyes over at the end of the frame itself.
-
-There is no menu entry. To go back to the earlier behaviour for diagnosis,
-close the tray, set `capture_at_end_frame=0` under `[tray]` in
-`%LOCALAPPDATA%\OFXR Bridge\tray.ini` and start the tray again. The one
-setting covers D3D12 and D3D11 games together.
-
-### D3D11 games
-
-D3D11 games go through the **D3D11 bridge**, on by default since 0.2.6. The
-bridge creates the OpenXR runtime's session on its own D3D12 device; the game
-keeps rendering in D3D11, into textures shared between the two devices, and
-generation, pacing and submission then follow the D3D12 path that UEVR games
-use. The runtime never works the game's D3D11 device, which is what crashed
-NVIDIA's D3D11 driver in DCS World and SkyrimVR, and D3D11 games get the
-SteamVR pacing described below. A runtime that does not offer D3D12 keeps the
-previous path automatically.
-
-There is no menu entry. To turn the bridge off for diagnosis, close the tray,
-set `d3d11_bridge=0` under `[tray]` in `%LOCALAPPDATA%\OFXR Bridge\tray.ini`
-and start the tray again. Editing the `ofxr_bridge.ini` beside the tray does
-nothing: the tray rewrites the layer's settings from `tray.ini` each time it
-arms.
+start here. The optical flow, Hybrid, the Frame Gen multiplier, the FPS
+overlay and the flight recorder change in a running game at once; the rest
+applies the next time the game starts.
 
 ### Cheeky Foveated DLSS
 
-The bridge works alongside [Cheeky Foveated DLSS](https://github.com/ClarkCheekyKent/CheekyFoveatedDLSS),
-including its eye-tracked foveation, since 0.2.6. Cheeky's OpenXR layer sits
-above the bridge and reads the game's frames before the bridge submits
-anything, so its calibration and gaze are unaffected. If Cheeky shows a
-flashing grid of small white coded squares at high resolutions, that is its
-own eye calibration failing to lock, with or without the bridge; its
-**Standard corners** calibration method avoids it, and setting the resolution
-before launching the game helps, since every change restarts the calibration.
+OFXR works alongside [Cheeky Foveated DLSS](https://github.com/ClarkCheekyKent/CheekyFoveatedDLSS),
+including its eye-tracked foveation, and Hybrid works with it.
 
-Since 0.2.13.2, opening Cheeky's settings window in the headset (F8) no
-longer pauses frame generation, and on Virtual Desktop it no longer costs
-frame rate for the rest of the session. The same goes for any window or HUD
-panel a game or mod adds while you play.
+### For the best results
 
-### Vulkan games (experimental)
+On every headset and VR software:
 
-Vulkan support is **on by default** and no longer has a tray menu entry.
-It covers games that render through Vulkan — No Man's Sky through
-[OpenComposite](https://www.nexusmods.com/nomanssky/mods/4363) is the one it
-has been tested with. To turn it off, quit the tray, set `vulkan_bridge=0` in
-`%LOCALAPPDATA%\OFXR Bridge\tray.ini`, and start the tray again. An older
-`vulkan_support=0` line there is ignored: it was written automatically while
-the option was off by default.
-
-- While the bridge is armed, it registers a small Vulkan layer of its own
-  (`OFXR_vulkan_queue_layer.dll`) that serialises GPU queue submissions,
-  which the bridge's second thread otherwise races the game for. It is
-  removed when you disarm or close the tray. A Vulkan implicit layer loads
-  into every Vulkan application while registered, browsers included.
-- **No FPS number in Vulkan games** for now: the overlay has no Vulkan path.
-  The diagnostic squares still show generation running. fpsVR or the Virtual
-  Desktop overlay give a rough rate, but they count repeated frames as new
-  ones, so they read high whenever the game is below half the refresh rate.
-- On SteamVR, turn off the game's **fixed frame rate at half** and Motion
-  Smoothing in the per-application video settings, or SteamVR holds the game
-  to half rate and the bridge can only deliver half.
-- Since 0.2.10.1 a Vulkan game's VR session goes through a bridge, like a
-  D3D11 game's: the game renders into images the bridge shares with it, and
-  everything after that is the native D3D12 pipeline. That halves the VRAM
-  the bridge needs and gives Vulkan games SteamVR's frame pacing. To go back
-  to the earlier path, set `vulkan_session_bridge=0` in `tray.ini`.
-- Off, Vulkan games are passed through unchanged and nothing Vulkan is
-  registered.
-
-### SteamVR users
-
-SteamVR headsets (Pimax and others) get a pipeline built specifically for
-SteamVR's compositor. The bridge sends two frames for every game frame, and
-they must arrive one display refresh apart. Other runtimes, such as Virtual
-Desktop, pace this by themselves. SteamVR does not, so the bridge times each
-frame against SteamVR's compositor directly. The bridge also gives SteamVR a
-GPU queue of its own, so the game's next frame can no longer make a finished
-generated frame look unready; with the D3D11 bridge, D3D11 games get this
-too.
-
-For the best results on SteamVR:
-
+- **Turn off your VR software's own frame smoothing**: it fights with
+  OFXR's. That is **SteamVR**'s Motion Smoothing and "fixed frame rate at
+  half" (per-application video settings), **Meta**'s ASW, **Virtual
+  Desktop**'s SSW, **Pimax Play**'s Smart Smoothing and **Pico Streaming
+  Assistant**'s Frame Interpolation.
 - Leave **Prefer FPS over latency** on, then try the same scene with it off.
   If you still hold full frame rate without it, keep it off for one frame
   less latency.
 - Pick a refresh rate close to double your game's frame rate, or triple it
-  with **3X Frame Gen**. If that is still short of the refresh rate, SteamVR
-  fills the gap with repeated frames and the image judders.
-- If you get dips, disarm the bridge and play the same scene. If the dips
-  remain, lower SteamVR's per-eye resolution; the bridge cannot recover
-  frames the game does not render. Pausing is not enough for this test: a
-  paused game still runs through the bridge.
-
-### Virtual Desktop and Pimax OpenXR users
-
-On these two runtimes the bridge chooses how it sends frames once, from how
-the game itself is built, and keeps that choice for the whole session. A
-given game behaves the same way every time; earlier versions could switch in
-the middle of a session when the game stalled, and stay that way. Since
-0.2.13.2, on Virtual Desktop, a game that briefly stops generating, for
-example when an overlay window opens, also goes back to the way it was
-running before.
+  with **3X Frame Gen**. If that is still short of the refresh rate, your VR
+  software fills the gap with repeated frames and the image judders.
 
 ### When the number stops short of the refresh rate
 
-Generating frames costs GPU time too, so a game needs some headroom above
-half the refresh rate, on every runtime. Each pair of frames is one frame
-from the game plus the optical flow and the generated frame, and the pair
-has to fit in two display refreshes.
-
-An example from our test machine, No Man's Sky on Virtual Desktop, which
-runs at 94 FPS without the bridge:
-
-| Refresh rate | Time allowed per pair | Result |
-|---|---|---|
-| 100 Hz | 20.0 ms | an even 100 |
-| 120 Hz | 16.7 ms | 113 to 115 |
-| 144 Hz | 13.9 ms | about 110 |
-
-A pair took about 17.7 ms there: about 10.5 ms for the game's frame, about
-5 ms of optical flow and generation, and the rest in handing the extra frame
-over. That fits at 100 Hz and not above.
-
-If your number stops short like this, lower the refresh rate, the per-eye
-resolution or the optical-flow resolution. The refresh rate where the number
-reaches the refresh rate is the one to play at.
+Generating frames costs GPU time too, so your game needs some headroom above
+half the refresh rate. If the number stops short (110 at 120 Hz, for
+example), lower the refresh rate, the per-eye resolution or the optical-flow
+resolution. See the
+[troubleshooting guide](docs/TROUBLESHOOTING.md#c-ofxr-works-but-it-does-not-feel-better).
 
 ### How much VRAM the bridge uses
 
 See the VRAM table in [Troubleshooting](docs/TROUBLESHOOTING.md#how-much-vram-ofxr-uses).
-Since 0.2.10.1 the mode no longer changes it: 2X, Prefer FPS over latency
-and 3X Frame Gen all use the same amount. The table assumes **Lower VRAM**
-on, which it is by default; with it off, add about 15% on D3D12 and D3D11.
-The bridge also stays out of Pimax Home, which takes the headset whenever a
-game leaves VR.
+
+### Other tools: MSFS AutoFPS
+
+The tray writes OFXR's live state to a small file, `status.json`, once a
+second. [MSFS AutoFPS](https://github.com/ResetXPDR/MSFS_AutoFPS) reads it,
+so it knows when frame generation is running and at which multiplier, and
+adjusts the simulator's detail to keep your frame rate at its maximum. Other
+tools can read it too: see [status.json](docs/STATUS_JSON.md).
 
 ### What the tray changes on your PC
 
@@ -504,20 +339,19 @@ and crashes in [GitHub Issues](https://github.com/djules75/OFXR-Bridge/issues)
 or on the [Flat2VR Modding Discord](https://discord.gg/flat2vr).
 
 Reported results are collected in the
-[OFXR Bridge Compatibility Chart](https://docs.google.com/spreadsheets/d/1lhaJm1wzt29exmx4tZbxdwf82RcrlLcyZJ850GcTf1w/edit?usp=sharing).
+[OFXR Bridge Compatibility Chart](https://docs.google.com/spreadsheets/d/1lhaJm1wzt29exmx4tZbxdwf82RcrlLcyZJ850GcTf1w/edit?usp=sharing);
+the games we tested ourselves are in the
+[game compatibility guide](docs/GAME_COMPATIBILITY.md#tested-games).
 
-Before reproducing a problem:
+Before reporting a problem:
 
 1. Right-click the tray icon and enable **Bridge flight recorder**.
-2. Start the game and reproduce the problem once. The recorder can also be
-   switched on while the game is already running, right when the problem
-   shows up: recording starts within a moment, and the log still begins with
-   what was noted when the game started (your headset's runtime, the
-   resolution, the game's graphics API). The game hitches once when you
-   switch it on or off.
+2. Start the game and reproduce the problem once. You can also switch the
+   recorder on while the game is running; the game hitches once.
 3. Close the game, then select **Open bridge logs** from the tray.
 4. Attach the newest `ofxr-bridge-flight-*.log` file to the issue.
-5. Make sure OFXR has worked on your system on at least another game before claiming that is not working for the game you are reporting
+5. Make sure OFXR works on your system in at least one other game before
+   reporting that it does not work in this one.
 
 Please also include:
 
