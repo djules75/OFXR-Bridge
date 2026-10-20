@@ -105,10 +105,10 @@ int main(int argc, char** argv) {
     if (reload_test && mode != "inline") return 1;
     g_overlay_swapchain_mode = overlay_test;
     // "frame-loop <runtime> <single|split|handoff> [paused]": that on Virtual
-    // Desktop a single-threaded session takes the presenter at its first
-    // generating frames and a split loop stays inline, that Pimax OpenXR stays
-    // inline whatever its pairs measure, and that another runtime still
-    // promotes on bunched pairs. "handoff", Virtual Desktop only: a
+    // Desktop and Pimax OpenXR a single-threaded session takes the presenter
+    // at its first generating frames and a split loop stays inline whatever
+    // its pairs measure, and that another runtime still promotes on bunched
+    // pairs. "handoff", Virtual Desktop only: a
     // single-threaded session that had the presenter moves its loop to
     // another thread, and the presenter a pass-through stopped comes back.
     //
@@ -650,11 +650,11 @@ int main(int argc, char** argv) {
                       << presenter_at << std::endl;
             const bool decided_by_shape = loop_runtime != "other";
             if (!decided_by_shape && start_paused) return 1; // not a scenario
-            if (loop_runtime == "virtual-desktop" && !split_loop)
+            if (decided_by_shape && !split_loop)
                 // Requested on the first generating frame, started by the next,
                 // seen by the application at the wait after that.
                 require(presenter_at >= 0 && presenter_at <= 6,
-                    "a single-threaded session takes the presenter at its first generating frames on Virtual Desktop");
+                    "a single-threaded session takes the presenter at its first generating frames on this runtime");
             else if (decided_by_shape)
                 require(presenter_at < 0,
                     "stays inline on this runtime whatever the pairs measure");

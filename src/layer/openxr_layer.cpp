@@ -538,10 +538,11 @@ struct Dispatch {
     // Virtual Desktop's runtime or Pimax Play's ("Pimax OpenXR"): the two
     // where a session's mode is fixed by the application's frame loop and by
     // nothing measured. A title that waits for its next frame inside the
-    // current one takes the presenter, as on every runtime. On Virtual
-    // Desktop a title whose frame loop runs on one thread takes it too, from
-    // its first generating frame (frame_loop_takes_presenter). Every other
-    // title stays inline for the whole session.
+    // current one takes the presenter, as on every runtime. A title whose
+    // frame loop runs on one thread takes it too, from its first generating
+    // frame (frame_loop_takes_presenter): Virtual Desktop since V433, Pimax
+    // OpenXR since V464fix2. Every other title stays inline for the whole
+    // session.
     //
     // They went by the bunched-pair detector before, and on these runtimes
     // its evidence was an accident of the session: the same title produced
@@ -850,7 +851,8 @@ struct SessionState {
     bool presenter_restore_after_pause{}; // frame_call_mutex
     // A pass-through frame stopped a presenter this session was running: a
     // structural quarantine, a cooldown, the menu switched off. Lets
-    // frame_loop_takes_presenter give it back on Virtual Desktop even once
+    // frame_loop_takes_presenter give it back on Virtual Desktop and Pimax
+    // OpenXR even once
     // split_frame_loop has latched. A title that hands its whole frame loop
     // from a loading thread to its render thread latches there after its
     // presenter started (IL-2 Great Battles, 24 s in), and an overlay's
@@ -13322,8 +13324,8 @@ struct InternalCycleResult {
     return true;
 }
 
-// Virtual Desktop, a frame loop on one thread: the presenter, from the first
-// generating frame, for the whole session.
+// Virtual Desktop or Pimax OpenXR, a frame loop on one thread: the presenter,
+// from the first generating frame, for the whole session.
 //
 // VDXR paces the first xrWaitFrame of a period and not the second, so inline
 // the real frame follows the synthetic by a fraction of a period - IL-2 Great
@@ -13338,6 +13340,18 @@ struct InternalCycleResult {
 // the two overlap. It is what V414-V416 did for this title, through the
 // bunched-pair detector, and what the reporter called "super smooth".
 //
+// Pimax OpenXR, the same rule since V464fix2 (issue #40). Inline, the
+// synthetic goes down in the application's own slot straight after its
+// synthesis is queued, so the deeper pipeline's period of slack - which only
+// the presenter's hold gives - never applies there. Elite Dangerous through
+// OpenComposite at 72 Hz: the synthetic waited 7 ms on the GPU behind the
+// game's own frame and finished a median 1.1 ms before Pimax's next wait
+// returned, after it on 785 of 4293 pairs, and the headset showed the
+// synthetics irregularly at an even 36 + 36 submitted. The presenter on this
+// runtime paces on Pimax's own wait with a half-period floor
+// (presenter_last_end_returned_at), as MSFS 2024, a pipelined title, already
+// runs it there.
+//
 // A split loop - the wait on one thread, the end on another, No Man's Sky -
 // stays inline: on the presenter at 144 Hz it ran the GPU out of room, with
 // synthetics held three periods and fifteen continuity resets a second,
@@ -13350,7 +13364,7 @@ struct InternalCycleResult {
 // frame (split_frame_loop latches on the first wait that follows an end from
 // another thread, before anything can generate). Nothing measured, nothing
 // that moves with the scene: the mode is settled at start-up and holds for
-// the session, as on Pimax OpenXR. Asked on every inline generating frame,
+// the session. Asked on every inline generating frame,
 // so a presenter the pause stopped, or a run of failures demoted, comes back
 // the same way.
 //
@@ -13367,7 +13381,7 @@ struct InternalCycleResult {
 // presenter a pass-through stopped, c the graphics binding.
 [[nodiscard]] bool frame_loop_takes_presenter(
     const std::shared_ptr<SessionState>& state) noexcept {
-    if (!state->dispatch->virtual_desktop_runtime ||
+    if (!state->dispatch->inline_unless_pipelined ||
         state->steamvr_presenter_start_requested ||
         (state->split_frame_loop && !state->presenter_restore_after_bypass)) {
         return false;
