@@ -3301,11 +3301,40 @@ void test_dlss_eye_order_measurement(D3D12WarpFixture& fixture) {
         require(split_left && split_right && split_left->eyes[0]->stream == 722 &&
                 split_right->eyes[0]->stream == 711,
             "the decided eye order did not hold with an evaluation between the releases");
-        require(split_left->eyes[0]->publication <= first_release &&
-                split_right->eyes[0]->publication <= second_release,
-            "an eye took an evaluation published after its release");
+        // V548: both releases belong to one frame, so each eye takes its
+        // stream's evaluation from either release: the left eye's stream
+        // (722) was published at the right eye's release, the right eye's
+        // (711) at the left eye's.
+        require(split_left->eyes[0]->publication == second_release &&
+                split_right->eyes[0]->publication == first_release,
+            "an eye did not take its stream's evaluation from the frame's two releases");
         require(!split_left->alternate && !split_right->alternate,
             "a decided pair between its releases still carried the other stream");
+    }
+    // V548: the first-released eye's own evaluation published only between
+    // the two releases - the second eye's wait for the game's queue completed
+    // it. Both releases belong to one frame, so that eye takes it, not its
+    // stream's previous evaluation (what V547 did: vectors a frame older
+    // than the image).
+    {
+        publish(711, first_output.Get());
+        const std::uint64_t left_release = xrfg::dlss_motion_vector_publications();
+        publish(722, second_output.Get());
+        const std::uint64_t right_release = xrfg::dlss_motion_vector_publications();
+        // The left eye's stream is 722 (decided above); its evaluation came
+        // after the left eye's own release and before the right eye's.
+        const auto late_left = xrfg::resolve_dlss_motion_vectors(
+            left_xr.Get(), fixture.queue(), 0, left_release, right_release);
+        const auto late_right = xrfg::resolve_dlss_motion_vectors(
+            right_xr.Get(), fixture.queue(), 1, right_release, left_release);
+        require(late_left && late_right && late_left->eyes[0]->stream == 722 &&
+                late_right->eyes[0]->stream == 711,
+            "the decided order did not hold when the left eye's evaluation came between the releases");
+        require(late_left->eyes[0]->publication == right_release &&
+                late_left->eyes[0]->publication > left_release,
+            "the first-released eye took its previous evaluation instead of the one the second release published");
+        require(late_right->eyes[0]->publication == left_release,
+            "the second-released eye did not take its own newest evaluation");
     }
     // Contrary votes after the decision change nothing.
     for (int measurement = 0; measurement < 100; ++measurement) {

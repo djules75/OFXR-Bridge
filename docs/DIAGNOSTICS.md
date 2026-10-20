@@ -440,7 +440,14 @@ first-seen order stands. A still head in a still scene gives no votes.
   3 (decided, one between). V546 applied the decided order on path 2 only;
   on path 3 each eye took the newest evaluation before its own release,
   whichever stream it was, which swapped Star Citizen's eyes after a live
-  switch to 3X on Virtual Desktop. V547 applies it on both.
+  switch to 3X on Virtual Desktop. V547 applies it on both. V548: `a` bit
+  44 set where the eye took its stream's previous evaluation rather than
+  its newest, and the count of those so far in `b`'s top 16 bits (path 0's
+  count is then 16 bits). The later of the two eyes' release watermarks now
+  bounds both eyes: the two bridged releases run back to back at the
+  game's xrEndFrame, and an evaluation the second eye's wait for the game's
+  queue completed is this frame's for the first eye too; V547 gave that eye
+  its previous evaluation, vectors one frame older than the image.
 
 ### The diagnostic tint (V539)
 

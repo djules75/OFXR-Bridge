@@ -548,12 +548,17 @@ void record_resolver_statistics(const DlssMotionVectorStatistics& statistics) no
 // the path << 32 | the chosen stream's low 32 bits, b the paths so far: 0
 // undecided, both evaluations before either release << 32 | 1 undecided, one
 // between the releases; c 2 decided, both before << 32 | 3 decided, one
-// between.
-void record_pair_path(std::uint64_t eye, unsigned path, const DlssMotionVectorFrame* chosen) noexcept {
+// between. V548: a bit 44 where the eye took its stream's previous
+// evaluation, not its newest, and the count of those so far in b's bits
+// 48-63 (16 bits, saturating).
+void record_pair_path(std::uint64_t eye, unsigned path, bool behind,
+    const DlssMotionVectorFrame* chosen) noexcept {
     if (chosen == nullptr || path > 3) return;
     static std::array<std::atomic<std::uint64_t>, 4> paths{};
+    static std::atomic<std::uint64_t> behinds{0};
     static std::atomic<std::uint64_t> records{0};
     paths[path].fetch_add(1, std::memory_order_relaxed);
+    if (behind) behinds.fetch_add(1, std::memory_order_relaxed);
     const std::uint64_t record = records.fetch_add(1, std::memory_order_relaxed);
     if (record >= 16 && record % 600 != 0) return;
     const auto count = [&](unsigned index) {
@@ -561,9 +566,11 @@ void record_pair_path(std::uint64_t eye, unsigned path, const DlssMotionVectorFr
     };
     try {
         bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 869,
-            (eye << 40U) | (static_cast<std::uint64_t>(path) << 32U) |
-                (chosen->stream & 0xFFFFFFFFULL),
-            (count(0) << 32U) | count(1), (count(2) << 32U) | count(3));
+            (eye << 40U) | (behind ? 1ULL << 44U : 0ULL) |
+                (static_cast<std::uint64_t>(path) << 32U) | (chosen->stream & 0xFFFFFFFFULL),
+            (std::min<std::uint64_t>(behinds.load(std::memory_order_relaxed), 0xFFFFULL) << 48U) |
+                ((count(0) & 0xFFFFULL) << 32U) | count(1),
+            (count(2) << 32U) | count(3));
     } catch (...) {
     }
 }
@@ -1844,23 +1851,46 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             // measured and decided. The release now only says which of the
             // decided stream's evaluations an eye takes, and an undecided
             // pair is measured whichever way its eyes were given.
+            std::uint64_t accept_limit = released_at;
             if (candidates.size() == 2 && untold_pair(candidates)) {
                 std::sort(candidates.begin(), candidates.end(),
                     [](const Candidate& a, const Candidate& b) {
                         return a.first_publication < b.first_publication;
                     });
                 const bool undecided = order_measured_pair(candidates);
+                // V548: the later of the two eyes' watermarks bounds both
+                // eyes. The bridged releases of a frame's two eyes run back
+                // to back at the game's xrEndFrame, each publishing the
+                // evaluations whose Vulkan submissions its wait for the
+                // game's queue completed, then reading its watermark. When
+                // the second eye's wait is what completes the first eye's
+                // DLSS submission - Star Citizen evaluates its eyes in either
+                // order - the first eye's own evaluation lands above its
+                // watermark and below the other's, and V547 gave that eye its
+                // stream's previous evaluation: vectors one frame older than
+                // the image, a valid pair that chained, and a double image on
+                // every head move (Virtual Desktop, 3X, a quarter of the
+                // resolves on that path). Both releases belong to one game
+                // frame, so what either had published is this frame's.
+                const std::uint64_t limit =
+                    other_released_at != 0 ? std::max(released_at, other_released_at) : released_at;
+                accept_limit = limit;
                 const auto at_release = [&](const Candidate& candidate) {
-                    return candidate.frame->publication <= released_at
+                    return candidate.frame->publication <= limit
                         ? candidate.frame : candidate.previous;
                 };
                 const bool tie = chosen && other && chosen == other;
                 unsigned path = 0;
+                bool behind = false;
                 if (!undecided) {
-                    chosen = at_release(candidates[static_cast<std::size_t>(eye)]);
+                    const Candidate& own = candidates[static_cast<std::size_t>(eye)];
+                    chosen = at_release(own);
+                    behind = chosen != own.frame;
                     path = tie ? 2U : 3U;
                 } else if (tie) {
-                    chosen = at_release(candidates[static_cast<std::size_t>(eye)]);
+                    const Candidate& own = candidates[static_cast<std::size_t>(eye)];
+                    chosen = at_release(own);
+                    behind = chosen != own.frame;
                     alternate = at_release(candidates[static_cast<std::size_t>(1 - eye)]);
                     path = 0;
                 } else if (chosen) {
@@ -1869,7 +1899,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                     alternate = at_release(unchosen);
                     path = 1;
                 }
-                record_pair_path(static_cast<std::uint64_t>(eye), path, chosen.get());
+                record_pair_path(static_cast<std::uint64_t>(eye), path, behind, chosen.get());
             } else if (chosen && other && chosen == other) {
                 if (candidates.size() >= 2) {
                     // Both evaluated before either release. Exactly two
@@ -1909,7 +1939,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                     }
                 }
             }
-            if (!chosen || frames.empty() || chosen->publication > released_at ||
+            if (!chosen || frames.empty() || chosen->publication > accept_limit ||
                 frames.front()->publication - chosen->publication > kMaximumStereoPublicationGap)
                 return stale();
             if (other && other != chosen)
