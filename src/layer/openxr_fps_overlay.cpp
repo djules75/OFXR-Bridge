@@ -57,6 +57,9 @@ struct OpenXrFpsOverlay::Impl {
     FpsOverlaySize size{FpsOverlaySize::big};
     bool show_latency{true};
     bool show_hybrid{true};
+    bool show_multiplier{true};
+    // The session's frame generation multiplier (FpsSnapshot::multiplier).
+    int multiplier{0};
     // Added-latency samples from whichever thread submits the real frame,
     // drained into a window at every redraw; the figure is the mean of the
     // last four windows, about a second.
@@ -147,9 +150,10 @@ struct OpenXrFpsOverlay::Impl {
         }
         if (format == DXGI_FORMAT_UNKNOWN) return false;
         width = overlay_texture_width(eye_width);
-        // 24x20 of the number's grid: its 24x12, four rows above for Hybrid's
-        // state and four below for the latency (rasterize_fps_overlay).
-        height = width * 5 / 6;
+        // 24x24 of the number's grid: its 24x12, four rows above for Hybrid's
+        // state and eight below for the latency and the multiplier
+        // (rasterize_fps_overlay).
+        height = width;
         if (width > properties.graphicsProperties.maxSwapchainImageWidth ||
             height > properties.graphicsProperties.maxSwapchainImageHeight) return false;
         XrReferenceSpaceCreateInfo space_info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
@@ -317,6 +321,7 @@ struct OpenXrFpsOverlay::Impl {
         size = parse_overlay_size(ascii(ini_file::read_string(ini, L"overlay", L"size", L"big")));
         show_latency = ini_file::read_int(ini, L"overlay", L"latency", 1) != 0;
         show_hybrid = ini_file::read_int(ini, L"overlay", L"hybrid", 1) != 0;
+        show_multiplier = ini_file::read_int(ini, L"overlay", L"multiplier", 1) != 0;
         if (position == FpsOverlayPosition::off || disabled || !info->layerCount || !info->layers) return;
         float left = -1, right = 1, down = -1, up = 1;
         std::uint32_t eye_width = 0;
@@ -364,11 +369,12 @@ struct OpenXrFpsOverlay::Impl {
         // head turns enough to move it off. Reproduced in Callisto Protocol,
         // and reported as the counter vanishing, so rule it out before
         // suspecting the upload path.
-        // The texture is two thirds taller than the number's panel, a third
-        // above it and a third below, so the number stays where the placement
-        // puts it.
-        quad.pose.position = {placement.x, placement.y, placement.z};
-        quad.size = {placement.width, placement.height * 5.0f / 3.0f};
+        // The texture is twice the number's panel: a third of it above for
+        // Hybrid's state and two thirds below for the latency and the
+        // multiplier. The quad sits a sixth of the panel lower than the
+        // placement, so the number stays where the placement puts it.
+        quad.pose.position = {placement.x, placement.y - placement.height / 6.0f, placement.z};
+        quad.size = {placement.width, placement.height * 2.0f};
         auto snapshot = displayed_snapshot(now);
         snapshot.paused = paused;
         // Only while generation runs: nothing beside a red or paused number.
@@ -376,6 +382,8 @@ struct OpenXrFpsOverlay::Impl {
             ? latency_ms() : -1;
         // Likewise Hybrid's state: only while generation runs.
         snapshot.hybrid = show_hybrid && snapshot.active && !paused ? hybrid : -1;
+        // And the multiplier.
+        snapshot.multiplier = show_multiplier && snapshot.active && !paused ? multiplier : 0;
         upload(snapshot);
     }
 
@@ -463,6 +471,13 @@ void OpenXrFpsOverlay::set_hybrid_status(int status) noexcept {
     std::scoped_lock lock(impl_->mutex);
     if (impl_->hybrid == status) return;
     impl_->hybrid = status;
+    impl_->next_refresh = 0;
+}
+
+void OpenXrFpsOverlay::set_multiplier(int multiplier) noexcept {
+    std::scoped_lock lock(impl_->mutex);
+    if (impl_->multiplier == multiplier) return;
+    impl_->multiplier = multiplier;
     impl_->next_refresh = 0;
 }
 

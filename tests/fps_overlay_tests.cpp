@@ -241,6 +241,41 @@ int main(int argc, char** argv) {
                 "Hybrid status leaves the number as it was");
         require(rasterize_fps_overlay(240, 160, hybrid_ok, false) == tall_plain,
                 "a 16-row image has no room for Hybrid status");
+        // V550: the multiplier below the latency in a 24-row image, where the
+        // latency would be when it is off; nothing for 0, no room in 20 rows
+        // under the latency.
+        FpsSnapshot latency_3x = with_latency, only_3x = snapshot, latency_2x = with_latency;
+        latency_3x.multiplier = 3;
+        only_3x.multiplier = 3;
+        latency_2x.multiplier = 2;
+        const auto ink_rows = [](const std::vector<std::uint32_t>& image, std::size_t from,
+                                 std::size_t to) {
+            std::size_t ink = 0;
+            for (std::size_t i = 240 * from; i < 240 * to && i < image.size(); ++i) {
+                require(image[i] == 0 || image[i] == 0xff70eb40u, "multiplier in the number's colour");
+                ink += image[i] != 0;
+            }
+            return ink;
+        };
+        const auto full_latency = rasterize_fps_overlay(240, 240, with_latency, false);
+        const auto full_3x = rasterize_fps_overlay(240, 240, latency_3x, false);
+        const auto full_2x = rasterize_fps_overlay(240, 240, latency_2x, false);
+        const auto full_only = rasterize_fps_overlay(240, 240, only_3x, false);
+        // The number ends at row 135 (rows 4-16 of the grid, 7 of its 10-pixel
+        // glyph rows from 65), the latency at 140-175, the multiplier at 180-215.
+        require(std::equal(full_latency.begin(), full_latency.begin() + 240 * 180, full_3x.begin()),
+                "the multiplier leaves the number and the latency as they were");
+        require(ink_rows(full_latency, 180, 240) == 0 && ink_rows(full_3x, 180, 216) > 0 &&
+                    ink_rows(full_3x, 216, 240) == 0,
+                "3X drawn below the latency, at its size");
+        require(full_2x != full_3x && ink_rows(full_2x, 180, 216) > 0, "2X differs from 3X");
+        require(ink_rows(full_only, 140, 176) > 0 && ink_rows(full_only, 180, 240) == 0,
+                "without the latency the multiplier takes its line");
+        require(ink_rows(rasterize_fps_overlay(240, 240, snapshot, false), 136, 240) == 0,
+                "multiplier 0 draws nothing");
+        require(rasterize_fps_overlay(240, 200, latency_3x, false) ==
+                    rasterize_fps_overlay(240, 200, with_latency, false),
+                "a 20-row image has no room for the multiplier under the latency");
         // Optional visual artifact, not a live image or runtime dependency.
         if (argc > 1) {
             std::ofstream file(argv[1], std::ios::binary);

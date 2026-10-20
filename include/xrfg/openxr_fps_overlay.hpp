@@ -39,6 +39,9 @@ public:
     // Hybrid's state above the number (FpsSnapshot::hybrid): negative
     // nothing, 0 OK, otherwise the flight-log record behind a failure.
     void set_hybrid_status(int status) noexcept;
+    // The frame generation multiplier the session runs, 2 or 3, drawn below
+    // the latency (FpsSnapshot::multiplier); 0 nothing.
+    void set_multiplier(int multiplier) noexcept;
     // The headset's scanout period as the layer knows it, so the counter can
     // draw the refresh rate for a rate within 2% of it (displayed_rate). Any
     // thread; 0 clears it.

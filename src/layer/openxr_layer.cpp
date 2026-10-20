@@ -14251,6 +14251,8 @@ XrResult layer_end_frame_impl(
         std::scoped_lock gpu_lock(state->gpu_mutex);
         state->fps_overlay->set_paused(state->pause_applied);
         state->fps_overlay->set_hybrid_status(judge_hybrid_status(*state));
+        state->fps_overlay->set_multiplier(
+            static_cast<int>(state->frames_per_application_frame.load()));
         state->fps_overlay->application_frame(end_info);
     }
 

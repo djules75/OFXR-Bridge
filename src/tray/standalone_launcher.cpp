@@ -254,6 +254,9 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "overlay_hybrid") {
                     settings.overlay_hybrid = value == "1" ||
                                               lower_ascii(value) == "true";
+                } else if (key == "overlay_multiplier") {
+                    settings.overlay_multiplier = value == "1" ||
+                                                  lower_ascii(value) == "true";
                 } else if (key == "diagnostics") {
                     settings.diagnostics = value == "1" ||
                                            lower_ascii(value) == "true";
@@ -349,6 +352,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\noverlay_size=" + overlay_size_name(settings.overlay_size) +
            "\r\noverlay_latency=" + (settings.overlay_latency ? "1" : "0") +
            "\r\noverlay_hybrid=" + (settings.overlay_hybrid ? "1" : "0") +
+           "\r\noverlay_multiplier=" + (settings.overlay_multiplier ? "1" : "0") +
            "\r\npause_hotkey=" + settings.pause_hotkey +
            "\r\nedge_ghosting_reduction=" +
            (settings.edge_ghosting_reduction ? "1" : "0") +
@@ -597,7 +601,8 @@ std::string build_runtime_ini(
            "\r\n[overlay]\r\nposition=" + overlay_position_name(settings.overlay_position) +
            "\r\nsize=" + overlay_size_name(settings.overlay_size) +
            "\r\nlatency=" + (settings.overlay_latency ? "1" : "0") +
-           "\r\nhybrid=" + (settings.overlay_hybrid ? "1" : "0") + "\r\n";
+           "\r\nhybrid=" + (settings.overlay_hybrid ? "1" : "0") +
+           "\r\nmultiplier=" + (settings.overlay_multiplier ? "1" : "0") + "\r\n";
 }
 
 std::filesystem::path runtime_version_directory(

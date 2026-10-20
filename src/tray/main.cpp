@@ -84,6 +84,7 @@ enum MenuCommand : UINT {
     overlay_size_small = 133,
     toggle_overlay_latency = 134,
     toggle_overlay_hybrid = 135,
+    toggle_overlay_multiplier = 136,
     donate_creator = 138,
     donate_maintainer = 139,
     show_about = 140,
@@ -1670,6 +1671,9 @@ void show_context_menu(AppState& state) {
         AppendMenuW(overlay_menu, MF_STRING |
             (state.settings.overlay_latency ? MF_CHECKED : MF_UNCHECKED),
             toggle_overlay_latency, L"Show latency");
+        AppendMenuW(overlay_menu, MF_STRING |
+            (state.settings.overlay_multiplier ? MF_CHECKED : MF_UNCHECKED),
+            toggle_overlay_multiplier, L"Show multiplier");
         AppendMenuW(overlay_menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(overlay_menu, MF_STRING |
             (state.settings.overlay_hybrid ? MF_CHECKED : MF_UNCHECKED),
@@ -1881,7 +1885,7 @@ void handle_command(AppState& state, UINT command) {
                 L"Reset every OFXR setting to its factory default?\n\n"
                 L"Optical flow: FidelityFX (NVIDIA: Medium at 50%, bidirectional "
                 L"consistency off). Prefer FPS over latency: on. Frame Gen "
-                L"multiplier: 2X. Lower VRAM: on. FPS overlay: upper right, big, latency and Hybrid status shown. Bridge "
+                L"multiplier: 2X. Lower VRAM: on. FPS overlay: upper right, big, latency, multiplier and Hybrid status shown. Bridge "
                 L"flight recorder: off. Pause key: Ctrl + Alt + F7. Hybrid: off, "
                 L"its depth search off. "
                 L"Settings "
@@ -1975,6 +1979,12 @@ void handle_command(AppState& state, UINT command) {
         state.settings.overlay_latency = !state.settings.overlay_latency;
         update_runtime_options(
             state, L"The latency below the FPS number updates in running applications.");
+        break;
+    case toggle_overlay_multiplier:
+        state.settings.overlay_multiplier = !state.settings.overlay_multiplier;
+        update_runtime_options(
+            state, L"The multiplier below the latency, 2X or 3X, updates in running "
+                   L"applications.");
         break;
     case toggle_overlay_hybrid:
         state.settings.overlay_hybrid = !state.settings.overlay_hybrid;

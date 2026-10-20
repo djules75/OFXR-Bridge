@@ -147,6 +147,7 @@ std::array<unsigned, 7> glyph(char c) noexcept {
     case ')': return {8,4,2,2,2,4,8};
     case 'm': return {0,0,26,21,21,21,21};
     case 's': return {0,0,15,16,14,1,30};
+    case 'X': return {17,17,10,4,10,17,17};
     default: return {};
     }
 }
@@ -226,17 +227,25 @@ std::vector<std::uint32_t> rasterize_fps_overlay(
                 snapshot.hybrid == 0 ? color(64, 235, 112) : color(255, 80, 80));
         }
     }
+    // The lines below the number: half its size, each one of its own glyph
+    // pixels below the one above it.
+    const float small_cell = std::max(1.0f, cell * 0.5f);
+    const auto small_height = static_cast<unsigned>(std::ceil(7 * small_cell));
+    const auto small_gap = static_cast<unsigned>(std::ceil(small_cell));
+    unsigned next_top = below + small_gap;
     if (snapshot.latency_ms >= 0) {
         char latency[8]{};
         const auto latency_length = static_cast<unsigned>(std::snprintf(
             latency, sizeof(latency), "%dms", std::min(snapshot.latency_ms, 999)));
-        // Half the number's size, one of its own glyph pixels below it.
-        const float latency_cell = std::max(1.0f, cell * 0.5f);
-        const unsigned latency_top =
-            below + static_cast<unsigned>(std::ceil(latency_cell));
-        if (latency_top + static_cast<unsigned>(std::ceil(7 * latency_cell)) <= height) {
-            draw(latency, latency_length, latency_cell, latency_top);
+        if (next_top + small_height <= height) {
+            draw(latency, latency_length, small_cell, next_top);
         }
+        next_top += small_height + small_gap;
+    }
+    // V550: the multiplier below the latency, in the number's colour.
+    if (snapshot.multiplier >= 2 && snapshot.multiplier <= 9 && next_top + small_height <= height) {
+        const char multiplier[3]{static_cast<char>('0' + snapshot.multiplier), 'X', '\0'};
+        draw(multiplier, 2, small_cell, next_top);
     }
     return pixels;
 }
