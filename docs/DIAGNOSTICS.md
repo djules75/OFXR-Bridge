@@ -432,6 +432,15 @@ first-seen order stands. A still head in a still scene gives no votes.
 - 868, the pair's order, once a session (kept through the log's wraps): `a`
   the left stream, `b` the right, `c` the votes for the lower stream as the
   left `<< 40` or for the higher `<< 16` (24 bits each) or the measurements.
+- 869 (V547), how the pair went to an eye at its release, the first 16 and
+  every 600th after: `a` the eye `<< 40` or the path `<< 32` or the chosen
+  stream's low 32 bits; `b` the count of path 0 (undecided, both
+  evaluations before either release) `<< 32` or path 1 (undecided, one
+  between the releases); `c` path 2 (decided, both before) `<< 32` or path
+  3 (decided, one between). V546 applied the decided order on path 2 only;
+  on path 3 each eye took the newest evaluation before its own release,
+  whichever stream it was, which swapped Star Citizen's eyes after a live
+  switch to 3X on Virtual Desktop. V547 applies it on both.
 
 ### The diagnostic tint (V539)
 

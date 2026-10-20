@@ -543,6 +543,31 @@ void record_resolver_statistics(const DlssMotionVectorStatistics& statistics) no
     }
 }
 
+// V547, 869: how a swapchain-per-eye session's two untold streams went to an
+// eye at its release, the first 16 and every 600th after: a the eye << 40 |
+// the path << 32 | the chosen stream's low 32 bits, b the paths so far: 0
+// undecided, both evaluations before either release << 32 | 1 undecided, one
+// between the releases; c 2 decided, both before << 32 | 3 decided, one
+// between.
+void record_pair_path(std::uint64_t eye, unsigned path, const DlssMotionVectorFrame* chosen) noexcept {
+    if (chosen == nullptr || path > 3) return;
+    static std::array<std::atomic<std::uint64_t>, 4> paths{};
+    static std::atomic<std::uint64_t> records{0};
+    paths[path].fetch_add(1, std::memory_order_relaxed);
+    const std::uint64_t record = records.fetch_add(1, std::memory_order_relaxed);
+    if (record >= 16 && record % 600 != 0) return;
+    const auto count = [&](unsigned index) {
+        return paths[index].load(std::memory_order_relaxed) & 0xFFFFFFFFULL;
+    };
+    try {
+        bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 869,
+            (eye << 40U) | (static_cast<std::uint64_t>(path) << 32U) |
+                (chosen->stream & 0xFFFFFFFFULL),
+            (count(0) << 32U) | count(1), (count(2) << 32U) | count(3));
+    } catch (...) {
+    }
+}
+
 }  // namespace
 
 void publish_dlss_motion_vectors(
@@ -1470,13 +1495,14 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         // the order the pair's measurement decided replaces first seen
         // (report_dlss_eye_order); true while the pair is still undecided,
         // and its sets then carry the other stream for the measurement.
+        const auto untold_pair = [&](const std::vector<Candidate>& pair) {
+            return pair.size() == 2 && pair[0].frame && pair[1].frame &&
+                pair[0].frame->stream != pair[1].frame->stream &&
+                input_offset(*pair[0].frame) == input_offset(*pair[1].frame) &&
+                !pair[0].frame->view.known && !pair[1].frame->view.known;
+        };
         const auto order_measured_pair = [&](std::vector<Candidate>& pair) {
-            if (pair.size() != 2 || !pair[0].frame || !pair[1].frame ||
-                pair[0].frame->stream == pair[1].frame->stream ||
-                input_offset(*pair[0].frame) != input_offset(*pair[1].frame) ||
-                pair[0].frame->view.known || pair[1].frame->view.known) {
-                return false;
-            }
+            if (!untold_pair(pair)) return false;
             const auto key = std::minmax(pair[0].frame->stream, pair[1].frame->stream);
             const auto found = state.eye_orders.find({key.first, key.second});
             const std::uint64_t left =
@@ -1808,7 +1834,43 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 return one_eye(chosen, false);
             }
             std::shared_ptr<const DlssMotionVectorFrame> alternate;
-            if (chosen && other && chosen == other) {
+            // V547: two streams nothing tells apart go to the eyes by their
+            // measured order on this path too. V546 applied the order only
+            // where both evaluations came before either release (the tie
+            // below); where one came between the two releases, each eye took
+            // the newest evaluation before its own, whichever stream that
+            // was - Star Citizen switched live to 3X on Virtual Desktop got
+            // the other eye's vectors in each eye, with the pair's order
+            // measured and decided. The release now only says which of the
+            // decided stream's evaluations an eye takes, and an undecided
+            // pair is measured whichever way its eyes were given.
+            if (candidates.size() == 2 && untold_pair(candidates)) {
+                std::sort(candidates.begin(), candidates.end(),
+                    [](const Candidate& a, const Candidate& b) {
+                        return a.first_publication < b.first_publication;
+                    });
+                const bool undecided = order_measured_pair(candidates);
+                const auto at_release = [&](const Candidate& candidate) {
+                    return candidate.frame->publication <= released_at
+                        ? candidate.frame : candidate.previous;
+                };
+                const bool tie = chosen && other && chosen == other;
+                unsigned path = 0;
+                if (!undecided) {
+                    chosen = at_release(candidates[static_cast<std::size_t>(eye)]);
+                    path = tie ? 2U : 3U;
+                } else if (tie) {
+                    chosen = at_release(candidates[static_cast<std::size_t>(eye)]);
+                    alternate = at_release(candidates[static_cast<std::size_t>(1 - eye)]);
+                    path = 0;
+                } else if (chosen) {
+                    const Candidate& unchosen =
+                        candidates[0].frame->stream == chosen->stream ? candidates[1] : candidates[0];
+                    alternate = at_release(unchosen);
+                    path = 1;
+                }
+                record_pair_path(static_cast<std::uint64_t>(eye), path, chosen.get());
+            } else if (chosen && other && chosen == other) {
                 if (candidates.size() >= 2) {
                     // Both evaluated before either release. Exactly two
                     // active streams keep the input-offset ordering; a

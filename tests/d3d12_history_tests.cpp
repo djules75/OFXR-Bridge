@@ -3228,6 +3228,30 @@ void test_dlss_eye_order_measurement(D3D12WarpFixture& fixture) {
     require(left->alternate && left->alternate->stream == 722 && left->resolved_eye == 0 &&
             right->alternate && right->alternate->stream == 711 && right->resolved_eye == 1,
         "an undecided pair's sets did not carry the other stream for the measurement");
+    // V547: one evaluation between the two releases. The left eye's release
+    // comes after the first stream's, the right eye's after both: each eye
+    // takes the newest before its own release, and is measured against the
+    // other stream.
+    const auto split_releases = [&]() {
+        publish(711, first_output.Get());
+        const std::uint64_t first_release = xrfg::dlss_motion_vector_publications();
+        publish(722, second_output.Get());
+        const std::uint64_t second_release = xrfg::dlss_motion_vector_publications();
+        return std::pair{first_release, second_release};
+    };
+    {
+        const auto [first_release, second_release] = split_releases();
+        const auto split_left = xrfg::resolve_dlss_motion_vectors(
+            left_xr.Get(), fixture.queue(), 0, first_release, second_release);
+        const auto split_right = xrfg::resolve_dlss_motion_vectors(
+            right_xr.Get(), fixture.queue(), 1, second_release, first_release);
+        require(split_left && split_right && split_left->eyes[0]->stream == 711 &&
+                split_right->eyes[0]->stream == 722,
+            "an undecided pair's releases did not keep the newest evaluation before each");
+        require(split_left->alternate && split_left->alternate->stream == 722 &&
+                split_right->alternate && split_right->alternate->stream == 711,
+            "an undecided pair between its releases was not measured against the other stream");
+    }
 
     // Each eye's images favour the other stream, too few times to decide.
     for (int measurement = 0; measurement < 10; ++measurement) {
@@ -3265,6 +3289,24 @@ void test_dlss_eye_order_measurement(D3D12WarpFixture& fixture) {
         "the decided eye order did not replace the first-seen order");
     require(!left_decided->alternate && !right_decided->alternate,
         "a decided pair still carried the other stream for the measurement");
+    // V547: with one evaluation between the releases, the decided order
+    // still holds - the left eye takes the second stream's evaluation from
+    // before its release, not the first stream's newer one.
+    {
+        const auto [first_release, second_release] = split_releases();
+        const auto split_left = xrfg::resolve_dlss_motion_vectors(
+            left_xr.Get(), fixture.queue(), 0, first_release, second_release);
+        const auto split_right = xrfg::resolve_dlss_motion_vectors(
+            right_xr.Get(), fixture.queue(), 1, second_release, first_release);
+        require(split_left && split_right && split_left->eyes[0]->stream == 722 &&
+                split_right->eyes[0]->stream == 711,
+            "the decided eye order did not hold with an evaluation between the releases");
+        require(split_left->eyes[0]->publication <= first_release &&
+                split_right->eyes[0]->publication <= second_release,
+            "an eye took an evaluation published after its release");
+        require(!split_left->alternate && !split_right->alternate,
+            "a decided pair between its releases still carried the other stream");
+    }
     // Contrary votes after the decision change nothing.
     for (int measurement = 0; measurement < 100; ++measurement) {
         xrfg::report_dlss_eye_order(0, 722, 711, 0, 5000, 5000);
