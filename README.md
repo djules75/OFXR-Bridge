@@ -200,7 +200,8 @@ such as cockpit frames and railings, from breaking up.
 
 OFXR's files are digitally signed, so Easy Anti-Cheat lets OFXR load in Star
 Citizen. 2X and 3X both work, and Hybrid works with the game's DLSS. Start
-OFXR before the game.
+OFXR before the game. The best settings are in the
+[game compatibility guide](docs/GAME_COMPATIBILITY.md#star-citizen).
 
 > [!CAUTION]
 > OFXR is an independent project, not endorsed by Cloud Imperium Games or

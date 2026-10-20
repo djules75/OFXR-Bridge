@@ -14,7 +14,7 @@ collects players' reports.
 | Game | How it runs in VR | Hybrid |
 |---|---|---|
 | Microsoft Flight Simulator 2024 | Native OpenXR | Yes, [settings below](#microsoft-flight-simulator-2024) |
-| Star Citizen | Native OpenXR | Yes |
+| Star Citizen | Native OpenXR | Yes, [settings below](#star-citizen) |
 | No Man's Sky | OpenComposite | Yes |
 | Hogwarts Legacy | UEVR | Yes |
 | Returnal | UEVR | Yes |
@@ -36,6 +36,7 @@ collects players' reports.
 - [Microsoft Flight Simulator 2024](#microsoft-flight-simulator-2024)
 - [R.E.A.L. VR games](#real-vr-games)
 - [Skyrim VR](#skyrim-vr)
+- [Star Citizen](#star-citizen)
 
 ---
 
@@ -116,3 +117,22 @@ With Mod Organizer, the file is in the upscaler's own mod folder. Leave
 - Choose the DLSS option, not DLAA: DLAA does not start at Skyrim VR's
   resolution (**HYBRID KO (821)**).
 - No DLSS mod enabled at all gives **HYBRID KO (820)**.
+
+---
+
+## Star Citizen
+
+**Easy Anti-Cheat:** OFXR loads in Star Citizen because its files are signed.
+Using it with an anti-cheat protected game is at your own risk.
+
+**Best settings for frame rate:**
+
+- **Frame Gen multiplier:** 3X.
+- **Hybrid:** on.
+- **Hybrid: depth search:** on.
+
+In 2X, depth search costs more than it gives back. In 3X it removes a lot of
+the artifacts the two generated frames would otherwise show, so it is worth
+its cost there.
+
+Start OFXR before the game, so Hybrid is ready when Star Citizen sets up DLSS.
