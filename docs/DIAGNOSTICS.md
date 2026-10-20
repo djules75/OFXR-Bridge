@@ -430,6 +430,17 @@ Otherwise **magenta** nothing of the current frame came from there,
 consulted (static pixels). Stripes instead of a solid colour: the optical
 flow was mixed in.
 
+V543: the mask's band (the tuning window's "Mask band", off by default):
+each moving surface's footprint is drawn along its own motion, either way,
+by that share of it and at least a texel, so background a fast edge
+uncovers is found although the picture sits slightly off its vectors -
+R.E.A.L. VR's eye between two of its evaluations, render-resolution
+vectors, an anti-aliased fringe. Off by default: in Cyberpunk 2077 it did
+not reach the ghost left at fast edges (that one shows with the optical flow
+alone too), and it costs about 0.2 ms a pair at 20%, more moving faster.
+866 records the tuning fields past 813's
+sixteen (`a` the mask band, `c` the window's sequence).
+
 The second-surface search (Edge surface solves) accepts a surface only
 where the coverage mask does not give its previous-frame spot to another
 surface (V539): white bands in the mask tint were the search painting the

@@ -5783,9 +5783,14 @@ int main(int argc, char** argv) {
             }
             test_hybrid_side_by_side(hybrid_fixture);
             test_hybrid_side_by_side(hybrid_fixture, true);
-            test_hybrid_bars(hybrid_fixture, false);
+            // Without depth the bars are missing (V543: with the mask's band
+            // on, a third of them is found - the band marks the background
+            // they sweep as revealed, and the second-surface search finds
+            // them).
+            const double bars_without_depth = test_hybrid_bars(hybrid_fixture, false);
+            require(bars_without_depth < 0.95, "hybrid bars without depth are whole: depth is not needed");
             // V505: with the game's depth the bars are whole in the
-            // generated frame (none of them without it).
+            // generated frame.
             require(test_hybrid_bars(hybrid_fixture, true) >= 0.95,
                 "hybrid bars with depth are not whole in the generated frame");
             // V530: the depth tiles skip the search only where it would
@@ -5811,13 +5816,15 @@ int main(int argc, char** argv) {
                           << differing << " bytes differ\n";
                 require(differing == 0, "the depth tiles changed the generated frame");
             }
-            // V532: the menu's "Hybrid: depth search" off, the bars go again.
+            // V532: the menu's "Hybrid: depth search" off, the bars are as
+            // without depth again.
             xrfg::set_hybrid_depth_search(false);
-            require(test_hybrid_bars(hybrid_fixture, true) <= 0.05,
+            require(test_hybrid_bars(hybrid_fixture, true) <= bars_without_depth + 0.05,
                 "Hybrid: depth search off did not reach the shader");
             xrfg::set_hybrid_depth_search(true);
             // V507: the tray's live tuning block reaches the shader. With a
-            // block whose depth reach is nothing, the bars go again.
+            // block whose depth reach is nothing and (V543) no mask band, the
+            // bars go again, as before V543.
             // Skipped where a tray already owns the block, so a live window
             // is not written over.
             {
@@ -5833,6 +5840,7 @@ int main(int argc, char** argv) {
                     values.sequence = 1;
                     values.depth_near_reach_px = 0;
                     values.depth_far_reach_px = 0;
+                    values.mask_band_percent = 0;
                     *block = values;
                     // The synthesizer retries a failed open once a second.
                     SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", nullptr);
@@ -5840,7 +5848,7 @@ int main(int argc, char** argv) {
                     const double with_block = test_hybrid_bars(hybrid_fixture, true);
                     SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
                     require(with_block <= 0.05,
-                        "the live tuning block's depth reach did not reach the shader");
+                        "the live tuning block's depth reach and mask band did not reach the shader");
                     values.depth_far_reach_px = xrfg::live_tuning::kDefaults.depth_far_reach_px;
                     values.sequence = 2;
                     *block = values;

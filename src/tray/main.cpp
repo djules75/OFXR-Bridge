@@ -122,8 +122,8 @@ struct AppState {
     // values set once hold for every game started after them.
     HWND tuning_window{};
     std::array<HWND, 2> tuning_switches{};
-    std::array<HWND, 14> tuning_sliders{};
-    std::array<HWND, 14> tuning_labels{};
+    std::array<HWND, 15> tuning_sliders{};
+    std::array<HWND, 15> tuning_labels{};
     HANDLE tuning_mapping{};
     xrfg::live_tuning::Block* tuning_block{};
 };
@@ -1138,7 +1138,7 @@ struct TuningSlider {
     bool reversed;
 };
 
-constexpr std::array<TuningSlider, 14> kTuningSliders{{
+constexpr std::array<TuningSlider, 15> kTuningSliders{{
     {L"Agree threshold", 0, 62,
      &xrfg::live_tuning::Block::hybrid_agree_threshold_255ths, 1U, 1.0, L"/255",
      L"the flow is asked only where the vectors' two frames disagree by more",
@@ -1168,6 +1168,10 @@ constexpr std::array<TuningSlider, 14> kTuningSliders{{
      &xrfg::live_tuning::Block::revealed_error_1000ths, 1U, 0.001, L"",
      L"revealed background accepted within this; looser skips the flow more",
      nullptr, true},
+    {L"Mask band", 0, 50,
+     &xrfg::live_tuning::Block::mask_band_percent, 1U, 1.0, L"%",
+     L"revealed background found this share of a surface's motion beyond it; 0 V539's mask",
+     nullptr, false},
     {L"Vector snap", 0, 40,
      &xrfg::live_tuning::Block::vector_snap_tenths, 1U, 0.1, L"px",
      L"nearest vector where the four texels differ by more; 0 always (no cost)",

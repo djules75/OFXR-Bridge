@@ -458,8 +458,10 @@ void record_composition_switches() noexcept {
 // once per pair for every layout, so the switches are recorded for all of
 // them. Each new set of values is recorded once, as embedded_configuration
 // result=813: a the first eight fields of xrfg::live_tuning::Block, 8 bits
-// each from bit 0; b the remaining seven, likewise; c the window's sequence
-// (0 without the window). (811 was V475-V494's record, with the edge
+// each from bit 0; b the next eight, likewise; c the window's sequence (0
+// without the window). V543: the fields past the sixteenth, as
+// embedded_configuration result=866: a 8 bits each from bit 0 (the mask
+// band), c the sequence. (811 was V475-V494's record, with the edge
 // ghosting reduction values that left with the feature; V497-V506's 813
 // packed the pattern lock and three hybrid values.) Returns the values
 // the hybrid's draws read (V530: the depth tiles are sized from them).
@@ -485,12 +487,20 @@ xrfg::live_tuning::Block apply_live_composition_tuning(
         for (std::size_t index = 0; index < 8; ++index) {
             a |= static_cast<std::uint64_t>(field[index] & 0xFFU) << (8 * index);
         }
-        for (std::size_t index = 8; index < xrfg::live_tuning::kFieldCount; ++index) {
+        for (std::size_t index = 8; index < std::min<std::size_t>(16, xrfg::live_tuning::kFieldCount);
+             ++index) {
             b |= static_cast<std::uint64_t>(field[index] & 0xFFU) << (8 * (index - 8));
         }
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::embedded_configuration,
             813, a, b, values.sequence);
+        std::uint64_t more = 0;
+        for (std::size_t index = 16; index < xrfg::live_tuning::kFieldCount; ++index) {
+            more |= static_cast<std::uint64_t>(field[index] & 0xFFU) << (8 * (index - 16));
+        }
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::embedded_configuration,
+            866, more, 0, values.sequence);
     }
     return values;
 }

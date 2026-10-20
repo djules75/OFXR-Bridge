@@ -120,7 +120,7 @@ int depth_tiles_radius() {
 ByteAddressBuffer HybridTuning : register(t8);
 
 static const uint kTuningMagic = 0x4C565446u;
-static const uint kTuningVersion = 8u;
+static const uint kTuningVersion = 9u;
 // Field indices: xrfg::live_tuning::Block's order after its header.
 static const uint kTuningAgree = 0u;
 static const uint kTuningChoiceSlope = 1u;
@@ -138,6 +138,7 @@ static const uint kTuningDepthSolves = 12u;
 static const uint kTuningDepthNearer = 13u;
 static const uint kTuningDepthAgree = 14u;
 static const uint kTuningTint = 15u;
+static const uint kTuningMaskBand = 16u;
 
 bool tuning_present() {
     return HybridTuning.Load(0u) == kTuningMagic && HybridTuning.Load(4u) == kTuningVersion;
@@ -169,6 +170,8 @@ static uint last_mask_gate = 0u;
 // 0 off, 1 tinted by last_vectors_case (and the flow's share), 2 by
 // last_mask_state.
 uint hybrid_tint_mode() { return min(tuning_value(kTuningTint, 0u), 2u); }
+// V543: the coverage mask's band, a share of each surface's motion.
+float coverage_mask_band() { return float(min(tuning_value(kTuningMaskBand, 0u), 50u)) / 100.0; }
 
 // Where the vectors' warped samples disagree by less, they are taken as they
 // are and the flow is not asked.
@@ -2132,14 +2135,26 @@ void BuildCoverageMask(uint3 id : SV_DispatchThreadID) {
     float priority = game_depth_available() ? game_nearness(pixel)
                                             : min(length(motion), 255.0) / 255.0;
     uint word = coverage_mask_word(motion, priority);
-    float2 at = (previous.coordinate - output_rect.xy + 0.5) /
-        max(output_rect.zw, float2(1.0, 1.0)) * extent;
-    int2 base = int2(floor(at - 0.5));
+    float2 per_pixel = extent / max(output_rect.zw, float2(1.0, 1.0));
+    float2 at = (previous.coordinate - output_rect.xy + 0.5) * per_pixel;
     int2 limit = int2(ceil(extent));
-    [unroll] for (uint corner = 0; corner < 4; ++corner) {
-        int2 texel = base + int2(corner & 1u, corner >> 1);
-        if (all(texel >= 0) && all(texel <= limit)) {
-            InterlockedMax(CoverageMaskOut[uint3(uint2(texel), Slice)], word);
+    // V543: a moving surface along its own motion, either way, by the band's
+    // share of it and at least a texel (0, V539's mask); the nearer (or
+    // faster) surface still keeps a contested texel.
+    float2 band = float2(0.0, 0.0);
+    if (coverage_mask_band() > 0.0 && length(motion) > 0.5) {
+        float2 along = normalize(motion) * max(coverage_mask_band() * length(motion), 1.0 / per_pixel.x);
+        band = along * per_pixel;
+    }
+    uint steps = min(uint(ceil(length(band))), 8u);
+    [loop] for (int step = -int(steps); step <= int(steps); ++step) {
+        float2 spot = at + (steps != 0u ? band * (float(step) / float(steps)) : float2(0.0, 0.0));
+        int2 base = int2(floor(spot - 0.5));
+        [unroll] for (uint corner = 0; corner < 4; ++corner) {
+            int2 texel = base + int2(corner & 1u, corner >> 1);
+            if (all(texel >= 0) && all(texel <= limit)) {
+                InterlockedMax(CoverageMaskOut[uint3(uint2(texel), Slice)], word);
+            }
         }
     }
 }
