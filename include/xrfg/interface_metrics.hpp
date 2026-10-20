@@ -19,11 +19,11 @@ struct InterfaceDeliveryReceipt {
     const bool synthetic;
     std::atomic<bool> synthetic_confirmed{false};
     std::atomic<int> outcome{0}; // 0 pending, 1 nonempty native success, -1 failure/empty
-    std::int64_t entered_ns{},returned_ns{},display_ns{};
+    std::int64_t entered_ns{},returned_ns{},display_ns{},prepared_ns{};
     explicit InterfaceDeliveryReceipt(bool generated) noexcept:synthetic(generated) {}
     void completed(bool success,std::int64_t entered,std::int64_t returned,
-                   std::int64_t display) noexcept {
-        entered_ns=entered;returned_ns=returned;display_ns=display;
+                   std::int64_t display,std::int64_t prepared=0) noexcept {
+        entered_ns=entered;returned_ns=returned;display_ns=display;prepared_ns=prepared;
         outcome.store(success?1:-1,std::memory_order_release);
     }
 };
@@ -44,6 +44,7 @@ class InterfaceCycle {
     std::array<SyntheticReceipt,4> synthetic_{};
     std::size_t synthetic_count_{};
     bool estimate_valid_{true};
+    std::int64_t real_display_ns_{};
     bool native_required_{},native_valid_{true};
     std::array<std::shared_ptr<InterfaceDeliveryReceipt>,8> native_{};
     std::size_t native_count_{};
@@ -86,6 +87,9 @@ public:
         std::scoped_lock lock(mutex_);required=native_required_;
         return required && native_real(out);
     }
+    void real_prediction(std::int64_t display) noexcept {
+        std::scoped_lock lock(mutex_);real_display_ns_=display;
+    }
     // Observation only: no sleep, queue operation or GPU synchronization.
     // Pending native results can confirm receipts later and out of order.
     void synthetic_accepted(std::int64_t at, std::int64_t period) noexcept {
@@ -103,17 +107,14 @@ public:
             InterfaceNativeTiming real;
             if(!valid_ || !started_ns || producer_returned_<started_ns || !native_real(real) ||
                 real.display_ns<real.entered_ns)return false;
-            bool generated_delivered=false;
-            for(std::size_t i=0;i<native_count_;++i) {
-                const auto& receipt=native_[i];
-                generated_delivered |= receipt->synthetic && receipt->synthetic_confirmed.load(std::memory_order_acquire) &&
-                    receipt->outcome.load(std::memory_order_acquire)==1 &&
-                    receipt->entered_ns>=started_ns && receipt->entered_ns<real.entered_ns;
-            }
-            if(!generated_delivered)return false;
             // The director already spaces outputs. Its actual real target
             // includes those slots: never add another refresh to the receipt.
             estimated_ms=float(std::max({real.display_ns,real.returned_ns,producer_returned_})-started_ns)*1e-6F;
+            return std::isfinite(estimated_ms);
+        }
+        if(valid_ && !synthetic_count_ && started_ns && producer_returned_>=started_ns &&
+            real_display_ns_>=started_ns && accepted_ns>=started_ns) {
+            estimated_ms=float(std::max({real_display_ns_,producer_returned_,accepted_ns})-started_ns)*1e-6F;
             return std::isfinite(estimated_ms);
         }
         if(!valid_ || !estimate_valid_ || !synthetic_count_ || !started_ns ||
@@ -141,6 +142,51 @@ public:
         ofxr_ms=float(held)*1e-6F;
         cycle_ms=float(std::max(producer_returned_,accepted_ns)-started_ns)*1e-6F;
         return true;
+    }
+    // A wall-clock partition, not GPU kernel durations. Production excludes
+    // the union of intercepted XR calls before the source End entry; their
+    // blocking time belongs to delivery even with generation disabled.
+    // Native generation/preparation ends
+    // only after the first confirmed synthetic's existing preparation fence
+    // and copy have completed. Delivery owns the remainder to the real target.
+    // No synthetic means zero OFXR generation, including the disabled baseline.
+    bool stages(std::int64_t source_end,std::int64_t accepted,float estimated,
+                float& game,float& generation,float& delivery) const noexcept {
+        std::scoped_lock lock(mutex_);
+        if(!valid_ || !started_ns || source_end<started_ns ||
+            producer_returned_<source_end || !std::isfinite(estimated))return false;
+        std::int64_t ready=source_end;
+        if(native_required_) {
+            InterfaceNativeTiming real;if(!native_real(real))return false;
+            const InterfaceDeliveryReceipt* first{};
+            bool has_synthetic{};
+            for(std::size_t i=0;i<native_count_;++i) {
+                const auto& r=native_[i];if(!r->synthetic)continue;
+                has_synthetic=true;
+                if(r->outcome.load(std::memory_order_acquire)!=1 ||
+                   !r->synthetic_confirmed.load(std::memory_order_acquire) ||
+                   r->entered_ns>=real.entered_ns)continue;
+                if(!first || r->entered_ns<first->entered_ns)first=r.get();
+            }
+            if(has_synthetic) {
+                if(!first || first->prepared_ns<source_end || first->prepared_ns>first->entered_ns)return false;
+                ready=first->prepared_ns;
+            }
+        } else if(synthetic_count_) {
+            if(!estimate_valid_ || synthetic_[0].accepted<source_end || accepted<synthetic_[0].accepted)return false;
+            ready=synthetic_[0].accepted;
+        }
+        std::int64_t xr_calls{};
+        for(std::size_t i=0;i<count_;++i)
+            xr_calls+=std::max(std::int64_t{},std::min(source_end,intervals_[i].last)-
+                std::max(started_ns,intervals_[i].first));
+        if(xr_calls>source_end-started_ns)return false;
+        game=float(source_end-started_ns-xr_calls)*1e-6F;
+        generation=float(ready-source_end)*1e-6F;
+        delivery=estimated-game-generation;
+        // Floating-point subtraction may leave a few nanoseconds below zero.
+        if(delivery<-.001F)return false;
+        delivery=std::max(0.F,delivery);return true;
     }
 };
 // Construct before call locks; destruct after them and all frame teardown.
@@ -179,6 +225,8 @@ struct InterfaceTelemetry {
     float cycle_estimated_ms{};
     bool cycle_estimated_valid{};
     InterfaceSource cycle_estimated_source{};
+    float game_time_ms{},generation_time_ms{},delivery_time_ms{};
+    bool stages_valid{};
 };
 
 // Caller serializes access. Fixed storage; only the first successful real
@@ -215,7 +263,8 @@ public:
         std::array<float, 256> delay{}, presentation{}, cpu{};
         std::array<float,256> ofxr{},cycle{};
         std::array<float,256> estimated{};
-        std::size_t nd{}, np{}, nc{}, nt{}, ne{};
+        std::array<float,256> game_stage{},generation_stage{},delivery_stage{};
+        std::size_t nd{}, np{}, nc{}, nt{}, ne{},ns{};
         bool native_cycle{},native_estimate{};
         for (const auto& s : samples_) {
             if (!s.at || now < s.at || now - s.at > 1'000'000'000) continue;
@@ -228,7 +277,11 @@ public:
             } else if (s.display_valid) presentation[np++] = s.presentation;
             if (s.cpu_valid) cpu[nc++] = s.cpu;
             if(s.cycle && s.cycle->read(s.accepted_ns,ofxr[nt],cycle[nt])){++nt;native_cycle|=delivered;}
-            if(s.cycle && s.cycle->read_estimated(s.accepted_ns,estimated[ne])){++ne;native_estimate|=delivered;}
+            if(s.cycle && s.cycle->read_estimated(s.accepted_ns,estimated[ne])) {
+                if(s.cycle->stages(s.source_entered_ns,s.accepted_ns,estimated[ne],
+                    game_stage[ns],generation_stage[ns],delivery_stage[ns]))++ns;
+                ++ne;native_estimate|=delivered;
+            }
         }
         const auto median = [](auto& values, std::size_t count) {
             std::sort(values.begin(), values.begin() + count);
@@ -244,6 +297,9 @@ public:
         out.cycle_estimated_valid=ne!=0;
         if(ne)out.cycle_estimated_ms=median(estimated,ne);
         out.cycle_estimated_source=ne?(native_estimate?InterfaceSource::native_predicted_display_qpc:InterfaceSource::frame_cycle_slot_estimate):InterfaceSource::none;
+        out.stages_valid=ns!=0;
+        if(ns) {out.game_time_ms=median(game_stage,ns);out.generation_time_ms=median(generation_stage,ns);
+            out.delivery_time_ms=median(delivery_stage,ns);}
         out.delay_source = nd ? InterfaceSource::real_frame_qpc : InterfaceSource::none;
         out.presentation_source = np ? InterfaceSource::predicted_display_qpc : InterfaceSource::none;
         out.cpu_source = nc ? InterfaceSource::application_cpu_qpc : InterfaceSource::none;

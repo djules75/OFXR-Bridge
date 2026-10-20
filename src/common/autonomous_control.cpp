@@ -76,7 +76,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465852;
-constexpr std::uint32_t kAbi = 60401;
+constexpr std::uint32_t kAbi = 60801;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==72); // V471 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==69); // previously reserved padding
@@ -187,7 +187,7 @@ public:
             identity ^= static_cast<std::uint64_t>(std::towlower(character));
             identity *= 1099511628211ULL;
         }
-        const auto prefix = L"Local\\OFXRAutonomousV604-" + std::to_wstring(identity);
+        const auto prefix = L"Local\\OFXRAutonomousV608-" + std::to_wstring(identity);
         mutex = CreateMutexW(nullptr, FALSE, (prefix + L"-mutex").c_str());
         if (!mutex) return;
         const DWORD waited = WaitForSingleObject(mutex, 2000);

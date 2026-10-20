@@ -23,12 +23,14 @@ int main() {
         m.output_source=InterfaceSource::steamvr_delivery;
         m.ofxr_time_ms=7; m.cycle_length_ms=55; m.cycle_estimated_ms=44;
         m.ofxr_time_valid=m.cycle_valid=m.cycle_estimated_valid=true;
+        m.stages_valid=true;m.game_time_ms=20;m.generation_time_ms=5;m.delivery_time_ms=19;
         log_benchmark_telemetry(m);
         logger.flush();
         const auto path=benchmark_log_path(logger.log_path());
         std::ifstream input(path); std::stringstream text; text << input.rdbuf();
         if(text.str().find("op=benchmark_rates result=2049 dur_us=0 a=343597383720000 b=171798691930000") == std::string::npos ||
-            text.str().find("op=benchmark_cycles result=7 dur_us=0 a=30064771127000 b=44000") == std::string::npos)
+            text.str().find("op=benchmark_cycles result=7 dur_us=0 a=30064771127000 b=44000") == std::string::npos ||
+            text.str().find("op=benchmark_stages result=1 dur_us=0 a=85899345925000 b=19000") == std::string::npos)
             throw std::runtime_error("menu FPS/cycle values were not recorded with their units and source");
         if(autonomous::snapshot().revision != control.revision) throw std::runtime_error("benchmark reconfigured renderer");
         logger.shutdown();

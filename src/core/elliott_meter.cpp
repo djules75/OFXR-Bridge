@@ -334,10 +334,10 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
         {value(m.game_fps,current&&m.rates_valid,true),"Real submitted",metric_tone(m.rates_valid)},
         {value(m.generated_fps,current&&m.rates_valid,true),"Gen submitted",metric_tone(m.rates_valid)},
         {value(m.display_hz,current&&m.display_hz>0,true),"Display Hz",PanelTone::dim},
-        {value(m.ofxr_time_ms,current&&m.ofxr_time_valid,false),"OFXR time",metric_tone(m.ofxr_time_valid)},
-        {value(m.cycle_length_ms,current&&m.cycle_valid,false),"Cycle length",metric_tone(m.cycle_valid)},
-        {value(m.cycle_estimated_ms,current&&m.cycle_estimated_valid,false),"Cycle estimated",metric_tone(m.cycle_estimated_valid)},
-        {std::string(status),"State",tone}};
+        {value(m.game_time_ms,current&&m.stages_valid,false),"Game time",metric_tone(m.stages_valid)},
+        {value(m.generation_time_ms,current&&m.stages_valid,false),"Generation time",metric_tone(m.stages_valid)},
+        {value(m.delivery_time_ms,current&&m.stages_valid,false),"Delivery time",metric_tone(m.stages_valid)},
+        {value(m.cycle_estimated_ms,current&&m.cycle_estimated_valid,false),"Cycle (estimated)",metric_tone(m.cycle_estimated_valid)}};
     const std::string vectors=std::string(autonomous::interface_vectors_text(state,now_ms));
     const std::string explanation=autonomous::interface_status_text(state);
     const auto vector_rows=wrap(vectors,51), status_rows=wrap(explanation,51);
@@ -362,7 +362,8 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
         for(std::size_t k=0;k<std::min<std::size_t>(lines.size(),2);++k){
             c.text(centre-8*scale*int(lines[k].size())/2,yy,lines[k],scale,n.tone);yy+=8*scale+2;
         }
-        c.text(centre-16*int(std::string_view(n.label).size())/2,i<4?100:184,n.label,body,PanelTone::dim);
+        const int label_scale=8*body*int(std::string_view(n.label).size())>column-8 ? 1 : body;
+        c.text(centre-8*label_scale*int(std::string_view(n.label).size())/2,i<4?100:184,n.label,label_scale,PanelTone::dim);
     }
     c.rule(margin,w-margin,124,2);c.rule(margin,w-margin,206,2);
     int y=rows_top, drawn=0;

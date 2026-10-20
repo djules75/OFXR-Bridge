@@ -25,5 +25,8 @@ inline void log_benchmark_telemetry(const InterfaceTelemetry& value) noexcept {
         (value.ofxr_time_valid ? 1 : 0) | (value.cycle_valid ? 2 : 0) | (value.cycle_estimated_valid ? 4 : 0),
         (std::uint64_t(benchmark_milli(value.ofxr_time_ms)) << 32) | benchmark_milli(value.cycle_length_ms),
         benchmark_milli(value.cycle_estimated_ms), control.revision);
+    logger.event(BridgeFlightOperation::benchmark_stages,value.stages_valid?1:0,
+        (std::uint64_t(benchmark_milli(value.game_time_ms))<<32)|benchmark_milli(value.generation_time_ms),
+        benchmark_milli(value.delivery_time_ms),control.revision);
 }
 }

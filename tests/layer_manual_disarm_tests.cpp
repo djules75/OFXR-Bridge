@@ -46,6 +46,7 @@ int main(int argc, char** argv) {
     const bool luke_fixture_mode=luke_no_guides || luke_color;
     g_luke_scratch_mode=luke_fixture_mode;
     const bool control_mode = argc == 4 && std::string_view(argv[3]) == "controls";
+    g_recycle_control_slots=control_mode;
     const std::string marker_mode = argc == 4 && !control_mode && !luke_fixture_mode ? argv[3] : "";
     if (!marker_mode.empty() && (mode != "d3d11" ||
         (marker_mode != "on" && marker_mode != "off" && marker_mode != "hidden"))) return 1;
@@ -313,6 +314,13 @@ int main(int argc, char** argv) {
             capture(); submit(frame.predictedDisplayTime);
             require(wait_for_queue_idle(), "re-enabled GPU retirement");
         }
+        if(g_synthetic_release_calls.load()<=synthetic_after_stop) {
+            const auto s=xrfg::autonomous::snapshot();
+            std::cerr<<"control receipt revision "<<s.revision<<" applied "<<s.runtime.applied_revision
+                <<" enabled "<<s.desired.enabled<<" backend "<<s.desired.backend
+                <<" preset "<<s.desired.preset<<" scale "<<s.desired.scale<<" state "
+                <<unsigned(s.runtime.generation_state)<<" pending "<<s.runtime.pending<<'\n';
+        }
         require(g_synthetic_release_calls.load() > synthetic_after_stop, "synthesis resumes in same XR session");
         const auto before_failure = g_synthetic_release_calls.load();
         require(menu_request(1, 1, 1, 2, 0) != 0, "request unavailable NVIDIA on WARP");
@@ -374,8 +382,12 @@ int main(int argc, char** argv) {
         for (const auto& path : log_paths()) {
             std::ifstream input(path);
             const std::string contents{std::istreambuf_iterator<char>(input), {}};
-            require(contents.find("op=negotiation") != std::string::npos,
-                "late-started log retains startup identity metadata");
+            // F9 off intentionally records no startup diagnostics. Every new
+            // file identifies its logger version/PID; an initially enabled
+            // run additionally retains the actually observed runtime identity.
+            require(contents.find("op=logger result=") != std::string::npos &&
+                (!retain_failure || contents.find("op=runtime_identity") != std::string::npos),
+                "late-started log identifies its build/process without inventing unobserved startup data");
             require(contents.find("op=downstream_first_end_frame") != std::string::npos,
                 "live logging records frames from the existing loaded session");
         }
@@ -404,6 +416,9 @@ int main(int argc, char** argv) {
     if (swapchain && destroy_swapchain) destroy_swapchain(swapchain);
     if (session && destroy_session) destroy_session(session);
     if (instance && destroy_instance) destroy_instance(instance);
+    if(control_mode && result==0 && std::any_of(g_control_slot_live.begin()+1,g_control_slot_live.end(),[](bool live){return live;})) {
+        std::cerr<<"private control slots remain live after teardown\n";result=1;
+    }
     if (module) FreeLibrary(module);
     // The production hook monitor outlives XR teardown. Keep the marker
     // module loaded until process exit, just as the actual game injector is.

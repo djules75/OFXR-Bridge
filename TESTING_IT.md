@@ -1,3 +1,17 @@
+## V608: quattro tempi e riferimento a generazione spenta
+
+Riavvia tray e gioco con V608. F10 e meter Elliott mostrano Game time,
+Generation time, Delivery time e Cycle (estimated). Anche con OFXR spento
+il ciclo stimato viene registrato nel benchmark quando il clock e disponibile.
+Con la DLL caricata il bridge privato resta attivo: non e un confronto senza DLL.
+Game time esclude le chiamate XR intercettate; le loro attese restano nella
+consegna anche senza generazione. Sono tempi osservati del percorso, non
+misure isolate del costo GPU o della latenza testa-pannello. F9 e facoltativo
+per i meter e il benchmark; non serve F8. Formato CSV e script del foglio
+invariati. Per confrontare i vecchi 35ms con le route attive occorre una nuova
+misura: V607 non registrava il ciclo stimato del riferimento spento.
+Il ghosting Hybrid/FSR di High on Life2 Synched Sequential resta da esaminare.
+
 ## V604: interfaccia e report automatico del device hung
 
 Avvia tray e gioco V604 insieme. Nei due pannelli lo stato mostra il framework

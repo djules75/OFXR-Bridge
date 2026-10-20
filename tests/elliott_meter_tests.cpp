@@ -28,11 +28,18 @@ int main(int argc,char** argv){try{
     m.output_source=InterfaceSource::steamvr_delivery;m.output_fps=90;m.game_fps=45;m.generated_fps=45;m.display_hz=90;
     m.ofxr_time_ms=9;m.cycle_length_ms=17;m.cycle_estimated_ms=28.1F;
     m.ofxr_time_valid=m.cycle_valid=m.cycle_estimated_valid=true;
+    m.game_time_ms=9;m.generation_time_ms=5;m.delivery_time_ms=14.1F;m.stages_valid=true;
     unsigned rows{};auto pixels=rasterize_elliott_meter(s,1000,false,false,&rows);
     check(pixels.size()==1024*512&&rows>250&&rows<=512,"two metric rows and diagnostics fit");
     check(pixels[0]==0&&pixels[100*1024+30]!=0,"rounded upstream canvas");
-    auto changed=s;changed.runtime.telemetry.cycle_length_ms=65;
-    check(rasterize_elliott_meter(changed,1000,false,false)!=pixels,"draw supplied measured counter");
+    for(int stage=0;stage<4;++stage) {
+        auto changed=s;auto& v=changed.runtime.telemetry;
+        if(stage==0)v.game_time_ms=65;
+        if(stage==1)v.generation_time_ms=65;
+        if(stage==2)v.delivery_time_ms=65;
+        if(stage==3)v.cycle_estimated_ms=65;
+        check(rasterize_elliott_meter(changed,1000,false,false)!=pixels,"each of the four supplied stage counters is drawn");
+    }
     auto stale=rasterize_elliott_meter(s,4000,false,false);
     check(stale!=pixels,"stale metrics show unavailable");
     auto active=s;

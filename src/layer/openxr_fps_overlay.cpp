@@ -1145,8 +1145,11 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
     const auto submit_clock = measure ? interface_clock_ns() : 0;
     const auto result = delivery?impl_->private_delivery_end(submitted,delivery):impl_->downstream_end(impl_->session, submitted);
     const auto accepted_clock = measure ? interface_clock_ns() : 0;
-    if (measure && !synthetic) impl_->timings.submitted(stamp, submit_clock, result == XR_SUCCESS,
-        nonempty, synthetic, new_content, display, accepted_clock);
+    if (measure && !synthetic) {
+        if(result==XR_SUCCESS && nonempty && stamp.cycle)stamp.cycle->real_prediction(display);
+        impl_->timings.submitted(stamp, submit_clock, result == XR_SUCCESS,
+            nonempty, synthetic, new_content, display, accepted_clock);
+    }
     if (result != XR_SUCCESS) {
         if (impl_->menu_open) impl_->menu_event(8, result);
         impl_->close_menu();

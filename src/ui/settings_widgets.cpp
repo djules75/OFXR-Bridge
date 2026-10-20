@@ -62,14 +62,15 @@ void status(const Snapshot& state) {
         value("Display Hz", m.display_hz, current && m.display_hz > 0, true,
             m.display_source == InterfaceSource::steamvr_display ? "SteamVR physical display frequency." : "OpenXR shortest observed predicted display period; may reflect runtime throttling.");
         ImGui::TableNextRow();
-        value("OFXR time", m.ofxr_time_ms, current && m.ofxr_time_valid, false,
-            "Wall time in this frame's app Wait/Begin/Acquire/Wait/Release/End calls, including blocking runtime calls and waits after submission. Concurrent calls counted once; game code between calls excluded.");
-        value("Cycle length", m.cycle_length_ms, current && m.cycle_valid, false,
-            "Cycle from this frame's app WaitFrame entry to the later of app EndFrame return and its real native EndFrame return. SteamVR includes director queuing, GPU preparation and native submission. Not measured headset scanout.");
-        value("Cycle estimated", m.cycle_estimated_ms, current && m.cycle_estimated_valid, false,
-            "SteamVR: full cycle to this real frame's actual native predicted display time, including director queuing and GPU preparation; never adds another refresh to slots already delivered. N/A until matching real and confirmed generated outputs reach the runtime. Other runtimes use the generated-to-real slot estimate. Prediction, not measured scanout or streaming.");
-        ImGui::TableNextColumn();
-        ImGui::TextDisabled("State");
+        value("Game time", m.game_time_ms, current && m.stages_valid, false,
+            "App/UEVR wall time before source EndFrame entry, excluding the union of intercepted XR calls. XR pacing and blocked bridge calls belong to Delivery time. Not pure game GPU time or input-to-photon latency.");
+        value("Generation time", m.generation_time_ms, current && m.stages_valid, false,
+            "Observed preparation: source EndFrame entry until the first confirmed generated output is GPU-ready and copied for native submission. Includes generation queuing, history retention and copies, not just GPU kernel time. Zero when no generated output was delivered. Other runtimes use generated submission acceptance.");
+        value("Delivery time", m.delivery_time_ms, current && m.stages_valid, false,
+            "XR/bridge time outside generation preparation: intercepted app XR calls before End plus the remaining time to the real predicted display target. Includes pacing, copies, native runtime and prediction horizon. Also measured with generation off. Per-frame stages partition Cycle; independent displayed medians need not add exactly.");
+        value("Cycle (estimated)", m.cycle_estimated_ms, current && m.cycle_estimated_valid, false,
+            "This frame's app WaitFrame entry to its actual native real-frame predicted display target, or later producer/native return. Includes the game's production phase and our delivery. No extra refresh added. Also measured with generation off. A prediction, not measured panel scanout or head-motion latency; compositor pose reprojection is separate.");
+        ImGui::EndTable();
         const auto text = interface_state_text(state);
         const auto color = interface_generation_active(state) ? ImVec4(.36F,.88F,.56F,1) :
             text == "Fallback" || text == "Applying settings" ? ImVec4(1,.75F,.28F,1) : ImVec4(.75F,.8F,.88F,1);
@@ -78,7 +79,6 @@ void status(const Snapshot& state) {
         ImGui::TextUnformatted(text.data(), text.data() + text.size());
         ImGui::PopTextWrapPos();
         ImGui::PopStyleColor();
-        ImGui::EndTable();
     }
     ImGui::Text("Vectors: %s", interface_vectors_text(state, now).data());
     const auto explanation = interface_status_text(state);

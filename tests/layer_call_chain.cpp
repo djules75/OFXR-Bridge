@@ -109,6 +109,10 @@ std::atomic<std::uint32_t> g_begin_frame_calls{0};
 std::atomic<std::uint32_t> g_end_frame_calls{0};
 std::atomic<std::uint32_t> g_locate_views_calls{0};
 std::atomic<std::uint32_t> g_create_swapchain_calls{0};
+// Opt-in live-control fixture: keep its five-handle budget, but permit a
+// private handle to be allocated again after the layer actually destroys it.
+bool g_recycle_control_slots{};
+std::array<bool,5> g_control_slot_live{};
 // Split-eye counts the two kinds of creation separately. The layer takes its
 // private swapchains when a projection layer first names an application
 // swapchain rather than when that swapchain's images are enumerated, so both
@@ -558,6 +562,11 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
     XrSwapchain* swapchain) {
     std::uint32_t call =
         g_create_swapchain_calls.fetch_add(1, std::memory_order_relaxed);
+    if(g_recycle_control_slots && call) {
+        for(call=1;call<g_control_slot_live.size() && g_control_slot_live[call];++call) {}
+        if(call==g_control_slot_live.size())return XR_ERROR_LIMIT_REACHED;
+        g_control_slot_live[call]=true;
+    }
     if (g_luke_scratch_mode && call == 3) {
         *swapchain = g_current_swapchain_c;
         return XR_SUCCESS;
@@ -740,7 +749,15 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_poll_event(
     return XR_SUCCESS;
 }
 
-XRAPI_ATTR XrResult XRAPI_CALL fake_destroy_swapchain(XrSwapchain) {
+XRAPI_ATTR XrResult XRAPI_CALL fake_destroy_swapchain(XrSwapchain handle) {
+    if(g_recycle_control_slots) {
+        const XrSwapchain slots[]{g_application_swapchain,g_current_swapchain,g_current_swapchain_b,
+            g_synthetic_swapchain,g_synthetic_swapchain_b};
+        for(unsigned i=1;i<5;++i)if(handle==slots[i]) {
+            if(!g_control_slot_live[i])return XR_ERROR_HANDLE_INVALID;
+            g_control_slot_live[i]=false;
+        }
+    }
     g_swapchain_destroyed.store(true, std::memory_order_release);
     g_destroy_swapchain_calls.fetch_add(1, std::memory_order_relaxed);
     return XR_SUCCESS;

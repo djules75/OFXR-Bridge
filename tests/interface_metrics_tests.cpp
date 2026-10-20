@@ -93,7 +93,7 @@ void native_delivery_cycle() {
     generated->completed(true,145'000'000,146'000'000,155'000'000);
     real->completed(true,156'111'111,157'000'000,166'111'111);
     check(c->read(109'000'000,calls,ms) && calls==3 && ms==57,"native full cycle includes47ms beyond virtual return, producer call total unchanged");
-    check(!c->read_estimated(109'000'000,ms),"native success alone cannot confirm generated content");
+    check(c->read_estimated(109'000'000,ms),"actual real prediction is valid independently of generation confirmation");
     generated->synthetic_confirmed=true;
     check(c->read_estimated(109'000'000,ms) && std::abs(ms-66.111111F)<.001F,"native predicted real slot counted once, no additional refresh");
     InterfaceTelemetry actual;window.snapshot(160'000'000,actual);
@@ -113,6 +113,37 @@ void native_delivery_cycle() {
     triple->attach_native_delivery(generated);triple->attach_native_delivery(second);triple->attach_native_delivery(triple_real);
     check(triple->read_estimated(109'000'000,ms) && std::abs(ms-77.222222F)<.001F,"3X uses actual real target, two delivered synthetic slots are not added twice");
     window.snapshot(1'200'000'000,actual);check(!actual.cycle_valid,"native observations expire normally");
+}
+void stage_partition_and_baseline() {
+    auto c=std::make_shared<InterfaceCycle>(100'000'000);c->producer_returned(125'000'000);
+    c->call(100'000'000,105'000'000);c->call(110'000'000,112'000'000);
+    c->call(111'000'000,114'000'000); // overlapping eye calls count once
+    c->call(120'000'000,125'000'000); // End preparation is outside the game phase
+    auto real=std::make_shared<InterfaceDeliveryReceipt>(false);
+    c->attach_native_delivery(real);real->completed(true,130'000'000,131'000'000,145'000'000,129'000'000);
+    InterfaceTimingWindow window;
+    check(window.submitted({608,120'000'000,105'000'000,c},123'000'000,true,true,false,true,0,125'000'000),"disabled baseline source identity");
+    InterfaceTelemetry m;window.snapshot(150'000'000,m);
+    check(m.cycle_estimated_valid && m.cycle_estimated_ms==45 && m.stages_valid,"baseline cycle needs no synthetic frame");
+    check(m.game_time_ms==11 && m.generation_time_ms==0 && m.delivery_time_ms==34,"disabled baseline removes XR waits from game time and assigns them to delivery once");
+    auto generated=std::make_shared<InterfaceDeliveryReceipt>(true);c->attach_native_delivery(generated);
+    generated->completed(true,127'000'000,128'000'000,138'000'000,126'000'000);
+    window.snapshot(150'000'000,m);check(!m.stages_valid && m.cycle_estimated_valid,"unconfirmed generated pixels cannot supply a preparation boundary");
+    generated->synthetic_confirmed=true;window.snapshot(150'000'000,m);
+    check(m.stages_valid && m.game_time_ms==11 && m.generation_time_ms==6 && m.delivery_time_ms==28,"native preparation and delivery partition one exact real cycle");
+    auto extra=std::make_shared<InterfaceDeliveryReceipt>(true);extra->synthetic_confirmed=true;
+    extra->completed(true,129'000'000,130'000'000,140'000'000,128'000'000);c->attach_native_delivery(extra);
+    window.snapshot(150'000'000,m);
+    check(m.stages_valid && m.generation_time_ms==6 && m.cycle_estimated_ms==45,"3X first-output preparation and actual real target are not added twice");
+    auto legacy=std::make_shared<InterfaceCycle>(100'000'000);legacy->producer_returned(125'000'000);legacy->real_prediction(140'000'000);
+    float estimated{},game{},gen{},delivery{};
+    check(legacy->read_estimated(125'000'000,estimated) && estimated==40 &&
+        legacy->stages(120'000'000,125'000'000,estimated,game,gen,delivery) && game==20 && gen==0 && delivery==20,
+        "nonprivate baseline uses a converted actual real prediction, not a synthetic slot constant");
+    legacy->real_prediction(0);check(!legacy->read_estimated(125'000'000,estimated),"unknown baseline display clock stays N/A");
+    generated->prepared_ns=0;window.snapshot(150'000'000,m);
+    check(!m.stages_valid && m.cycle_estimated_valid,"missing readiness cannot fabricate generation duration");
+    window.snapshot(1'200'000'000,m);check(!m.stages_valid && !m.cycle_estimated_valid,"all four measurements expire");
 }
 void estimated_cycle() {
     auto make=[](std::int64_t returned=125'000'000) {
@@ -223,7 +254,7 @@ int main() {
         const auto fixture=std::filesystem::temp_directory_path()/(L"ofxr-v460-timing-"+std::to_wstring(GetCurrentProcessId()));
         std::filesystem::create_directories(fixture);
         SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",fixture.c_str());
-        timing();complete_cycle();estimated_cycle();native_delivery_cycle();wording();
+        timing();complete_cycle();estimated_cycle();native_delivery_cycle();stage_partition_and_baseline();wording();
         const auto before=snapshot();
         check(!interface_telemetry_requested(), "hidden by default");
         set_interface_visible(InterfaceSurface::desktop,true);
