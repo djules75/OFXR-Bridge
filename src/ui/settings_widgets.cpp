@@ -62,14 +62,14 @@ void status(const Snapshot& state) {
         value("Display Hz", m.display_hz, current && m.display_hz > 0, true,
             m.display_source == InterfaceSource::steamvr_display ? "SteamVR physical display frequency." : "OpenXR shortest observed predicted display period; may reflect runtime throttling.");
         ImGui::TableNextRow();
-        value("Game time", m.game_time_ms, current && m.stages_valid, false,
-            "App/UEVR wall time before source EndFrame entry, excluding the union of intercepted XR calls. XR pacing and blocked bridge calls belong to Delivery time. Not pure game GPU time or input-to-photon latency.");
+        value("Game time", m.game_time_ms, current && m.game_time_valid, false,
+            "Observed engine-frame start to source handoff at EndFrame entry. UEVR engine-tick callback matched by the same stereo poses, space and display target. Includes game/mod work and waits before handoff. N/A without an unambiguous source start; not GPU kernel time.");
         value("Generation time", m.generation_time_ms, current && m.stages_valid, false,
             "Observed preparation: source EndFrame entry until the first confirmed generated output is GPU-ready and copied for native submission. Includes generation queuing, history retention and copies, not just GPU kernel time. Zero when no generated output was delivered. Other runtimes use generated submission acceptance.");
         value("Delivery time", m.delivery_time_ms, current && m.stages_valid, false,
-            "XR/bridge time outside generation preparation: intercepted app XR calls before End plus the remaining time to the real predicted display target. Includes pacing, copies, native runtime and prediction horizon. Also measured with generation off. Per-frame stages partition Cycle; independent displayed medians need not add exactly.");
+            "After the source handoff: time outside first-generated preparation through the real predicted display target. Includes pacing, copies, native runtime and prediction horizon. With generation Off, the whole handoff-to-target interval is Delivery. Independent medians need not add exactly.");
         value("Cycle (estimated)", m.cycle_estimated_ms, current && m.cycle_estimated_valid, false,
-            "This frame's app WaitFrame entry to its actual native real-frame predicted display target, or later producer/native return. Includes the game's production phase and our delivery. No extra refresh added. Also measured with generation off. A prediction, not measured panel scanout or head-motion latency; compositor pose reprojection is separate.");
+            "Observed engine-frame start to the same real frame's predicted display target, or later native/producer return. Game + Generation + Delivery per frame, with no extra refresh. N/A without an unambiguous engine start. Predicted display is not measured panel scanout or motion-to-photon latency.");
         ImGui::EndTable();
         const auto text = interface_state_text(state);
         const auto color = interface_generation_active(state) ? ImVec4(.36F,.88F,.56F,1) :
@@ -214,21 +214,24 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     }
     bool lower_vram = draft.lower_vram != 0;
     ImGui::BeginDisabled(state.runtime.luke_detected);
-    if(ImGui::Checkbox("Lower VRAM", &lower_vram)) {
+    if(ImGui::Checkbox("Fast mode (lower vram, lower latency, may reduce performance)", &lower_vram)) {
         draft.lower_vram = draft.separate_synthesis = lower_vram ? 1 : 0;
         changed = true;
     }
     ImGui::EndDisabled();
-    ImGui::TextWrapped(state.runtime.luke_detected ? "Lower VRAM has no effect with Luke Ross."
+    ImGui::TextWrapped(state.runtime.luke_detected ? "Fast mode has no effect with Luke Ross."
         : "Uses private synthesis textures and fewer XR swapchains.");
-    changed |= ImGui::Checkbox("Single director (SteamVR)", &draft.single_director);
-    ImGui::TextWrapped("Experimental: removes route presentation holds. SteamVR only; generation history and GPU safety remain active.");
+    changed |= ImGui::Combo("Pacing", &draft.pacing_mode,"Framework\0Director\0Framework+director\0");
+    ImGui::TextWrapped("SteamVR: Framework uses framework pacing; Director uses the final director; Framework+director combines both. VDXR keeps Framework pacing.");
+    if(state.connected && state.runtime.steamvr_runtime && state.runtime.pacing_mode>=0 &&
+        ((state.runtime.pacing_mode==0)!=(draft.pacing_mode==0)))
+        ImGui::TextColored(ImVec4(1,.75F,.28F,1),"Restart the game to apply the selected transport.");
     ImGui::Separator();
     if (!ImGui::CollapsingHeader("Details")) return changed;
     const auto& telemetry = state.runtime.telemetry;
     if (state.connected && telemetry.updated_ms && GetTickCount64()-telemetry.updated_ms<2000 && telemetry.cpu_valid)
-        ImGui::Text("CPU frame production: %.1f ms", telemetry.cpu_render_ms);
-    else ImGui::TextDisabled("CPU frame production: N/A");
+        ImGui::Text("OpenXR Begin-to-End interval: %.1f ms", telemetry.cpu_render_ms);
+    else ImGui::TextDisabled("OpenXR Begin-to-End interval: N/A");
     ImGui::TextDisabled("Requested %llu / applied %llu",
         static_cast<unsigned long long>(state.revision),
         static_cast<unsigned long long>(state.runtime.applied_revision));

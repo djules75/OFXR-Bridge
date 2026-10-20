@@ -8,7 +8,7 @@
 namespace xrfg_fixture {
 inline bool request_control(const xrfg::embedded::Settings& desired) {
     auto s=xrfg::autonomous::snapshot().desired;
-    s.single_director=desired.single_director;
+    s.pacing_mode=desired.pacing_mode;
     s.enabled=desired.enabled; s.backend=desired.backend; s.preset=desired.preset;
     s.scale=desired.scale; s.backward=desired.backward; s.lower_vram=desired.lower_vram;
     s.separate_synthesis=desired.separate_synthesis;
@@ -32,12 +32,12 @@ public:
                 L"-"+std::to_wstring(GetTickCount64()));
         std::filesystem::create_directories(directory_);
         SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",directory_.c_str());
-        auto initial=xrfg::embedded::snapshot().desired;initial.single_director=false;
+        auto initial=xrfg::embedded::snapshot().desired;initial.pacing_mode=2;
         if (!request_control(initial))
             throw std::runtime_error("autonomous fixture publication failed");
     }
     ~ControlProfile() {
-        auto restored=xrfg::embedded::snapshot().desired;restored.single_director=false;
+        auto restored=xrfg::embedded::snapshot().desired;restored.pacing_mode=2;
         static_cast<void>(request_control(restored));
         std::error_code error;
         std::filesystem::remove(directory_/L"ofxr-bridge.ini",error);

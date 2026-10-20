@@ -29,7 +29,7 @@ constexpr std::size_t kGenerationProfileCount = 7; // four OFXR engines, FSR, DL
 // No application resource pointers cross this boundary.
 struct Settings {
     bool enabled{true};
-    bool single_director{}; // experimental SteamVR-only upstream pacing bypass
+    int pacing_mode{2}; // 0 framework, 1 sole director, 2 framework + director
     int backend{2}; // 0 FidelityFX, 1 NVIDIA reference, 2 NVIDIA new, 3 NVIDIA djules
     int motion_vectors{}; // 0 optical flow, 1 native game guides
     int frame_generation{}; // 0 OFXR, 1 FSR 3, 2 native DLSS Frame Generation, 3 Hybrid
@@ -105,6 +105,8 @@ struct VideoMemoryStatus {
 };
 struct RuntimeStatus {
     std::uint32_t process_id{};
+    int pacing_mode{-1}; // effective session transport, independent of requested mode
+    bool steamvr_runtime{};
     int afw_shading_rate{-1}; // active after successful evaluation; desired can be pending
     std::uint64_t heartbeat_ms{};
     std::uint64_t applied_revision{};

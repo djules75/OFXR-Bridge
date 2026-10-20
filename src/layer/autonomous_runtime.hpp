@@ -32,7 +32,7 @@ inline void apply_runtime_settings() {
     if (applied==incoming.revision) return;
     const auto& s=incoming.desired;
     embedded::Settings e{};
-    e.single_director=s.single_director;
+    e.pacing_mode=s.pacing_mode;
     e.enabled=s.enabled; e.backend=s.backend; e.preset=s.preset; e.scale=s.scale;
     e.backward=s.backward; e.separate_synthesis=s.separate_synthesis; e.lower_vram=s.lower_vram;
     e.motion_vectors=s.motion_vectors; e.frame_generation=s.frame_generation==3 ? 0 : s.frame_generation;
@@ -69,11 +69,12 @@ inline void apply_runtime_settings() {
 inline void publish_runtime_status(unsigned native_generated_frames=0,
     GenerationState generation=GenerationState::waiting, HRESULT initialization_result=S_OK,
     bool vulkan_detected=false, std::uint32_t provider_error=0,
-    const SwapchainBudgetStatus* swapchains=nullptr) {
+    const SwapchainBudgetStatus* swapchains=nullptr,int pacing_mode=-1,bool steamvr=false) {
     const auto control=embedded::snapshot();
     const auto afw=embedded::afw_snapshot();
     const auto nr=neural_rendering::status();
     RuntimeStatus out{};
+    out.pacing_mode=pacing_mode;out.steamvr_runtime=steamvr;
     out.dlssg_preset_request=xrfg::standalone::process_dlssg_preset();
     if (swapchains) out.swapchains=*swapchains;
     out.process_id=GetCurrentProcessId();

@@ -1,3 +1,12 @@
+## V611: pacing selection and observed producer origin
+
+The menu preserves V610 Director/combined behavior and offers session-start
+Framework transport without a private director. Production timing observes a
+UEVR engine-tick origin only when the submitted stereo record identifies it;
+unknown Game/full Cycle are N/A while post-handoff timing remains measurable.
+See [scope](docs/V611_PACING_AND_PRODUCTION_TIMING.md) and
+[results](docs/V611_VALIDATION.json). Real-game source matching is still pending.
+
 ## V604: framework labels, existing-memory display and removal evidence
 
 The accepted Witcher rendering protections are present. Restore the missing

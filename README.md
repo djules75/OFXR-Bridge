@@ -1,3 +1,14 @@
+## V611 local candidate: pacing menu and producer timing
+
+Choose **Framework**, **Director** or **Framework+director**. The previous
+Lower VRAM checkbox is now **Fast mode (lower vram, lower latency, may reduce
+performance)**, with unchanged behavior. Crossing from/to Framework requires
+restarting the game; the other two modes switch live. Restart tray and game
+together for IPC61101. The initial source-start timing adapter supports UEVR;
+unavailable or ambiguous engine origins stay N/A independently of post-handoff
+generation/delivery. [Details](docs/V611_PACING_AND_PRODUCTION_TIMING.md).
+Local candidate; actual headset behavior and timing coverage remain pending.
+
 ## V609 / V610 local comparison
 
 V609 makes native DLSS-G manual selection match the benchmark presenter.

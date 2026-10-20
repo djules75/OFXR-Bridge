@@ -39,7 +39,7 @@ class InterfaceCycle {
     std::array<Interval, 64> intervals_{};
     std::size_t count_{};
     bool valid_{true};
-    std::int64_t producer_returned_{};
+    std::int64_t producer_returned_{},production_started_{};
     struct SyntheticReceipt { std::int64_t accepted{}, period{}; };
     std::array<SyntheticReceipt,4> synthetic_{};
     std::size_t synthetic_count_{};
@@ -61,7 +61,8 @@ class InterfaceCycle {
     }
 public:
     const std::int64_t started_ns;
-    explicit InterfaceCycle(std::int64_t started) noexcept : started_ns(started) {}
+    explicit InterfaceCycle(std::int64_t started,std::int64_t producer_start=0) noexcept
+        : production_started_(producer_start),started_ns(started) {}
     void call(std::int64_t first, std::int64_t last) noexcept {
         std::scoped_lock lock(mutex_);
         if (!first || last < first || first < started_ns) { valid_=false; return; }
@@ -73,6 +74,16 @@ public:
         }
         if (count_==intervals_.size()) { valid_=false; return; }
         intervals_[count_++]={first,last};
+    }
+    void production_started(std::int64_t at) noexcept {
+        std::scoped_lock lock(mutex_);production_started_=at;
+    }
+    bool production_cycle(std::int64_t source_end,float xr_estimated,float& game,float& total) const noexcept {
+        std::scoped_lock lock(mutex_);
+        if(production_started_<=0 || production_started_>source_end || !std::isfinite(xr_estimated))return false;
+        game=float(source_end-production_started_)*1e-6F;
+        total=xr_estimated+float(started_ns-production_started_)*1e-6F;
+        return std::isfinite(total) && total>=game;
     }
     void producer_returned(std::int64_t at) noexcept {
         std::scoped_lock lock(mutex_);producer_returned_=at;
@@ -143,9 +154,9 @@ public:
         cycle_ms=float(std::max(producer_returned_,accepted_ns)-started_ns)*1e-6F;
         return true;
     }
-    // A wall-clock partition, not GPU kernel durations. Production excludes
-    // the union of intercepted XR calls before the source End entry; their
-    // blocking time belongs to delivery even with generation disabled.
+    // Wall-clock partition at the source End handoff, not GPU kernel durations.
+    // Production requires an observed, source-associated engine origin. Missing
+    // origins do not invalidate the independent generation/delivery intervals.
     // Native generation/preparation ends
     // only after the first confirmed synthetic's existing preparation fence
     // and copy have completed. Delivery owns the remainder to the real target.
@@ -176,14 +187,12 @@ public:
             if(!estimate_valid_ || synthetic_[0].accepted<source_end || accepted<synthetic_[0].accepted)return false;
             ready=synthetic_[0].accepted;
         }
-        std::int64_t xr_calls{};
-        for(std::size_t i=0;i<count_;++i)
-            xr_calls+=std::max(std::int64_t{},std::min(source_end,intervals_[i].last)-
-                std::max(started_ns,intervals_[i].first));
-        if(xr_calls>source_end-started_ns)return false;
-        game=float(source_end-started_ns-xr_calls)*1e-6F;
+        // This is a chronological partition at source End, not an attribution
+        // of intercepted calls to a guessed engine render duration.
+        game=production_started_>0 && production_started_<=source_end
+            ? float(source_end-production_started_)*1e-6F : 0.F;
         generation=float(ready-source_end)*1e-6F;
-        delivery=estimated-game-generation;
+        delivery=estimated-float(ready-started_ns)*1e-6F;
         // Floating-point subtraction may leave a few nanoseconds below zero.
         if(delivery<-.001F)return false;
         delivery=std::max(0.F,delivery);return true;
@@ -226,7 +235,7 @@ struct InterfaceTelemetry {
     bool cycle_estimated_valid{};
     InterfaceSource cycle_estimated_source{};
     float game_time_ms{},generation_time_ms{},delivery_time_ms{};
-    bool stages_valid{};
+    bool stages_valid{},game_time_valid{};
 };
 
 // Caller serializes access. Fixed storage; only the first successful real
@@ -264,7 +273,7 @@ public:
         std::array<float,256> ofxr{},cycle{};
         std::array<float,256> estimated{};
         std::array<float,256> game_stage{},generation_stage{},delivery_stage{};
-        std::size_t nd{}, np{}, nc{}, nt{}, ne{},ns{};
+        std::size_t nd{}, np{}, nc{}, nt{}, ne{},ns{},ng{};
         bool native_cycle{},native_estimate{};
         for (const auto& s : samples_) {
             if (!s.at || now < s.at || now - s.at > 1'000'000'000) continue;
@@ -277,10 +286,15 @@ public:
             } else if (s.display_valid) presentation[np++] = s.presentation;
             if (s.cpu_valid) cpu[nc++] = s.cpu;
             if(s.cycle && s.cycle->read(s.accepted_ns,ofxr[nt],cycle[nt])){++nt;native_cycle|=delivered;}
-            if(s.cycle && s.cycle->read_estimated(s.accepted_ns,estimated[ne])) {
-                if(s.cycle->stages(s.source_entered_ns,s.accepted_ns,estimated[ne],
-                    game_stage[ns],generation_stage[ns],delivery_stage[ns]))++ns;
-                ++ne;native_estimate|=delivered;
+            float raw_estimate{};
+            if(s.cycle && s.cycle->read_estimated(s.accepted_ns,raw_estimate)) {
+                float unused_game{};
+                if(s.cycle->stages(s.source_entered_ns,s.accepted_ns,raw_estimate,
+                    unused_game,generation_stage[ns],delivery_stage[ns]))++ns;
+                float game{},total{};
+                if(s.cycle->production_cycle(s.source_entered_ns,raw_estimate,game,total)) {
+                    game_stage[ng++]=game;estimated[ne++]=total;native_estimate|=delivered;
+                }
             }
         }
         const auto median = [](auto& values, std::size_t count) {
@@ -298,7 +312,8 @@ public:
         if(ne)out.cycle_estimated_ms=median(estimated,ne);
         out.cycle_estimated_source=ne?(native_estimate?InterfaceSource::native_predicted_display_qpc:InterfaceSource::frame_cycle_slot_estimate):InterfaceSource::none;
         out.stages_valid=ns!=0;
-        if(ns) {out.game_time_ms=median(game_stage,ns);out.generation_time_ms=median(generation_stage,ns);
+        out.game_time_valid=ng!=0;if(ng)out.game_time_ms=median(game_stage,ng);
+        if(ns) {out.generation_time_ms=median(generation_stage,ns);
             out.delivery_time_ms=median(delivery_stage,ns);}
         out.delay_source = nd ? InterfaceSource::real_frame_qpc : InterfaceSource::none;
         out.presentation_source = np ? InterfaceSource::predicted_display_qpc : InterfaceSource::none;

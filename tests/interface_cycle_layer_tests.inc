@@ -76,5 +76,37 @@ void interface_cycle_layer_test() {
     check(XR_SUCCEEDED(layer_begin_frame(s->handle,nullptr)), "hidden Begin");
     real->info.displayTime=prediction.predictedDisplayTime;
     check(XR_SUCCEEDED(layer_end_frame(s->handle,&real->info)), "hidden End behavior retained");
+    // Engine work can start BEFORE the app's late Wait. The submitted poses
+    // must carry that exact tick, even though another tick is already running.
+    xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,true);
+    auto engine=reinterpret_cast<UEVR_UGameEngineHandle>(0x1050);
+    uevr_production_timing::begin(engine,0.F);
+    const auto engine_start=uevr_production_timing::active.at;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    check(XR_SUCCEEDED(layer_wait_frame(s->handle,nullptr,&prediction)),"late app Wait after engine production starts");
+    auto engine_cycle=s->pending_frames.back().interface_cycle;
+    check(engine_cycle && engine_cycle->started_ns-engine_start>=4'000'000,"engine work precedes XR ticket");
+    s->dispatch->locate_views=+[](XrSession,const XrViewLocateInfo*,XrViewState* state,std::uint32_t capacity,std::uint32_t* count,XrView* views)->XrResult {
+        if(capacity<2)return XR_ERROR_SIZE_INSUFFICIENT;
+        *count=2;state->viewStateFlags=XR_VIEW_STATE_ORIENTATION_VALID_BIT|XR_VIEW_STATE_POSITION_VALID_BIT;
+        for(int i=0;i<2;++i) {views[i]={XR_TYPE_VIEW};views[i].pose.orientation.w=1;views[i].pose.position.x=i?.03F:-.03F;}
+        return XR_SUCCESS;
+    };
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};locate.displayTime=prediction.predictedDisplayTime;locate.space=reinterpret_cast<XrSpace>(77);
+    XrViewState view_state{XR_TYPE_VIEW_STATE};XrView located[2]{{XR_TYPE_VIEW},{XR_TYPE_VIEW}};std::uint32_t count{};
+    check(XR_SUCCEEDED(layer_locate_views(s->handle,&locate,&view_state,2,&count,located)),"real locate hook captures engine production identity");
+    uevr_production_timing::end(engine,0.F);
+    check(!uevr_production_timing::active,"engine post callback clears thread-local production");
+    check(XR_SUCCEEDED(layer_begin_frame(s->handle,nullptr)),"engine ticket Begin");
+    XrCompositionLayerProjectionView rendered[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+    for(int i=0;i<2;++i)rendered[i].pose=located[i].pose;
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=locate.space;projection.viewCount=2;projection.views=rendered;
+    const auto* header=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=prediction.predictedDisplayTime;end.layerCount=1;end.layers=&header;
+    const auto handoff=xrfg::interface_clock_ns();
+    check(XR_SUCCEEDED(layer_end_frame(s->handle,&end)),"engine source handed to actual End hook");
+    float game_stage{},estimated{};
+    check(engine_cycle->production_cycle(handoff,100.F,game_stage,estimated) && game_stage>=4.F,
+        "actual engine callback, locate record and End handoff retain pre-Wait production");
     std::cout<<"V465 actual Wait/Begin/Acquire/Wait/Release/End cycle and overlapping identity passed\n";
 }

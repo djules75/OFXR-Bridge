@@ -28,7 +28,7 @@ int main(int argc,char** argv){try{
     m.output_source=InterfaceSource::steamvr_delivery;m.output_fps=90;m.game_fps=45;m.generated_fps=45;m.display_hz=90;
     m.ofxr_time_ms=9;m.cycle_length_ms=17;m.cycle_estimated_ms=28.1F;
     m.ofxr_time_valid=m.cycle_valid=m.cycle_estimated_valid=true;
-    m.game_time_ms=9;m.generation_time_ms=5;m.delivery_time_ms=14.1F;m.stages_valid=true;
+    m.game_time_ms=9;m.generation_time_ms=5;m.delivery_time_ms=14.1F;m.stages_valid=true;m.game_time_valid=true;
     unsigned rows{};auto pixels=rasterize_elliott_meter(s,1000,false,false,&rows);
     check(pixels.size()==1024*512&&rows>250&&rows<=512,"two metric rows and diagnostics fit");
     check(pixels[0]==0&&pixels[100*1024+30]!=0,"rounded upstream canvas");

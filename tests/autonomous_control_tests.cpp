@@ -36,15 +36,22 @@ void codec() {
         passive.motion && !passive.depth && passive.last_seen_ms!=0,
         "passive observation distinguishes motion from depth without activating guide capture");
     xrfg::autonomous::Settings desired;
-    require(!desired.single_director,"Single director experiment defaults OFF");
-    auto experiment=desired;experiment.single_director=true;
+    require(desired.pacing_mode==2,"Single director experiment defaults OFF");
+    for(int mode=0;mode<3;++mode) {
+        auto choice=desired;choice.pacing_mode=mode;
+        require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(choice)).pacing_mode==mode,"three pacing modes persist independently of generator");
+    }
+    require(xrfg::autonomous::parse_settings("[autonomous]\nsingle_director=1\n").pacing_mode==1,"V610 ON preserves sole director");
+    require(xrfg::autonomous::parse_settings("[autonomous]\nsingle_director=0\n").pacing_mode==2,"V610 OFF preserves framework plus director");
+    require(xrfg::autonomous::parse_settings("[autonomous]\npacing_mode=0\nsingle_director=1\n").pacing_mode==0,"explicit new choice overrides old checkbox");
+    auto experiment=desired;experiment.pacing_mode=1;
     auto experiment_saved=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(experiment));
-    require(experiment_saved.single_director,"global single-director setting persists in the existing INI");
+    require(experiment_saved.pacing_mode==1,"global single-director setting persists in the existing INI");
     xrfg::autonomous::select_generation(experiment_saved,0,3);
-    require(experiment_saved.single_director,"changing generation profile preserves the global experiment");
+    require(experiment_saved.pacing_mode==1,"changing generation profile preserves the global experiment");
     auto changed_elsewhere=desired;changed_elsewhere.enabled=false;
     const auto experiment_merged=xrfg::autonomous::merge_changes(changed_elsewhere,desired,experiment);
-    require(experiment_merged.single_director && !experiment_merged.enabled,
+    require(experiment_merged.pacing_mode==1 && !experiment_merged.enabled,
         "global checkbox merge preserves another interface's concurrent edits");
     for (int inherited = 0; inherited != 4; ++inherited) {
         auto manual = desired;

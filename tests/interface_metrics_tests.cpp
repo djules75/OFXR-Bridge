@@ -1,4 +1,5 @@
 #include "xrfg/interface_metrics.hpp"
+#include "xrfg/frame_production.hpp"
 #include "xrfg/autonomous_control.hpp"
 #include "xrfg/fps_overlay_model.hpp"
 #include <windows.h>
@@ -42,7 +43,7 @@ void timing() {
     check(fps.sample_valid && fps.real_fps>0 && fps.generated_fps>0 && fps.submitted_fps==fps.real_fps+fps.generated_fps, "real/generated split excludes repeats and native bypass copies");
 }
 void complete_cycle() {
-    auto cycle=std::make_shared<InterfaceCycle>(100'000'000);
+    auto cycle=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);
     cycle->call(100'000'000,110'000'000); // Wait includes runtime/OFXR waits.
     cycle->call(115'000'000,117'000'000); // Begin; game gaps remain outside OFXR time.
     cycle->call(120'000'000,124'000'000);
@@ -56,11 +57,11 @@ void complete_cycle() {
     cycle->producer_returned(165'000'000);window.snapshot(170'000'000,out);
     check(out.cycle_valid && out.cycle_length_ms==65 && out.ofxr_time_ms==43, "production plus waits include post-submit producer tail; eye overlaps counted once");
     check(out.cycle_source==InterfaceSource::frame_cycle_qpc && out.ofxr_time_source==InterfaceSource::producer_call_qpc && !out.gpu_valid, "CPU boundary never claims GPU completion");
-    auto next=std::make_shared<InterfaceCycle>(151'000'000);
+    auto next=std::make_shared<InterfaceCycle>(151'000'000,151'000'000);
     next->call(151'000'000,171'000'000);next->producer_returned(195'000'000);
     window.snapshot(180'000'000,out);
     check(out.cycle_length_ms==65 && out.ofxr_time_ms==43, "overlapping next Wait cannot overwrite retained previous frame");
-    auto held=std::make_shared<InterfaceCycle>(200'000'000);
+    auto held=std::make_shared<InterfaceCycle>(200'000'000,200'000'000);
     held->call(200'000'000,205'000'000);held->call(240'000'000,245'000'000);
     held->producer_returned(245'000'000);
     InterfaceTimingWindow asynchronous;
@@ -78,7 +79,7 @@ void complete_cycle() {
     check(!regression.read(201,a,b), "clock/identity regression has no timing");
 }
 void native_delivery_cycle() {
-    auto c=std::make_shared<InterfaceCycle>(100'000'000);
+    auto c=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);
     c->call(100'000'000,103'000'000);c->producer_returned(109'000'000);
     c->synthetic_accepted(103'500'000,11'111'111);
     float ms{},calls{};
@@ -99,15 +100,15 @@ void native_delivery_cycle() {
     InterfaceTelemetry actual;window.snapshot(160'000'000,actual);
     check(actual.cycle_source==InterfaceSource::native_frame_cycle_qpc && actual.cycle_estimated_source==InterfaceSource::native_predicted_display_qpc,"physical observations have distinct source labels");
     check(std::abs(actual.ofxr_delay_ms-51.111111F)<.001F && std::abs(actual.presentation_ms-10.F)<.001F,"delay and presentation use real native handoff rather than virtual submission");
-    auto failed=std::make_shared<InterfaceCycle>(100'000'000);failed->producer_returned(109'000'000);
+    auto failed=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);failed->producer_returned(109'000'000);
     auto rejected=std::make_shared<InterfaceDeliveryReceipt>(false);failed->attach_native_delivery(rejected);
     rejected->completed(false,150'000'000,151'000'000,160'000'000);
     check(!failed->read(109'000'000,calls,ms),"failed or empty physical End never becomes a delivered-cycle sample");
-    auto no_clock=std::make_shared<InterfaceCycle>(100'000'000);no_clock->producer_returned(109'000'000);
+    auto no_clock=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);no_clock->producer_returned(109'000'000);
     auto no_clock_real=std::make_shared<InterfaceDeliveryReceipt>(false);no_clock->attach_native_delivery(generated);no_clock->attach_native_delivery(no_clock_real);
     no_clock_real->completed(true,156'111'111,157'000'000,0);
     check(no_clock->read(109'000'000,calls,ms) && ms==57 && !no_clock->read_estimated(109'000'000,ms),"native handoff remains measurable without inventing an unknown display target");
-    auto triple=std::make_shared<InterfaceCycle>(100'000'000);triple->producer_returned(109'000'000);
+    auto triple=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);triple->producer_returned(109'000'000);
     auto second=std::make_shared<InterfaceDeliveryReceipt>(true);second->synthetic_confirmed=true;second->completed(true,156'111'111,157'000'000,166'111'111);
     auto triple_real=std::make_shared<InterfaceDeliveryReceipt>(false);triple_real->completed(true,167'222'222,168'000'000,177'222'222);
     triple->attach_native_delivery(generated);triple->attach_native_delivery(second);triple->attach_native_delivery(triple_real);
@@ -115,7 +116,7 @@ void native_delivery_cycle() {
     window.snapshot(1'200'000'000,actual);check(!actual.cycle_valid,"native observations expire normally");
 }
 void stage_partition_and_baseline() {
-    auto c=std::make_shared<InterfaceCycle>(100'000'000);c->producer_returned(125'000'000);
+    auto c=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);c->producer_returned(125'000'000);
     c->call(100'000'000,105'000'000);c->call(110'000'000,112'000'000);
     c->call(111'000'000,114'000'000); // overlapping eye calls count once
     c->call(120'000'000,125'000'000); // End preparation is outside the game phase
@@ -125,17 +126,17 @@ void stage_partition_and_baseline() {
     check(window.submitted({608,120'000'000,105'000'000,c},123'000'000,true,true,false,true,0,125'000'000),"disabled baseline source identity");
     InterfaceTelemetry m;window.snapshot(150'000'000,m);
     check(m.cycle_estimated_valid && m.cycle_estimated_ms==45 && m.stages_valid,"baseline cycle needs no synthetic frame");
-    check(m.game_time_ms==11 && m.generation_time_ms==0 && m.delivery_time_ms==34,"disabled baseline removes XR waits from game time and assigns them to delivery once");
+    check(m.game_time_valid && m.game_time_ms==20 && m.generation_time_ms==0 && m.delivery_time_ms==25,"disabled baseline partitions the engine source handoff without relabeling pre-handoff waits");
     auto generated=std::make_shared<InterfaceDeliveryReceipt>(true);c->attach_native_delivery(generated);
     generated->completed(true,127'000'000,128'000'000,138'000'000,126'000'000);
     window.snapshot(150'000'000,m);check(!m.stages_valid && m.cycle_estimated_valid,"unconfirmed generated pixels cannot supply a preparation boundary");
     generated->synthetic_confirmed=true;window.snapshot(150'000'000,m);
-    check(m.stages_valid && m.game_time_ms==11 && m.generation_time_ms==6 && m.delivery_time_ms==28,"native preparation and delivery partition one exact real cycle");
+    check(m.stages_valid && m.game_time_ms==20 && m.generation_time_ms==6 && m.delivery_time_ms==19,"native preparation and delivery partition one exact real cycle");
     auto extra=std::make_shared<InterfaceDeliveryReceipt>(true);extra->synthetic_confirmed=true;
     extra->completed(true,129'000'000,130'000'000,140'000'000,128'000'000);c->attach_native_delivery(extra);
     window.snapshot(150'000'000,m);
     check(m.stages_valid && m.generation_time_ms==6 && m.cycle_estimated_ms==45,"3X first-output preparation and actual real target are not added twice");
-    auto legacy=std::make_shared<InterfaceCycle>(100'000'000);legacy->producer_returned(125'000'000);legacy->real_prediction(140'000'000);
+    auto legacy=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);legacy->producer_returned(125'000'000);legacy->real_prediction(140'000'000);
     float estimated{},game{},gen{},delivery{};
     check(legacy->read_estimated(125'000'000,estimated) && estimated==40 &&
         legacy->stages(120'000'000,125'000'000,estimated,game,gen,delivery) && game==20 && gen==0 && delivery==20,
@@ -147,7 +148,7 @@ void stage_partition_and_baseline() {
 }
 void estimated_cycle() {
     auto make=[](std::int64_t returned=125'000'000) {
-        auto c=std::make_shared<InterfaceCycle>(100'000'000);
+        auto c=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);
         c->call(100'000'000,105'000'000);c->producer_returned(returned);return c;
     };
     float ms{};
@@ -169,7 +170,7 @@ void estimated_cycle() {
     auto changed=make();changed->synthetic_accepted(120'000'000,10'000'000);changed->synthetic_accepted(120'100'000,8'333'333);
     check(!changed->read_estimated(125'000'000,ms),"refresh change within pair cannot fabricate a slot estimate");
     check(!c->read_estimated(119'000'000,ms),"real receipt earlier than generated is invalid");
-    auto unfinished=std::make_shared<InterfaceCycle>(100'000'000);unfinished->synthetic_accepted(120'000'000,10'000'000);
+    auto unfinished=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);unfinished->synthetic_accepted(120'000'000,10'000'000);
     check(!unfinished->read_estimated(121'000'000,ms),"estimate waits for producer completion");
     InterfaceTimingWindow window;
     check(window.submitted({50,120'000'000,0,c},120'050'000,true,true,false,true,0,120'100'000),"estimated cycle needs no XrTime conversion");
@@ -178,6 +179,36 @@ void estimated_cycle() {
         m.cycle_estimated_source==InterfaceSource::frame_cycle_slot_estimate,"measured and estimated cycles remain distinct and independently labeled");
     window.snapshot(1'130'000'001,m);
     check(!m.cycle_estimated_valid && !m.cycle_valid,"both counters expire with the same one-second sample window");
+}
+void production_boundaries() {
+    auto c=std::make_shared<InterfaceCycle>(120'000'000);
+    c->producer_returned(125'000'000);c->real_prediction(150'000'000);
+    InterfaceTimingWindow w;check(w.submitted({201,121'000'000,0,c},125'000'000,true,true,false,true,150'000'000,125'000'000),"source handoff recorded");
+    InterfaceTelemetry m{};w.snapshot(140'000'000,m);
+    check(!m.game_time_valid && !m.cycle_estimated_valid && m.stages_valid && m.generation_time_ms==0 && m.delivery_time_ms==29,"missing engine origin keeps independent handoff delivery and no fake game time");
+    c->production_started(100'000'000);w.snapshot(140'000'000,m);
+    check(m.game_time_valid && m.game_time_ms==21 && m.cycle_estimated_valid && m.cycle_estimated_ms==50 && m.delivery_time_ms==29,"late Wait cannot omit earlier game production");
+    c->call(120'000'000,120'700'000);w.snapshot(140'000'000,m);
+    check(m.game_time_ms==21 && m.delivery_time_ms==29,"pre-handoff calls remain inside chronological game interval");
+    FrameProductionTracker tracker;
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};locate.displayTime=500;locate.space=reinterpret_cast<XrSpace>(10);
+    XrView views[2]{{XR_TYPE_VIEW},{XR_TYPE_VIEW}};views[0].pose.orientation.w=views[1].pose.orientation.w=1;
+    views[0].pose.position.x=-.03F;views[1].pose.position.x=.03F;
+    tracker.locate({8,1,100'000'000},locate,views,2);
+    XrCompositionLayerProjectionView projected[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+    for(int i=0;i<2;++i)projected[i].pose=views[i].pose;
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=locate.space;projection.viewCount=2;projection.views=projected;
+    const auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+    XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO};frame.displayTime=500;frame.layerCount=1;frame.layers=&layer;
+    check(tracker.match(frame,121'000'000).serial==1,"retained stereo projection identifies its producer tick");
+    locate.displayTime=600;tracker.locate({8,2,115'000'000},locate,views,2);
+    check(tracker.match(frame,121'000'000).serial==1,"a newer tick with identical stationary poses cannot replace the retained old frame");
+    locate.displayTime=500;tracker.locate({8,3,116'000'000},locate,views,2);
+    check(!tracker.match(frame,121'000'000),"ambiguous reused target and stationary poses stay unknown");
+    frame.displayTime=600;projected[1].pose.position.x=.04F;
+    check(!tracker.match(frame,121'000'000),"a different eye projection cannot borrow a tick");
+    projected[1].pose=views[1].pose;
+    check(!tracker.match(frame,3'000'000'000),"stale source origin is rejected");
 }
 void wording() {
     Snapshot s{};
@@ -254,7 +285,7 @@ int main() {
         const auto fixture=std::filesystem::temp_directory_path()/(L"ofxr-v460-timing-"+std::to_wstring(GetCurrentProcessId()));
         std::filesystem::create_directories(fixture);
         SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",fixture.c_str());
-        timing();complete_cycle();estimated_cycle();native_delivery_cycle();stage_partition_and_baseline();wording();
+        production_boundaries();timing();complete_cycle();estimated_cycle();native_delivery_cycle();stage_partition_and_baseline();wording();
         const auto before=snapshot();
         check(!interface_telemetry_requested(), "hidden by default");
         set_interface_visible(InterfaceSurface::desktop,true);

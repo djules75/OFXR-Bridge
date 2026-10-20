@@ -8,8 +8,10 @@
 #include "autonomous_layer_fixture.hpp"
 #include <d3d12sdklayers.h>
 
+static bool framework_session_probe{};
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    framework_session_probe=route=="framework-session";if(framework_session_probe)route="session";
     const bool measured=route.starts_with("metrics-");if(measured)route=route.substr(8);
     const bool deep=route.starts_with("deep-");if(deep)route=route.substr(5);
     const bool toggling=route.starts_with("toggle-");if(toggling)route=route.substr(7);
@@ -26,11 +28,16 @@ int main(int argc,char** argv) {
     const bool native12=!route.starts_with("d11-");if(!native12)route=route.substr(4);
     const bool triple=route.ends_with('3');if(triple)route.pop_back();
     xrfg_fixture::ControlProfile profile;
+    if(framework_session_probe) {
+        auto desired=xrfg::autonomous::snapshot().desired;desired.pacing_mode=0;
+        check(xrfg::autonomous::request(desired),"select framework transport before session");
+        xrfg::autonomous::apply_runtime_settings();
+    }
     if(sole) {
         auto desired=xrfg::autonomous::snapshot().desired;
         xrfg::autonomous::select_generation(desired,route=="fsr"?1:route=="dlssg"?2:route=="hybrid"?3:0,
             route=="ref"?1:route=="new"?2:route=="djules"?3:0);
-        desired.enabled=true;desired.single_director=true;
+        desired.enabled=true;desired.pacing_mode=1;
         desired.lower_vram=b;desired.separate_synthesis=a;
         desired.motion_vectors=route=="fsr" || route=="hybrid" || route=="dlssg";
         desired.triple_frame_gen=triple;desired.prefer_fps=triple || deep;
@@ -44,7 +51,7 @@ int main(int argc,char** argv) {
     }
     ComPtr<ID3D12Debug> debug;
     if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
-    Fixture f(native12);f.transport->stop();if(route!="memory" && route!="scope")f.transport.reset();f.throttled=false;f.real_common=true;f.expected_views=2;f.unblock();
+    Fixture f(native12);f.transport->stop();if(route!="memory" && route!="scope" && !framework_session_probe)f.transport.reset();f.throttled=false;f.real_common=true;f.expected_views=2;f.unblock();
     f.create_state=[] {std::scoped_lock lock(g_state_mutex);return g_swapchains.empty()?D3D12_RESOURCE_STATE_RENDER_TARGET:D3D12_RESOURCE_STATE_COMMON;};
     auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=true;
     if(measured)dispatch->get_instance_proc_addr=+[](XrInstance,const char*,PFN_xrVoidFunction* out)->XrResult{*out=nullptr;return XR_ERROR_FUNCTION_UNSUPPORTED;};
@@ -56,7 +63,7 @@ int main(int argc,char** argv) {
         dispatch->create_session=+[](XrInstance,const XrSessionCreateInfo* info,XrSession* out)->XrResult{
             auto& f=*current;auto* binding=static_cast<const XrGraphicsBindingD3D12KHR*>(info->next);
             check(binding && binding->type==XR_TYPE_GRAPHICS_BINDING_D3D12_KHR,"actual raw D12 binding");
-            check(binding->queue!=f.queue.Get(),"real XR must not receive producer queue");
+            if(!framework_session_probe)check(binding->queue!=f.queue.Get(),"real XR must not receive producer queue");
             f.delivery_queue=binding->queue;*out=reinterpret_cast<XrSession>(2);return XR_SUCCESS;
         };
         dispatch->destroy_session=+[](XrSession)->XrResult{return XR_SUCCESS;};
@@ -64,7 +71,18 @@ int main(int argc,char** argv) {
         XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};binding.device=f.device12.Get();binding.queue=f.queue.Get();
         XrSessionCreateInfo info{XR_TYPE_SESSION_CREATE_INFO};info.next=&binding;info.systemId=1;
         XrSession handle{};xr_ok(layer_create_session_impl(dispatch->instance,&info,&handle),"shipping session creates private delivery binding");
-        auto created=find_session(handle);check(created && created->private_runtime,"shipping session installed transport");
+        auto created=find_session(handle);
+        if(framework_session_probe) {
+            check(created && !created->private_runtime && !created->private_delivery_queue,"Framework does not allocate or install the final director");
+            auto next=xrfg::autonomous::snapshot().desired;next.pacing_mode=1;
+            check(xrfg::autonomous::request(next),"request director for next session");
+            xrfg::autonomous::apply_runtime_settings();ok(apply_embedded_control(created),"persist transport selection without replacing active session");
+            check(!created->private_runtime && !single_director_pacing(*created),"Framework session stays safe until restart");
+            xr_ok(layer_destroy_session_impl(handle),"framework session cleanup");
+            {std::scoped_lock lock(g_state_mutex);g_instances.clear();}
+            std::puts("Framework startup has no private director; cross-transport change waits for restart PASS");return 0;
+        }
+        check(created && created->private_runtime,"shipping session installed transport");
         f.transport=created->private_runtime; // fixture teardown owns a valid stopped endpoint
         check(created->private_delivery_queue.Get()==f.delivery_queue.Get() &&
               created->private_delivery_queue.Get()!=runtime_queue(*created),"raw binding and private preparation queues are distinct");
@@ -221,11 +239,11 @@ int main(int argc,char** argv) {
         if(measured)xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,true);
         if(toggling && (n==4 || n==6)) {
             auto desired=xrfg::autonomous::snapshot().desired;
-            desired.single_director=!state->single_director_requested.load();
+            desired.pacing_mode=state->single_director_requested.load()?2:1;
             check(xrfg::autonomous::request(desired),"publish only the single-director hot switch");
             xrfg::autonomous::apply_runtime_settings();
             ok(apply_embedded_control(state),"drained single-director hot switch");
-            check(single_director_pacing(*state)==desired.single_director,"active policy matches the applied global checkbox");
+            check(single_director_pacing(*state)==(desired.pacing_mode==1),"active policy matches the applied global checkbox");
             check(state->private_runtime==f.transport,"hot switch retains the sole physical endpoint");
         }
         if(switching && (n==3 || n==5 || n==7)) {
@@ -238,7 +256,9 @@ int main(int argc,char** argv) {
         f.write(chain,n*20);if(split_eyes)f.write(right,n*20+7);
         if(vectors && !split_eyes){auto c=find_swapchain(chain);auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();guides->eye_count=2;
             for(unsigned eye=0;eye<2;++eye){auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=eye+1;g->epoch=1;g->serial=n;g->previous_serial=n-1;g->publication=2*n+eye;g->producer_queue=f.queue;g->output=images[*c->last_released_index].texture;g->output_slice=eye;g->depth=depth;g->motion_vectors=motion;g->motion_slice=eye;g->output_width=g->depth_width=g->motion_width=256;g->output_height=g->depth_height=g->motion_height=128;guides->eyes[eye]=g;}c->last_released_motion_vectors=guides;}
+        const auto engine_started=xrfg::interface_clock_ns();
         XrFrameState prediction{XR_TYPE_FRAME_STATE};xr_ok(layer_wait_frame_impl(state->handle,nullptr,&prediction),"shipping virtual Wait");xr_ok(layer_begin_frame_impl(state->handle,nullptr),"shipping virtual Begin");
+        if(measured)if(auto ticket=state->interface_active_cycle.load())ticket->production_started(engine_started);
         std::array<XrCompositionLayerProjectionView,2> views;
         for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=(sole?float(n):0.F)+(eye?.032F:-.032F);v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=split_eyes && eye?right:chain;v.subImage.imageArrayIndex=split_eyes?0:eye;v.subImage.imageRect.extent={256,128};}
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=2;projection.views=views.data();auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);

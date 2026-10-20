@@ -1,3 +1,21 @@
+## V611: tendina pacing e Game time
+
+Riavvia tray e gioco con V611 insieme. Le scelte sono Framework, Director
+(il precedente Single director acceso), Framework+director (precedente spento).
+Per passare da/a Framework serve riavviare il gioco: il menu e lo status lo
+segnalano. Director e Framework+director si cambiano durante la run.
+Fast mode e il nuovo nome del vecchio Lower VRAM, con lo stesso comportamento;
+resta senza effetto in Luke Ross. Nessuna nuova sequenza benchmark.
+
+Il primo adattatore per Game time usa il callback iniziale del tick UEVR fino
+all'ingresso OFXR. Solo le proiezioni associabili allo stesso tick mostrano
+Game e Cycle completo; gli altri casi rimangono N/A. Generation e Delivery
+restano indipendenti, e con OFXR Off Generation e zero. Questo non misura
+la scansione fisica del pannello o il solo costo GPU. Per ora native OpenXR e
+Luke Ross non hanno un adattatore iniziale del motore in questa versione.
+Per Ghostwire verificare nella scena se Game diventa misurabile; nessun nuovo
+F8 richiesto. F9 resta facoltativo per i meter.
+
 ## V610: Single director (SteamVR), confronto sperimentale
 
 Riavvia tray e gioco V610 insieme. Sotto Lower VRAM trovi Single director

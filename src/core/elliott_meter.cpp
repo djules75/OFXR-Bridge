@@ -334,7 +334,7 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
         {value(m.game_fps,current&&m.rates_valid,true),"Real submitted",metric_tone(m.rates_valid)},
         {value(m.generated_fps,current&&m.rates_valid,true),"Gen submitted",metric_tone(m.rates_valid)},
         {value(m.display_hz,current&&m.display_hz>0,true),"Display Hz",PanelTone::dim},
-        {value(m.game_time_ms,current&&m.stages_valid,false),"Game time",metric_tone(m.stages_valid)},
+        {value(m.game_time_ms,current&&m.game_time_valid,false),"Game time",metric_tone(m.game_time_valid)},
         {value(m.generation_time_ms,current&&m.stages_valid,false),"Generation time",metric_tone(m.stages_valid)},
         {value(m.delivery_time_ms,current&&m.stages_valid,false),"Delivery time",metric_tone(m.stages_valid)},
         {value(m.cycle_estimated_ms,current&&m.cycle_estimated_valid,false),"Cycle (estimated)",metric_tone(m.cycle_estimated_valid)}};
