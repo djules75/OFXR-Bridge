@@ -1831,6 +1831,23 @@ void run_streamline_views(const wchar_t* ngx_path, CreateFeature create, Evaluat
 
 // V521: an upscaler's input offset inside its eye's render region, removed;
 // regions elsewhere on the texture left alone.
+// V551: a feature registered from its evaluation takes its sizes the right
+// way round. No Man's Sky's evaluation has them swapped.
+void test_late_feature_sizes() {
+    const auto nms = xrfg::late_feature_sizes(6144, 3264, 3564, 1893);
+    require(nms.swapped && nms.width == 3564 && nms.height == 1893 && nms.out_width == 6144 &&
+            nms.out_height == 3264, "No Man's Sky's swapped sizes were not put back");
+    // Its creation's: render 4840 x 1895 into 8344 x 3268, left as they are.
+    const auto creation = xrfg::late_feature_sizes(4840, 1895, 8344, 3268);
+    require(!creation.swapped && creation.width == 4840 && creation.out_width == 8344,
+        "an upscale's sizes were swapped");
+    // DLAA (equal), an output smaller on one axis only, and no output size.
+    require(!xrfg::late_feature_sizes(2546, 1994, 2546, 1994).swapped, "DLAA swapped");
+    require(!xrfg::late_feature_sizes(2000, 1000, 1800, 1200).swapped, "one axis swapped");
+    const auto unknown = xrfg::late_feature_sizes(2000, 1000, 0, 0);
+    require(!unknown.swapped && unknown.out_width == 0, "a missing output size swapped");
+}
+
 void test_input_offset_within_region() {
     // Skyrim, PureDark's upscaler with its foveated offsets at scale 1.0:
     // 2824 x 2212 per eye side by side, output 4870 x 3813 at (0, 0).
@@ -1852,6 +1869,7 @@ void test_input_offset_within_region() {
 int run(const wchar_t* module_path) {
     test_split_both_eyes_guide();
     test_input_offset_within_region();
+    test_late_feature_sizes();
     // WARP: the capture only records copies, which WARP executes.
     ComPtr<IDXGIFactory4> factory;
     require_hresult(CreateDXGIFactory2(0, IID_PPV_ARGS(factory.GetAddressOf())), "CreateDXGIFactory2");

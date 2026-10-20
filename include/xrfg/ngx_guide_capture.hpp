@@ -156,5 +156,17 @@ NgxGuideCaptureStatistics ngx_guide_capture_statistics() noexcept;
 // region, in render texels; 0 when on it or too far to be an offset.
 long dlss_input_offset_within_region(
     unsigned base, unsigned output_base, unsigned extent, unsigned output_extent) noexcept;
+// V551: the render and output sizes of a super-resolution feature registered
+// from its evaluation, from the parameter object's Width/Height and
+// OutWidth/OutHeight. An output smaller than the input on both axes is not an
+// upscale, so the pair is the other way round - No Man's Sky's evaluation
+// carries Width x Height = 6144 x 3264 (its side-by-side output) and
+// OutWidth x OutHeight = 3564 x 1893 (its render size) - and is swapped.
+struct LateFeatureSizes {
+    unsigned width{}, height{}, out_width{}, out_height{};
+    bool swapped{};
+};
+[[nodiscard]] LateFeatureSizes late_feature_sizes(
+    unsigned width, unsigned height, unsigned out_width, unsigned out_height) noexcept;
 
 }  // namespace xrfg

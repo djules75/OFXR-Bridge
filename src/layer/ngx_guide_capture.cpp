@@ -1056,10 +1056,21 @@ void register_late(const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* pa
             feature.flags_known = NVSDK_NGX_SUCCEED(
                 parameters->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &flags));
             feature.flags = flags;
-            feature.width = get<unsigned>(parameters, NVSDK_NGX_Parameter_Width);
-            feature.height = get<unsigned>(parameters, NVSDK_NGX_Parameter_Height);
-            feature.out_width = get<unsigned>(parameters, NVSDK_NGX_Parameter_OutWidth);
-            feature.out_height = get<unsigned>(parameters, NVSDK_NGX_Parameter_OutHeight);
+            // V551: the parameter object's sizes, the right way round. No
+            // Man's Sky with Hybrid switched on mid-session published a
+            // 3564 x 1893 output (its render size) for a 6144 x 3264 one, so
+            // the side-by-side split never matched its eyes and Hybrid
+            // never engaged; started with Hybrid on, its creation gives them
+            // correctly.
+            const auto sizes = late_feature_sizes(
+                get<unsigned>(parameters, NVSDK_NGX_Parameter_Width),
+                get<unsigned>(parameters, NVSDK_NGX_Parameter_Height),
+                get<unsigned>(parameters, NVSDK_NGX_Parameter_OutWidth),
+                get<unsigned>(parameters, NVSDK_NGX_Parameter_OutHeight));
+            feature.width = sizes.width;
+            feature.height = sizes.height;
+            feature.out_width = sizes.out_width;
+            feature.out_height = sizes.out_height;
             std::scoped_lock lock(s.mutex);
             if (s.features.find(handle) != s.features.end()) {
                 return;
@@ -1067,8 +1078,9 @@ void register_late(const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* pa
             feature.stream = s.next_stream++;
             s.features[handle] = feature;
             ++s.statistics.features_created;
+            // b bit 33 (V551): the sizes were swapped.
             record(kRecordFeature, static_cast<std::uint64_t>(feature.type) + 100U,
-                (feature.flags_known ? 1ULL << 32U : 0ULL) |
+                (feature.flags_known ? 1ULL << 32U : 0ULL) | (sizes.swapped ? 1ULL << 33U : 0ULL) |
                     static_cast<std::uint32_t>(feature.flags),
                 (static_cast<std::uint64_t>(feature.width) << 32U) | feature.height);
         } catch (...) {
@@ -5720,6 +5732,15 @@ NgxGuideCaptureStatistics ngx_guide_capture_statistics() noexcept {
 long dlss_input_offset_within_region(
     unsigned base, unsigned output_base, unsigned extent, unsigned output_extent) noexcept {
     return input_offset_within_region(base, output_base, extent, output_extent);
+}
+
+LateFeatureSizes late_feature_sizes(
+    unsigned width, unsigned height, unsigned out_width, unsigned out_height) noexcept {
+    LateFeatureSizes sizes{width, height, out_width, out_height, false};
+    if (out_width != 0 && out_height != 0 && out_width < width && out_height < height) {
+        sizes = {out_width, out_height, width, height, true};
+    }
+    return sizes;
 }
 
 }  // namespace xrfg
