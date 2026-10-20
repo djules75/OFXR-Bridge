@@ -4732,14 +4732,23 @@ void test_nvidia_serialized_eye_context_stress(
 // vectors in the current inset (reading B). The composition must find which.
 enum class HybridScene {
     occlusion, overlay, fade, occlusion_low_res, occlusion_periphery,
-    occlusion_foveated, occlusion_foveated_moved, occlusion_foveated_moved_current
+    occlusion_foveated, occlusion_foveated_moved, occlusion_foveated_moved_current,
+    // V539: the object twice as fast over a flat background, the revealed
+    // strip wider than the edge probes' reach.
+    occlusion_fast,
+    // V539: the same, dark and low in contrast - the object within the
+    // second-surface search's margin of the background (Returnal's wall).
+    occlusion_fast_dark
 };
 
 // backend nvidia: real OFA on the NVIDIA GPU ("hybrid nvidia"), measured
 // only - the bounds below are FidelityFX's on WARP.
 void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
     xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx) {
-    const bool measure_only = backend == xrfg::D3D12OpticalFlowBackend::nvidia;
+    // The fast scene without the coverage mask measures the ghost it removes.
+    const bool measure_only = backend == xrfg::D3D12OpticalFlowBackend::nvidia ||
+        ((kind == HybridScene::occlusion_fast || kind == HybridScene::occlusion_fast_dark) &&
+            GetEnvironmentVariableW(L"XRFG_DISABLE_COVERAGE_MASK", nullptr, 0) != 0);
     constexpr UINT width = 256, height = 128;
     constexpr int object_left = 72, object_width = 80, object_top = 32, object_bottom = 96;
     constexpr int background_motion = 6;
@@ -4753,9 +4762,13 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
     const bool inset_reading_a = kind == HybridScene::occlusion_foveated_moved;
     constexpr float inset_x = 48.0F, inset_y = 16.0F, inset_width = 160.0F, inset_height = 96.0F;
     constexpr UINT inset_motion_width = 80, inset_motion_height = 48;
-    const bool occluding = kind == HybridScene::occlusion || low_res || periphery;
-    const int object_motion = overlay ? 0 : fade ? background_motion : 20;
+    const bool dark = kind == HybridScene::occlusion_fast_dark;
+    const bool fast = kind == HybridScene::occlusion_fast || dark;
+    const bool occluding = kind == HybridScene::occlusion || low_res || periphery || fast;
+    const int object_motion = overlay ? 0 : fade ? background_motion : fast ? 40 : 20;
     const char* const name = fade ? "fade" : overlay ? "overlay"
+        : dark ? "occlusion fast, dark low contrast"
+        : fast ? "occlusion fast, flat background"
         : low_res ? "occlusion low-res vectors"
         : kind == HybridScene::occlusion_foveated ? "occlusion foveated inset"
         : kind == HybridScene::occlusion_foveated_moved ? "occlusion foveated inset moved (A)"
@@ -4782,7 +4795,10 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
                         ox < object_left + object_width;
                     const int bx = static_cast<int>(x) - background_shift + 64;
                     const RgbaBytes color = object
-                        ? ((ox / 5) % 2 ? RgbaBytes{240, 210, 40, 255} : RgbaBytes{30, 60, 200, 255})
+                        ? (dark ? ((ox / 5) % 2 ? RgbaBytes{40, 40, 42, 255} : RgbaBytes{17, 17, 19, 255})
+                                : (ox / 5) % 2 ? RgbaBytes{240, 210, 40, 255} : RgbaBytes{30, 60, 200, 255})
+                        : dark ? RgbaBytes{28, 28, 30, 255}
+                        : fast ? RgbaBytes{70, 90, 110, 255}
                         : RgbaBytes{static_cast<std::uint8_t>(40 + (bx * 13 + static_cast<int>(y) * 5) % 160),
                                     static_cast<std::uint8_t>(60 + ((bx / 3) % 7) * 20 + eye * 9),
                                     static_cast<std::uint8_t>(90 + (bx * 7) % 120), 255};
@@ -4989,8 +5005,14 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
                                                    static_cast<int>(expected[eye][offset + c]));
                     }
                 }
+                const double side_error = side_total / static_cast<double>(side_count);
                 std::cout << "  " << (edge == left ? "revealing" : "covering") << " edge_mae="
-                          << side_total / static_cast<double>(side_count) << '\n';
+                          << side_error << '\n';
+                // V539: the coverage mask keeps the fast object's revealed
+                // strip clean (25.6 without it, 0.08 with; the 20 px scenes
+                // 5.2 -> 0.10).
+                require(measure_only || !fast || edge != left || side_error <= (dark ? 0.5 : 1.0),
+                    "the fast object's revealed background ghosted it");
             }
         }
         // The overlay's blend is exact (nothing moved), so it is held to an
@@ -5638,7 +5660,9 @@ int main(int argc, char** argv) {
                                      HybridScene::occlusion_low_res, HybridScene::occlusion_periphery,
                                      HybridScene::occlusion_foveated,
                                      HybridScene::occlusion_foveated_moved,
-                                     HybridScene::occlusion_foveated_moved_current}) {
+                                     HybridScene::occlusion_foveated_moved_current,
+                                     HybridScene::occlusion_fast,
+                                     HybridScene::occlusion_fast_dark}) {
                 test_hybrid_composition(nvidia_fixture, scene, xrfg::D3D12OpticalFlowBackend::nvidia);
             }
             return 0;
@@ -5669,7 +5693,9 @@ int main(int argc, char** argv) {
                                      HybridScene::occlusion_low_res, HybridScene::occlusion_periphery,
                                      HybridScene::occlusion_foveated,
                                      HybridScene::occlusion_foveated_moved,
-                                     HybridScene::occlusion_foveated_moved_current}) {
+                                     HybridScene::occlusion_foveated_moved_current,
+                                     HybridScene::occlusion_fast,
+                                     HybridScene::occlusion_fast_dark}) {
                 test_hybrid_composition(hybrid_fixture, scene);
             }
             test_hybrid_side_by_side(hybrid_fixture);

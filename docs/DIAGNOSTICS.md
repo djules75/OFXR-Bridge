@@ -43,7 +43,7 @@ composed from the game's vectors alone).
 | result | meaning |
 | --- | --- |
 | 812 | the ini's composition switch: bit 0 edge ghosting reduction, recorded but off on this build (bit 1, the repeating-pattern lock, left with V507) |
-| 813 | the live tuning window's values for the hybrid (V507), once per change, 8 bits a field from bit 0 in `xrfg::live_tuning::Block`'s order: `a` agree threshold (255ths), choice slope, vectors slope, flow rule slope, edge reach (percent), edge surface solves, surface agreement (1000ths), revealed check (1000ths); `b` vector snap (tenths of a pixel), depth search on, near reach (px), far reach (px), depth solves, nearer margin (percent), depth agreement (1000ths); `c` the window's sequence, 0 without the window (the built-in values) |
+| 813 | the live tuning window's values for the hybrid (V507), once per change, 8 bits a field from bit 0 in `xrfg::live_tuning::Block`'s order: `a` agree threshold (255ths), choice slope, vectors slope, flow rule slope, edge reach (percent), edge surface solves, surface agreement (1000ths), revealed check (1000ths); `b` vector snap (tenths of a pixel), depth search on, near reach (px), far reach (px), depth solves, nearer margin (percent), depth agreement (1000ths), tint (V539: 0 off, 1 by branch, 2 by the coverage mask); `c` the window's sequence, 0 without the window (the built-in values) |
 | 814 | the first pair composed by the hybrid; `a` 1 on the NVIDIA backend, 0 on FidelityFX |
 | 815 | a pair with the game's vectors the hybrid could not use, first eight: `a` 1 the two frames' guides do not pair (`b` previous serial `<< 32` or the current guide's previous serial, `c` previous epoch `<< 32` or current epoch), 2 the guides do not cover the views (`b` view width `<< 32` or height, `c` guide output width `<< 32` or height), 3 the guide's resource is on another device |
 | 820 | an NGX module's exports are detoured; `a` the module (0 nvngx_dlss.dll, 1 nvngx_dlssd.dll, 2 _nvngx.dll), `b` whether it had a separate `EvaluateFeature_C` |
@@ -348,6 +348,56 @@ the menu's value.
   or the columns `<< 20` or the rows; `b` the first tile column `<< 32` or
   row; `c` the search's reach in image pixels `<< 32` or the depth texels per
   image pixel in 1000ths.
+
+### Coverage mask (V539)
+
+Background a fast object uncovers ghosted the object behind it with Hybrid
+on: at such a pixel the game's vector is the background's, so the previous
+frame is sampled where the object still was, and the probes that would
+have caught it reach 16 pixels, scaled by the pixel's own displacement -
+the background's. Before a hybrid pair's draws, a compute pass at the
+vectors' resolution writes, per texel of the previous frame's image, the
+current frame's surface that came from there (its vector; the nearest by
+the game's depth, else the fastest, keeps a contested texel). A pixel whose
+previous-frame sample lies under another surface is revealed background
+whatever that surface's speed, and takes the current frame alone there.
+
+- `embedded_configuration` 860, at a synthesizer's first mask for an eye
+  and whenever its grid changes: `a` the eye `<< 48` or columns `<< 20` or
+  rows; `b` 1 when the game's depth decides the nearer surface, 0 the
+  faster.
+
+### The diagnostic tint (V539)
+
+Two boxes at the top of the tray's "Frame generation tuning (live)" window
+(expert mode) tint generated frames in a running game - the real frames
+stay as they are, so the tint flickers at half rate. Never saved: unticked
+at every tray start. 813's last field records it.
+
+By what Hybrid did at each pixel: **red** the optical flow took it,
+**yellow stripes** a mix of flow and vectors; otherwise the vectors' answer -
+**blue** covered background (the previous frame alone), **cyan** revealed
+background (the current frame alone: the probes' check or the coverage
+mask), **orange** the camera alone, **magenta** a motion edge found but not
+verified (the current frame lerped with the blend by confidence - the
+revealed-ghost path), **green** a second surface found, **white** the depth
+search's nearer surface, untinted the plain vectors warp.
+
+By the coverage mask's verdict at the pixel's previous-frame sample, and
+what became of it. Where the mask says another surface covered it there
+(revealed): **green** its answer, the current frame alone, was kept;
+**white** kept, then replaced by a surface search; **orange** not acted on
+because the camera alone explains the pixel; **blue** not acted on because
+the pixel is covered background; **red** not acted on, a repeated capture.
+Otherwise **magenta** nothing of the current frame came from there,
+**grey** no mask bound, untinted the pixel's own surface or the mask not
+consulted (static pixels). Stripes instead of a solid colour: the optical
+flow was mixed in.
+
+The second-surface search (Edge surface solves) accepts a surface only
+where the coverage mask does not give its previous-frame spot to another
+surface (V539): white bands in the mask tint were the search painting the
+object back over revealed background on dark or flat walls.
 
 ### Generated images for flat panels (V509)
 

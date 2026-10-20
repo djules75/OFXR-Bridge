@@ -12,6 +12,12 @@ Texture2DArray<float> GameDepth : register(t7);
 // tile, along its row (x) and its column (y) (depth_tiles.hlsl), for
 // skipping the depth search.
 Texture2DArray<float2> DepthTiles : register(t9);
+// V539: the coverage mask (BuildCoverageMask below): per vector texel of
+// the previous frame's image, the surface of the current frame that came
+// from there - its vector, and how near or how fast it is - so a pixel
+// whose A sample lies under another surface knows it is background that
+// surface has uncovered, however far the surface has moved since.
+Texture2DArray<uint> CoverageMask : register(t10);
 #endif
 // Linear filtering with clamped addressing, a static sampler in the root
 // signature: one fetch per bilinear tap where four loads and three lerps used
@@ -30,6 +36,11 @@ RWTexture2D<float> NvidiaCurrentColor : register(u2);
 #else
 RWTexture2D<float4> NvidiaPreviousColor : register(u1);
 RWTexture2D<float4> NvidiaCurrentColor : register(u2);
+#endif
+#ifdef XRFG_COVERAGE_MASK
+// The pass that writes the coverage mask (V539), on the pack's register,
+// which that pass does not use.
+RWTexture2DArray<uint> CoverageMaskOut : register(u0);
 #endif
 
 struct CameraMapping {
@@ -76,6 +87,11 @@ bool flat_panel() {
     return (SynthesisFlags & 4u) != 0u;
 }
 
+// V539: bit 4, this eye's coverage mask is at t10.
+bool coverage_mask_available() {
+    return (SynthesisFlags & 16u) != 0u;
+}
+
 // V530: bit 3, this eye's depth tiles are at t9; bits 24-26 their dilation
 // in tiles.
 bool depth_tiles_available() {
@@ -104,7 +120,7 @@ int depth_tiles_radius() {
 ByteAddressBuffer HybridTuning : register(t8);
 
 static const uint kTuningMagic = 0x4C565446u;
-static const uint kTuningVersion = 7u;
+static const uint kTuningVersion = 8u;
 // Field indices: xrfg::live_tuning::Block's order after its header.
 static const uint kTuningAgree = 0u;
 static const uint kTuningChoiceSlope = 1u;
@@ -121,6 +137,7 @@ static const uint kTuningDepthFarReach = 11u;
 static const uint kTuningDepthSolves = 12u;
 static const uint kTuningDepthNearer = 13u;
 static const uint kTuningDepthAgree = 14u;
+static const uint kTuningTint = 15u;
 
 bool tuning_present() {
     return HybridTuning.Load(0u) == kTuningMagic && HybridTuning.Load(4u) == kTuningVersion;
@@ -134,12 +151,24 @@ uint tuning_value(uint index, uint built_in) {
 // a little, and lerped toward the pose-only blend's own disagreement where it
 // fell back to that: what the hybrid chooses by. 1 where it had no samples.
 static float last_disagreement = 1.0;
-#ifdef XRFG_HYBRID_TINT
-// Diagnostic tint: what the vectors branch did with the last pixel. 0 plain
-// vectors, 1 covered background (A alone), 2 revealed background (B alone),
-// 3 other edge handling (unverified edge, second surface, camera alone).
+// Diagnostic tint (V539, the tray's tuning window, off at every start):
+// what the vectors branch did with the last pixel. 0 plain vectors, 1 covered background (A alone), 2 revealed
+// background (B alone), 3 the camera alone, 4 a motion edge not verified
+// (B lerped with the blend), 5 a second surface found, 6 the depth search's
+// nearer surface.
 static uint last_vectors_case = 0u;
-#endif
+// And the coverage mask's verdict for the last pixel: 0 not consulted, 1 no
+// mask, 2 nothing of B came from the A sample, 3 the pixel's own surface,
+// 4 another surface.
+static uint last_mask_state = 0u;
+// Why a mask verdict of another surface was not acted on: 0 it was, 1 the
+// camera alone explains the pixel, 2 it is covered background, 3 a repeated
+// capture. fxc evaluates both sides of &&, so the verdict is read for these
+// pixels too.
+static uint last_mask_gate = 0u;
+// 0 off, 1 tinted by last_vectors_case (and the flow's share), 2 by
+// last_mask_state.
+uint hybrid_tint_mode() { return min(tuning_value(kTuningTint, 0u), 2u); }
 
 // Where the vectors' warped samples disagree by less, they are taken as they
 // are and the flow is not asked.
@@ -1326,6 +1355,71 @@ bool depth_tiles_may_hold_nearer(float2 a, float2 b, float threshold) {
 }
 
 bool nearer(float a, float b) { return a > b * depth_nearer_factor() + 1.0e-6; }
+
+// V539: the mask's texel for a coordinate of A's image: the vectors' texel
+// grid over the output rectangle, counted from the rectangle's origin.
+int2 coverage_mask_texel(float2 coordinate) {
+    float4 output_rect = game_motion_output_rect();
+    float2 uv = (coordinate - output_rect.xy + 0.5) / max(output_rect.zw, float2(1.0, 1.0));
+    float2 limit = max(ceil(GameMotionRect.zw), float2(1.0, 1.0));
+    return int2(clamp(floor(uv * GameMotionRect.zw), float2(0.0, 0.0), limit));
+}
+
+// A mask word: bits 24-31 the priority - how near by the game's depth, or
+// without depth how fast - and bits 0-23 the vector in quarter pixels, 12
+// bits an axis from -512 to +512 (8 bits an axis, +-32, lost a fast strafe:
+// background and object both clamped to 32 read as one surface). The
+// largest word wins a texel; 0 is an empty one.
+uint coverage_mask_word(float2 motion, float priority) {
+    uint2 quarter = uint2(clamp(round(motion * 4.0) + 2048.0, 0.0, 4095.0));
+    return (uint(saturate(priority) * 255.0) << 24) | (quarter.x << 12) | quarter.y;
+}
+
+float2 coverage_mask_motion(uint word) {
+    return (float2(float((word >> 12) & 4095u), float(word & 4095u)) - 2048.0) / 4.0;
+}
+
+// Whether A's sample at `coordinate` lies under a surface of B other than
+// the one moving by `motion`, this pixel's: that surface covered the spot in
+// A, so the pixel is background it has uncovered. False without a mask, and
+// where nothing of B came from there.
+// The verdict: 1 no mask, 2 nothing of B came from there, 3 the surface
+// moving by `motion`, 4 another.
+uint coverage_mask_verdict(float2 coordinate, float2 motion) {
+    uint verdict = 1u;
+    [branch] if (coverage_mask_available()) {
+        uint word = CoverageMask.Load(int4(coverage_mask_texel(coordinate), 0, 0));
+        verdict = 2u;
+        if (word != 0u) {
+            float2 recorded = coverage_mask_motion(word);
+            float2 own = clamp(motion, -512.0, 512.0);
+            verdict = length(recorded - own) > max(1.0, 0.15 * length(recorded)) ? 4u : 3u;
+        }
+    }
+    return verdict;
+}
+
+bool coverage_mask_other_surface(float2 coordinate, float2 motion) {
+    last_mask_state = coverage_mask_verdict(coordinate, motion);
+    return last_mask_state == 4u;
+}
+
+// V539: whether the surface a solve found at `endpoint` of B is hidden in A
+// where its own vector places it - the coverage mask gives that spot to
+// another surface. Such a solve is not that surface in both frames: on a
+// trailing edge it is the pixel's own background again, A's sample the
+// object over it, and over a dark or flat background the two agreed within
+// the search's margin and the blend of them painted the object back over
+// what the mask had shown revealed (Returnal: white bands, the ghost).
+bool coverage_mask_hides(float2 endpoint) {
+    bool hidden = false;
+    [branch] if (coverage_mask_available()) {
+        float2 backward = game_motion_for_pixel(endpoint, Slice, ViewIndex);
+        MappedCoordinate mapped = map_source_to_target(endpoint + backward, PreviousMappings[ViewIndex]);
+        hidden = coverage_mask_verdict(mapped.coordinate, backward) == 4u;
+    }
+    return hidden;
+}
 #endif
 
 struct FullscreenVertex {
@@ -1383,9 +1477,9 @@ float4 synthesize_midpoint(
     float4 output_color = float4(0.0, 0.0, 0.0, 1.0);
 #ifdef XRFG_HYBRID
     last_disagreement = 1.0;
-#ifdef XRFG_HYBRID_TINT
     last_vectors_case = 0u;
-#endif
+    last_mask_state = 0u;
+    last_mask_gate = 0u;
 #endif
     uint2 integer_pixel = uint2(input.position.xy);
     bool in_bounds = integer_pixel.x < Width && integer_pixel.y < Height &&
@@ -1638,7 +1732,7 @@ float4 synthesize_midpoint(
                         // whose shading changed - a fade, a flash - and their
                         // motion-compensated blend is the frame between.
                         output_color = saturate(camera_explains ? stable_midpoint : flow_midpoint);
-#ifdef XRFG_HYBRID_TINT
+#ifdef XRFG_HYBRID
                         last_vectors_case = camera_explains ? 3u : 0u;
 #endif
 #ifdef XRFG_HYBRID
@@ -1655,15 +1749,29 @@ float4 synthesize_midpoint(
                         // steps it ends outside, on the covered surface's
                         // displacement, which places A's sample.
                         bool covered_case = !camera_explains && solve_residual >= 0.5;
+#ifdef XRFG_HYBRID
+                        // V539: A's sample under another surface of B. The
+                        // coverage mask says so whatever that surface's speed;
+                        // the probes below reach 16 pixels, scaled by this
+                        // pixel's displacement - the background's, not the
+                        // object's - so background a fast object uncovers
+                        // escaped them and kept the blend, a ghost of the
+                        // object that widened with its speed.
+                        bool mask_revealed = !camera_explains && !covered_case &&
+                            repeated_capture_flag() == 0 &&
+                            coverage_mask_other_surface(previous_coordinate, raw_backward);
+                        last_mask_gate = camera_explains ? 1u : covered_case ? 2u
+                                       : repeated_capture_flag() != 0 ? 3u : 0u;
+#else
+                        const bool mask_revealed = false;
+#endif
                         if (covered_case) {
                             CameraSample covered = sample_previous_target(
                                 pixel + synthesis_fraction() * last_displacement, Slice, ViewIndex);
                             if (covered.valid >= 0.5) {
                                 output_color = saturate(covered.color);
-#ifdef XRFG_HYBRID_TINT
-                                last_vectors_case = 1u;
-#endif
 #ifdef XRFG_HYBRID
+                                last_vectors_case = 1u;
                                 // No surface of B reaches the pixel: the
                                 // clearest occlusion the vectors find, and A
                                 // alone shows what is there. The hybrid keeps
@@ -1675,7 +1783,8 @@ float4 synthesize_midpoint(
                                 explained = 0.0;
 #endif
                             }
-                        } else if (!camera_explains && disagreement > 0.1 && repeated_capture_flag() == 0) {
+                        } else if (!camera_explains && (disagreement > 0.1 || mask_revealed) &&
+                                   repeated_capture_flag() == 0) {
                             // Where the motion is not uniform - a vector 16
                             // pixels away differs by a tenth of a pixel -
                             // disagreeing samples are two surfaces instead. A's
@@ -1709,18 +1818,18 @@ float4 synthesize_midpoint(
                                         previous_coordinate, previous_sample.color, pixel + offset));
 #endif
                             }
+                            motion_edge = motion_edge || mask_revealed;
                             if (motion_edge) {
                                 output_color = saturate(lerp(
                                     current_sample.color, flow_midpoint, confidence));
 #ifdef XRFG_HYBRID
                                 // A's sample is that surface: B's alone is the
                                 // background, and the vectors explain the pair.
-#ifdef XRFG_HYBRID_TINT
-                                last_vectors_case = revealed < 0.05 ? 2u : 3u;
-#endif
-                                if (revealed < revealed_error_limit()) {
+                                last_vectors_case = 4u;
+                                if (mask_revealed || revealed < revealed_error_limit()) {
                                     output_color = saturate(current_sample.color);
-                                    explained = min(explained, revealed);
+                                    explained = min(explained, mask_revealed ? 0.0 : revealed);
+                                    last_vectors_case = 2u;
                                 }
 #endif
                             }
@@ -1744,15 +1853,18 @@ float4 synthesize_midpoint(
                                     // A start on the same surface finds B's again.
                                     if (length(game_motion_texel(start) - here) > 1.0) {
                                         float4 a, b;
+                                        float2 found_at;
                                         ++solves;
-                                        if (game_motion_surface(pixel, start, a, b) &&
-                                            rgb_error(a, b) < edge_surface_agree()) {
+                                        bool surface = game_motion_surface_at(pixel, start, a, b, found_at) &&
+                                            rgb_error(a, b) < edge_surface_agree();
+#ifdef XRFG_HYBRID
+                                        surface = surface && !coverage_mask_hides(found_at);
+#endif
+                                        if (surface) {
                                             output_color = saturate(lerp(a, b, synthesis_fraction()));
 #ifdef XRFG_HYBRID
                                             explained = rgb_error(a, b);
-#ifdef XRFG_HYBRID_TINT
-                                            last_vectors_case = 3u;
-#endif
+                                            last_vectors_case = 5u;
 #endif
                                             done = true;
                                         }
@@ -1816,9 +1928,7 @@ float4 synthesize_midpoint(
                                         output_color = saturate(lerp(a, b, synthesis_fraction()));
                                         explained = rgb_error(a, b);
                                         depth_found = true;
-#ifdef XRFG_HYBRID_TINT
-                                        last_vectors_case = 3u;
-#endif
+                                        last_vectors_case = 6u;
                                     }
                                 }
                             }
@@ -1861,10 +1971,10 @@ float4 synthesize_hybrid(
     bool input_pose_compensated) {
     float4 vectors = synthesize_midpoint(input, 1.0, false, false, false, true, false);
     float vectors_disagreement = last_disagreement;
-#ifdef XRFG_HYBRID_TINT
     const uint vectors_case = last_vectors_case;
+    const uint mask_state = last_mask_state;
+    const uint mask_gate = last_mask_gate;
     float vectors_weight = 1.0;
-#endif
     float4 result = vectors;
     [branch] if (vectors_disagreement >= hybrid_agree_threshold()) {
         float4 flow = synthesize_midpoint(
@@ -1873,28 +1983,71 @@ float4 synthesize_hybrid(
         float weight = saturate(
             1.0 + (last_disagreement - vectors_disagreement) * hybrid_choice_slope());
         result = lerp(flow, vectors, weight);
-#ifdef XRFG_HYBRID_TINT
         vectors_weight = weight;
-#endif
     }
-#ifdef XRFG_HYBRID_TINT
-    // Generated frames only: red the flow, yellow a mix, then by the
-    // vectors' case - blue covered, cyan revealed, orange other edge work.
-    float3 tint = float3(0.0, 0.0, 0.0);
-    float amount = 0.0;
-    if (vectors_weight < 0.05) {
-        tint = float3(1.0, 0.0, 0.0); amount = 0.45;
-    } else if (vectors_weight < 0.95) {
-        tint = float3(1.0, 1.0, 0.0); amount = 0.45;
-    } else if (vectors_case == 1u) {
-        tint = float3(0.0, 0.25, 1.0); amount = 0.45;
-    } else if (vectors_case == 2u) {
-        tint = float3(0.0, 1.0, 1.0); amount = 0.45;
-    } else if (vectors_case == 3u) {
-        tint = float3(1.0, 0.5, 0.0); amount = 0.45;
+    // The diagnostic tint (the tray's tuning window), generated frames only.
+    // Mode 1: red the flow, yellow stripes a mix, then by the vectors' case
+    // - blue covered, cyan revealed, orange the camera alone, magenta a
+    // motion edge not verified, green a second surface, white the depth
+    // search's.
+    // Mode 2, the coverage mask where it says another surface covers the A
+    // sample: green its answer (B alone) kept, white kept then replaced by a
+    // surface search, orange stopped because the camera alone explains the
+    // pixel, blue stopped as covered background, red a repeated capture;
+    // magenta nothing of B came from the A sample, grey no mask bound,
+    // untinted the pixel's own surface or the mask not consulted. Stripes
+    // over any of these: the flow was mixed in.
+    uint tint_mode = hybrid_tint_mode();
+    [branch] if (tint_mode != 0u) {
+        float3 tint = float3(0.0, 0.0, 0.0);
+        float amount = 0.0;
+        // Diagonal stripes 6 pixels wide: a mix never reads as a solid colour
+        // over a dark or tinted surface.
+        uint2 tint_pixel = uint2(input.position.xy);
+        bool stripe = (((tint_pixel.x + tint_pixel.y) / 6u) & 1u) != 0u;
+        if (tint_mode == 1u) {
+            if (vectors_weight < 0.05) {
+                tint = float3(1.0, 0.0, 0.0); amount = 0.45;
+            } else if (vectors_weight < 0.95) {
+                tint = float3(1.0, 1.0, 0.0); amount = stripe ? 0.6 : 0.0;
+            } else if (vectors_case == 1u) {
+                tint = float3(0.0, 0.25, 1.0); amount = 0.45;
+            } else if (vectors_case == 2u) {
+                tint = float3(0.0, 1.0, 1.0); amount = 0.45;
+            } else if (vectors_case == 3u) {
+                tint = float3(1.0, 0.5, 0.0); amount = 0.45;
+            } else if (vectors_case == 4u) {
+                tint = float3(1.0, 0.0, 1.0); amount = 0.45;
+            } else if (vectors_case == 5u) {
+                tint = float3(0.0, 1.0, 0.0); amount = 0.45;
+            } else if (vectors_case == 6u) {
+                tint = float3(1.0, 1.0, 1.0); amount = 0.45;
+            }
+        } else {
+            if (mask_state == 4u) {
+                amount = 0.5;
+                if (mask_gate == 1u) {
+                    tint = float3(1.0, 0.5, 0.0);
+                } else if (mask_gate == 2u) {
+                    tint = float3(0.0, 0.25, 1.0);
+                } else if (mask_gate == 3u) {
+                    tint = float3(1.0, 0.0, 0.0);
+                } else if (vectors_case == 5u || vectors_case == 6u) {
+                    tint = float3(1.0, 1.0, 1.0);
+                } else {
+                    tint = float3(0.0, 1.0, 0.0);
+                }
+            } else if (mask_state == 2u) {
+                tint = float3(1.0, 0.0, 1.0); amount = 0.5;
+            } else if (mask_state == 1u) {
+                tint = float3(0.5, 0.5, 0.5); amount = 0.5;
+            }
+            if (vectors_weight < 0.95 && !stripe) {
+                amount = 0.0;
+            }
+        }
+        result.rgb = lerp(result.rgb, tint, amount);
     }
-    result.rgb = lerp(result.rgb, tint, amount);
-#endif
     return result;
 }
 
@@ -1948,3 +2101,46 @@ float4 SynthesizeNvidiaFastBidirectionalMidpointPS(
     FullscreenVertex input) : SV_Target {
     return synthesize_midpoint(input, 1.0 / 32.0, true, true, true, false, true);
 }
+
+#ifdef XRFG_COVERAGE_MASK
+// V539: the coverage mask, at the vectors' resolution over the output
+// rectangle, a slice per eye. ClearCoverageMask empties it; BuildCoverageMask
+// writes, for each texel of B's vectors, the surface's word at the texel of
+// A's image its vector leads to - the 2 x 2 texels around the point, so no
+// gap opens between neighbours - the nearest surface by the game's depth,
+// else the fastest, keeping a contested texel.
+[numthreads(8, 8, 1)]
+void ClearCoverageMask(uint3 id : SV_DispatchThreadID) {
+    float2 limit = ceil(GameMotionRect.zw);
+    if (float(id.x) <= limit.x && float(id.y) <= limit.y) {
+        CoverageMaskOut[uint3(id.xy, Slice)] = 0u;
+    }
+}
+
+[numthreads(8, 8, 1)]
+void BuildCoverageMask(uint3 id : SV_DispatchThreadID) {
+    float2 extent = GameMotionRect.zw;
+    if (float(id.x) >= extent.x || float(id.y) >= extent.y) return;
+    // The output pixel under this texel's centre: game_motion_texel's map,
+    // inverted.
+    float4 output_rect = game_motion_output_rect();
+    float2 uv = (float2(id.xy) + 0.5) / max(extent, float2(1.0, 1.0));
+    float2 pixel = output_rect.xy + uv * output_rect.zw - 0.5;
+    float2 motion = game_motion_for_pixel(pixel, Slice, ViewIndex);
+    MappedCoordinate previous = map_source_to_target(pixel + motion, PreviousMappings[ViewIndex]);
+    if (previous.valid < 0.5) return;
+    float priority = game_depth_available() ? game_nearness(pixel)
+                                            : min(length(motion), 255.0) / 255.0;
+    uint word = coverage_mask_word(motion, priority);
+    float2 at = (previous.coordinate - output_rect.xy + 0.5) /
+        max(output_rect.zw, float2(1.0, 1.0)) * extent;
+    int2 base = int2(floor(at - 0.5));
+    int2 limit = int2(ceil(extent));
+    [unroll] for (uint corner = 0; corner < 4; ++corner) {
+        int2 texel = base + int2(corner & 1u, corner >> 1);
+        if (all(texel >= 0) && all(texel <= limit)) {
+            InterlockedMax(CoverageMaskOut[uint3(uint2(texel), Slice)], word);
+        }
+    }
+}
+#endif

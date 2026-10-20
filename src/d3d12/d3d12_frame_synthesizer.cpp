@@ -11,6 +11,8 @@
 
 #include "depth_tiles_build_shader.hpp"
 #include "depth_tiles_dilate_shader.hpp"
+#include "coverage_mask_build_shader.hpp"
+#include "coverage_mask_clear_shader.hpp"
 #include "fullscreen_vertex_shader.hpp"
 #include "game_motion_synthesize_midpoint_pixel_shader.hpp"
 #include "guide_compose_clear_shader.hpp"
@@ -85,8 +87,9 @@ struct NvidiaInputScaleRatio {
 }
 constexpr UINT kMaxReprojectionViews = 2;
 // t7: the game's depth for the hybrid (V505); t8: the live tuning block
-// for the hybrid (V507); t9: the depth search's dilated tiles (V530).
-constexpr UINT kSrvDescriptorCount = 10;
+// for the hybrid (V507); t9: the depth search's dilated tiles (V530); t10:
+// the coverage mask (V539).
+constexpr UINT kSrvDescriptorCount = 11;
 // The tuning block's upload buffer, per work slot; the block is 72 bytes.
 constexpr UINT kTuningBufferBytes = 256;
 static_assert(sizeof(xrfg::live_tuning::Block) <= kTuningBufferBytes);
@@ -103,8 +106,14 @@ constexpr UINT kComposeDescriptorBase = kDescriptorCount;
 // the second's UAVs the undilated ones.
 constexpr UINT kTileDescriptorBase =
     kComposeDescriptorBase + kDescriptorBlockSize * kMaxReprojectionViews;
-constexpr UINT kSlotDescriptorCount =
+// V539: a block per eye after those for the coverage mask's passes, whose
+// u0 is the mask.
+constexpr UINT kMaskDescriptorBase =
     kTileDescriptorBase + 2U * kDescriptorBlockSize * kMaxReprojectionViews;
+constexpr UINT kSlotDescriptorCount =
+    kMaskDescriptorBase + kDescriptorBlockSize * kMaxReprojectionViews;
+// V539: synthesis_flags bit 4 says the eye's coverage mask is bound.
+constexpr UINT kCoverageMaskFlag = 16U;
 // The depth search's tiles: 8 depth texels a side (V531; 16 in V530),
 // dilated along their row and column by at most 7 (synthesis_flags bits
 // 24-26); bit 3 says they are bound.
@@ -904,6 +913,12 @@ struct D3D12FrameSynthesizer::Impl {
         ComPtr<ID3D12Resource> depth_tiles_dilated;
         UINT depth_tiles_width{};
         UINT depth_tiles_height{};
+        // V539: the coverage mask, a slice per eye, at the vectors'
+        // resolution; replaced only while the slot is idle.
+        ComPtr<ID3D12Resource> coverage_mask;
+        UINT coverage_mask_width{};
+        UINT coverage_mask_height{};
+        D3D12_RESOURCE_STATES coverage_mask_state{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
         std::array<NvidiaEyeResources, kMaxReprojectionViews> nvidia_eyes;
         D3D12NvidiaGpuTiming timing_metadata{};
         D3D12NvidiaGpuTiming cached_timing{};
@@ -967,6 +982,10 @@ struct D3D12FrameSynthesizer::Impl {
     // V530: the depth search's tile passes (depth_tiles.hlsl), hybrid only.
     ComPtr<ID3D12PipelineState> depth_tiles_build_pipeline;
     ComPtr<ID3D12PipelineState> depth_tiles_dilate_pipeline;
+    // V539: the coverage mask's passes (frame_synthesis.hlsl, XRFG_COVERAGE_MASK).
+    ComPtr<ID3D12PipelineState> coverage_mask_clear_pipeline;
+    ComPtr<ID3D12PipelineState> coverage_mask_build_pipeline;
+    std::array<std::atomic<std::uint64_t>, kMaxReprojectionViews> coverage_mask_recorded{};
     // What each eye's 850 last recorded (record_depth_tiles).
     std::array<std::atomic<std::uint64_t>, kMaxReprojectionViews> depth_tiles_recorded{};
     ComPtr<ID3D12Resource> composed_vectors;
@@ -1261,7 +1280,7 @@ struct D3D12FrameSynthesizer::Impl {
 
         if (nvidia_options.hybrid) {
             // V516: the foveated inset's composition.
-            const std::array<std::pair<D3D12_SHADER_BYTECODE, ComPtr<ID3D12PipelineState>*>, 5>
+            const std::array<std::pair<D3D12_SHADER_BYTECODE, ComPtr<ID3D12PipelineState>*>, 7>
                 compose{{
                     {{g_xrfg_guide_compose_clear_shader, sizeof(g_xrfg_guide_compose_clear_shader)},
                         &compose_clear_pipeline},
@@ -1275,6 +1294,11 @@ struct D3D12FrameSynthesizer::Impl {
                         &depth_tiles_build_pipeline},
                     {{g_xrfg_depth_tiles_dilate_shader, sizeof(g_xrfg_depth_tiles_dilate_shader)},
                         &depth_tiles_dilate_pipeline},
+                    // V539: the coverage mask.
+                    {{g_xrfg_coverage_mask_clear_shader, sizeof(g_xrfg_coverage_mask_clear_shader)},
+                        &coverage_mask_clear_pipeline},
+                    {{g_xrfg_coverage_mask_build_shader, sizeof(g_xrfg_coverage_mask_build_shader)},
+                        &coverage_mask_build_pipeline},
                 }};
             for (const auto& [code, pipeline] : compose) {
                 compute_description.CS = code;
@@ -2282,6 +2306,12 @@ struct D3D12FrameSynthesizer::Impl {
                     offset_cpu_handle(cpu_start,
                         block * kDescriptorBlockSize + 9U,
                         descriptor_increment));
+                D3D12_SHADER_RESOURCE_VIEW_DESC null_mask = null_depth;
+                null_mask.Format = DXGI_FORMAT_R32_UINT;
+                device->CreateShaderResourceView(nullptr, &null_mask,
+                    offset_cpu_handle(cpu_start,
+                        block * kDescriptorBlockSize + 10U,
+                        descriptor_increment));
             }
         }
         return S_OK;
@@ -2659,10 +2689,11 @@ struct D3D12FrameSynthesizer::Impl {
                 DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R32_UINT,
                 DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT,
                 DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R32G32_FLOAT,
+                DXGI_FORMAT_R32_UINT,
             };
             for (UINT index = 0; index < kSrvDescriptorCount; ++index) {
                 const bool array = index == 0 || index == 1 || index == 6 || index == 7 ||
-                    index == 9;
+                    index == 9 || index == 10;
                 D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
                 srv.Format = kSrvFormats[index];
                 srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -3702,6 +3733,199 @@ struct D3D12FrameSynthesizer::Impl {
         return flags;
     }
 
+    // V539: the coverage mask (frame_synthesis.hlsl, BuildCoverageMask) for
+    // each view's eye, recorded on `list` before the pair's draws, which find
+    // it at t10 of the eye's block. Per eye the synthesis_flags bit its draws
+    // carry, 0 where there is none. draw_parameters holds the pair's camera
+    // mappings; the eye's guide constants are applied as the draw applies
+    // them. create_game_motion_views has bound the vectors and depth, and
+    // guide_barriers has the vectors readable.
+    [[nodiscard]] std::array<UINT, kMaxReprojectionViews> record_coverage_mask(
+        WorkSlot& slot,
+        ID3D12GraphicsCommandList* list,
+        const DlssMotionVectorSet& guides,
+        const SynthesisParameters& draw_parameters,
+        std::span<const D3D12ReprojectionView> target_views) noexcept {
+        std::array<UINT, kMaxReprojectionViews> flags{};
+        // The harness compares the composition with and without it.
+        const bool disabled =
+            GetEnvironmentVariableW(L"XRFG_DISABLE_COVERAGE_MASK", nullptr, 0) != 0;
+        if (disabled || !coverage_mask_clear_pipeline || !coverage_mask_build_pipeline) {
+            return flags;
+        }
+        struct EyeMask {
+            SynthesisParameters parameters{};
+            UINT columns{}, rows{};
+            bool depth{};
+        };
+        std::array<EyeMask, kMaxReprojectionViews> eyes{};
+        std::array<bool, kMaxReprojectionViews> built{};
+        UINT width = 0, height = 0;
+        for (UINT view_index = 0; view_index < static_cast<UINT>(target_views.size()); ++view_index) {
+            const UINT slice = resolved_array_slice(target_views[view_index], view_index,
+                target_views.size(), image_description.DepthOrArraySize);
+            const UINT eye = guide_eye(guides, view_index, slice);
+            if (eye >= kMaxReprojectionViews || eye >= guides.eye_count || !guides.eyes[eye] ||
+                built[eye]) {
+                continue;
+            }
+            const auto& guide = *guides.eyes[eye];
+            if (!guide.motion_vectors || guide.output_width == 0 || guide.output_height == 0) continue;
+            EyeMask& mask = eyes[eye];
+            mask.parameters = draw_parameters;
+            apply_hybrid_guide_constants(mask.parameters, guide);
+            mask.parameters.slice = eye;
+            mask.parameters.view_index = view_index;
+            const auto& rect = mask.parameters.game_motion_rect;
+            if (!(rect[2] >= 1.0F) || !(rect[3] >= 1.0F) || rect[2] > 16384.0F || rect[3] > 16384.0F) {
+                continue;
+            }
+            mask.columns = static_cast<UINT>(std::ceil(rect[2])) + 1U;
+            mask.rows = static_cast<UINT>(std::ceil(rect[3])) + 1U;
+            mask.depth = usable_guide_depth(guide) && same_device(device.Get(), guide.depth.Get());
+            width = std::max(width, mask.columns);
+            height = std::max(height, mask.rows);
+            built[eye] = true;
+        }
+        if (width == 0 || height == 0) return flags;
+        if (!slot.coverage_mask || slot.coverage_mask_width < width ||
+            slot.coverage_mask_height < height) {
+            D3D12_HEAP_PROPERTIES heap{};
+            heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+            heap.CreationNodeMask = 1;
+            heap.VisibleNodeMask = 1;
+            D3D12_RESOURCE_DESC texture{};
+            texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            texture.Width = std::max(width, slot.coverage_mask_width);
+            texture.Height = std::max(height, slot.coverage_mask_height);
+            texture.DepthOrArraySize = kMaxReprojectionViews;
+            texture.MipLevels = 1;
+            texture.Format = DXGI_FORMAT_R32_UINT;
+            texture.SampleDesc.Count = 1;
+            texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            ComPtr<ID3D12Resource> mask;
+            if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texture,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                    IID_PPV_ARGS(mask.GetAddressOf())))) {
+                return flags;
+            }
+            mask->SetName(L"OFXR Coverage Mask");
+            slot.coverage_mask = std::move(mask);
+            slot.coverage_mask_width = static_cast<UINT>(texture.Width);
+            slot.coverage_mask_height = texture.Height;
+            slot.coverage_mask_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+
+        const D3D12_CPU_DESCRIPTOR_HANDLE cpu_start =
+            slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+        const D3D12_GPU_DESCRIPTOR_HANDLE gpu_start =
+            slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+        D3D12_SHADER_RESOURCE_VIEW_DESC slice_view{};
+        slice_view.Format = DXGI_FORMAT_R32_UINT;
+        slice_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        slice_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        slice_view.Texture2DArray.MipLevels = 1;
+        slice_view.Texture2DArray.ArraySize = 1;
+        D3D12_UNORDERED_ACCESS_VIEW_DESC array_view{};
+        array_view.Format = DXGI_FORMAT_R32_UINT;
+        array_view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+        array_view.Texture2DArray.ArraySize = kMaxReprojectionViews;
+        for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC view = slice_view;
+            view.Texture2DArray.FirstArraySlice = eye;
+            // The draw's t10: this eye's mask, or nothing.
+            device->CreateShaderResourceView(built[eye] ? slot.coverage_mask.Get() : nullptr, &view,
+                offset_cpu_handle(cpu_start, eye * kDescriptorBlockSize + 10U, descriptor_increment));
+            if (!built[eye]) continue;
+            device->CreateUnorderedAccessView(slot.coverage_mask.Get(), nullptr, &array_view,
+                offset_cpu_handle(cpu_start,
+                    kMaskDescriptorBase + eye * kDescriptorBlockSize + kSrvDescriptorCount,
+                    descriptor_increment));
+        }
+
+        dred_marker(list, "OFXR coverage mask begin");
+        // The depths into the shader-read state for the pass and back after,
+        // once a resource; the vectors already are.
+        std::array<std::pair<ID3D12Resource*, D3D12_RESOURCE_STATES>, kMaxReprojectionViews> sources{};
+        UINT source_count = 0;
+        for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
+            if (!built[eye] || !eyes[eye].depth) continue;
+            ID3D12Resource* const depth = guides.eyes[eye]->depth.Get();
+            const D3D12_RESOURCE_STATES state = guides.eyes[eye]->depth_resource_state;
+            bool known = state == kShaderReadState;
+            for (UINT index = 0; index < source_count; ++index) {
+                known = known || sources[index].first == depth;
+            }
+            if (!known) sources[source_count++] = {depth, state};
+        }
+        std::array<D3D12_RESOURCE_BARRIER, 1U + kMaxReprojectionViews> barriers{};
+        UINT barrier_count = 0;
+        if (slot.coverage_mask_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+            barriers[barrier_count++] = transition_barrier(slot.coverage_mask.Get(),
+                slot.coverage_mask_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
+        for (UINT index = 0; index < source_count; ++index) {
+            barriers[barrier_count++] = transition_barrier(sources[index].first,
+                sources[index].second, kShaderReadState);
+        }
+        if (barrier_count != 0) list->ResourceBarrier(barrier_count, barriers.data());
+        ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
+        list->SetDescriptorHeaps(1, heaps);
+        list->SetComputeRootSignature(root_signature.Get());
+        const auto bind = [&](UINT eye) {
+            list->SetComputeRootDescriptorTable(0,
+                offset_gpu_handle(gpu_start, eye * kDescriptorBlockSize, descriptor_increment));
+            list->SetComputeRootDescriptorTable(1, offset_gpu_handle(gpu_start,
+                kMaskDescriptorBase + eye * kDescriptorBlockSize + kSrvDescriptorCount,
+                descriptor_increment));
+            list->SetComputeRoot32BitConstants(2, kSynthesisConstantCount, &eyes[eye].parameters, 0);
+        };
+        list->SetPipelineState(coverage_mask_clear_pipeline.Get());
+        for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
+            if (!built[eye]) continue;
+            bind(eye);
+            list->Dispatch((eyes[eye].columns + 7U) / 8U, (eyes[eye].rows + 7U) / 8U, 1);
+        }
+        D3D12_RESOURCE_BARRIER cleared{};
+        cleared.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        cleared.UAV.pResource = slot.coverage_mask.Get();
+        list->ResourceBarrier(1, &cleared);
+        list->SetPipelineState(coverage_mask_build_pipeline.Get());
+        for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
+            if (!built[eye]) continue;
+            bind(eye);
+            list->Dispatch((eyes[eye].columns + 6U) / 8U, (eyes[eye].rows + 6U) / 8U, 1);
+            flags[eye] = kCoverageMaskFlag;
+        }
+        barrier_count = 0;
+        barriers[barrier_count++] = transition_barrier(slot.coverage_mask.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kShaderReadState);
+        for (UINT index = 0; index < source_count; ++index) {
+            barriers[barrier_count++] = transition_barrier(sources[index].first,
+                kShaderReadState, sources[index].second);
+        }
+        list->ResourceBarrier(barrier_count, barriers.data());
+        slot.coverage_mask_state = kShaderReadState;
+        dred_marker(list, "OFXR coverage mask complete");
+        // 860, a synthesizer's first mask for an eye and whenever its grid
+        // changes: a the eye << 48 | columns << 20 | rows, b 1 with the
+        // game's depth deciding the nearer surface, 0 the faster.
+        for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
+            if (!built[eye]) continue;
+            const std::uint64_t a = (static_cast<std::uint64_t>(eye) << 48U) |
+                (static_cast<std::uint64_t>(eyes[eye].columns & 0xFFFFFU) << 20U) |
+                (eyes[eye].rows & 0xFFFFFU);
+            const std::uint64_t key = (a << 1U) | (eyes[eye].depth ? 1U : 0U);
+            if (coverage_mask_recorded[eye].exchange(key + 1U, std::memory_order_relaxed) == key + 1U) {
+                continue;
+            }
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::embedded_configuration, 860, a,
+                eyes[eye].depth ? 1U : 0U);
+        }
+        return flags;
+    }
+
     [[nodiscard]] HRESULT record_game_motion_pair(
         WorkSlot& slot,
         const RollingSource& previous_source,
@@ -4347,6 +4571,10 @@ struct D3D12FrameSynthesizer::Impl {
         const std::array<UINT, kMaxReprojectionViews> depth_tiles = guides != nullptr
             ? record_depth_tiles(slot, synthesis, *guides, tuning)
             : std::array<UINT, kMaxReprojectionViews>{};
+        // V539: the coverage mask.
+        const std::array<UINT, kMaxReprojectionViews> coverage_mask = guides != nullptr
+            ? record_coverage_mask(slot, synthesis, *guides, parameters, target_views)
+            : std::array<UINT, kMaxReprojectionViews>{};
 
         synthesis->SetDescriptorHeaps(1, heaps);
         synthesis->SetGraphicsRootSignature(root_signature.Get());
@@ -4396,8 +4624,9 @@ struct D3D12FrameSynthesizer::Impl {
                 if (guides != nullptr) {
                     apply_hybrid_guide_constants(parameters, *guides->eyes[eye]);
                     parameters.synthesis_flags =
-                        (parameters.synthesis_flags & ~(kDepthTilesFlag | kDepthTilesRadiusMask)) |
-                        (eye < kMaxReprojectionViews ? depth_tiles[eye] : 0U);
+                        (parameters.synthesis_flags &
+                            ~(kDepthTilesFlag | kDepthTilesRadiusMask | kCoverageMaskFlag)) |
+                        (eye < kMaxReprojectionViews ? depth_tiles[eye] | coverage_mask[eye] : 0U);
                 }
                 synthesis->SetGraphicsRoot32BitConstants(
                     2,
@@ -5200,6 +5429,10 @@ struct D3D12FrameSynthesizer::Impl {
         const std::array<UINT, kMaxReprojectionViews> depth_tiles = guides != nullptr
             ? record_depth_tiles(slot, slot.command_list.Get(), *guides, tuning)
             : std::array<UINT, kMaxReprojectionViews>{};
+        // V539: the coverage mask.
+        const std::array<UINT, kMaxReprojectionViews> coverage_mask = guides != nullptr
+            ? record_coverage_mask(slot, slot.command_list.Get(), *guides, parameters, target_views)
+            : std::array<UINT, kMaxReprojectionViews>{};
 
         slot.command_list->SetDescriptorHeaps(1, heaps);
         slot.command_list->SetGraphicsRootSignature(root_signature.Get());
@@ -5246,8 +5479,9 @@ struct D3D12FrameSynthesizer::Impl {
                         offset_gpu_handle(block, kSrvDescriptorCount, descriptor_increment));
                     apply_hybrid_guide_constants(parameters, *guides->eyes[eye]);
                     parameters.synthesis_flags =
-                        (parameters.synthesis_flags & ~(kDepthTilesFlag | kDepthTilesRadiusMask)) |
-                        (eye < kMaxReprojectionViews ? depth_tiles[eye] : 0U);
+                        (parameters.synthesis_flags &
+                            ~(kDepthTilesFlag | kDepthTilesRadiusMask | kCoverageMaskFlag)) |
+                        (eye < kMaxReprojectionViews ? depth_tiles[eye] | coverage_mask[eye] : 0U);
                 }
                 slot.command_list->SetGraphicsRoot32BitConstants(
                     2,

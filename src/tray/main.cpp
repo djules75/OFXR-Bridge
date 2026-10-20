@@ -121,6 +121,7 @@ struct AppState {
     // writes (xrfg::live_tuning). The block lives as long as the tray, so
     // values set once hold for every game started after them.
     HWND tuning_window{};
+    std::array<HWND, 2> tuning_switches{};
     std::array<HWND, 14> tuning_sliders{};
     std::array<HWND, 14> tuning_labels{};
     HANDLE tuning_mapping{};
@@ -1192,6 +1193,23 @@ constexpr std::array<TuningSlider, 14> kTuningSliders{{
 // The depth search's on/off is the menu's "Hybrid: depth search" (V532);
 // the block's field is left as the window found it and the layer ignores it.
 static_assert(kTuningSliders.size() == std::tuple_size_v<decltype(AppState::tuning_sliders)>);
+
+// V539: the diagnostic tint of generated frames, a value of one field; the
+// boxes exclude each other. Unticked at every tray start, never saved.
+struct TuningSwitch {
+    const wchar_t* label;
+    std::uint32_t xrfg::live_tuning::Block::*field;
+    std::uint32_t value;
+};
+
+constexpr std::array<TuningSwitch, 2> kTuningSwitches{{
+    {L"Tint generated frames by what Hybrid did at each pixel (diagnostic, not saved)",
+     &xrfg::live_tuning::Block::hybrid_tint, 1U},
+    {L"Tint generated frames by the coverage mask's verdict instead (diagnostic, not saved)",
+     &xrfg::live_tuning::Block::hybrid_tint, 2U},
+}};
+static_assert(kTuningSwitches.size() == std::tuple_size_v<decltype(AppState::tuning_switches)>);
+constexpr int kTuningSwitchBaseId = 2101;
 constexpr int kTuningResetId = 2120;
 
 // A slider's position for a block value, and the value's steps for a
@@ -1236,6 +1254,12 @@ void write_tuning(AppState& state) {
         SetWindowTextW(state.tuning_labels[index],
             tuning_slider_text(slider, steps).c_str());
     }
+    for (const TuningSwitch& item : kTuningSwitches) block->*item.field = 0U;
+    for (std::size_t index = 0; index < kTuningSwitches.size(); ++index) {
+        if (SendMessageW(state.tuning_switches[index], BM_GETCHECK, 0, 0) == BST_CHECKED) {
+            block->*kTuningSwitches[index].field = kTuningSwitches[index].value;
+        }
+    }
     MemoryBarrier();
     InterlockedIncrement(reinterpret_cast<volatile LONG*>(&block->sequence));
 }
@@ -1246,6 +1270,9 @@ void reset_tuning_controls(AppState& state) {
         const TuningSlider& slider = kTuningSliders[index];
         SendMessageW(state.tuning_sliders[index], TBM_SETPOS, TRUE,
             static_cast<LPARAM>(tuning_position(slider, defaults.*slider.field)));
+    }
+    for (const HWND box : state.tuning_switches) {
+        SendMessageW(box, BM_SETCHECK, BST_UNCHECKED, 0);
     }
 }
 
@@ -1267,6 +1294,15 @@ LRESULT CALLBACK tuning_procedure(
         if (state != nullptr && HIWORD(wparam) == BN_CLICKED) {
             if (LOWORD(wparam) == kTuningResetId) {
                 reset_tuning_controls(*state);
+            }
+            // One tint at a time.
+            const int clicked = LOWORD(wparam) - kTuningSwitchBaseId;
+            if (clicked >= 0 && clicked < static_cast<int>(kTuningSwitches.size())) {
+                for (std::size_t index = 0; index < kTuningSwitches.size(); ++index) {
+                    if (static_cast<int>(index) != clicked) {
+                        SendMessageW(state->tuning_switches[index], BM_SETCHECK, BST_UNCHECKED, 0);
+                    }
+                }
             }
             write_tuning(*state);
         }
@@ -1325,9 +1361,12 @@ void show_tuning_window(AppState& state) {
         controls.dwICC = ICC_BAR_CLASSES;
         static_cast<void>(InitCommonControlsEx(&controls));
         constexpr int kCaptionHeight = 24;
+        constexpr int kSwitchHeight = 26;
         constexpr int kRowHeight = 44;
         constexpr int kSectionHeight = 30;
-        const int sliders_top = 12 + kCaptionHeight + 8;
+        const int switches_top = 12 + kCaptionHeight;
+        const int sliders_top =
+            switches_top + static_cast<int>(kTuningSwitches.size()) * kSwitchHeight + 8;
         // Each slider's row, with a section heading's height above the
         // sliders that open one.
         std::array<int, kTuningSliders.size()> slider_tops{};
@@ -1361,6 +1400,18 @@ void show_tuning_window(AppState& state) {
             WS_CHILD | WS_VISIBLE, 14, 12, 570, 18,
             state.tuning_window, nullptr, instance, nullptr);
         SendMessageW(caption, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        for (std::size_t index = 0; index < kTuningSwitches.size(); ++index) {
+            state.tuning_switches[index] = CreateWindowExW(
+                0, L"BUTTON", kTuningSwitches[index].label,
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                14, switches_top + static_cast<int>(index) * kSwitchHeight, 570, 22,
+                state.tuning_window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(
+                    kTuningSwitchBaseId + static_cast<int>(index))),
+                instance, nullptr);
+            SendMessageW(state.tuning_switches[index], WM_SETFONT,
+                reinterpret_cast<WPARAM>(font), TRUE);
+        }
         for (std::size_t index = 0; index < kTuningSliders.size(); ++index) {
             const int top = slider_tops[index];
             if (kTuningSliders[index].section != nullptr) {

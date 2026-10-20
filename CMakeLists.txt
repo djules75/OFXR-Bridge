@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.537.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.539.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -155,6 +155,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     # V530: the hybrid depth search's tiles.
     set(XRFG_DEPTH_TILES_BUILD_HEADER "${XRFG_GENERATED_SHADER_DIR}/depth_tiles_build_shader.hpp")
     set(XRFG_DEPTH_TILES_DILATE_HEADER "${XRFG_GENERATED_SHADER_DIR}/depth_tiles_dilate_shader.hpp")
+    # V539: the hybrid's coverage mask.
+    set(XRFG_COVERAGE_MASK_CLEAR_HEADER "${XRFG_GENERATED_SHADER_DIR}/coverage_mask_clear_shader.hpp")
+    set(XRFG_COVERAGE_MASK_BUILD_HEADER "${XRFG_GENERATED_SHADER_DIR}/coverage_mask_build_shader.hpp")
     add_custom_command(
         OUTPUT
             "${XRFG_PACK_INPUT_HEADER}"
@@ -177,7 +180,19 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_GUIDE_COMPOSE_HEADER}"
             "${XRFG_DEPTH_TILES_BUILD_HEADER}"
             "${XRFG_DEPTH_TILES_DILATE_HEADER}"
+            "${XRFG_COVERAGE_MASK_CLEAR_HEADER}"
+            "${XRFG_COVERAGE_MASK_BUILD_HEADER}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E ClearCoverageMask
+            /D XRFG_HYBRID=1 /D XRFG_COVERAGE_MASK=1
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_COVERAGE_MASK_CLEAR_HEADER}" /Vn g_xrfg_coverage_mask_clear_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E BuildCoverageMask
+            /D XRFG_HYBRID=1 /D XRFG_COVERAGE_MASK=1
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_COVERAGE_MASK_BUILD_HEADER}" /Vn g_xrfg_coverage_mask_build_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E BuildDepthTiles
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_DEPTH_TILES_BUILD_HEADER}" /Vn g_xrfg_depth_tiles_build_shader
@@ -283,6 +298,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_GUIDE_COMPOSE_HEADER}"
         "${XRFG_DEPTH_TILES_BUILD_HEADER}"
         "${XRFG_DEPTH_TILES_DILATE_HEADER}"
+        "${XRFG_COVERAGE_MASK_CLEAR_HEADER}"
+        "${XRFG_COVERAGE_MASK_BUILD_HEADER}"
         "${XRFG_GAME_MOTION_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_FULLSCREEN_VERTEX_HEADER}"
         "${XRFG_SYNTHESIZE_PIXEL_HEADER}"

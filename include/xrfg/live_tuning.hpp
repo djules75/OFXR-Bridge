@@ -25,7 +25,8 @@ inline constexpr std::uint32_t kMagic = 0x4C565446U;  // "FTVL"
 // (edge ghosting reduction and the pattern lock); 4 V477's; 3 V475's, which
 // also carried the background fill and the hardware bilinear switch; 1 and 2
 // the V374 flow-history window, which never reached main.
-inline constexpr std::uint32_t kVersion = 7U;
+// 8 (V539): hybrid_tint, the diagnostic tint of generated frames.
+inline constexpr std::uint32_t kVersion = 8U;
 
 // Each slider in the tray runs from cheaper on the GPU (left) to costlier
 // (right); the comments say which way that is for a value.
@@ -80,6 +81,11 @@ struct Block {
     std::uint32_t depth_solves;                   // 1-4, default 1
     std::uint32_t depth_nearer_percent;           // 0-50, default 50
     std::uint32_t depth_agree_1000ths;            // 0-250, default 250
+
+    // V539: generated frames tinted by what the hybrid composition did at
+    // each pixel (1) or by the coverage mask's verdict (2); 0 off. A
+    // diagnostic for the headset, never saved: off at every tray start.
+    std::uint32_t hybrid_tint;                    // 0 off, 1 branches, 2 mask
 };
 
 // The composition's built-in values (frame_synthesis.hlsl), so the window
@@ -94,6 +100,7 @@ inline constexpr Block kDefaults{
     62U, 8U, 3U, 8U,
     100U, 1U, 50U, 0U, 0U,
     1U, 0U, 32U, 1U, 50U, 250U,
+    0U,
 };
 
 // The block's values within their ranges, as the shader expects them.
@@ -113,17 +120,18 @@ inline constexpr Block kDefaults{
     block.depth_solves = std::clamp(block.depth_solves, 1U, 4U);
     block.depth_nearer_percent = std::min(block.depth_nearer_percent, 50U);
     block.depth_agree_1000ths = std::min(block.depth_agree_1000ths, 250U);
+    block.hybrid_tint = std::min(block.hybrid_tint, 2U);
     return block;
 }
 
 // The fields after the header, in order: what the shader indexes and what the
 // 813 record packs, 8 bits a value (every range fits).
-inline constexpr std::size_t kFieldCount = 15;
+inline constexpr std::size_t kFieldCount = 16;
 [[nodiscard]] inline const std::uint32_t* fields(const Block& block) noexcept {
     return &block.hybrid_agree_threshold_255ths;
 }
 static_assert(sizeof(Block) == sizeof(std::uint32_t) * (3 + kFieldCount));
 static_assert(offsetof(Block, hybrid_agree_threshold_255ths) == 12);
-static_assert(offsetof(Block, depth_agree_1000ths) == 12 + 4 * (kFieldCount - 1));
+static_assert(offsetof(Block, hybrid_tint) == 12 + 4 * (kFieldCount - 1));
 
 }  // namespace xrfg::live_tuning
