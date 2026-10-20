@@ -288,12 +288,16 @@ public:
             if(s.cycle && s.cycle->read(s.accepted_ns,ofxr[nt],cycle[nt])){++nt;native_cycle|=delivered;}
             float raw_estimate{};
             if(s.cycle && s.cycle->read_estimated(s.accepted_ns,raw_estimate)) {
+                // Keep the established benchmark interval on every runtime:
+                // app Wait entry -> same real predicted display endpoint.
+                // Engine-origin availability must not alter the Excel metric.
+                estimated[ne++]=raw_estimate;native_estimate|=delivered;
                 float unused_game{};
                 if(s.cycle->stages(s.source_entered_ns,s.accepted_ns,raw_estimate,
                     unused_game,generation_stage[ns],delivery_stage[ns]))++ns;
                 float game{},total{};
                 if(s.cycle->production_cycle(s.source_entered_ns,raw_estimate,game,total)) {
-                    game_stage[ng++]=game;estimated[ne++]=total;native_estimate|=delivered;
+                    game_stage[ng++]=game;
                 }
             }
         }

@@ -69,7 +69,7 @@ void status(const Snapshot& state) {
         value("Delivery time", m.delivery_time_ms, current && m.stages_valid, false,
             "After the source handoff: time outside first-generated preparation through the real predicted display target. Includes pacing, copies, native runtime and prediction horizon. With generation Off, the whole handoff-to-target interval is Delivery. Independent medians need not add exactly.");
         value("Cycle (estimated)", m.cycle_estimated_ms, current && m.cycle_estimated_valid, false,
-            "Observed engine-frame start to the same real frame's predicted display target, or later native/producer return. Game + Generation + Delivery per frame, with no extra refresh. N/A without an unambiguous engine start. Predicted display is not measured panel scanout or motion-to-photon latency.");
+            "Benchmark/Excel interval: app WaitFrame entry to the same real frame's predicted display target, or later native/producer return. Available independently of Game time, including generation Off. Includes work after Wait, generation and delivery; excludes game work before Wait. Not necessarily Game + Generation + Delivery, and not measured panel scanout or motion-to-photon latency.");
         ImGui::EndTable();
         const auto text = interface_state_text(state);
         const auto color = interface_generation_active(state) ? ImVec4(.36F,.88F,.56F,1) :

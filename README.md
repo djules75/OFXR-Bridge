@@ -1,3 +1,11 @@
+## V612 local candidate: benchmark estimate restored
+
+Cycle estimated retains the established Wait-to-real-display interval even
+when Game time has no observed engine origin. This supersedes V611's full-cycle
+estimate policy. The initial UEVR Game measurement and pacing menu remain;
+real-game Game coverage is pending. No FPS-derived estimate or pacing change.
+[Details](docs/V612_BENCHMARK_ESTIMATE.md).
+
 ## V611 local candidate: pacing menu and producer timing
 
 Choose **Framework**, **Director** or **Framework+director**. The previous

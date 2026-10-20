@@ -1,3 +1,12 @@
+## V612: Estimated indipendente dal Game time
+
+Cycle estimated torna alla misura da Wait al target reale, anche se manca
+l'inizio del frame motore. Game time rimane la misura UEVR introdotta in V611,
+ancora da verificare nel gioco. Per il primo confronto: stessa scena stabile,
+OFXR/AFW/Neural spenti, F9 acceso per circa 20 secondi, poi chiudere il gioco.
+Confronteremo Game con 1000/FPS del gioco, non con gli FPS totali del visore.
+Non serve F8 o un benchmark completo. Nessuna stima da FPS aggiunta alla DLL.
+
 ## V611: tendina pacing e Game time
 
 Riavvia tray e gioco con V611 insieme. Le scelte sono Framework, Director

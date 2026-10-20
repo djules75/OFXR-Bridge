@@ -376,14 +376,14 @@ int main(int argc, char** argv) {
             // independently of unavailable XrTime clock conversion.
             overlay.reset_metrics();overlay.set_display_period(10'000'000);
             auto estimate_start=xrfg::interface_clock_ns()-5'000'000;
-            auto estimate_cycle=std::make_shared<xrfg::InterfaceCycle>(estimate_start,estimate_start);
+            auto estimate_cycle=std::make_shared<xrfg::InterfaceCycle>(estimate_start);
             stamp={403,estimate_start,0,estimate_cycle};
             fail_end=true;check(XR_FAILED(overlay.end_frame(&info,true,true,{},0,stamp)),"failed synthetic has no slot receipt");
             check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS,"real without successful synthetic remains valid");
             estimate_cycle->producer_returned(xrfg::interface_clock_ns());
             float estimate{};check(!estimate_cycle->read_estimated(xrfg::interface_clock_ns(),estimate),"failed synthetic cannot enable estimated cycle");
             overlay.reset_metrics();estimate_start=xrfg::interface_clock_ns()-5'000'000;
-            estimate_cycle=std::make_shared<xrfg::InterfaceCycle>(estimate_start,estimate_start);stamp={404,estimate_start,0,estimate_cycle};
+            estimate_cycle=std::make_shared<xrfg::InterfaceCycle>(estimate_start);stamp={404,estimate_start,0,estimate_cycle};
             conversions=clock_conversions;
             check(overlay.end_frame(&info,true,true,{},0,stamp)==XR_SUCCESS,"successful synthetic receipt");
             check(clock_conversions==conversions,"slot estimate never converts a synthetic display clock");
@@ -397,7 +397,7 @@ int main(int argc, char** argv) {
             // A pending NGX decision contributes only after existing nonblocking
             // content polling confirms actual generation; a native copy never does.
             overlay.reset_metrics();estimate_start=xrfg::interface_clock_ns()-5'000'000;
-            estimate_cycle=std::make_shared<xrfg::InterfaceCycle>(estimate_start,estimate_start);stamp={405,estimate_start,0,estimate_cycle};
+            estimate_cycle=std::make_shared<xrfg::InterfaceCycle>(estimate_start);stamp={405,estimate_start,0,estimate_cycle};
             auto pending=std::make_shared<xrfg::D3D12NativeFrameResult>();pending->outputs=1;
             std::array native{pending};
             check(overlay.end_frame(&info,true,true,native,0,stamp)==XR_SUCCESS,"pending native receipt");

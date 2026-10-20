@@ -13,6 +13,7 @@ int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
     framework_session_probe=route=="framework-session";if(framework_session_probe)route="session";
     const bool measured=route.starts_with("metrics-");if(measured)route=route.substr(8);
+    const bool no_origin=route.starts_with("no-origin-");if(no_origin)route=route.substr(10);
     const bool deep=route.starts_with("deep-");if(deep)route=route.substr(5);
     const bool toggling=route.starts_with("toggle-");if(toggling)route=route.substr(7);
     const bool blocked=route.starts_with("blocked-");if(blocked)route=route.substr(8);
@@ -258,7 +259,7 @@ int main(int argc,char** argv) {
             for(unsigned eye=0;eye<2;++eye){auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=eye+1;g->epoch=1;g->serial=n;g->previous_serial=n-1;g->publication=2*n+eye;g->producer_queue=f.queue;g->output=images[*c->last_released_index].texture;g->output_slice=eye;g->depth=depth;g->motion_vectors=motion;g->motion_slice=eye;g->output_width=g->depth_width=g->motion_width=256;g->output_height=g->depth_height=g->motion_height=128;guides->eyes[eye]=g;}c->last_released_motion_vectors=guides;}
         const auto engine_started=xrfg::interface_clock_ns();
         XrFrameState prediction{XR_TYPE_FRAME_STATE};xr_ok(layer_wait_frame_impl(state->handle,nullptr,&prediction),"shipping virtual Wait");xr_ok(layer_begin_frame_impl(state->handle,nullptr),"shipping virtual Begin");
-        if(measured)if(auto ticket=state->interface_active_cycle.load())ticket->production_started(engine_started);
+        if(measured && !no_origin)if(auto ticket=state->interface_active_cycle.load())ticket->production_started(engine_started);
         std::array<XrCompositionLayerProjectionView,2> views;
         for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=(sole?float(n):0.F)+(eye?.032F:-.032F);v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=split_eyes && eye?right:chain;v.subImage.imageArrayIndex=split_eyes?0:eye;v.subImage.imageRect.extent={256,128};}
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=2;projection.views=views.data();auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
@@ -306,7 +307,8 @@ int main(int argc,char** argv) {
         XrFrameEndInfo sample{XR_TYPE_FRAME_END_INFO};sample.layerCount=1;sample.layers=&header;
         state->fps_overlay->application_frame(&sample);
         const auto m=xrfg::autonomous::snapshot().runtime.telemetry;
-        check(m.cycle_valid && m.cycle_estimated_valid,"shipping generator publishes complete physical cycle and predicted display");
+        check(m.cycle_valid && m.cycle_estimated_valid,"shipping generator publishes XR interval and predicted display independently of engine origin");
+        if(no_origin)check(!m.game_time_valid,"no engine origin does not invent Game time or hide the Excel estimate");
         check(m.cycle_source==xrfg::InterfaceSource::native_frame_cycle_qpc && m.cycle_estimated_source==xrfg::InterfaceSource::native_predicted_display_qpc,"all shipping route measurements reach native director endpoint");
         check(m.cycle_estimated_ms>=m.cycle_length_ms && m.ofxr_time_ms<=m.cycle_length_ms,"same physical frame has consistent complete-cycle values");
         check(m.stages_valid && m.game_time_ms>=0 && m.generation_time_ms>=0 && m.delivery_time_ms>=0,

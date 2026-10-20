@@ -1,5 +1,6 @@
 #include "xrfg/interface_metrics.hpp"
 #include "xrfg/frame_production.hpp"
+#include "xrfg/benchmark_suite.hpp"
 #include "xrfg/autonomous_control.hpp"
 #include "xrfg/fps_overlay_model.hpp"
 #include <windows.h>
@@ -185,9 +186,16 @@ void production_boundaries() {
     c->producer_returned(125'000'000);c->real_prediction(150'000'000);
     InterfaceTimingWindow w;check(w.submitted({201,121'000'000,0,c},125'000'000,true,true,false,true,150'000'000,125'000'000),"source handoff recorded");
     InterfaceTelemetry m{};w.snapshot(140'000'000,m);
-    check(!m.game_time_valid && !m.cycle_estimated_valid && m.stages_valid && m.generation_time_ms==0 && m.delivery_time_ms==29,"missing engine origin keeps independent handoff delivery and no fake game time");
+    check(!m.game_time_valid && m.cycle_estimated_valid && m.cycle_estimated_ms==30 && m.stages_valid && m.generation_time_ms==0 && m.delivery_time_ms==29,"missing engine origin preserves the exact XR baseline estimate and independent delivery, without fake Game time");
     c->production_started(100'000'000);w.snapshot(140'000'000,m);
-    check(m.game_time_valid && m.game_time_ms==21 && m.cycle_estimated_valid && m.cycle_estimated_ms==50 && m.delivery_time_ms==29,"late Wait cannot omit earlier game production");
+    check(m.game_time_valid && m.game_time_ms==21 && m.cycle_estimated_valid && m.cycle_estimated_ms==30 && m.delivery_time_ms==29,"Game includes pre-Wait production while Excel keeps its established Wait-origin interval");
+    BenchmarkSamples excel;
+    m.updated_ms=5000;excel.observe(m,1000,11000);
+    c->production_started(0);w.snapshot(140'000'000,m);
+    m.updated_ms=6000;excel.observe(m,1000,11000);
+    check(excel.latency.size()==2 && excel.latency[0]==30 && excel.latency[1]==30,
+        "benchmark receives the same value before and after loss of engine association");
+    c->production_started(100'000'000);
     c->call(120'000'000,120'700'000);w.snapshot(140'000'000,m);
     check(m.game_time_ms==21 && m.delivery_time_ms==29,"pre-handoff calls remain inside chronological game interval");
     FrameProductionTracker tracker;
