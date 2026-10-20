@@ -327,6 +327,25 @@ inset is not used yet.
   (as often as 751): `a` the eye `<< 32` or the stream's low bits; `b` the
   vector rectangle placed on the eye (x, y, width, height, eighths of a texel,
   16 bits each); `c` the publication.
+- `embedded_configuration` 870 (V549), how the eyes were joined, the first
+  16, every 512th, and each change of streams, method or the cameras'
+  verdict (the first 1024 changes): `a` the method (1 the releases' order, 2
+  the cameras' fit, 3 the cameras' positions), bit 4 the releases told the
+  eyes apart, bit 5 the eye released first, bit 6 the cameras' positions
+  tell, bit 7 they would swap the eyes, the left eye's stream's low 24 bits
+  `<< 8`, the right's `<< 32`; `b` the left camera's position along the two
+  cameras' summed right vector (float bits) `<< 32` or the right's; `c` the
+  streams considered, the first eye's group `<< 8`, the second's `<< 16`,
+  bit 24 both insets found, the joins so far `<< 32`. Since V549 the
+  releases' order picks the streams first: a game releases a view's image
+  after that view's DLSS, so the streams evaluated before the first eye's
+  release are its and those between the two releases the other eye's; the
+  cameras' positions decide only when both eyes were evaluated before either
+  release. MSFS 2024 foveated on a Pimax Dream Air (#33) carries the same
+  symmetric field in both peripheries, and the positions swapped the eyes
+  about half the time, the left eye then taking the right periphery's
+  previous evaluation. A run of 870 records with bit 7 changing shows that
+  swap still happening in the cameras, now without effect.
 
 ### The foveated inset composed in (V516)
 

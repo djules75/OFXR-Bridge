@@ -970,19 +970,67 @@ resolve_view_placed_dlss_guides(
                 }
             }
         }
-        // The pair of streams, one an eye, that fits best.
-        std::size_t best_left = 0, best_right = 0;
-        double best = kNoFit;
-        for (std::size_t left = 0; left < candidates.size(); ++left) {
-            for (std::size_t right = 0; right < candidates.size(); ++right) {
-                if (left == right || fit[left][0] >= kNoFit || fit[right][1] >= kNoFit) continue;
-                const double cost = fit[left][0] + fit[right][1];
-                if (cost < best) {
-                    best = cost;
-                    best_left = left;
-                    best_right = right;
+        // V549: the evaluations' order against the two eyes' releases picks
+        // each eye's streams before the cameras do. A game evaluates a view's
+        // DLSS and then releases that view's image - the image holds the
+        // output - so the streams whose newest evaluation came before the
+        // first eye's release are that eye's, and those evaluated between the
+        // two releases the other's. MSFS 2024 foveated on a Pimax Dream Air
+        // (#33): both peripheries carry the same symmetric field, the fit
+        // ties every frame, and the cameras' positions along their right
+        // vectors put the eyes the wrong way round about half the time; the
+        // left eye then took the right periphery's previous evaluation, the
+        // other eye's vectors a frame old, and juddered alone. The release
+        // order never varied in those frames. The cameras decide only when
+        // the order says nothing: both eyes evaluated before either release,
+        // or no covering stream in one of the two groups.
+        constexpr std::uint8_t kNoGroup = 2;
+        std::vector<std::uint8_t> group(candidates.size(), kNoGroup);
+        std::uint32_t first_eye = kDlssMotionVectorEyeCount;
+        if (released_at[0] != 0 && released_at[1] != 0 && released_at[0] != released_at[1]) {
+            first_eye = released_at[0] < released_at[1] ? 0U : 1U;
+            for (std::size_t index = 0; index < candidates.size(); ++index) {
+                const std::uint64_t publication = candidates[index].frame->publication;
+                if (publication <= released_at[first_eye]) {
+                    group[index] = static_cast<std::uint8_t>(first_eye);
+                } else if (publication <= released_at[1 - first_eye]) {
+                    group[index] = static_cast<std::uint8_t>(1 - first_eye);
                 }
             }
+        }
+        // The pair of streams, one an eye, that fits best among those
+        // allowed; equal fits prefer the newer evaluations (a stream left
+        // from the frame before, in the first eye's group).
+        std::size_t best_left = 0, best_right = 0;
+        double best = kNoFit;
+        const auto search = [&](auto&& allowed) {
+            best = kNoFit;
+            std::uint64_t best_recency = 0;
+            for (std::size_t left = 0; left < candidates.size(); ++left) {
+                for (std::size_t right = 0; right < candidates.size(); ++right) {
+                    if (left == right || fit[left][0] >= kNoFit || fit[right][1] >= kNoFit ||
+                        !allowed(left, right)) continue;
+                    const double cost = fit[left][0] + fit[right][1];
+                    const std::uint64_t recency =
+                        candidates[left].frame->publication + candidates[right].frame->publication;
+                    if (cost < best - 1e-9 || (std::fabs(cost - best) <= 1e-9 && recency > best_recency)) {
+                        best = cost;
+                        best_recency = recency;
+                        best_left = left;
+                        best_right = right;
+                    }
+                }
+            }
+            return best < kNoFit;
+        };
+        bool by_release = false;
+        if (first_eye < kDlssMotionVectorEyeCount) {
+            by_release = search([&](std::size_t left, std::size_t right) {
+                return group[left] == 0 && group[right] == 1;
+            });
+        }
+        if (!by_release) {
+            search([](std::size_t, std::size_t) { return true; });
         }
         if (best >= kNoFit) {
             // 836, the first eight: a the recent streams with a camera |
@@ -1010,20 +1058,33 @@ resolve_view_placed_dlss_guides(
             return none;
         }
         // Two cameras that fit both eyes alike (a symmetric field): the
-        // camera further left is the left eye.
-        if (fit[best_right][0] < kNoFit && fit[best_left][1] < kNoFit &&
-            std::fabs((fit[best_right][0] + fit[best_left][1]) - best) < 1e-4) {
+        // camera further left is the left eye. V549: only where the releases
+        // said nothing; where they decided, the cameras' verdict is logged
+        // against theirs (870) and nothing more.
+        const bool fit_tie = fit[best_right][0] < kNoFit && fit[best_left][1] < kNoFit &&
+            std::fabs((fit[best_right][0] + fit[best_left][1]) - best) < 1e-4;
+        double side_left = 0.0, side_right = 0.0;
+        bool cameras_tell = false;
+        {
             const auto& a = candidates[best_left].frame->view;
             const auto& b = candidates[best_right].frame->view;
             const std::array<float, 3> right{
                 a.right[0] + b.right[0], a.right[1] + b.right[1], a.right[2] + b.right[2]};
-            const double side_a = camera_side(a, right), side_b = camera_side(b, right);
-            if (!(std::fabs(side_a - side_b) > 1e-6)) {
+            side_left = camera_side(a, right);
+            side_right = camera_side(b, right);
+            cameras_tell = std::fabs(side_left - side_right) > 1e-6;
+        }
+        unsigned method = by_release ? 1U : fit_tie ? 3U : 2U;
+        if (fit_tie && !by_release) {
+            if (!cameras_tell) {
                 ++state.statistics.view_unmatched;
                 state.statistics.status = DlssMotionVectorStatus::temporal_mismatch;
                 return none;
             }
-            if (side_a > side_b) std::swap(best_left, best_right);
+            if (side_left > side_right) {
+                std::swap(best_left, best_right);
+                std::swap(side_left, side_right);
+            }
         }
 
         // Each eye's evaluation: its stream's newest by the eye's release.
@@ -1046,12 +1107,16 @@ resolve_view_placed_dlss_guides(
                 state.statistics.status = DlssMotionVectorStatus::temporal_mismatch;
                 return none;
             }
+            // V549: where the releases chose the peripheries, the eye's inset
+            // comes from the same release group - the camera nearest its
+            // periphery's among those, however far.
             std::shared_ptr<DlssMotionVectorFrame> inset;
-            if (eye_spacing > 1e-6) {
+            if (by_release || eye_spacing > 1e-6) {
                 std::size_t nearest = candidates.size();
-                double nearest_distance = 0.25 * eye_spacing;
+                double nearest_distance = by_release ? kNoFit : 0.25 * eye_spacing;
                 for (std::size_t index = 0; index < candidates.size(); ++index) {
                     if (index == best_left || index == best_right ||
+                        (by_release && group[index] != eye) ||
                         !inside_eye_field(candidates[index].frame->view, eyes[eye])) continue;
                     const double distance =
                         camera_distance(candidates[index].frame->view, candidate.frame->view);
@@ -1090,6 +1155,53 @@ resolve_view_placed_dlss_guides(
         state.statistics.matched += kDlssMotionVectorEyeCount;
         ++state.statistics.view_matched;
         if (insets_found == kDlssMotionVectorEyeCount) ++state.statistics.inset_matched;
+        // 870 (V549): how the eyes were joined, the first 16, every 512th, and
+        // each change of streams, method or the cameras' verdict (the first
+        // 1024 changes): a the method (1 the releases' order, 2 the cameras'
+        // fit, 3 the cameras' positions) | bit 4 the releases told the eyes
+        // apart | bit 5 the eye released first | bit 6 the cameras' positions
+        // tell | bit 7 they would swap the eyes | the left eye's stream's low
+        // 24 bits << 8 | the right's << 32; b the left camera's position
+        // along the two cameras' summed right vector (float bits) << 32 | the
+        // right's; c the streams considered | the first eye's group << 8 | the
+        // second's << 16 | bit 24 both insets found | the joins so far << 32.
+        {
+            static std::uint64_t joins = 0;
+            static std::uint64_t changes = 0;
+            static std::uint64_t last_key = ~0ULL;
+            const bool cameras_swap = cameras_tell && side_left > side_right;
+            const std::uint64_t left_stream = candidates[best_left].frame->stream & 0xFFFFFFULL;
+            const std::uint64_t right_stream = candidates[best_right].frame->stream & 0xFFFFFFULL;
+            const std::uint64_t key = method | (cameras_swap ? 1ULL << 7U : 0ULL) |
+                (left_stream << 8U) | (right_stream << 32U);
+            const std::uint64_t join = joins++;
+            const bool changed = key != last_key;
+            if (changed) last_key = key;
+            if (join < 16 || join % 512 == 0 || (changed && changes++ < 1024)) {
+                std::uint64_t first_group = 0, second_group = 0;
+                for (const auto g : group) {
+                    if (first_eye < kDlssMotionVectorEyeCount && g == first_eye) ++first_group;
+                    else if (g != kNoGroup) ++second_group;
+                }
+                const auto bits = [](double value) -> std::uint64_t {
+                    const float f = static_cast<float>(value);
+                    std::uint32_t b = 0;
+                    std::memcpy(&b, &f, sizeof(b));
+                    return b;
+                };
+                try {
+                    bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 870,
+                        key | (first_eye < kDlssMotionVectorEyeCount ? 1ULL << 4U : 0ULL) |
+                            (first_eye == 1U ? 1ULL << 5U : 0ULL) | (cameras_tell ? 1ULL << 6U : 0ULL),
+                        (bits(side_left) << 32U) | bits(side_right),
+                        (candidates.size() & 0xFFULL) | ((first_group & 0xFFULL) << 8U) |
+                            ((second_group & 0xFFULL) << 16U) |
+                            (insets_found == kDlssMotionVectorEyeCount ? 1ULL << 24U : 0ULL) |
+                            (join << 32U));
+                } catch (...) {
+                }
+            }
+        }
         return result;
     } catch (...) {
         return none;

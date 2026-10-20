@@ -285,9 +285,12 @@ std::array<float, 4> view_rect_in_eye(
 // game whose DLSS outputs are views of their own rather than its eye images
 // - MSFS 2024's foveated rendering: per eye a periphery over the whole field
 // at a fraction of its pixels, and an inset. Each eye takes the recent
-// stream whose camera covers its field and fits it best (the cameras'
-// positions decide between two that fit alike), placed scaled; the
-// evaluation is the stream's newest by the eye's release watermark. Both
+// stream whose camera covers its field and fits it best, placed scaled; the
+// evaluation is the stream's newest by the eye's release watermark. V549:
+// where the two releases differ, the streams evaluated before the first
+// eye's release are that eye's and those between the releases the other's,
+// and the fit chooses within each group; the cameras' positions decide
+// between two that fit alike only where the releases say nothing. Both
 // eyes or neither, from two streams. V516: each eye's periphery carries the
 // eye's inset when one is found - a recent stream whose field lies inside
 // the eye's, narrower than it, whose camera sits where the eye's periphery

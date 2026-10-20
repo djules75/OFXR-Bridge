@@ -1699,6 +1699,9 @@ void run_streamline_views(const wchar_t* ngx_path, CreateFeature create, Evaluat
         {-1.05F, 1.25F, 1.15F, -1.15F}, {-0.35F, 0.35F, 0.35F, -0.35F},
         {-0.35F, 0.35F, 0.35F, -0.35F}}};
     const std::array<float, 4> camera_x{-0.032F, 0.032F, -0.032F, 0.032F};
+    // V549, the third frame: the cameras' positions the wrong way round, as
+    // the Dream Air's flip (#33) put them.
+    const std::array<float, 4> swapped_x{0.032F, -0.032F, 0.032F, -0.032F};
     std::array<NVSDK_NGX_Handle*, 4> handles{};
     std::array<ComPtr<ID3D12Resource>, 4> outputs, motions;
     std::array<Constants, 4> constants{};
@@ -1717,12 +1720,19 @@ void run_streamline_views(const wchar_t* ngx_path, CreateFeature create, Evaluat
     }
     const auto publications_before = xrfg::ngx_guide_capture_statistics().publications_with_camera;
     int frame_token = 0;
-    for (UINT64 frame = 1; frame <= 2; ++frame) {
+    // Frames 1 and 2 evaluate the peripheries then the insets; frame 3 (V549)
+    // as MSFS 2024 does - each eye's periphery then its inset, the eye's
+    // image released after them - with the cameras swapped.
+    for (UINT64 frame = 1; frame <= 3; ++frame) {
+        const bool msfs_order = frame == 3;
         for (std::uint32_t v = 0; v < 4; ++v) {
+            if (msfs_order) constants[v] = constants_for(fields[v], swapped_x[v], v == 1);
             require(set_constants(&constants[v], &frame_token, &viewports[v]) == 0,
                 "slSetConstants failed through the hook");
         }
-        for (std::uint32_t v = 0; v < 4; ++v) {
+        const std::array<std::uint32_t, 4> order = msfs_order
+            ? std::array<std::uint32_t, 4>{0, 2, 1, 3} : std::array<std::uint32_t, 4>{0, 1, 2, 3};
+        for (const std::uint32_t v : order) {
             Evaluation evaluation{evaluate, list, handles[v], outputs[v].Get(), motions[v].Get(),
                 kRender, kRenderHeight};
             set_callback(&evaluate_inside, &evaluation);
@@ -1733,8 +1743,8 @@ void run_streamline_views(const wchar_t* ngx_path, CreateFeature create, Evaluat
         set_callback(nullptr, nullptr);
         execute(3 + frame);
     }
-    require(sl_evaluations() == 8, "the original slEvaluateFeature did not run eight times");
-    require(xrfg::ngx_guide_capture_statistics().publications_with_camera == publications_before + 8,
+    require(sl_evaluations() == 12, "the original slEvaluateFeature did not run twelve times");
+    require(xrfg::ngx_guide_capture_statistics().publications_with_camera == publications_before + 12,
         "the evaluations inside Streamline's did not carry their cameras");
 
     const std::uint64_t watermark = xrfg::dlss_motion_vector_publications();
@@ -1751,7 +1761,7 @@ void run_streamline_views(const wchar_t* ngx_path, CreateFeature create, Evaluat
         require(f.view.known && f.view.viewport == 40U + eye,
             "an eye did not take its own periphery");
         require(f.placed && f.output_x == 0 && f.output_y == 0 && f.output_width == kEyeWidth &&
-                f.output_height == kEyeHeight && f.serial == 2 && f.previous_serial == 1,
+                f.output_height == kEyeHeight && f.serial == 3 && f.previous_serial == 2,
             "the periphery was not placed over the eye image");
         // The field reaches 0.05 beyond the eye's 2.2 each side: 2.18
         // pixels of 96 left of the image, 16 texels over 100.36 pixels.
@@ -1777,13 +1787,34 @@ void run_streamline_views(const wchar_t* ngx_path, CreateFeature create, Evaluat
     }
     require(xrfg::dlss_motion_vector_statistics().inset_matched != 0,
         "the inset join was not counted");
-    // Symmetric eyes: both peripheries fit alike, and the camera further
-    // left is the left eye.
+    // Symmetric eyes: both peripheries fit alike, and with the releases
+    // saying nothing (both after every evaluation) the camera further left
+    // is the left eye - the swapped one, viewport 41, in the third frame.
     const xrfg::DlssEyeView symmetric{-1.0F, 1.0F, 1.1F, -1.1F, 0, 0, kEyeWidth, kEyeHeight};
     placed = resolve(symmetric, symmetric);
+    require(placed[0] && placed[1] && placed[0]->eyes[0]->view.viewport == 41U &&
+            placed[1]->eyes[0]->view.viewport == 40U,
+        "the cameras' positions did not decide between two alike peripheries");
+    // V549: the releases' order outranks the cameras. The left eye's image
+    // released after its periphery and inset (two publications before the
+    // right's), the right's after all four: each eye takes the streams
+    // evaluated before its own release, its inset among them.
+    const auto resolve_released = [&](std::uint64_t left_release, std::uint64_t right_release) {
+        return xrfg::resolve_view_placed_dlss_guides(
+            queue, {symmetric, symmetric}, {left_release, right_release});
+    };
+    placed = resolve_released(watermark - 2, watermark);
     require(placed[0] && placed[1] && placed[0]->eyes[0]->view.viewport == 40U &&
             placed[1]->eyes[0]->view.viewport == 41U,
-        "the cameras' positions did not decide between two alike peripheries");
+        "the releases' order did not pick the peripheries over the cameras");
+    require(placed[0]->eyes[0]->inset && placed[0]->eyes[0]->inset->view.viewport == 42U &&
+            placed[1]->eyes[0]->inset && placed[1]->eyes[0]->inset->view.viewport == 43U,
+        "the insets did not follow their eye's release group");
+    // The right eye released first: its group is the streams before it.
+    placed = resolve_released(watermark, watermark - 2);
+    require(placed[0] && placed[1] && placed[0]->eyes[0]->view.viewport == 41U &&
+            placed[1]->eyes[0]->view.viewport == 40U,
+        "the eye released first did not take the streams evaluated before it");
     // A field wider than every camera's: no guide.
     const auto unmatched_before = xrfg::dlss_motion_vector_statistics().view_unmatched;
     const xrfg::DlssEyeView wide{-1.5F, 1.5F, 1.1F, -1.1F, 0, 0, kEyeWidth, kEyeHeight};
