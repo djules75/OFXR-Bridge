@@ -5,6 +5,7 @@
 // resolver pairs the two streams into a stereo guide set whose fields are
 // the parameters' - rectangles, scale, jitter, the low-resolution vector
 // size from the creation flags.
+#include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/d3d11_d3d12_interop.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/ngx_guide_capture.hpp"
@@ -24,7 +25,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <stdexcept>
@@ -848,8 +852,15 @@ void run_bridged_d3d12(HMODULE module, ID3D12Device* layer_device, ID3D12Command
     {
         xrfg::configure_dlss_alternating_eyes(true);
         xrfg::configure_ngx_alternating_eye_anchor(true);
-        constexpr UINT kOutputPitch = kOutputWidth * 8U;
-        constexpr UINT kEyePitch = 512;
+        // V540: wide enough for the eye measurement's patches to slide 16
+        // pixels either way.
+        constexpr UINT kEyeWidth = 256, kEyeHeight = 96;
+        // Its features created at that size: the display size the guides take.
+        Parameters alternating_creation = creation;
+        alternating_creation.Set(NVSDK_NGX_Parameter_OutWidth, kEyeWidth);
+        alternating_creation.Set(NVSDK_NGX_Parameter_OutHeight, kEyeHeight);
+        constexpr UINT kOutputPitch = kEyeWidth * 8U;
+        constexpr UINT kEyePitch = kEyeWidth * 4U;
         const auto to_half = [](float value) {
             std::uint32_t bits = 0;
             std::memcpy(&bits, &value, sizeof(bits));
@@ -867,8 +878,8 @@ void run_bridged_d3d12(HMODULE module, ID3D12Device* layer_device, ID3D12Command
         default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
         D3D12_RESOURCE_DESC output_description{};
         output_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        output_description.Width = kOutputWidth;
-        output_description.Height = kOutputHeight;
+        output_description.Width = kEyeWidth;
+        output_description.Height = kEyeHeight;
         output_description.DepthOrArraySize = 1;
         output_description.MipLevels = 1;
         output_description.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -898,16 +909,16 @@ void run_bridged_d3d12(HMODULE module, ID3D12Device* layer_device, ID3D12Command
                 IID_PPV_ARGS(resource.GetAddressOf())), "alternating upload");
             return resource;
         };
-        const UINT64 output_bytes = static_cast<UINT64>(kOutputPitch) * kOutputHeight;
+        const UINT64 output_bytes = static_cast<UINT64>(kOutputPitch) * kEyeHeight;
         const auto output_upload = upload_buffer(game.Get(), 2U * output_bytes);
         {
             std::uint8_t* mapped = nullptr;
             require_hresult(output_upload->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "Map");
             for (UINT picture = 0; picture < 2; ++picture) {
-                for (UINT y = 0; y < kOutputHeight; ++y) {
+                for (UINT y = 0; y < kEyeHeight; ++y) {
                     auto* line = reinterpret_cast<std::uint16_t*>(
                         mapped + picture * output_bytes + static_cast<UINT64>(y) * kOutputPitch);
-                    for (UINT x = 0; x < kOutputWidth; ++x) {
+                    for (UINT x = 0; x < kEyeWidth; ++x) {
                         const std::uint16_t value = to_half(ramp(picture == 0, x, y));
                         line[4U * x] = value;
                         line[4U * x + 1U] = value;
@@ -930,15 +941,15 @@ void run_bridged_d3d12(HMODULE module, ID3D12Device* layer_device, ID3D12Command
                 D3D12_HEAP_FLAG_NONE, &eye_description, D3D12_RESOURCE_STATE_COMMON, nullptr,
                 IID_PPV_ARGS(eye_image.GetAddressOf())), "alternating eye image");
         }
-        const UINT64 eye_bytes = static_cast<UINT64>(kEyePitch) * kOutputHeight;
+        const UINT64 eye_bytes = static_cast<UINT64>(kEyePitch) * kEyeHeight;
         const auto eye_upload = upload_buffer(layer_device, 2U * eye_bytes);
         {
             std::uint8_t* mapped = nullptr;
             require_hresult(eye_upload->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "Map");
             for (UINT eye = 0; eye < 2; ++eye) {
-                for (UINT y = 0; y < kOutputHeight; ++y) {
+                for (UINT y = 0; y < kEyeHeight; ++y) {
                     std::uint8_t* line = mapped + eye * eye_bytes + static_cast<UINT64>(y) * kEyePitch;
-                    for (UINT x = 0; x < kOutputWidth; ++x) {
+                    for (UINT x = 0; x < kEyeWidth; ++x) {
                         const auto value = static_cast<std::uint8_t>(ramp(eye == 0, x, y) * 255.0F);
                         line[4U * x] = value;
                         line[4U * x + 1U] = value;
@@ -960,8 +971,8 @@ void run_bridged_d3d12(HMODULE module, ID3D12Device* layer_device, ID3D12Command
             from.pResource = eye_upload.Get();
             from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
             from.PlacedFootprint.Offset = eye * eye_bytes;
-            from.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_TYPELESS, kOutputWidth,
-                kOutputHeight, 1, kEyePitch};
+            from.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_TYPELESS, kEyeWidth,
+                kEyeHeight, 1, kEyePitch};
             D3D12_TEXTURE_COPY_LOCATION to{};
             to.pResource = eye_images[eye].Get();
             to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -986,7 +997,7 @@ void run_bridged_d3d12(HMODULE module, ID3D12Device* layer_device, ID3D12Command
         }
 
         NVSDK_NGX_Handle* shared = nullptr;
-        require(NVSDK_NGX_SUCCEED(create(game_list.Get(), NVSDK_NGX_Feature_SuperSampling, &creation,
+        require(NVSDK_NGX_SUCCEED(create(game_list.Get(), NVSDK_NGX_Feature_SuperSampling, &alternating_creation,
                     &shared)) && shared,
             "the alternating feature was not created through the hook");
         const auto transition = [&](D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
@@ -1000,13 +1011,14 @@ void run_bridged_d3d12(HMODULE module, ID3D12Device* layer_device, ID3D12Command
         };
         // An eye's evaluation: its picture into the output, as DLSS would
         // leave it, then the call.
-        const auto evaluate_eye = [&](UINT picture, ID3D12Resource* vectors) {
+        const auto evaluate_eye = [&](UINT picture, ID3D12Resource* vectors,
+                                      NVSDK_NGX_Handle* through = nullptr, int reset = 0) {
             D3D12_TEXTURE_COPY_LOCATION from{};
             from.pResource = output_upload.Get();
             from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
             from.PlacedFootprint.Offset = picture * output_bytes;
-            from.PlacedFootprint.Footprint = {DXGI_FORMAT_R16G16B16A16_FLOAT, kOutputWidth,
-                kOutputHeight, 1, kOutputPitch};
+            from.PlacedFootprint.Footprint = {DXGI_FORMAT_R16G16B16A16_FLOAT, kEyeWidth,
+                kEyeHeight, 1, kOutputPitch};
             D3D12_TEXTURE_COPY_LOCATION to{};
             to.pResource = shared_output.Get();
             to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -1018,20 +1030,21 @@ void run_bridged_d3d12(HMODULE module, ID3D12Device* layer_device, ID3D12Command
             frame.Set(NVSDK_NGX_Parameter_Depth, depth.Get());
             frame.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, kRenderWidth);
             frame.Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, kRenderHeight);
-            frame.Set(NVSDK_NGX_Parameter_Reset, 0);
-            require(NVSDK_NGX_SUCCEED(evaluate(game_list.Get(), shared, &frame, nullptr)),
+            frame.Set(NVSDK_NGX_Parameter_Reset, reset);
+            require(NVSDK_NGX_SUCCEED(evaluate(game_list.Get(), through != nullptr ? through : shared,
+                        &frame, nullptr)),
                 "an alternating evaluation failed through the hook");
             transition(D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
         };
         const std::array<xrfg::NgxEyeImage, 2> eyes{{
-            {eye_images[0].Get(), 0, 0, kOutputWidth, kOutputHeight},
-            {eye_images[1].Get(), 0, 0, kOutputWidth, kOutputHeight},
+            {eye_images[0].Get(), 0, 0, kEyeWidth, kEyeHeight},
+            {eye_images[1].Get(), 0, 0, kEyeWidth, kEyeHeight},
         }};
         // A feature kept from an earlier session, evaluated once: the anchor
         // takes the stream that is publishing (Cyberpunk 2077 keeps its first
         // session's feature beside the one it plays with).
         NVSDK_NGX_Handle* kept = nullptr;
-        require(NVSDK_NGX_SUCCEED(create(game_list.Get(), NVSDK_NGX_Feature_SuperSampling, &creation,
+        require(NVSDK_NGX_SUCCEED(create(game_list.Get(), NVSDK_NGX_Feature_SuperSampling, &alternating_creation,
                     &kept)) && kept,
             "the kept feature was not created through the hook");
         std::swap(shared, kept);
@@ -1046,6 +1059,18 @@ void run_bridged_d3d12(HMODULE module, ID3D12Device* layer_device, ID3D12Command
             xrfg::flush_ngx_guide_capture_d3d11();
             xrfg::anchor_ngx_alternating_eyes(eyes, xrfg::dlss_motion_vector_publications());
             layer_idle();
+        }
+        // V540: the anchor is the eye measurement's, analysed on a thread of
+        // its own - a few more releases until five votes are in.
+        const auto guided = [&] {
+            const auto watermark = xrfg::dlss_motion_vector_publications();
+            return xrfg::resolve_dlss_motion_vectors(
+                       eye_images[0].Get(), layer_queue, 0, watermark, watermark) != nullptr;
+        };
+        for (int wait = 0; wait < 300 && !guided(); ++wait) {
+            xrfg::anchor_ngx_alternating_eyes(eyes, xrfg::dlss_motion_vector_publications());
+            layer_idle();
+            Sleep(10);
         }
         std::uint64_t stream = 0;
         {
@@ -1071,6 +1096,78 @@ void run_bridged_d3d12(HMODULE module, ID3D12Device* layer_device, ID3D12Command
                 "the alternating eyes' vectors were stretched");
             std::cout << "ngx guide capture alternating anchor: left serial "
                       << left_set->eyes[0]->serial << ", right " << right_set->eyes[0]->serial << "\n";
+        }
+        // V540: R.E.A.L. VR's fix evaluates each eye through a feature of its
+        // own. The handles anchor once: after a reset - a new epoch, which a
+        // serial parity's anchor does not survive - the eyes are known at
+        // once, even where the reset swaps the order the eyes evaluate in.
+        {
+            NVSDK_NGX_Handle* left_feature = nullptr;
+            NVSDK_NGX_Handle* right_feature = nullptr;
+            require(NVSDK_NGX_SUCCEED(create(game_list.Get(), NVSDK_NGX_Feature_SuperSampling,
+                        &alternating_creation, &left_feature)) && left_feature &&
+                    NVSDK_NGX_SUCCEED(create(game_list.Get(), NVSDK_NGX_Feature_SuperSampling,
+                        &alternating_creation, &right_feature)) && right_feature,
+                "the per-eye features were not created through the hook");
+            const auto frame_of_two = [&](bool left_first, int reset) {
+                if (left_first) {
+                    evaluate_eye(0, motion_left.Get(), left_feature, reset);
+                    evaluate_eye(1, motion_right.Get(), right_feature);
+                } else {
+                    evaluate_eye(1, motion_right.Get(), right_feature, reset);
+                    evaluate_eye(0, motion_left.Get(), left_feature);
+                }
+                run_game();
+                xrfg::flush_ngx_guide_capture_d3d11();
+            };
+            frame_of_two(false, 1);
+            for (int frame = 0; frame < 4; ++frame) {
+                frame_of_two(false, 0);
+                xrfg::anchor_ngx_alternating_eyes(eyes, xrfg::dlss_motion_vector_publications());
+                layer_idle();
+            }
+            for (int wait = 0; wait < 300 &&
+                 !xrfg::dlss_motion_vector_stream_position(stream).tag_anchored; ++wait) {
+                xrfg::anchor_ngx_alternating_eyes(eyes, xrfg::dlss_motion_vector_publications());
+                layer_idle();
+                Sleep(10);
+            }
+            require(xrfg::dlss_motion_vector_stream_position(stream).tag_anchored,
+                "the per-eye handles did not anchor the alternating eyes");
+            const auto resolve_both = [&] {
+                const auto watermark = xrfg::dlss_motion_vector_publications();
+                return std::make_pair(
+                    xrfg::resolve_dlss_motion_vectors(eye_images[0].Get(), layer_queue, 0,
+                        watermark, watermark),
+                    xrfg::resolve_dlss_motion_vectors(eye_images[1].Get(), layer_queue, 1,
+                        watermark, watermark));
+            };
+            auto [left_set, right_set] = resolve_both();
+            require(left_set && right_set && left_set->eyes[0] && right_set->eyes[0],
+                "the handles' anchor did not guide both eyes");
+            const std::uint64_t left_tag = left_set->eyes[0]->eye_tag;
+            auto newest = xrfg::dlss_motion_vector_stream_position(stream).serial;
+            require(left_tag != 0 && right_set->eyes[0]->eye_tag != 0 &&
+                    left_tag != right_set->eyes[0]->eye_tag &&
+                    left_set->eyes[0]->serial == newest && right_set->eyes[0]->serial == newest - 3,
+                "the handles' anchor did not give each eye its evaluation");
+            // A reset, the left eye now evaluated first: no comparison, no new
+            // vote - the right eye has the newest, the left its one before.
+            frame_of_two(true, 1);
+            frame_of_two(true, 0);
+            std::tie(left_set, right_set) = resolve_both();
+            newest = xrfg::dlss_motion_vector_stream_position(stream).serial;
+            require(left_set && right_set && left_set->eyes[0] && right_set->eyes[0] &&
+                    left_set->eyes[0]->eye_tag == left_tag &&
+                    right_set->eyes[0]->eye_tag != left_tag &&
+                    right_set->eyes[0]->serial == newest && left_set->eyes[0]->serial == newest - 3,
+                "the handles' anchor did not hold through a reset that swapped the eyes' order");
+            std::cout << "ngx guide capture alternating handles: left tag " << left_tag
+                      << ", after the reset left serial " << left_set->eyes[0]->serial
+                      << ", right " << right_set->eyes[0]->serial << "\n";
+            require(NVSDK_NGX_SUCCEED(release(left_feature)) &&
+                    NVSDK_NGX_SUCCEED(release(right_feature)),
+                "the per-eye features' release failed");
         }
         require(NVSDK_NGX_SUCCEED(release(shared)) && NVSDK_NGX_SUCCEED(release(kept)),
             "the alternating features' release failed");
@@ -1918,6 +2015,17 @@ int wmain(int argc, wchar_t** argv) {
         return 2;
     }
     try {
+        // V540: a flight log of the run, as the layer writes one
+        // (XRFG_TEST_GPU_TRACE, as the history tests').
+        if (std::getenv("XRFG_TEST_GPU_TRACE") != nullptr) {
+            const auto trace_dir = std::filesystem::temp_directory_path() /
+                ("xrfg-ngx-" + std::to_string(GetCurrentProcessId()));
+            std::filesystem::create_directories(trace_dir);
+            std::ofstream(trace_dir / "ofxr_bridge.ini") <<
+                "[diagnostics]\nlogging_enabled=1\nmax_file_mb=32\nflush_each_event=0\n";
+            xrfg::bridge_flight_logger().initialize(trace_dir);
+            std::cout << "flight log in " << trace_dir.string() << "\n";
+        }
         // V513: with the Vulkan queue layer's path, the Vulkan phase runs too.
         if (argc > 2) g_queue_layer_path = argv[2];
         return run(argv[1]);

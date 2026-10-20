@@ -126,11 +126,12 @@ void flush_ngx_guide_capture_vulkan(bool end_of_frame) noexcept;
 void flush_ngx_guide_capture_d3d11() noexcept;
 // V524: the eyes of one DLSS stream rendered for both eyes in turn
 // (configure_dlss_alternating_eyes; Luke Ross's R.E.A.L. VR). While enabled,
-// each bridged D3D12 evaluation of a stream not yet anchored in its epoch
-// also copies 16 patches of its finished DLSS output into its slot; at each
-// release anchor_ngx_alternating_eyes compares the stream's two newest
-// evaluations with the two eye images and, once five comparisons agree,
-// anchors the stream's left eye to that evaluation's serial parity.
+// each bridged D3D12 evaluation also copies 16 patches of its finished DLSS
+// output into a four-deep history; at each release anchor_ngx_alternating_eyes
+// measures the two eye images against the last four evaluations (record 851)
+// and, until the stream is anchored, votes on it: five agreeing votes anchor
+// the left eye to its evaluations' R.E.A.L. VR handle (V540, eye_tag), for
+// the session, or without the handles to their serial parity, for the epoch.
 void configure_ngx_alternating_eye_anchor(bool enabled) noexcept;
 struct NgxEyeImage {
     // The layer's D3D12 image the eye was released in (a bridged session's

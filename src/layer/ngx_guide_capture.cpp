@@ -1849,21 +1849,34 @@ void capture11(
 }
 
 // ------------------------------------------- alternating-eye anchor (V524)
-// R.E.A.L. VR renders one eye per game frame through one DLSS feature; the
-// registry gives such a stream's evaluations to the eyes by serial parity
-// once it knows which parity is the left (configure_dlss_alternating_eyes).
-// That is read from the pictures: 16 patches of an evaluation's finished DLSS
-// output against the same places of each eye image, by rank correlation of
-// their luminance - the eye images are tone-mapped, DLSS's output is not, and
-// ranks do not care. An evaluation is most like the eye it was rendered for:
-// the other eye is another viewpoint (the near scene shifts by the eyes'
-// parallax) and another moment.
+// R.E.A.L. VR renders one eye per game frame; the registry gives such a
+// stream's evaluations to the eyes once it knows which are the left eye's
+// (configure_dlss_alternating_eyes). That is read from the pictures: 16
+// patches of an evaluation's finished DLSS output against the same places of
+// each eye image, by rank correlation of their luminance - the eye images are
+// tone-mapped, DLSS's output is not, and ranks do not care. An evaluation is
+// most like the eye it was rendered for: the other eye is another viewpoint
+// (the near scene shifts by the eyes' parallax) and another moment.
+//
+// V540: the comparison is the eye measurement's (851): each eye image against
+// the last four evaluations, sliding sideways. The two newest alone (V524)
+// were a coin toss in Cyberpunk 2077: AERv2 shows one eye an evaluation older
+// than its newest and the other R.E.A.L. VR's interpolation, so neither eye
+// matched them, and a Hybrid switched off and on anchored either way - the
+// eyes swapped, each eye's vectors the other's, the near scene out by the
+// eyes' parallax. And the evaluations' eyes are their R.E.A.L. VR handles
+// where its fix runs (eye_tag): one anchor for the session.
 constexpr std::uint32_t kAnchorPatches = 16;
 constexpr std::uint32_t kAnchorPatch = 32;
 constexpr std::uint32_t kAnchorAtlas = 4 * kAnchorPatch;
 constexpr std::uint32_t kAnchorVotes = 5;
-constexpr double kAnchorMargin = 0.02;
-//   846 (V524) an anchor comparison: a the older evaluation's publication
+// A vote: the better pairing's summed correlations ahead by this, and some
+// evaluation matching an eye by at least kAnchorFloor (not a loading screen).
+// Cyberpunk 2077: 1.25 against 0.77, the best match 0.8.
+constexpr double kAnchorMargin = 0.1;
+constexpr double kAnchorFloor = 0.5;
+//   846 (V524-V539, replaced by 861 and 862 in V540) an anchor comparison:
+//       a the older evaluation's publication
 //       << 32 | the newer's, b the pairing older-left's summed correlation
 //       (float bits) << 32 | older-right's, c the outcome (0 a vote, 1 too
 //       few patches with detail, 2 the pairings too close) | the vote's left
@@ -1879,7 +1892,9 @@ constexpr std::int64_t kRecordMotionMean = 847;
 //   849 (V524) a comparison the anchor could not queue, the first of each
 //       reason and every 1000th after: a the reason (1 no bridged stream or
 //       device, 2 the newest evaluations' patches not taken, 3 they are not
-//       the stream's two newest before the release, 4 an eye image it cannot
+//       the stream's newest before the release - V540: its four newest not
+//       consecutive in one epoch before it, c the newest's serial << 32 | the
+//       stream's - 4 an eye image it cannot
 //       read: c its DXGI format | its flags << 32, 5 a patch outside the eye:
 //       c width << 32 | height, 6 its resources could not be made), b the
 //       count so far
@@ -2150,52 +2165,6 @@ void skip_anchor(std::uint32_t reason, std::uint64_t detail = 0) noexcept {
     return std::isfinite(luminance) ? luminance : 0.0F;
 }
 
-// A patch's luminance, kAnchorPatch square, from a footprint in a mapped
-// readback buffer.
-void read_anchor_patch(const std::byte* base, std::uint64_t pitch, std::uint32_t x,
-    std::uint32_t y, DXGI_FORMAT format, std::vector<float>* out) {
-    const std::uint32_t bytes = anchor_texel_bytes(format);
-    out->resize(static_cast<std::size_t>(kAnchorPatch) * kAnchorPatch);
-    for (std::uint32_t row = 0; row < kAnchorPatch; ++row) {
-        const std::byte* line = base + (y + row) * pitch + static_cast<std::uint64_t>(x) * bytes;
-        for (std::uint32_t column = 0; column < kAnchorPatch; ++column) {
-            (*out)[static_cast<std::size_t>(row) * kAnchorPatch + column] =
-                anchor_luminance(line + static_cast<std::size_t>(column) * bytes, format);
-        }
-    }
-}
-
-// Spearman's rank correlation; NaN where either patch is flat.
-[[nodiscard]] double rank_correlation(const std::vector<float>& a, const std::vector<float>& b) {
-    const auto ranks = [](const std::vector<float>& values) {
-        std::vector<std::uint32_t> order(values.size());
-        std::iota(order.begin(), order.end(), 0U);
-        std::sort(order.begin(), order.end(),
-            [&](std::uint32_t l, std::uint32_t r) { return values[l] < values[r]; });
-        std::vector<double> rank(values.size());
-        for (std::size_t first = 0; first < order.size();) {
-            std::size_t last = first;
-            while (last + 1 < order.size() && values[order[last + 1]] == values[order[first]]) ++last;
-            const double shared = (static_cast<double>(first) + static_cast<double>(last)) / 2.0;
-            for (std::size_t index = first; index <= last; ++index) rank[order[index]] = shared;
-            first = last + 1;
-        }
-        return rank;
-    };
-    if (a.size() != b.size() || a.empty()) return std::numeric_limits<double>::quiet_NaN();
-    const auto ra = ranks(a), rb = ranks(b);
-    const double mean = (static_cast<double>(a.size()) - 1.0) / 2.0;
-    double covariance = 0.0, va = 0.0, vb = 0.0;
-    for (std::size_t index = 0; index < ra.size(); ++index) {
-        covariance += (ra[index] - mean) * (rb[index] - mean);
-        va += (ra[index] - mean) * (ra[index] - mean);
-        vb += (rb[index] - mean) * (rb[index] - mean);
-    }
-    const double floor = 1.0e-3 * static_cast<double>(a.size()) * static_cast<double>(a.size());
-    if (va < floor || vb < floor) return std::numeric_limits<double>::quiet_NaN();
-    return covariance / std::sqrt(va * vb);
-}
-
 
 // ------------------------------------------ vector alignment probe (V524)
 // R.E.A.L. VR in Cyberpunk 2077: Hybrid's ghost of near things sits on each
@@ -2381,12 +2350,30 @@ void analyse_probe(const ProbeData& data) noexcept {
 // The correlation is Pearson's of ranked luminance (the output is not tone
 // mapped, the eye image is).
 constexpr std::int64_t kRecordEyeMeasure = 851;
+// V540, the anchor from the measurement:
+//   861 a vote, while the stream's eyes need their anchor, the first 512: a
+//       the newest evaluation's publication << 16 | agreeing votes << 8 | bit
+//       5 the left eye on the newest evaluation's side (it and the third) |
+//       bit 4 by handles | the outcome (0 a vote, 1 no evaluation matched an
+//       eye by kAnchorFloor, 2 the pairings within kAnchorMargin); b the
+//       pairings' summed correlations, the left eye on the newest's side <<
+//       32 | on the other's (float bits); c the four evaluations' handles (8
+//       bits each, the newest's low), or the newest's serial without handles
+//   862 the anchor: a as 861; b the left eye's handle << 32 | the right's,
+//       or the left eye's serial parity without handles; c the stream. Kept
+//       through every wrap of the flight log (a handful in a session).
+constexpr std::int64_t kRecordEyeVote = 861;
+constexpr std::int64_t kRecordEyeAnchor = 862;
 constexpr int kMeasureShift = 16;
 constexpr std::uint32_t kMeasureWindow = kAnchorPatch + 2U * kMeasureShift;
 
 struct MeasureData {
     std::uint64_t publication{};
     std::uint64_t serial{};
+    // V540: the stream and epoch, and the evaluations' handles, newest first.
+    std::uint64_t stream{};
+    std::uint64_t epoch{};
+    std::array<std::uint64_t, 4> tags{};
     // [evaluation][patch][kAnchorPatch x kAnchorPatch], newest first.
     std::array<std::vector<float>, 4> outputs;
     // [eye][patch][kAnchorPatch rows x kMeasureWindow].
@@ -2407,6 +2394,80 @@ struct MeasureData {
         first = last + 1;
     }
     return rank;
+}
+
+// V540: a vote for the alternating eyes' anchor, from the measurement's best
+// correlations ([eye][evaluation], newest first). The four evaluations are
+// two of each eye's, alternating: the left eye's are the newest and the third
+// or the second and the fourth, and the right eye's the others. Each pairing
+// scores its eyes' best matches among their own two; five agreeing votes
+// anchor - by handles where the four alternate between two, else by serial
+// parity in the epoch.
+void vote_alternating_eyes(
+    const MeasureData& data, const std::array<std::array<double, 4>, 2>& best) noexcept {
+    try {
+        const auto& tags = data.tags;
+        const bool by_handles = tags[0] != 0 && tags[1] != 0 && tags[0] != tags[1] &&
+            tags[2] == tags[0] && tags[3] == tags[1];
+        const DlssStreamPosition position = dlss_motion_vector_stream_position(data.stream);
+        if (!position.known || (by_handles ? position.tag_anchored : position.anchored)) return;
+        const double newest_left = std::max(best[0][0], best[0][2]) + std::max(best[1][1], best[1][3]);
+        const double newest_right = std::max(best[0][1], best[0][3]) + std::max(best[1][0], best[1][2]);
+        double strongest = -1.0;
+        for (const auto& eye : best) {
+            for (const double value : eye) strongest = std::max(strongest, value);
+        }
+        std::uint32_t outcome = 0;
+        if (strongest < kAnchorFloor) {
+            outcome = 1;
+        } else if (std::fabs(newest_left - newest_right) < kAnchorMargin) {
+            outcome = 2;
+        }
+        const bool left_newest = newest_left > newest_right;
+        const std::uint64_t left = by_handles ? (left_newest ? tags[0] : tags[1])
+                                              : ((data.serial + (left_newest ? 0U : 1U)) & 1U);
+        const std::uint64_t right = by_handles ? (left_newest ? tags[1] : tags[0]) : 0;
+        static std::mutex mutex;
+        static std::uint64_t key = 0, epoch = 0, side = 0, records = 0;
+        static std::uint32_t votes = 0;
+        std::scoped_lock lock(mutex);
+        // Handles anchor for the session; a parity, for its epoch.
+        const std::uint64_t vote_key = (data.stream << 1U) | (by_handles ? 1U : 0U);
+        if (key != vote_key || (!by_handles && epoch != data.epoch)) {
+            key = vote_key;
+            epoch = data.epoch;
+            votes = 0;
+        }
+        if (outcome == 0) {
+            votes = votes != 0 && side == left ? votes + 1 : 1;
+            side = left;
+        }
+        const bool anchored = outcome == 0 && votes >= kAnchorVotes;
+        std::uint64_t handles = data.serial;
+        if (by_handles) {
+            handles = 0;
+            for (std::size_t j = 0; j < 4; ++j) handles |= (tags[j] & 0xFFU) << (8U * j);
+        }
+        const std::uint64_t a = (data.publication << 16U) |
+            (static_cast<std::uint64_t>(std::min(votes, 255U)) << 8U) |
+            (left_newest ? 1ULL << 5U : 0ULL) | (by_handles ? 1ULL << 4U : 0ULL) | outcome;
+        if (records++ < 512) {
+            record(kRecordEyeVote, a,
+                (float_bits(static_cast<float>(newest_left)) << 32U) |
+                    float_bits(static_cast<float>(newest_right)),
+                handles);
+        }
+        if (!anchored) return;
+        votes = 0;
+        if (by_handles) {
+            anchor_dlss_alternating_eye_tags(left, right);
+            record(kRecordEyeAnchor, a, (left << 32U) | right, data.stream);
+        } else {
+            anchor_dlss_alternating_eyes(data.stream, data.epoch, static_cast<std::uint32_t>(left));
+            record(kRecordEyeAnchor, a, left, data.stream);
+        }
+    } catch (...) {
+    }
 }
 
 void analyse_measure(const MeasureData& data) noexcept {
@@ -2451,8 +2512,13 @@ void analyse_measure(const MeasureData& data) noexcept {
             }
             return used >= 4 ? total / used : -1.0;
         };
+        // Each eye against each evaluation at its best shift, for the anchor's
+        // vote: [eye][evaluation].
+        std::array<std::array<double, 4>, 2> bests{};
         for (std::uint32_t k = 0; k < 2; ++k) {
-            std::array<double, 4> best{-2, -2, -2, -2}, at_zero{};
+            std::array<double, 4>& best = bests[k];
+            best = {-2, -2, -2, -2};
+            std::array<double, 4> at_zero{};
             std::array<int, 4> shift{};
             for (std::size_t j = 0; j < 4; ++j) {
                 at_zero[j] = correlation(j, k, 0);
@@ -2477,6 +2543,7 @@ void analyse_measure(const MeasureData& data) noexcept {
             }
             record(kRecordEyeMeasure, (data.publication << 8U) | (k << 4U) | chosen, b, c);
         }
+        vote_alternating_eyes(data, bests);
     } catch (...) {
     }
 }
@@ -2630,10 +2697,13 @@ public:
         DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
         std::uint32_t width{};
         std::uint32_t height{};
+        // V540: the publication's eye_tag.
+        std::uint64_t tag{};
     };
 
     // The evaluation just staged was published at this place in its stream.
-    void note_publication(std::uint64_t stream, const DlssStreamPosition& position) noexcept {
+    void note_publication(
+        std::uint64_t stream, const DlssStreamPosition& position, std::uint64_t tag) noexcept {
         std::scoped_lock lock(mutex_);
         Slot& slot = slots_[last_slot_];
         slot.sample = {};
@@ -2641,6 +2711,7 @@ public:
         slot.sample.epoch = position.epoch;
         slot.sample.serial = position.serial;
         slot.sample.publication = position.publication;
+        slot.sample.tag = tag;
     }
 
     // In the game's list after its DLSS: 16 patches of the finished output
@@ -2714,34 +2785,6 @@ public:
         } catch (...) {
             return E_FAIL;
         }
-    }
-
-    // Both slots' samples, older first, and their slot indices.
-    void samples(std::array<AnchorSample, 2>* out, std::array<std::uint32_t, 2>* indices) noexcept {
-        std::scoped_lock lock(mutex_);
-        const bool swapped = slots_[0].sample.serial > slots_[1].sample.serial;
-        (*out)[0] = slots_[swapped ? 1 : 0].sample;
-        (*out)[1] = slots_[swapped ? 0 : 1].sample;
-        (*indices)[0] = swapped ? 1U : 0U;
-        (*indices)[1] = swapped ? 0U : 1U;
-    }
-
-    // In a list for the layer's queue: a slot's atlas into a readback buffer.
-    void read_atlas(std::uint32_t index, ID3D12GraphicsCommandList* list,
-        ID3D12Resource* readback, std::uint64_t offset, std::uint64_t pitch) noexcept {
-        std::scoped_lock lock(mutex_);
-        const Slot& slot = slots_[index & 1U];
-        if (!slot.atlas.layer) return;
-        D3D12_TEXTURE_COPY_LOCATION from{};
-        from.pResource = slot.atlas.layer.Get();
-        from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        D3D12_TEXTURE_COPY_LOCATION to{};
-        to.pResource = readback;
-        to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        to.PlacedFootprint.Offset = offset;
-        to.PlacedFootprint.Footprint = {slot.atlas.source.Format, kAnchorAtlas, kAnchorAtlas, 1,
-            static_cast<UINT>(pitch)};
-        list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
     }
 
     // V524, alternating eyes. R.E.A.L. VR's vectors span the game's last
@@ -2861,15 +2904,6 @@ public:
         std::scoped_lock lock(mutex_);
         if (SUCCEEDED(queue_->Signal(read_.Get(), ++submitted_))) {
             for (auto& done : history_read_done_) done = std::max(done, submitted_);
-        }
-    }
-
-    // After a list that read the atlases has gone to the queue: neither slot
-    // is written again before it has run.
-    void protect_slots() noexcept {
-        std::scoped_lock lock(mutex_);
-        if (SUCCEEDED(queue_->Signal(read_.Get(), ++submitted_))) {
-            for (Slot& slot : slots_) slot.read_done = std::max(slot.read_done, submitted_);
         }
     }
 
@@ -3466,104 +3500,9 @@ void complete12(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter* para
     }
 }
 
-struct AnchorJob {
-    ComPtr<ID3D12CommandAllocator> allocator;
-    ComPtr<ID3D12GraphicsCommandList> list;
-    ComPtr<ID3D12Fence> fence;
-    ComPtr<ID3D12Resource> readback;
-    std::uint64_t value{};
-    bool pending{};
-    // What the queued comparison read: the two evaluations, older first,
-    // the readback layout and the eye images' formats.
-    std::array<GuideTransport12::AnchorSample, 2> samples{};
-    std::array<DXGI_FORMAT, 2> eye_formats{};
-    std::uint64_t atlas_pitch{};
-    std::array<std::uint64_t, 2> atlas_offsets{};
-    std::uint64_t patch_pitch_bytes[2]{};
-    std::uint64_t eye_base{};
-    std::uint64_t patch_size{};
-    // The votes for the stream in its epoch.
-    std::uint64_t stream{};
-    std::uint64_t epoch{};
-    std::uint64_t last_publication{};
-    std::uint32_t vote_parity{};
-    std::uint32_t votes{};
-    std::uint64_t records{};
-};
-
-constexpr std::uint64_t kAnchorReadbackBytes = 2U * 2048U * kAnchorAtlas +
-    2U * kAnchorPatches * 32U * 512U;
-
-AnchorJob& anchor_job() noexcept {
-    static auto* value = new AnchorJob;
-    return *value;
-}
-
 std::mutex& anchor_mutex() noexcept {
     static auto* value = new std::mutex;
     return *value;
-}
-
-// The queued comparison has run: its votes, and the anchor once five agree.
-void judge_anchor(AnchorJob& job) noexcept {
-    std::array<std::array<double, 2>, 2> correlation{};
-    std::array<std::array<std::uint32_t, 2>, 2> used{};
-    std::byte* mapped = nullptr;
-    const D3D12_RANGE range{0, static_cast<SIZE_T>(kAnchorReadbackBytes)};
-    if (FAILED(job.readback->Map(0, &range, reinterpret_cast<void**>(&mapped))) || mapped == nullptr) {
-        return;
-    }
-    std::vector<float> evaluation, eye_patch;
-    for (std::uint32_t source = 0; source < 2; ++source) {
-        for (std::uint32_t eye = 0; eye < 2; ++eye) {
-            double total = 0.0;
-            std::uint32_t count = 0;
-            for (std::uint32_t patch = 0; patch < kAnchorPatches; ++patch) {
-                read_anchor_patch(mapped + job.atlas_offsets[source], job.atlas_pitch,
-                    (patch % 4U) * kAnchorPatch, (patch / 4U) * kAnchorPatch,
-                    job.samples[source].format, &evaluation);
-                read_anchor_patch(mapped + job.eye_base +
-                        (static_cast<std::uint64_t>(eye) * kAnchorPatches + patch) * job.patch_size,
-                    job.patch_pitch_bytes[eye], 0, 0, job.eye_formats[eye], &eye_patch);
-                const double value = rank_correlation(evaluation, eye_patch);
-                if (std::isfinite(value)) {
-                    total += value;
-                    ++count;
-                }
-            }
-            correlation[source][eye] = count != 0 ? total / count : 0.0;
-            used[source][eye] = count;
-        }
-    }
-    job.readback->Unmap(0, nullptr);
-    const std::uint32_t fewest =
-        std::min({used[0][0], used[0][1], used[1][0], used[1][1]});
-    const double older_left = correlation[0][0] + correlation[1][1];
-    const double older_right = correlation[0][1] + correlation[1][0];
-    std::uint32_t outcome = 0;
-    std::uint32_t parity = 0;
-    if (fewest < 4) {
-        outcome = 1;
-    } else if (std::fabs(older_left - older_right) < kAnchorMargin) {
-        outcome = 2;
-    } else {
-        const auto& left = older_left > older_right ? job.samples[0] : job.samples[1];
-        parity = static_cast<std::uint32_t>(left.serial & 1U);
-        job.votes = job.votes != 0 && job.vote_parity == parity ? job.votes + 1 : 1;
-        job.vote_parity = parity;
-    }
-    const bool anchored = outcome == 0 && job.votes >= kAnchorVotes;
-    if (anchored) anchor_dlss_alternating_eyes(job.stream, job.epoch, job.vote_parity);
-    if (job.records++ < 512 || anchored) {
-        record(kRecordAnchor,
-            (job.samples[0].publication << 32U) | (job.samples[1].publication & 0xFFFFFFFFULL),
-            (float_bits(static_cast<float>(older_left)) << 32U) |
-                float_bits(static_cast<float>(older_right)),
-            outcome | (static_cast<std::uint64_t>(parity) << 8U) |
-                (static_cast<std::uint64_t>(std::min(job.votes, 255U)) << 16U) |
-                (anchored ? 1ULL << 24U : 0ULL) |
-                (static_cast<std::uint64_t>(fewest) << 32U));
-    }
 }
 
 // V524, alternating eyes: record 848, the stretch of an evaluation's
@@ -3615,6 +3554,9 @@ void read_measure(MeasureJob& job) noexcept {
         MeasureData data;
         data.publication = job.samples[0].publication;
         data.serial = job.samples[0].serial;
+        data.stream = job.samples[0].stream;
+        data.epoch = job.samples[0].epoch;
+        for (std::size_t j = 0; j < 4; ++j) data.tags[j] = job.samples[j].tag;
         const std::size_t patch_area = static_cast<std::size_t>(kAnchorPatch) * kAnchorPatch;
         const std::size_t window_area = static_cast<std::size_t>(kAnchorPatch) * kMeasureWindow;
         const std::uint32_t output_bytes = anchor_texel_bytes(job.samples[0].format);
@@ -3665,19 +3607,33 @@ void measure_eyes(const std::shared_ptr<GuideTransport12>& transport, ID3D12Devi
             read_measure(job);
         }
         const std::uint64_t call = job.calls++;
-        if (call % 4 != 0 || (job.queued >= 400 && call % 64 != 0)) return;
         std::array<GuideTransport12::AnchorSample, 4> history{};
         transport->history(&history);
         // Newest first, four consecutive serials of one epoch, all before the release.
         std::array<GuideTransport12::AnchorSample, 4> samples = history;
         std::sort(samples.begin(), samples.end(),
             [](const auto& a, const auto& b) { return a.serial > b.serial; });
+        // V540: while the stream's eyes need their anchor (vote_alternating_
+        // eyes) - by handles where the four alternate between two - every
+        // other release; after, every 4th (the first 400), then every 64th.
+        const bool by_handles = samples[0].tag != 0 && samples[1].tag != 0 &&
+            samples[0].tag != samples[1].tag && samples[2].tag == samples[0].tag &&
+            samples[3].tag == samples[1].tag;
+        const DlssStreamPosition position = dlss_motion_vector_stream_position(stream);
+        const bool anchoring =
+            position.known && !(by_handles ? position.tag_anchored : position.anchored);
+        if (anchoring ? call % 2 != 0 : (call % 4 != 0 || (job.queued >= 400 && call % 64 != 0))) {
+            return;
+        }
         for (std::size_t j = 0; j < 4; ++j) {
             const auto& sample = samples[j];
             if (!sample.valid || sample.epoch != samples[0].epoch ||
                 sample.serial + j != samples[0].serial || sample.publication > released_at ||
                 sample.format != samples[0].format || sample.width != samples[0].width ||
                 sample.height != samples[0].height) {
+                if (anchoring) {
+                    skip_anchor(3, (samples[0].serial << 32U) | (position.serial & 0xFFFFFFFFULL));
+                }
                 return;
             }
         }
@@ -3686,16 +3642,26 @@ void measure_eyes(const std::shared_ptr<GuideTransport12>& transport, ID3D12Devi
         std::array<std::pair<std::int32_t, std::int32_t>, 2> origins{};
         for (std::uint32_t k = 0; k < 2; ++k) {
             const NgxEyeImage& image = eyes[k];
-            if (image.image == nullptr || image.x < 0 || image.y < 0) return;
+            if (image.image == nullptr || image.x < 0 || image.y < 0) {
+                if (anchoring) skip_anchor(4);
+                return;
+            }
             const D3D12_RESOURCE_DESC description = image.image->GetDesc();
             const std::uint32_t bytes = anchor_texel_bytes(description.Format);
             if (bytes == 0 || (description.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS) == 0) {
+                if (anchoring) {
+                    skip_anchor(4, static_cast<std::uint64_t>(description.Format) |
+                        (static_cast<std::uint64_t>(description.Flags) << 32U));
+                }
                 return;
             }
             origins[k] = eye_patch_origin(stream, k, image);
             for (std::uint32_t p = 0; p < kAnchorPatches; ++p) {
                 const auto [x, y] = anchor_patch_origin(p, samples[0].width, samples[0].height);
-                if (!patch_on_eye(origins[k], x, y, kMeasureShift, image)) return;
+                if (!patch_on_eye(origins[k], x, y, kMeasureShift, image)) {
+                    if (anchoring) skip_anchor(5, (static_cast<std::uint64_t>(image.width) << 32U) | image.height);
+                    return;
+                }
             }
             eye_formats[k] = description.Format;
             eye_pitch[k] = align_up(static_cast<std::uint64_t>(kMeasureWindow) * bytes,
@@ -3721,6 +3687,7 @@ void measure_eyes(const std::shared_ptr<GuideTransport12>& transport, ID3D12Devi
                 FAILED(job.list->Close()) ||
                 FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(job.fence.GetAddressOf())))) {
                 job.readback.Reset();
+                skip_anchor(6);
                 return;
             }
         }
@@ -3965,6 +3932,11 @@ void capture12_bridged(
         publication.producer_queue = queue.Get();
         publication.producer_command_list = staged.list;
         publication.verified_producer_device = device.Get();
+        // V540: under R.E.A.L. VR, the handle its fix evaluated this eye
+        // through (the inner call's, V526): the evaluation's eye.
+        if (g_anchor_enabled.load(std::memory_order_acquire)) {
+            publication.eye_tag = realvr_handle_index(handle) + 1U;
+        }
         // Shared simultaneous-access textures, back to COMMON after the copy.
         publication.resource_state = D3D12_RESOURCE_STATE_COMMON;
         if (staged.depth != nullptr) {
@@ -4004,7 +3976,7 @@ void capture12_bridged(
         // stream still needs its eyes anchored, its finished output's patches
         // after the DLSS call (complete12).
         const DlssStreamPosition position = dlss_motion_vector_stream_position(feature.stream);
-        transport->note_publication(feature.stream, position);
+        transport->note_publication(feature.stream, position, publication.eye_tag);
         if (g_anchor_enabled.load(std::memory_order_acquire)) {
             static std::atomic<std::uint64_t> inner_recorded{0};
             const std::uint64_t inner = inner_recorded.fetch_add(1, std::memory_order_relaxed);
@@ -5529,142 +5501,6 @@ void anchor_ngx_alternating_eyes(
         }
         std::scoped_lock lock(anchor_mutex());
         measure_eyes(transport, device.Get(), queue.Get(), eyes, released_at, stream);
-        AnchorJob& job = anchor_job();
-        if (job.pending) {
-            if (job.fence->GetCompletedValue() < job.value) return;
-            job.pending = false;
-            if (job.samples[0].stream == job.stream && job.samples[0].epoch == job.epoch) {
-                judge_anchor(job);
-            }
-        }
-        const DlssStreamPosition position = dlss_motion_vector_stream_position(stream);
-        if (!position.known || position.anchored) return;
-        if (job.stream != stream || job.epoch != position.epoch) {
-            job.stream = stream;
-            job.epoch = position.epoch;
-            job.votes = 0;
-            job.last_publication = 0;
-        }
-        std::array<GuideTransport12::AnchorSample, 2> samples{};
-        std::array<std::uint32_t, 2> slots{};
-        transport->samples(&samples, &slots);
-        const auto& older = samples[0];
-        const auto& newer = samples[1];
-        if (!older.valid || !newer.valid || older.stream != stream || newer.stream != stream ||
-            older.epoch != position.epoch || newer.epoch != position.epoch ||
-            newer.serial != older.serial + 1 || newer.serial != position.serial ||
-            newer.publication > released_at || newer.publication <= job.last_publication ||
-            older.format != newer.format || older.width != newer.width ||
-            older.height != newer.height) {
-            skip_anchor(older.valid && newer.valid ? 3U : 2U,
-                (newer.serial << 32U) | (position.serial & 0xFFFFFFFFULL));
-            return;
-        }
-        // The eye images: a bridged session's shared textures, read without a
-        // barrier; every patch where it lies on the output, from the eye's
-        // origin.
-        std::array<std::uint64_t, 2> patch_pitch{};
-        std::array<std::pair<std::int32_t, std::int32_t>, 2> origins{};
-        for (std::uint32_t eye = 0; eye < 2; ++eye) {
-            const NgxEyeImage& image = eyes[eye];
-            if (image.image == nullptr || image.x < 0 || image.y < 0) {
-                skip_anchor(4);
-                return;
-            }
-            const D3D12_RESOURCE_DESC description = image.image->GetDesc();
-            const std::uint32_t bytes = anchor_texel_bytes(description.Format);
-            if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || bytes == 0 ||
-                description.SampleDesc.Count != 1 ||
-                (description.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS) == 0 ||
-                static_cast<std::uint64_t>(image.x) + image.width > description.Width ||
-                static_cast<std::uint64_t>(image.y) + image.height > description.Height) {
-                skip_anchor(4, static_cast<std::uint64_t>(description.Format) |
-                    (static_cast<std::uint64_t>(description.Flags) << 32U));
-                return;
-            }
-            origins[eye] = eye_patch_origin(stream, eye, image);
-            for (std::uint32_t patch = 0; patch < kAnchorPatches; ++patch) {
-                const auto [x, y] = anchor_patch_origin(patch, older.width, older.height);
-                if (!patch_on_eye(origins[eye], x, y, 0, image)) {
-                    skip_anchor(5, (static_cast<std::uint64_t>(image.width) << 32U) | image.height);
-                    return;
-                }
-            }
-            job.eye_formats[eye] = description.Format;
-            patch_pitch[eye] = align_up(static_cast<std::uint64_t>(kAnchorPatch) * bytes,
-                D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
-        }
-        if (!job.readback) {
-            D3D12_HEAP_PROPERTIES heap{};
-            heap.Type = D3D12_HEAP_TYPE_READBACK;
-            D3D12_RESOURCE_DESC buffer{};
-            buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-            buffer.Width = kAnchorReadbackBytes;
-            buffer.Height = 1;
-            buffer.DepthOrArraySize = 1;
-            buffer.MipLevels = 1;
-            buffer.SampleDesc.Count = 1;
-            buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-            if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
-                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                    IID_PPV_ARGS(job.readback.GetAddressOf()))) ||
-                FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                    IID_PPV_ARGS(job.allocator.GetAddressOf()))) ||
-                FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                    job.allocator.Get(), nullptr, IID_PPV_ARGS(job.list.GetAddressOf()))) ||
-                FAILED(job.list->Close()) ||
-                FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
-                    IID_PPV_ARGS(job.fence.GetAddressOf())))) {
-                job.readback.Reset();
-                skip_anchor(6);
-                return;
-            }
-        }
-        if (FAILED(job.allocator->Reset()) || FAILED(job.list->Reset(job.allocator.Get(), nullptr))) {
-            return;
-        }
-        // The layout: both atlases, then 16 patches of each eye.
-        job.atlas_pitch = align_up(static_cast<std::uint64_t>(kAnchorAtlas) *
-                anchor_texel_bytes(older.format), D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
-        const std::uint64_t atlas_size =
-            align_up(job.atlas_pitch * kAnchorAtlas, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
-        job.atlas_offsets = {0, atlas_size};
-        job.eye_base = 2U * atlas_size;
-        job.patch_size = align_up(std::max(patch_pitch[0], patch_pitch[1]) * kAnchorPatch,
-            D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
-        job.patch_pitch_bytes[0] = patch_pitch[0];
-        job.patch_pitch_bytes[1] = patch_pitch[1];
-        transport->read_atlas(slots[0], job.list.Get(), job.readback.Get(), job.atlas_offsets[0],
-            job.atlas_pitch);
-        transport->read_atlas(slots[1], job.list.Get(), job.readback.Get(), job.atlas_offsets[1],
-            job.atlas_pitch);
-        for (std::uint32_t eye = 0; eye < 2; ++eye) {
-            for (std::uint32_t patch = 0; patch < kAnchorPatches; ++patch) {
-                const auto [x, y] = anchor_patch_origin(patch, older.width, older.height);
-                const auto left = static_cast<UINT>(origins[eye].first + static_cast<std::int32_t>(x));
-                const auto top = static_cast<UINT>(origins[eye].second + static_cast<std::int32_t>(y));
-                D3D12_TEXTURE_COPY_LOCATION from{};
-                from.pResource = eyes[eye].image;
-                from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                D3D12_TEXTURE_COPY_LOCATION to{};
-                to.pResource = job.readback.Get();
-                to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-                to.PlacedFootprint.Offset = job.eye_base +
-                    (static_cast<std::uint64_t>(eye) * kAnchorPatches + patch) * job.patch_size;
-                to.PlacedFootprint.Footprint = {job.eye_formats[eye], kAnchorPatch, kAnchorPatch, 1,
-                    static_cast<UINT>(patch_pitch[eye])};
-                const D3D12_BOX box{left, top, 0, left + kAnchorPatch, top + kAnchorPatch, 1};
-                job.list->CopyTextureRegion(&to, 0, 0, 0, &from, &box);
-            }
-        }
-        if (FAILED(job.list->Close())) return;
-        ID3D12CommandList* lists[]{job.list.Get()};
-        queue->ExecuteCommandLists(1, lists);
-        if (FAILED(queue->Signal(job.fence.Get(), ++job.value))) return;
-        transport->protect_slots();
-        job.samples = samples;
-        job.pending = true;
-        job.last_publication = newer.publication;
     } catch (...) {
     }
 }

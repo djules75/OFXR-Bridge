@@ -332,8 +332,14 @@ struct BridgeFlightLogger::Impl {
     // session looks like after a title has rebuilt its swapchains many times.
     static constexpr std::size_t kKeptFirst = 128;
     static constexpr std::size_t kKeptRecent = 896;
+    // V540: records a session has a handful of that say how it was set up,
+    // and that the recent ones would push out (the alternating eyes'
+    // anchors, 862: Cyberpunk 2077's 3042 probe records left none of the
+    // anchor's).
+    static constexpr std::size_t kKeptPinned = 64;
     std::mutex kept_mutex;
     std::vector<std::string> kept_first; // kept_mutex
+    std::vector<std::string> kept_pinned; // kept_mutex
     std::deque<std::string> kept_recent; // kept_mutex
     std::uint64_t kept_dropped{}; // kept_mutex
 
@@ -346,10 +352,14 @@ struct BridgeFlightLogger::Impl {
     bool pending_setting{}; // control_mutex
     bool pending_setting_seen{}; // control_mutex
 
-    void keep(const char* line, std::size_t length) {
+    void keep(const char* line, std::size_t length, bool pinned) {
         std::scoped_lock lock(kept_mutex);
         if (kept_first.size() < kKeptFirst) {
             kept_first.emplace_back(line, length);
+            return;
+        }
+        if (pinned && kept_pinned.size() < kKeptPinned) {
+            kept_pinned.emplace_back(line, length);
             return;
         }
         if (kept_recent.size() >= kKeptRecent) {
@@ -386,6 +396,7 @@ struct BridgeFlightLogger::Impl {
                 ++count;
             };
             for (const auto& line : kept_first) write_line(line);
+            for (const auto& line : kept_pinned) write_line(line);
             for (const auto& line : kept_recent) write_line(line);
             if (dropped != nullptr) *dropped = kept_dropped;
         } catch (...) {
@@ -490,7 +501,8 @@ struct BridgeFlightLogger::Impl {
         // one waited does not put it in the file twice.
         if (kept) {
             try {
-                keep(line.data(), static_cast<std::size_t>(length));
+                keep(line.data(), static_cast<std::size_t>(length),
+                    operation == BridgeFlightOperation::embedded_configuration && result == 862);
             } catch (...) {
             }
         }

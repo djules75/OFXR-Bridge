@@ -171,6 +171,9 @@ struct Registry {
     // V533: set_dlss_eye_view.
     std::array<DlssEyeView, kDlssMotionVectorEyeCount> eye_views{};
     std::array<bool, kDlssMotionVectorEyeCount> eye_view_known{};
+    // V540: the alternating eyes' tags (anchor_dlss_alternating_eye_tags).
+    std::uint64_t left_eye_tag{};
+    std::uint64_t right_eye_tag{};
 };
 
 Registry& registry() {
@@ -626,6 +629,7 @@ void publish_dlss_motion_vectors(
         frame->depth_inverted = publication.depth_inverted;
         frame->depth_infinite = publication.depth_infinite;
         frame->view = publication.view;
+        frame->eye_tag = publication.eye_tag;
         // V516: the stream's previous camera (a reset above cleared it).
         if (stream.latest) frame->previous_view = stream.latest->view;
         stream.jitter_x = publication.jitter_x;
@@ -1058,6 +1062,27 @@ void anchor_dlss_alternating_eyes(
     }
 }
 
+void anchor_dlss_alternating_eye_tags(std::uint64_t left_tag, std::uint64_t right_tag) noexcept {
+    try {
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        state.left_eye_tag = left_tag;
+        state.right_eye_tag = right_tag;
+    } catch (...) {
+    }
+}
+
+// V540: an alternating stream's evaluation's eye, 0 left and 1 right, or -1
+// before its anchor: by its tag where the tags are anchored, else by its
+// serial's parity where its epoch is.
+[[nodiscard]] static int alternating_eye(
+    const Registry& state, const StreamState& stream, const DlssMotionVectorFrame& frame) noexcept {
+    if (frame.eye_tag != 0 && frame.eye_tag == state.left_eye_tag) return 0;
+    if (frame.eye_tag != 0 && frame.eye_tag == state.right_eye_tag) return 1;
+    if (stream.anchor_epoch == 0 || stream.anchor_epoch != frame.epoch) return -1;
+    return (frame.serial & 1U) == stream.left_parity ? 0 : 1;
+}
+
 // V534: an eye image that is the middle window of a slightly larger DLSS
 // output, without a camera to say so. R.E.A.L. VR's Kingdom Come renders
 // 3776 x 3088 and submits each eye on 3679 x 3088 swapchains with no
@@ -1246,7 +1271,12 @@ DlssStreamPosition dlss_motion_vector_stream_position(std::uint64_t stream) noex
         position.epoch = value.epoch;
         position.serial = value.serial;
         position.publication = value.latest ? value.latest->publication : 0;
-        position.anchored = value.anchor_epoch != 0 && value.anchor_epoch == value.epoch;
+        position.anchored = value.latest
+            ? alternating_eye(state, value, *value.latest) >= 0
+            : value.anchor_epoch != 0 && value.anchor_epoch == value.epoch;
+        position.tag_anchored = value.latest && value.latest->eye_tag != 0 &&
+            (value.latest->eye_tag == state.left_eye_tag ||
+                value.latest->eye_tag == state.right_eye_tag);
     } catch (...) {
     }
     return position;
@@ -1483,13 +1513,15 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 candidates.size() == 1 && !array_eyes(*candidates.front().frame)) {
                 const auto& latest = candidates.front().frame;
                 const auto found = state.streams.find(latest->stream);
-                if (found == state.streams.end() || found->second.anchor_epoch == 0 ||
-                    found->second.anchor_epoch != latest->epoch) {
+                if (found == state.streams.end() ||
+                    alternating_eye(state, found->second, *latest) < 0) {
                     return stale();
                 }
                 StreamState& stream = found->second;
-                const std::uint32_t parity =
-                    eye == 0 ? stream.left_parity : 1U - stream.left_parity;
+                // V540: by tag, or by serial parity (alternating_eye).
+                const auto ours = [&](const DlssMotionVectorFrame& frame) {
+                    return alternating_eye(state, stream, frame) == eye;
+                };
                 std::vector<std::shared_ptr<const DlssMotionVectorFrame>> history;
                 for (const auto* frame : {&stream.latest, &stream.previous, &stream.previous2,
                          &stream.previous3}) {
@@ -1501,11 +1533,11 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 std::sort(history.begin(), history.end(),
                     [](const auto& a, const auto& b) { return a->serial > b->serial; });
                 if (history.empty()) return stale();
-                const bool current = (history.front()->serial & 1U) == parity;
+                const bool current = ours(*history.front());
                 bool skipped = false;
                 std::shared_ptr<const DlssMotionVectorFrame> chosen;
                 for (const auto& frame : history) {
-                    if ((frame->serial & 1U) != parity) continue;
+                    if (!ours(*frame)) continue;
                     if (!current && !skipped) {
                         skipped = true;
                         continue;

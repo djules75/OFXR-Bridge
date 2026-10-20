@@ -146,15 +146,31 @@ Then:
 - Its flat panels go out as it placed them: no pose between frames (V508), no
   generated panel images (V509).
 - Its one DLSS stream for both eyes, one eye per game frame, goes to the eyes
-  by serial parity once anchored, and guides no eye before. The anchor
-  compares 16 patches of the two newest finished DLSS outputs with each eye
-  image at a release, by rank correlation of luminance; five agreeing votes
-  anchor the left eye's parity, and a DLSS reset needs a new anchor.
-- 846, each comparison: `a` the older evaluation's publication << 32 | the
-  newer's; `b` older-left's summed correlation << 32 | older-right's (float
-  bits); `c` outcome (0 a vote, 1 too few patches with detail, 2 too close) |
-  the vote's left parity << 8 | agreeing votes << 16 | bit 24 anchored | the
-  fewest patches used << 32.
+  once anchored, and guides no eye before. V540: where R.E.A.L. VR's DLSS fix
+  runs, it evaluates each eye through a feature handle of its own
+  (RealVR64.dll keeps the handle on its frame parity, the eye it renders), and
+  the eyes go by handle: one anchor for the session, through DLSS resets and
+  Hybrid switched off and on. Without the fix (one handle) they go by serial
+  parity, anchored again after each reset.
+- The anchor is the eye measurement's (851): each eye image against the last
+  four evaluations, sliding up to 16 pixels sideways. Each pairing of the
+  eyes with the evaluations scores its eyes' best matches among their own
+  two; five agreeing votes, ahead by 0.1 with some match of at least 0.5,
+  anchor. Measured every other release until then. (V524-V539 compared the two
+  newest evaluations only: in Cyberpunk 2077 AERv2 shows one eye an older
+  evaluation and the other its interpolation, the vote was a coin toss, and
+  a Hybrid switched off and on could swap the eyes - each eye's vectors the
+  other's, the near scene out by the eyes' parallax: the mask tint's
+  outlines left of a weapon in the left eye, right of it in the right.)
+- 861, each vote while anchoring (the first 512): `a` the newest
+  evaluation's publication << 16 | agreeing votes << 8 | bit 5 the left eye
+  on the newest's side | bit 4 by handles | outcome (0 a vote, 1 no match of
+  0.5, 2 within 0.1); `b` the two pairings' scores, the left eye on the
+  newest's side << 32 | on the other's (float bits); `c` the four
+  evaluations' handles (8 bits each, newest low), or the newest's serial.
+- 862, the anchor: `a` as 861; `b` the left eye's handle << 32 | the right's,
+  or the left eye's serial parity; `c` the stream. Kept at the head of every
+  flight log file (846, V524's comparison, is gone).
 - The anchor takes the stream published most recently: the game may keep an
   earlier session's feature beside the one it plays with.
 - Its vectors span the game's last frame, the other eye's (R.E.A.L. VR's

@@ -3304,10 +3304,13 @@ void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
     // Streamline's cameras: the earlier is the left eye's whether the cameras
     // stand apart or not. R.E.A.L. VR's cameras are the same for both eyes and
     // stand apart only where the player moved between the two evaluations.
-    const auto publish_eye = [&](std::uint64_t stream, float side) {
+    const auto publish_eye = [&](std::uint64_t stream, float side, std::uint64_t tag = 0,
+                                 bool reset = false) {
         fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
             xrfg::DlssMotionVectorPublication p{};
             p.stream = stream;
+            p.eye_tag = tag;
+            p.reset = reset;
             p.output = color.Get();
             p.motion_vectors = motion.Get();
             p.output_width = 64;
@@ -3404,6 +3407,49 @@ void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
             alternating_right->eyes[0]->previous_serial == 4 &&
             alternating_right->eyes[0]->scale_x > 0.5F,
         "the alternating stream lost its eyes after a frame with one evaluation");
+
+    // V540: each eye through a DLSS feature of its own (R.E.A.L. VR's fix),
+    // its handle the evaluation's eye_tag. Anchored by the tags, the eyes hold
+    // through a reset - a new epoch, which a parity's anchor does not survive
+    // - that swaps the order the eyes evaluate in.
+    {
+        // One alternating stream of the image's size at a time.
+        xrfg::retire_dlss_motion_vector_stream(799);
+        constexpr std::uint64_t kLeftTag = 11, kRightTag = 22;
+        std::uint64_t tagged_release = 0;
+        for (int frame = 0; frame < 2; ++frame) {
+            publish_eye(801, 0.0F, kRightTag);
+            tagged_release = publish_eye(801, 0.0F, kLeftTag);
+        }
+        const auto resolve_tagged = [&](int eye) {
+            return xrfg::resolve_dlss_motion_vectors(
+                cropped.Get(), fixture.queue(), eye, tagged_release, tagged_release);
+        };
+        require(!resolve_tagged(0) && !xrfg::dlss_motion_vector_stream_position(801).anchored,
+            "a tagged alternating stream guided an eye before its anchor");
+        xrfg::anchor_dlss_alternating_eye_tags(kLeftTag, kRightTag);
+        const auto tagged_position = xrfg::dlss_motion_vector_stream_position(801);
+        require(tagged_position.anchored && tagged_position.tag_anchored,
+            "the tags did not anchor the alternating stream");
+        require(resolve_tagged(0)->eyes[0]->eye_tag == kLeftTag &&
+                resolve_tagged(0)->eyes[0]->serial == 4 &&
+                resolve_tagged(1)->eyes[0]->eye_tag == kRightTag &&
+                resolve_tagged(1)->eyes[0]->serial == 1,
+            "the tags did not give each eye its evaluation");
+        publish_eye(801, 0.0F, kLeftTag, true);
+        publish_eye(801, 0.0F, kRightTag);
+        publish_eye(801, 0.0F, kLeftTag);
+        tagged_release = publish_eye(801, 0.0F, kRightTag);
+        require(xrfg::dlss_motion_vector_stream_position(801).epoch == tagged_position.epoch + 1,
+            "the reset did not start an epoch");
+        require(resolve_tagged(0) && resolve_tagged(0)->eyes[0]->eye_tag == kLeftTag &&
+                resolve_tagged(0)->eyes[0]->serial == 1 &&
+                resolve_tagged(1)->eyes[0]->eye_tag == kRightTag &&
+                resolve_tagged(1)->eyes[0]->serial == 4,
+            "the tags' anchor did not hold through a reset that swapped the eyes' order");
+        xrfg::anchor_dlss_alternating_eye_tags(0, 0);
+        xrfg::retire_dlss_motion_vector_stream(801);
+    }
 
     // V533: R.E.A.L. VR's Ghost of Tsushima. The DLSS output is wider than the
     // eye image (4192 against 4003): the eye image is its middle window, the

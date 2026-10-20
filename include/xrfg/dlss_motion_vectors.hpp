@@ -86,6 +86,10 @@ struct DlssMotionVectorPublication {
     ID3D12Device* verified_producer_device{};
     // V515: the evaluation's camera, where the producer knows it.
     DlssViewGeometry view{};
+    // V540: under R.E.A.L. VR, the DLSS feature handle its fix evaluated
+    // through - one per eye - as a small number (first seen order + 1); 0
+    // elsewhere.
+    std::uint64_t eye_tag{};
 };
 
 struct DlssMotionVectorFrame {
@@ -130,6 +134,8 @@ struct DlssMotionVectorFrame {
     bool depth_inverted{};
     bool depth_infinite{};
     DlssViewGeometry view{};
+    // V540: the publication's eye_tag.
+    std::uint64_t eye_tag{};
     // V515: a guide placed by its camera rather than pixel for pixel. The
     // output rectangle is then the eye's image rectangle the guide covers,
     // and placed_motion_rect (x, y, width, height in vector texels, not
@@ -295,13 +301,23 @@ std::uint64_t dlss_motion_vector_publications() noexcept;
 // evaluations go to the eyes by their serial's parity once the stream has
 // been anchored in its epoch - its left eye takes `left_parity` - and guide
 // no eye before. A reset (a new epoch) needs a new anchor.
+// V540: R.E.A.L. VR's fix evaluates each eye through a DLSS feature handle
+// of its own (RealVR64.dll keeps the handle on its frame parity, the eye it
+// renders), and an evaluation's eye_tag says which. Anchored by the two
+// tags, the eyes go by tag: the whole session, through resets and every
+// stream the handles publish into. A stream without them (the fix not
+// running: one handle) keeps the serial parity.
 void configure_dlss_alternating_eyes(bool required) noexcept;
 void anchor_dlss_alternating_eyes(
     std::uint64_t stream, std::uint64_t epoch, std::uint32_t left_parity) noexcept;
+void anchor_dlss_alternating_eye_tags(std::uint64_t left_tag, std::uint64_t right_tag) noexcept;
 struct DlssStreamPosition {
     bool known{};
-    // Anchored in the stream's current epoch.
+    // Its newest evaluation has an eye: by its tag, or by its serial parity
+    // in the stream's current epoch.
     bool anchored{};
+    // V540: by its tag.
+    bool tag_anchored{};
     std::uint64_t epoch{};
     std::uint64_t serial{};
     std::uint64_t publication{};
