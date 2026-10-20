@@ -94,7 +94,9 @@ void record_shared_stream_choice(std::uint64_t eye, const SharedStreamOrder& ord
     } catch (...) {
     }
 }
-constexpr std::size_t kSnapshotSlotCount = 6;
+// V542: eight under alternating eyes, an eye's guide up to two of its own
+// evaluations behind its newest (set_dlss_alternating_skips).
+constexpr std::size_t kSnapshotSlotCount = 8;
 // The snapshot ring's length: four, and six under alternating eyes (V524),
 // whose lagging eye takes the evaluation three before the newest - its
 // snapshot has to outlast the two evaluations of the frame after.
@@ -117,9 +119,11 @@ struct StreamState {
     float jitter_y{};
     std::shared_ptr<const DlssMotionVectorFrame> previous;
     std::shared_ptr<const DlssMotionVectorFrame> latest;
-    // V524, alternating eyes: the two before `previous`.
+    // V524, alternating eyes: the two before `previous`; V542, two more.
     std::shared_ptr<const DlssMotionVectorFrame> previous2;
     std::shared_ptr<const DlssMotionVectorFrame> previous3;
+    std::shared_ptr<const DlssMotionVectorFrame> previous4;
+    std::shared_ptr<const DlssMotionVectorFrame> previous5;
     // V524, alternating eyes: each eye's evaluation at this frame's release
     // watermark and at the frame before (the resolver's).
     struct EyeTrack {
@@ -174,8 +178,9 @@ struct Registry {
     // V540: the alternating eyes' tags (anchor_dlss_alternating_eye_tags).
     std::uint64_t left_eye_tag{};
     std::uint64_t right_eye_tag{};
-    // V541: set_dlss_alternating_newest_late.
-    bool newest_late{};
+    // V542: set_dlss_alternating_skips - the newest evaluation's eye's, the
+    // other's.
+    std::array<std::uint32_t, 2> alternating_skips{0, 1};
 };
 
 Registry& registry() {
@@ -550,6 +555,8 @@ void publish_dlss_motion_vectors(
             stream.latest.reset();
             stream.previous2.reset();
             stream.previous3.reset();
+            stream.previous4.reset();
+            stream.previous5.reset();
         }
 
         ComPtr<ID3D12Resource> motion_snapshot;
@@ -639,6 +646,8 @@ void publish_dlss_motion_vectors(
         if (stream.first_publication == 0) {
             stream.first_publication = frame->publication;
         }
+        stream.previous5 = std::move(stream.previous4);
+        stream.previous4 = std::move(stream.previous3);
         stream.previous3 = std::move(stream.previous2);
         stream.previous2 = std::move(stream.previous);
         stream.previous = std::move(stream.latest);
@@ -679,6 +688,8 @@ void configure_dlss_motion_vector_tracking(bool enabled) noexcept {
             stream.latest.reset();
             stream.previous2.reset();
             stream.previous3.reset();
+            stream.previous4.reset();
+            stream.previous5.reset();
         }
         state.statistics = {};
         state.statistics.status = DlssMotionVectorStatus::waiting_for_dlss;
@@ -1103,11 +1114,11 @@ int dlss_alternating_eye(
     }
 }
 
-void set_dlss_alternating_newest_late(bool late) noexcept {
+void set_dlss_alternating_skips(std::uint32_t newest, std::uint32_t other) noexcept {
     try {
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
-        state.newest_late = late;
+        state.alternating_skips = {std::min(newest, 2U), std::min(other, 2U)};
     } catch (...) {
     }
 }
@@ -1537,9 +1548,8 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             // or - for the other eye - not its newest but the one before it,
             // its evaluation of the previous frame. So the newest
             // evaluation's eye takes it, and the other eye takes its
-            // second-newest. V541: or both their second-newest, where the
-            // eye measurement found the newest evaluation's eye late too
-            // (set_dlss_alternating_newest_late).
+            // second-newest. V542: as many of its own as the eye measurement
+            // found its picture behind (set_dlss_alternating_skips).
             if (g_alternating_eyes.load(std::memory_order_acquire) &&
                 candidates.size() == 1 && !array_eyes(*candidates.front().frame)) {
                 const auto& latest = candidates.front().frame;
@@ -1555,7 +1565,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 };
                 std::vector<std::shared_ptr<const DlssMotionVectorFrame>> history;
                 for (const auto* frame : {&stream.latest, &stream.previous, &stream.previous2,
-                         &stream.previous3}) {
+                         &stream.previous3, &stream.previous4, &stream.previous5}) {
                     if (*frame && (*frame)->epoch == latest->epoch &&
                         (*frame)->publication <= released_at) {
                         history.push_back(*frame);
@@ -1565,12 +1575,12 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                     [](const auto& a, const auto& b) { return a->serial > b->serial; });
                 if (history.empty()) return stale();
                 const bool current = ours(*history.front());
-                bool skipped = false;
+                std::uint32_t skip = state.alternating_skips[current ? 0 : 1];
                 std::shared_ptr<const DlssMotionVectorFrame> chosen;
                 for (const auto& frame : history) {
                     if (!ours(*frame)) continue;
-                    if ((!current || state.newest_late) && !skipped) {
-                        skipped = true;
+                    if (skip != 0) {
+                        --skip;
                         continue;
                     }
                     chosen = frame;

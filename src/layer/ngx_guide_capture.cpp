@@ -1903,6 +1903,8 @@ constexpr std::int64_t kRecordAnchorSkip = 849;
 // Alternating eyes (configure_ngx_alternating_eye_anchor): the anchor, and
 // the vectors' stretch to each eye's own frame.
 std::atomic_bool g_anchor_enabled{false};
+// V542: both eyes' lags decided (vote_alternating_skips).
+std::atomic_bool g_alternating_skips_decided{false};
 
 // ------------------------------------------- R.E.A.L. VR's inner call (V526)
 // R.E.A.L. VR hooks _nvngx.dll's exports before the layer does, and fixes the
@@ -2339,8 +2341,8 @@ void analyse_probe(const ProbeData& data) noexcept {
 // picture or the mod's interpolation, and which one changes frame by frame.
 // The measurement says which: at every 4th release (the first 400, then
 // every 64th) 16 regions of each eye image are compared with the finished
-// DLSS output of each of the last four evaluations, sliding up to 16 output
-// pixels sideways. Record 851 per eye per comparison:
+// DLSS output of each of the last four evaluations (V542: six, 865 the fifth
+// and sixth), sliding up to 16 output pixels sideways. Record 851 per eye per comparison:
 //   a the newest evaluation's publication << 8 | the eye << 4 | the best
 //     evaluation (0 the newest, 3 the oldest)
 //   b each evaluation's best correlation x100 as a byte (newest in the low
@@ -2364,20 +2366,31 @@ constexpr std::int64_t kRecordEyeMeasure = 851;
 //       through every wrap of the flight log (a handful in a session).
 constexpr std::int64_t kRecordEyeVote = 861;
 constexpr std::int64_t kRecordEyeAnchor = 862;
-// V541, whether the newest evaluation's eye shows it at the release or, late,
-// its one before (set_dlss_alternating_newest_late), from the measurement
-// once the eyes are anchored. Standing still the two look alike and tie;
-// moving, the one shown matches:
+// V542, the eyes' lags, from the measurement once the eyes are anchored: per
+// role - the eye that owns the newest evaluation (0) and the other (1) - how
+// many of its own evaluations its picture lags its newest
+// (set_dlss_alternating_skips), the one of its three the measurement found
+// at the smallest shift, moving. Standing still all three sit at 0:
 //   863 a vote, the first 512: a the newest evaluation's publication << 16 |
-//       agreeing votes << 8 | bit 4 late | the outcome (0 a vote, 1 neither
-//       matched by kAnchorFloor, 2 within kAnchorMargin); b that eye's best
-//       correlation with the newest << 32 | with its one before (float
-//       bits); c the eye
-//   864 the decision, for the session: a as 863; b 1 late, 0 not; c the
-//       stream. Kept through every wrap of the flight log.
+//       agreeing votes << 8 | the role << 6 | the evaluations skipped << 4 |
+//       the outcome (0 a vote, 1 its picture matched by less than
+//       kAnchorFloor, 2 not moving - none of the three 3 pixels to the side
+//       - 3 two within 2 pixels of each other); b the three's shifts (int8,
+//       its newest low) | their best correlations x100 << 32 (bytes); c the
+//       eye
+//   864 a decision, for the session: a as 863; b the evaluations skipped; c
+//       the stream. Kept through every wrap of the flight log.
+//   865 the measurement's fifth and sixth evaluations: a as 851; b and c as
+//       851's, two lanes.
 constexpr std::int64_t kRecordLagVote = 863;
 constexpr std::int64_t kRecordLagDecision = 864;
+constexpr std::int64_t kRecordEyeMeasureOlder = 865;
+constexpr std::uint32_t kLagVotes = 3;
 constexpr int kMeasureShift = 16;
+// V542: the evaluations measured, newest first: six, so an eye's picture two
+// of its own evaluations behind its newest is found (851 the first four, 865
+// the other two).
+constexpr std::size_t kMeasureDepth = 6;
 constexpr std::uint32_t kMeasureWindow = kAnchorPatch + 2U * kMeasureShift;
 
 struct MeasureData {
@@ -2386,9 +2399,9 @@ struct MeasureData {
     // V540: the stream and epoch, and the evaluations' handles, newest first.
     std::uint64_t stream{};
     std::uint64_t epoch{};
-    std::array<std::uint64_t, 4> tags{};
+    std::array<std::uint64_t, kMeasureDepth> tags{};
     // [evaluation][patch][kAnchorPatch x kAnchorPatch], newest first.
-    std::array<std::vector<float>, 4> outputs;
+    std::array<std::vector<float>, kMeasureDepth> outputs;
     // [eye][patch][kAnchorPatch rows x kMeasureWindow].
     std::array<std::vector<float>, 2> eyes;
 };
@@ -2417,7 +2430,7 @@ struct MeasureData {
 // anchor - by handles where the four alternate between two, else by serial
 // parity in the epoch.
 void vote_alternating_eyes(
-    const MeasureData& data, const std::array<std::array<double, 4>, 2>& best) noexcept {
+    const MeasureData& data, const std::array<std::array<double, kMeasureDepth>, 2>& best) noexcept {
     try {
         const auto& tags = data.tags;
         const bool by_handles = tags[0] != 0 && tags[1] != 0 && tags[0] != tags[1] &&
@@ -2483,44 +2496,66 @@ void vote_alternating_eyes(
     }
 }
 
-// V541: a vote on whether the newest evaluation's eye is late (kRecordLagVote).
-// The newest is the first evaluation, that eye's one before the third.
-void vote_alternating_lag(
-    const MeasureData& data, const std::array<std::array<double, 4>, 2>& best) noexcept {
+// V542: the lags' votes (kRecordLagVote), per role: its own evaluations are
+// the newest, third and fifth for the newest evaluation's eye, the second,
+// fourth and sixth for the other. Three agreeing votes decide a role.
+void vote_alternating_skips(const MeasureData& data,
+    const std::array<std::array<double, kMeasureDepth>, 2>& best,
+    const std::array<std::array<int, kMeasureDepth>, 2>& shift) noexcept {
     try {
         static std::mutex mutex;
-        static bool decided = false, side = false;
-        static std::uint32_t votes = 0;
+        static std::array<bool, 2> decided{};
+        static std::array<std::uint32_t, 2> skips{0, 1}, sides{}, votes{};
         static std::uint64_t records = 0;
         std::scoped_lock lock(mutex);
-        if (decided) return;
-        const int eye = dlss_alternating_eye(data.stream, data.epoch, data.serial, data.tags[0]);
-        if (eye < 0) return;
-        const double newest = best[static_cast<std::size_t>(eye)][0];
-        const double before = best[static_cast<std::size_t>(eye)][2];
-        std::uint32_t outcome = 0;
-        if (std::max(newest, before) < kAnchorFloor) {
-            outcome = 1;
-        } else if (std::fabs(newest - before) < kAnchorMargin) {
-            outcome = 2;
+        const int newest_eye = dlss_alternating_eye(data.stream, data.epoch, data.serial, data.tags[0]);
+        if (newest_eye < 0) return;
+        for (std::uint32_t role = 0; role < 2; ++role) {
+            if (decided[role]) continue;
+            const auto eye = static_cast<std::size_t>(role == 0 ? newest_eye : 1 - newest_eye);
+            std::array<int, 3> at{};
+            std::array<double, 3> match{};
+            for (std::size_t k = 0; k < 3; ++k) {
+                at[k] = std::abs(shift[eye][role + 2U * k]);
+                match[k] = best[eye][role + 2U * k];
+            }
+            std::uint32_t chosen = 0;
+            for (std::uint32_t k = 1; k < 3; ++k) if (at[k] < at[chosen]) chosen = k;
+            int runner_up = 1 << 20;
+            for (std::uint32_t k = 0; k < 3; ++k) if (k != chosen) runner_up = std::min(runner_up, at[k]);
+            std::uint32_t outcome = 0;
+            if (match[chosen] < kAnchorFloor) {
+                outcome = 1;
+            } else if (std::max({at[0], at[1], at[2]}) < 3) {
+                outcome = 2;
+            } else if (runner_up - at[chosen] < 2) {
+                outcome = 3;
+            }
+            if (outcome == 0) {
+                votes[role] = votes[role] != 0 && sides[role] == chosen ? votes[role] + 1 : 1;
+                sides[role] = chosen;
+            }
+            const std::uint64_t a = (data.publication << 16U) |
+                (static_cast<std::uint64_t>(std::min(votes[role], 255U)) << 8U) |
+                (static_cast<std::uint64_t>(role) << 6U) | (static_cast<std::uint64_t>(chosen) << 4U) |
+                outcome;
+            if (records++ < 512) {
+                std::uint64_t b = 0;
+                for (std::size_t k = 0; k < 3; ++k) {
+                    b |= static_cast<std::uint64_t>(static_cast<std::uint8_t>(static_cast<std::int8_t>(
+                        shift[eye][role + 2U * k]))) << (8U * k);
+                    b |= static_cast<std::uint64_t>(std::clamp(match[k], 0.0, 1.0) * 100.0 + 0.5)
+                        << (32U + 8U * k);
+                }
+                record(kRecordLagVote, a, b, eye);
+            }
+            if (outcome != 0 || votes[role] < kLagVotes) continue;
+            decided[role] = true;
+            skips[role] = chosen;
+            set_dlss_alternating_skips(skips[0], skips[1]);
+            if (decided[0] && decided[1]) g_alternating_skips_decided.store(true, std::memory_order_release);
+            record(kRecordLagDecision, a, chosen, data.stream);
         }
-        const bool late = before > newest;
-        if (outcome == 0) {
-            votes = votes != 0 && side == late ? votes + 1 : 1;
-            side = late;
-        }
-        const std::uint64_t a = (data.publication << 16U) |
-            (static_cast<std::uint64_t>(std::min(votes, 255U)) << 8U) |
-            (late ? 1ULL << 4U : 0ULL) | outcome;
-        if (records++ < 512) {
-            record(kRecordLagVote, a,
-                (float_bits(static_cast<float>(newest)) << 32U) | float_bits(static_cast<float>(before)),
-                static_cast<std::uint64_t>(eye));
-        }
-        if (outcome != 0 || votes < kAnchorVotes) return;
-        decided = true;
-        set_dlss_alternating_newest_late(late);
-        record(kRecordLagDecision, a, late ? 1U : 0U, data.stream);
     } catch (...) {
     }
 }
@@ -2530,8 +2565,8 @@ void analyse_measure(const MeasureData& data) noexcept {
         const std::size_t patch_area = static_cast<std::size_t>(kAnchorPatch) * kAnchorPatch;
         const std::size_t window_area = static_cast<std::size_t>(kAnchorPatch) * kMeasureWindow;
         // Ranked per patch once: the outputs' 32x32, the eyes' 32x64 windows.
-        std::array<std::vector<double>, 4> outputs;
-        for (std::size_t j = 0; j < 4; ++j) {
+        std::array<std::vector<double>, kMeasureDepth> outputs;
+        for (std::size_t j = 0; j < kMeasureDepth; ++j) {
             outputs[j].resize(kAnchorPatches * patch_area);
             for (std::size_t p = 0; p < kAnchorPatches; ++p) {
                 const auto ranked = rank_values(data.outputs[j].data() + p * patch_area, patch_area);
@@ -2567,15 +2602,16 @@ void analyse_measure(const MeasureData& data) noexcept {
             }
             return used >= 4 ? total / used : -1.0;
         };
-        // Each eye against each evaluation at its best shift, for the anchor's
-        // vote: [eye][evaluation].
-        std::array<std::array<double, 4>, 2> bests{};
+        // Each eye against each evaluation at its best shift, for the votes:
+        // [eye][evaluation].
+        std::array<std::array<double, kMeasureDepth>, 2> bests{};
+        std::array<std::array<int, kMeasureDepth>, 2> shifts{};
         for (std::uint32_t k = 0; k < 2; ++k) {
-            std::array<double, 4>& best = bests[k];
-            best = {-2, -2, -2, -2};
-            std::array<double, 4> at_zero{};
-            std::array<int, 4> shift{};
-            for (std::size_t j = 0; j < 4; ++j) {
+            std::array<double, kMeasureDepth>& best = bests[k];
+            best.fill(-2.0);
+            std::array<double, kMeasureDepth> at_zero{};
+            std::array<int, kMeasureDepth>& shift = shifts[k];
+            for (std::size_t j = 0; j < kMeasureDepth; ++j) {
                 at_zero[j] = correlation(j, k, 0);
                 for (int s = -kMeasureShift; s <= kMeasureShift; ++s) {
                     const double value = correlation(j, k, s);
@@ -2586,7 +2622,7 @@ void analyse_measure(const MeasureData& data) noexcept {
                 }
             }
             std::uint32_t chosen = 0;
-            for (std::uint32_t j = 1; j < 4; ++j) if (best[j] > best[chosen]) chosen = j;
+            for (std::uint32_t j = 1; j < kMeasureDepth; ++j) if (best[j] > best[chosen]) chosen = j;
             const auto byte = [](double value) {
                 return static_cast<std::uint64_t>(std::clamp(value, 0.0, 1.0) * 100.0 + 0.5);
             };
@@ -2597,9 +2633,17 @@ void analyse_measure(const MeasureData& data) noexcept {
                 c |= byte(at_zero[j]) << (32U + 8U * j);
             }
             record(kRecordEyeMeasure, (data.publication << 8U) | (k << 4U) | chosen, b, c);
+            // V542: the fifth and sixth evaluations, as 851 the first four.
+            std::uint64_t b6 = 0, c6 = data.serial & 0xFFFFFFFFULL;
+            for (std::uint32_t j = 4; j < kMeasureDepth; ++j) {
+                b6 |= byte(best[j]) << (32U + 8U * (j - 4U));
+                b6 |= static_cast<std::uint64_t>(static_cast<std::uint8_t>(static_cast<std::int8_t>(shift[j]))) << (8U * (j - 4U));
+                c6 |= byte(at_zero[j]) << (32U + 8U * (j - 4U));
+            }
+            record(kRecordEyeMeasureOlder, (data.publication << 8U) | (k << 4U) | chosen, b6, c6);
         }
         vote_alternating_eyes(data, bests);
-        vote_alternating_lag(data, bests);
+        vote_alternating_skips(data, bests, shifts);
     } catch (...) {
     }
 }
@@ -2809,7 +2853,7 @@ public:
             }
             // V524, record 851: the same patches into the four-deep history,
             // by serial, once its last read has run.
-            const std::size_t entry = slot.sample.serial & 3U;
+            const std::size_t entry = slot.sample.serial % kMeasureDepth;
             bool history_free = history_read_done_[entry] == 0 ||
                 read_->GetCompletedValue() >= history_read_done_[entry];
             if (!history_free &&
@@ -2931,8 +2975,8 @@ public:
         }
     }
 
-    // V524, record 851: the last four evaluations' output patches.
-    void history(std::array<AnchorSample, 4>* out) noexcept {
+    // V524, record 851: the last evaluations' output patches (V542: six).
+    void history(std::array<AnchorSample, kMeasureDepth>* out) noexcept {
         std::scoped_lock lock(mutex_);
         *out = history_samples_;
     }
@@ -2940,7 +2984,7 @@ public:
     void read_history(std::uint32_t index, ID3D12GraphicsCommandList* list,
         ID3D12Resource* readback, std::uint64_t offset, std::uint64_t pitch) noexcept {
         std::scoped_lock lock(mutex_);
-        const Shared& atlas = history_atlas_[index & 3U];
+        const Shared& atlas = history_atlas_[index % kMeasureDepth];
         if (!atlas.layer) return;
         D3D12_TEXTURE_COPY_LOCATION from{};
         from.pResource = atlas.layer.Get();
@@ -3518,10 +3562,11 @@ private:
     std::array<Slot, 2> slots_{};
     std::array<MotionMean, 4> motion_means_{};
     std::array<ProbeRead, 2> probe_reads_{};
-    // V524, record 851: the last four evaluations' output patches, by serial.
-    std::array<Shared, 4> history_atlas_{};
-    std::array<AnchorSample, 4> history_samples_{};
-    std::array<std::uint64_t, 4> history_read_done_{};
+    // V524, record 851: the last evaluations' output patches, by serial
+    // (V542: six).
+    std::array<Shared, kMeasureDepth> history_atlas_{};
+    std::array<AnchorSample, kMeasureDepth> history_samples_{};
+    std::array<std::uint64_t, kMeasureDepth> history_read_done_{};
     // V524: each serial parity's mean motion in motion_epoch_ (motion_stretch).
     std::array<double, 2> parity_motion_{};
     std::uint64_t motion_epoch_{};
@@ -3581,7 +3626,7 @@ struct MeasureJob {
     ComPtr<ID3D12Resource> readback;
     std::uint64_t value{};
     bool pending{};
-    std::array<GuideTransport12::AnchorSample, 4> samples{};  // newest first
+    std::array<GuideTransport12::AnchorSample, kMeasureDepth> samples{};  // newest first
     std::array<DXGI_FORMAT, 2> eye_formats{};
     std::uint64_t atlas_pitch{};
     std::uint64_t atlas_size{};
@@ -3592,7 +3637,7 @@ struct MeasureJob {
     std::uint64_t queued{};
 };
 
-constexpr std::uint64_t kMeasureReadbackBytes = 4U * 2048U * kAnchorAtlas +
+constexpr std::uint64_t kMeasureReadbackBytes = kMeasureDepth * 2048U * kAnchorAtlas +
     2U * kAnchorPatches * kAnchorPatch * 2048U;
 
 MeasureJob& measure_job() noexcept {
@@ -3612,11 +3657,11 @@ void read_measure(MeasureJob& job) noexcept {
         data.serial = job.samples[0].serial;
         data.stream = job.samples[0].stream;
         data.epoch = job.samples[0].epoch;
-        for (std::size_t j = 0; j < 4; ++j) data.tags[j] = job.samples[j].tag;
+        for (std::size_t j = 0; j < kMeasureDepth; ++j) data.tags[j] = job.samples[j].tag;
         const std::size_t patch_area = static_cast<std::size_t>(kAnchorPatch) * kAnchorPatch;
         const std::size_t window_area = static_cast<std::size_t>(kAnchorPatch) * kMeasureWindow;
         const std::uint32_t output_bytes = anchor_texel_bytes(job.samples[0].format);
-        for (std::size_t j = 0; j < 4; ++j) {
+        for (std::size_t j = 0; j < kMeasureDepth; ++j) {
             data.outputs[j].resize(kAnchorPatches * patch_area);
             const std::byte* base = mapped + j * job.atlas_size;
             for (std::uint32_t p = 0; p < kAnchorPatches; ++p) {
@@ -3663,25 +3708,28 @@ void measure_eyes(const std::shared_ptr<GuideTransport12>& transport, ID3D12Devi
             read_measure(job);
         }
         const std::uint64_t call = job.calls++;
-        std::array<GuideTransport12::AnchorSample, 4> history{};
+        std::array<GuideTransport12::AnchorSample, kMeasureDepth> history{};
         transport->history(&history);
-        // Newest first, four consecutive serials of one epoch, all before the release.
-        std::array<GuideTransport12::AnchorSample, 4> samples = history;
+        // Newest first, six consecutive serials of one epoch, all before the release.
+        std::array<GuideTransport12::AnchorSample, kMeasureDepth> samples = history;
         std::sort(samples.begin(), samples.end(),
             [](const auto& a, const auto& b) { return a.serial > b.serial; });
         // V540: while the stream's eyes need their anchor (vote_alternating_
         // eyes) - by handles where the four alternate between two - every
-        // other release; after, every 4th (the first 400), then every 64th.
+        // other release; after, every 4th (the first 400), then every 64th -
+        // V542: every 4th until the eyes' lags are decided too.
         const bool by_handles = samples[0].tag != 0 && samples[1].tag != 0 &&
             samples[0].tag != samples[1].tag && samples[2].tag == samples[0].tag &&
             samples[3].tag == samples[1].tag;
         const DlssStreamPosition position = dlss_motion_vector_stream_position(stream);
         const bool anchoring =
             position.known && !(by_handles ? position.tag_anchored : position.anchored);
-        if (anchoring ? call % 2 != 0 : (call % 4 != 0 || (job.queued >= 400 && call % 64 != 0))) {
+        if (anchoring ? call % 2 != 0
+                      : (call % 4 != 0 || (job.queued >= 400 && call % 64 != 0 &&
+                                              g_alternating_skips_decided.load(std::memory_order_acquire)))) {
             return;
         }
-        for (std::size_t j = 0; j < 4; ++j) {
+        for (std::size_t j = 0; j < kMeasureDepth; ++j) {
             const auto& sample = samples[j];
             if (!sample.valid || sample.epoch != samples[0].epoch ||
                 sample.serial + j != samples[0].serial || sample.publication > released_at ||
@@ -3751,12 +3799,12 @@ void measure_eyes(const std::shared_ptr<GuideTransport12>& transport, ID3D12Devi
         job.atlas_pitch = align_up(static_cast<std::uint64_t>(kAnchorAtlas) *
             anchor_texel_bytes(samples[0].format), D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
         job.atlas_size = align_up(job.atlas_pitch * kAnchorAtlas, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
-        job.eye_base = 4U * job.atlas_size;
+        job.eye_base = kMeasureDepth * job.atlas_size;
         job.window_size = align_up(std::max(eye_pitch[0], eye_pitch[1]) * kAnchorPatch,
             D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
         if (job.eye_base + 2U * kAnchorPatches * job.window_size > kMeasureReadbackBytes) return;
-        for (std::uint32_t j = 0; j < 4; ++j) {
-            transport->read_history(static_cast<std::uint32_t>(samples[j].serial & 3U), job.list.Get(),
+        for (std::uint32_t j = 0; j < kMeasureDepth; ++j) {
+            transport->read_history(static_cast<std::uint32_t>(samples[j].serial % kMeasureDepth), job.list.Get(),
                 job.readback.Get(), j * job.atlas_size, job.atlas_pitch);
         }
         for (std::uint32_t k = 0; k < 2; ++k) {

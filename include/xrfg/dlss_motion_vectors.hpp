@@ -315,13 +315,15 @@ void anchor_dlss_alternating_eye_tags(std::uint64_t left_tag, std::uint64_t righ
 // stream's evaluation of this epoch, serial and eye_tag goes to.
 int dlss_alternating_eye(
     std::uint64_t stream, std::uint64_t epoch, std::uint64_t serial, std::uint64_t tag) noexcept;
-// V541: at an eye image's release, AERv2 shows one eye its evaluation of the
-// frame before. The other eye shows its newest (V524, Cyberpunk 2077 on
-// 2026-10-19) or - late - its one before as well (2026-10-20, the eye taking
-// the newest led its picture by a frame: its contour off by the strafe's
-// speed). Measured (the eye measurement's vote, record 864); not late until
-// then.
-void set_dlss_alternating_newest_late(bool late) noexcept;
+// V542: how many of its own evaluations each eye's picture lags its newest at
+// a release, 0 to 2: `newest` for the eye that owns the stream's newest
+// evaluation, `other` for the other eye (the two trade places when a frame
+// carries one evaluation). Cyberpunk 2077 under AERv2: 0 and 1 on
+// 2026-10-19 (V524's rule, the default), 1 and 1 then about 2 and 1 on
+// 2026-10-20 - the eye given a newer evaluation's vectors than its picture
+// had its contour off by the strafe's speed. Measured (the eye measurement's
+// votes, record 864).
+void set_dlss_alternating_skips(std::uint32_t newest, std::uint32_t other) noexcept;
 struct DlssStreamPosition {
     bool known{};
     // Its newest evaluation has an eye: by its tag, or by its serial parity
