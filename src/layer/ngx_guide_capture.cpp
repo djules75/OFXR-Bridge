@@ -2364,6 +2364,19 @@ constexpr std::int64_t kRecordEyeMeasure = 851;
 //       through every wrap of the flight log (a handful in a session).
 constexpr std::int64_t kRecordEyeVote = 861;
 constexpr std::int64_t kRecordEyeAnchor = 862;
+// V541, whether the newest evaluation's eye shows it at the release or, late,
+// its one before (set_dlss_alternating_newest_late), from the measurement
+// once the eyes are anchored. Standing still the two look alike and tie;
+// moving, the one shown matches:
+//   863 a vote, the first 512: a the newest evaluation's publication << 16 |
+//       agreeing votes << 8 | bit 4 late | the outcome (0 a vote, 1 neither
+//       matched by kAnchorFloor, 2 within kAnchorMargin); b that eye's best
+//       correlation with the newest << 32 | with its one before (float
+//       bits); c the eye
+//   864 the decision, for the session: a as 863; b 1 late, 0 not; c the
+//       stream. Kept through every wrap of the flight log.
+constexpr std::int64_t kRecordLagVote = 863;
+constexpr std::int64_t kRecordLagDecision = 864;
 constexpr int kMeasureShift = 16;
 constexpr std::uint32_t kMeasureWindow = kAnchorPatch + 2U * kMeasureShift;
 
@@ -2470,6 +2483,48 @@ void vote_alternating_eyes(
     }
 }
 
+// V541: a vote on whether the newest evaluation's eye is late (kRecordLagVote).
+// The newest is the first evaluation, that eye's one before the third.
+void vote_alternating_lag(
+    const MeasureData& data, const std::array<std::array<double, 4>, 2>& best) noexcept {
+    try {
+        static std::mutex mutex;
+        static bool decided = false, side = false;
+        static std::uint32_t votes = 0;
+        static std::uint64_t records = 0;
+        std::scoped_lock lock(mutex);
+        if (decided) return;
+        const int eye = dlss_alternating_eye(data.stream, data.epoch, data.serial, data.tags[0]);
+        if (eye < 0) return;
+        const double newest = best[static_cast<std::size_t>(eye)][0];
+        const double before = best[static_cast<std::size_t>(eye)][2];
+        std::uint32_t outcome = 0;
+        if (std::max(newest, before) < kAnchorFloor) {
+            outcome = 1;
+        } else if (std::fabs(newest - before) < kAnchorMargin) {
+            outcome = 2;
+        }
+        const bool late = before > newest;
+        if (outcome == 0) {
+            votes = votes != 0 && side == late ? votes + 1 : 1;
+            side = late;
+        }
+        const std::uint64_t a = (data.publication << 16U) |
+            (static_cast<std::uint64_t>(std::min(votes, 255U)) << 8U) |
+            (late ? 1ULL << 4U : 0ULL) | outcome;
+        if (records++ < 512) {
+            record(kRecordLagVote, a,
+                (float_bits(static_cast<float>(newest)) << 32U) | float_bits(static_cast<float>(before)),
+                static_cast<std::uint64_t>(eye));
+        }
+        if (outcome != 0 || votes < kAnchorVotes) return;
+        decided = true;
+        set_dlss_alternating_newest_late(late);
+        record(kRecordLagDecision, a, late ? 1U : 0U, data.stream);
+    } catch (...) {
+    }
+}
+
 void analyse_measure(const MeasureData& data) noexcept {
     try {
         const std::size_t patch_area = static_cast<std::size_t>(kAnchorPatch) * kAnchorPatch;
@@ -2544,6 +2599,7 @@ void analyse_measure(const MeasureData& data) noexcept {
             record(kRecordEyeMeasure, (data.publication << 8U) | (k << 4U) | chosen, b, c);
         }
         vote_alternating_eyes(data, bests);
+        vote_alternating_lag(data, bests);
     } catch (...) {
     }
 }

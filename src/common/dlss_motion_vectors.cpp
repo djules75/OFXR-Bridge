@@ -174,6 +174,8 @@ struct Registry {
     // V540: the alternating eyes' tags (anchor_dlss_alternating_eye_tags).
     std::uint64_t left_eye_tag{};
     std::uint64_t right_eye_tag{};
+    // V541: set_dlss_alternating_newest_late.
+    bool newest_late{};
 };
 
 Registry& registry() {
@@ -1075,12 +1077,39 @@ void anchor_dlss_alternating_eye_tags(std::uint64_t left_tag, std::uint64_t righ
 // V540: an alternating stream's evaluation's eye, 0 left and 1 right, or -1
 // before its anchor: by its tag where the tags are anchored, else by its
 // serial's parity where its epoch is.
+[[nodiscard]] static int alternating_eye(const Registry& state, const StreamState& stream,
+    std::uint64_t epoch, std::uint64_t serial, std::uint64_t tag) noexcept {
+    if (tag != 0 && tag == state.left_eye_tag) return 0;
+    if (tag != 0 && tag == state.right_eye_tag) return 1;
+    if (stream.anchor_epoch == 0 || stream.anchor_epoch != epoch) return -1;
+    return (serial & 1U) == stream.left_parity ? 0 : 1;
+}
+
 [[nodiscard]] static int alternating_eye(
     const Registry& state, const StreamState& stream, const DlssMotionVectorFrame& frame) noexcept {
-    if (frame.eye_tag != 0 && frame.eye_tag == state.left_eye_tag) return 0;
-    if (frame.eye_tag != 0 && frame.eye_tag == state.right_eye_tag) return 1;
-    if (stream.anchor_epoch == 0 || stream.anchor_epoch != frame.epoch) return -1;
-    return (frame.serial & 1U) == stream.left_parity ? 0 : 1;
+    return alternating_eye(state, stream, frame.epoch, frame.serial, frame.eye_tag);
+}
+
+int dlss_alternating_eye(
+    std::uint64_t stream, std::uint64_t epoch, std::uint64_t serial, std::uint64_t tag) noexcept {
+    try {
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        const auto found = state.streams.find(stream);
+        if (found == state.streams.end()) return -1;
+        return alternating_eye(state, found->second, epoch, serial, tag);
+    } catch (...) {
+        return -1;
+    }
+}
+
+void set_dlss_alternating_newest_late(bool late) noexcept {
+    try {
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        state.newest_late = late;
+    } catch (...) {
+    }
 }
 
 // V534: an eye image that is the middle window of a slightly larger DLSS
@@ -1508,7 +1537,9 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             // or - for the other eye - not its newest but the one before it,
             // its evaluation of the previous frame. So the newest
             // evaluation's eye takes it, and the other eye takes its
-            // second-newest.
+            // second-newest. V541: or both their second-newest, where the
+            // eye measurement found the newest evaluation's eye late too
+            // (set_dlss_alternating_newest_late).
             if (g_alternating_eyes.load(std::memory_order_acquire) &&
                 candidates.size() == 1 && !array_eyes(*candidates.front().frame)) {
                 const auto& latest = candidates.front().frame;
@@ -1538,7 +1569,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 std::shared_ptr<const DlssMotionVectorFrame> chosen;
                 for (const auto& frame : history) {
                     if (!ours(*frame)) continue;
-                    if (!current && !skipped) {
+                    if ((!current || state.newest_late) && !skipped) {
                         skipped = true;
                         continue;
                     }

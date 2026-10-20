@@ -3447,6 +3447,27 @@ void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
                 resolve_tagged(1)->eyes[0]->eye_tag == kRightTag &&
                 resolve_tagged(1)->eyes[0]->serial == 4,
             "the tags' anchor did not hold through a reset that swapped the eyes' order");
+        require(xrfg::dlss_alternating_eye(801, tagged_position.epoch + 1, 4, kRightTag) == 1 &&
+                xrfg::dlss_alternating_eye(801, tagged_position.epoch + 1, 3, kLeftTag) == 0 &&
+                xrfg::dlss_alternating_eye(801, tagged_position.epoch + 1, 3, 99) == -1,
+            "an evaluation's eye was not reported by its tag");
+        // V541: the newest evaluation's eye late as well - each eye its
+        // second-newest. A frame on (5 left, 6 right): the right eye 4, which
+        // it showed the frame before, again; a frame on, 6, and the left 5.
+        publish_eye(801, 0.0F, kLeftTag);
+        tagged_release = publish_eye(801, 0.0F, kRightTag);
+        xrfg::set_dlss_alternating_newest_late(true);
+        require(resolve_tagged(1)->eyes[0]->serial == 4 && resolve_tagged(0)->eyes[0]->serial == 3,
+            "a late newest evaluation's eye still took the newest");
+        publish_eye(801, 0.0F, kLeftTag);
+        tagged_release = publish_eye(801, 0.0F, kRightTag);
+        const auto late_right = resolve_tagged(1);
+        const auto late_left = resolve_tagged(0);
+        require(late_right && late_left && late_right->eyes[0]->serial == 6 &&
+                late_right->eyes[0]->previous_serial == 4 && late_left->eyes[0]->serial == 5 &&
+                late_left->eyes[0]->previous_serial == 3,
+            "a late newest evaluation's eye did not take its second-newest");
+        xrfg::set_dlss_alternating_newest_late(false);
         xrfg::anchor_dlss_alternating_eye_tags(0, 0);
         xrfg::retire_dlss_motion_vector_stream(801);
     }

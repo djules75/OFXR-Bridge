@@ -171,6 +171,18 @@ Then:
 - 862, the anchor: `a` as 861; `b` the left eye's handle << 32 | the right's,
   or the left eye's serial parity; `c` the stream. Kept at the head of every
   flight log file (846, V524's comparison, is gone).
+- V541: at a release AERv2 shows one eye its evaluation of the frame before.
+  The other eye showed its newest in Cyberpunk 2077 on 2026-10-19, and its
+  one before as well on 2026-10-20 - the eye given the newest's vectors then
+  led its picture by a frame, its contour off by the strafe's speed. Once the
+  eyes are anchored the measurement votes on which the newest evaluation's
+  eye shows: standing still the two tie, moving the one shown matches. Five
+  agreeing votes decide it for the session; until then the newest's eye
+  takes it. 863, each vote (the first 512): `a` the newest evaluation's
+  publication << 16 | agreeing votes << 8 | bit 4 late | outcome (0 a vote,
+  1 no match of 0.5, 2 within 0.1); `b` that eye's best correlation with the
+  newest << 32 | with its one before (float bits); `c` the eye. 864, the
+  decision: `a` as 863; `b` 1 late; `c` the stream. Kept like 862.
 - The anchor takes the stream published most recently: the game may keep an
   earlier session's feature beside the one it plays with.
 - Its vectors span the game's last frame, the other eye's (R.E.A.L. VR's
