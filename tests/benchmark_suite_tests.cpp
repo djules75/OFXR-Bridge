@@ -20,7 +20,19 @@ int main() {
             auto s=benchmark_settings(baseline,step);
             check(!s.diagnostics && s.nr_enabled && s.afw_mode==2,"Keep diagnostics, Neural and AFW choices");
             check(!s.triple_frame_gen || s.separate_synthesis || !s.lower_vram,"Never silently test 2X as 3X");
-            if(step.generation==2){++dlssg_steps;check(step.label.starts_with("DLSS-G ") && !step.label.starts_with("DLSS-G C"),"Route labels must not invent a preset");}
+            if(step.generation==2){
+                ++dlssg_steps;
+                check(step.label.starts_with("DLSS-G ") && !step.label.starts_with("DLSS-G C"),"Route labels must not invent a preset");
+                for(int prior=0;prior<4;++prior) {
+                    auto manual=baseline;manual.backend=prior;
+                    select_generation(manual,2,prior);
+                    manual.lower_vram=manual.separate_synthesis=step.b?1:0;
+                    manual=sanitize(manual);
+                    check(manual.backend==s.backend && manual.frame_generation==s.frame_generation &&
+                        manual.lower_vram==s.lower_vram && manual.native_scale==s.native_scale,
+                        "manual DLSS-G and benchmark select identical presenter, memory variant and native resolution");
+                }
+            }
             if(step.prefer && !step.triple)++prefer;
         }
         check(dlssg_steps==2 && prefer==0,"Two DLSS-G memory variants and no Prefer FPS trial");

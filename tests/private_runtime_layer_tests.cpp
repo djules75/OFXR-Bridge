@@ -11,6 +11,7 @@
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
     const bool measured=route.starts_with("metrics-");if(measured)route=route.substr(8);
+    const bool canonical=route.starts_with("canonical-");if(canonical)route=route.substr(10);
     const bool pooled=route.starts_with("pooled-");if(pooled)route=route.substr(7);
     const bool unpooled=route.starts_with("unpooled-");if(unpooled)route=route.substr(9);
     const bool split_eyes=pooled || unpooled;
@@ -109,6 +110,11 @@ int main(int argc,char** argv) {
     if(vectors)state->dlss_motion_vectors=true;
     if(route=="fsr")state->frame_generation_mode=xrfg::D3D12FrameGenerationMode::fsr3;
     if(route=="dlssg")state->frame_generation_mode=xrfg::D3D12FrameGenerationMode::native_dlss;
+    if(canonical || route=="dlssg") {
+        check(route=="dlssg","canonical route fixture is DLSS-G");
+        state->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::fidelity_fx;
+        state->nvidia_new_route=false;state->djules_route=false;
+    }
     if(route=="hybrid"){state->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::fidelity_fx;state->hybrid_requested=true;state->nvidia_options.hybrid=true;state->nvidia_new_route=false;}
     state->control_revision=xrfg::embedded::snapshot().revision;
     {std::scoped_lock lock(g_state_mutex);g_sessions[state->handle]=state;g_instances[dispatch->instance]=dispatch;}

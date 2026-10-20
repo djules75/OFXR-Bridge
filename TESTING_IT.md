@@ -1,3 +1,10 @@
+## V609: DLSS-G manuale uguale al benchmark
+
+Riavvia tray e gioco con V609. DLSS-G usa lo stesso percorso qualunque sia
+l'ultimo OFXR selezionato, anche con impostazioni salvate. Preset A/C,
+risoluzione, moltiplicatore e Lower VRAM restano le tue scelte. Il nuovo
+flag sperimentale del director appartiene alla V610, non alla V609.
+
 ## V608: quattro tempi e riferimento a generazione spenta
 
 Riavvia tray e gioco con V608. F10 e meter Elliott mostrano Game time,

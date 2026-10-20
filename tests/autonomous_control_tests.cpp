@@ -36,6 +36,21 @@ void codec() {
         passive.motion && !passive.depth && passive.last_seen_ms!=0,
         "passive observation distinguishes motion from depth without activating guide capture");
     xrfg::autonomous::Settings desired;
+    for (int inherited = 0; inherited != 4; ++inherited) {
+        auto manual = desired;
+        manual.backend = inherited;
+        xrfg::autonomous::select_generation(manual, 2, inherited);
+        require(manual.frame_generation == 2 && manual.backend == 0,
+            "manual DLSS-G uses the benchmark presenter, independent of preceding OFXR");
+        manual.backend = inherited;
+        require(xrfg::autonomous::sanitize(manual).backend == 0,
+            "DLSS-G IPC/INI canonicalization cannot restore an inherited OFXR presenter");
+        require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(manual)).backend == 0,
+            "saved DLSS-G selection matches the benchmark presenter");
+        manual.frame_generation = 0;
+        require(xrfg::autonomous::sanitize(manual).backend == inherited,
+            "DLSS-G normalization does not change OFXR engine selection");
+    }
     require(desired.lower_vram == 0, "Lower VRAM defaults off");
     require(!desired.r19_camera, "R19 camera defaults off for legacy profiles");
     desired.r19_camera=true;

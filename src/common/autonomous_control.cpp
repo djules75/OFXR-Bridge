@@ -245,6 +245,9 @@ Settings sanitize(Settings value) noexcept {
     value.hybrid_backend = 0; // Migrate old selectable fallbacks to FidelityFX.
     value.motion_vectors = std::clamp(value.motion_vectors, 0, 1);
     value.frame_generation = std::clamp(value.frame_generation, 0, 3);
+    // DLSS-G owns its generator. Do not inherit a previous OFXR presenter's
+    // queue/history policy: benchmark and manual/INI/IPC selection must agree.
+    if (value.frame_generation == 2) value.backend = 0;
     value.preset = std::clamp(value.preset, 0, 2);
     value.scale = std::clamp(value.scale, 0, 3);
     value.separate_synthesis = std::clamp(value.separate_synthesis, 0, 1);
@@ -298,7 +301,7 @@ Settings sanitize(Settings value) noexcept {
 void select_generation(Settings& value, int generation, int ofxr_engine) noexcept {
     value = sanitize(value); // commit outgoing edits before restoring the target
     value.frame_generation = std::clamp(generation, 0, 3);
-    value.backend = std::clamp(ofxr_engine, 0, 3);
+    value.backend = value.frame_generation == 2 ? 0 : std::clamp(ofxr_engine, 0, 3);
     restore_preferences(value);
 }
 

@@ -18,6 +18,7 @@ inline bool request_control(const xrfg::embedded::Settings& desired) {
     if (!xrfg::autonomous::request(s)) return false;
     xrfg::autonomous::apply_runtime_settings();
     auto effective=desired;
+    if (effective.frame_generation == 2) effective.backend = 0;
     effective.motion_vectors=xrfg::autonomous::snapshot().desired.motion_vectors;
     return xrfg::embedded::snapshot().desired==effective;
 }
