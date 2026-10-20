@@ -1,5 +1,6 @@
 #include "xrfg/private_openxr_runtime.hpp"
 #include "xrfg/private_output_distributor.hpp"
+#include "xrfg/interface_metrics.hpp"
 
 #include <algorithm>
 #include <array>
@@ -80,6 +81,7 @@ struct PrivateOpenXrRuntime::Impl {
     };
     struct Packet {
         XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
+        std::shared_ptr<InterfaceDeliveryReceipt> delivery;
         std::vector<LayerCopy> copies;
         std::vector<const XrCompositionLayerBaseHeader*> layers;
         std::vector<Lease> leases;
@@ -482,7 +484,7 @@ struct PrivateOpenXrRuntime::Impl {
         }
         return {};
     }
-    XrTime display_time(const XrFrameState& prediction) {
+    XrTime display_time(const XrFrameState& prediction,std::int64_t* display_qpc=nullptr) {
         auto result=prediction.predictedDisplayTime;
         if(auto at=prediction_qpc(prediction)) {
             const auto deficit=clock_ns()+PrivateOutputSchedule::preparation_lead-*at;
@@ -491,6 +493,7 @@ struct PrivateOpenXrRuntime::Impl {
             // alone cannot renew a SteamVR cycle after an input gap.
             if(deficit>0) {const auto step=period(prediction.predictedDisplayPeriod);
                 result+=(deficit+step-1)/step*step;}
+            if(display_qpc)*display_qpc=*at+(result-prediction.predictedDisplayTime);
         }
         return result;
     }
@@ -657,7 +660,8 @@ struct PrivateOpenXrRuntime::Impl {
                     auto end=packet->info;
                     // Use this cycle's runtime phase. A prediction which aged
                     // through a long prior End advances whole display periods.
-                    end.displayTime=display_time(prediction);
+                    std::int64_t observed_display{};
+                    end.displayTime=display_time(prediction,packet->delivery?&observed_display:nullptr);
                     if(!prediction.shouldRender){end.layerCount=0;end.layers=nullptr;}
                     if(diagnostic)options.trace(22,packet->sequence,packet->info.layerCount,
                         std::int64_t(end.layerCount)|(std::int64_t(prediction.shouldRender)<<32));
@@ -675,6 +679,10 @@ struct PrivateOpenXrRuntime::Impl {
                     }
                     const auto at_end=clock_ns();
                     result=options.real.end(options.real.session,&end);begun=false;
+                    // Optional receipt only after native End: no observer lock,
+                    // callback or clock query is added to the handoff edge.
+                    if(packet->delivery)packet->delivery->completed(result==XR_SUCCESS && end.layerCount!=0,
+                        at_end,clock_ns(),observed_display);
                     last_handoff=at_end;
                     // This consumer exclusively owns the schedule. Commit its
                     // saved edge after the call too, leaving no bookkeeping
@@ -816,7 +824,7 @@ XrResult PrivateOpenXrRuntime::begin_frame(const XrFrameBeginInfo* info) {
     if(!s.waits)return XR_ERROR_CALL_ORDER_INVALID;--s.waits;
     const auto result=s.begun?XR_FRAME_DISCARDED:XR_SUCCESS;s.begun=1;return result;
 }
-XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info) {
+XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info,const std::shared_ptr<InterfaceDeliveryReceipt>& delivery) {
     if(!info || info->type!=XR_TYPE_FRAME_END_INFO)return XR_ERROR_VALIDATION_FAILURE;
     auto& s=*impl_;std::scoped_lock accept(s.accept_mutex);
     {std::scoped_lock lock(s.mutex);if(XR_FAILED(s.failure))return s.failure;if(!s.running || s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;if(!s.begun)return XR_ERROR_CALL_ORDER_INVALID;}
@@ -831,7 +839,7 @@ XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info) {
             }
             if(counted)--s.pending;}s.fifo->cancel();s.changed.notify_all();}
     } reservation{s,packet};
-    packet=std::make_shared<Impl::Packet>();XrResult result;
+    packet=std::make_shared<Impl::Packet>();packet->delivery=delivery;XrResult result;
     {std::scoped_lock lock(s.mutex);result=s.own(*packet,*info);
      if(XR_FAILED(result))return result;
      packet->sequence=++s.sequence;packet->ready=s.ready_serial+1;}

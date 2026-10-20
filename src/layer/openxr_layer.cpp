@@ -2400,12 +2400,13 @@ void refresh_luke_prediction_clock(SessionState& state,const XrFrameState& slot,
 }
 void record_rolling_runtime_output(const XrFrameEndInfo* info) noexcept;
 XrResult end_frame_with_private_auxiliary(const std::shared_ptr<SessionState>& state,
-    const XrFrameEndInfo* info);
+    const XrFrameEndInfo* info,const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery={});
 
-XrResult XRAPI_CALL content_end_frame(XrSession session,const XrFrameEndInfo* info) {
-    const auto state=find_session(session);
+XrResult observed_content_end_frame(const std::shared_ptr<SessionState>& state,const XrFrameEndInfo* info,
+    const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery) {
     if(!state || !state->dispatch->end_frame)return XR_ERROR_HANDLE_INVALID;
-    if(!state->luke_fresh_only)return end_frame_with_private_auxiliary(state,info);
+    const auto session=state->handle;
+    if(!state->luke_fresh_only)return end_frame_with_private_auxiliary(state,info,delivery);
     if(!info || info->type!=XR_TYPE_FRAME_END_INFO)return XR_ERROR_VALIDATION_FAILURE;
     if(!state->luke_output_begun) {
         XrFrameState slot{XR_TYPE_FRAME_STATE};
@@ -2438,11 +2439,24 @@ XrResult XRAPI_CALL content_end_frame(XrSession session,const XrFrameEndInfo* in
         submitted.layers=nullptr;
     }
     record_rolling_runtime_output(&submitted);
-    const auto result=end_frame_with_private_auxiliary(state,&submitted);
+    const auto result=end_frame_with_private_auxiliary(state,&submitted,delivery);
     if(xrfg::diagnostic_ring_enabled)xrfg::diagnostic_ring_record("{\"kind\":\"runtime_result\",\"qpc\":"+
         std::to_string(xrfg::diagnostic_ring_qpc())+",\"display_time\":"+std::to_string(submitted.displayTime)+",\"result\":"+std::to_string(result)+"}");
     state->luke_output_begun=false;
     return result;
+}
+
+XrResult XRAPI_CALL content_end_frame(XrSession session,const XrFrameEndInfo* info) {
+    return observed_content_end_frame(find_session(session),info,{});
+}
+void bind_private_delivery_metrics(const std::shared_ptr<SessionState>& state) {
+    if(!state->private_runtime || !state->fps_overlay)return;
+    const std::weak_ptr<SessionState> weak=state;
+    state->fps_overlay->set_private_delivery_end([weak](const XrFrameEndInfo* info,
+        const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery) {
+        const auto owner=weak.lock();
+        return owner?observed_content_end_frame(owner,info,delivery):XR_ERROR_HANDLE_INVALID;
+    });
 }
 
 [[nodiscard]] std::shared_ptr<SwapchainState> find_swapchain(XrSwapchain swapchain) {
@@ -5657,6 +5671,7 @@ XrResult layer_create_session_impl(
                 if (!d.convert_time_to_qpc || XR_FAILED(d.convert_time_to_qpc(d.instance, time, &qpc))) return false;
                 ns = xrfg::interface_qpc_ns(qpc.QuadPart); return ns > 0;
             }, dispatch.get());
+        bind_private_delivery_metrics(state);
         state->fps_overlay->set_delivery_source(state->steamvr_delivery.get());
         state->fps_overlay->set_unique_content_only(state->luke_fresh_only);
         state->fps_overlay->set_luke_scene_measurement(xrfg::native_ingress::luke_detected());
@@ -12268,11 +12283,15 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
 }
 
 XrResult end_frame_with_private_auxiliary(const std::shared_ptr<SessionState>& state,
-    const XrFrameEndInfo* info) {
+    const XrFrameEndInfo* info,const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery) {
+    const auto submit=[&](const XrFrameEndInfo* end) {
+        return delivery && state->private_runtime?state->private_runtime->end_frame(end,delivery):
+            state->dispatch->end_frame(state->handle,end);
+    };
     if (!state->luke_afw_enabled || !state->dispatch->steamvr_runtime ||
         state->graphics_binding!=SessionGraphicsBinding::d3d11 ||
         !info || !info->layers || !info->layerCount)
-        return state->dispatch->end_frame(state->handle,info);
+        return submit(info);
     std::vector<OwnedCompositionLayer> copies;
     std::vector<const XrCompositionLayerBaseHeader*> layers;
     std::vector<std::shared_ptr<CompositionImageSlot>> snapshots;
@@ -12295,7 +12314,7 @@ XrResult end_frame_with_private_auxiliary(const std::shared_ptr<SessionState>& s
         copies.push_back(std::move(*copy));
         layers.push_back(composition_layer_header(copies.back()));
     }
-    if (snapshots.empty()) return state->dispatch->end_frame(state->handle,info);
+    if (snapshots.empty()) return submit(info);
     std::scoped_lock publication_lock(state->auxiliary_publication_mutex);
     for (const auto& slot:snapshots) {
         auto& output=*slot->public_output;
@@ -12346,7 +12365,7 @@ XrResult end_frame_with_private_auxiliary(const std::shared_ptr<SessionState>& s
             S_OK,handle_value(slot->image.handle),handle_value(output.image.handle),output.serial);
     }
     auto submitted=*info;submitted.layers=layers.data();
-    return state->dispatch->end_frame(state->handle,&submitted);
+    return submit(&submitted);
 }
 
 // Once per second, CPU-only, and never wait for a producer/presenter lock.

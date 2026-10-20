@@ -10,6 +10,7 @@
 
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    const bool measured=route.starts_with("metrics-");if(measured)route=route.substr(8);
     const bool pooled=route.starts_with("pooled-");if(pooled)route=route.substr(7);
     const bool unpooled=route.starts_with("unpooled-");if(unpooled)route=route.substr(9);
     const bool split_eyes=pooled || unpooled;
@@ -24,6 +25,7 @@ int main(int argc,char** argv) {
     Fixture f(native12);f.transport->stop();if(route!="memory")f.transport.reset();f.throttled=false;f.real_common=true;f.expected_views=2;f.unblock();
     f.create_state=[] {std::scoped_lock lock(g_state_mutex);return g_swapchains.empty()?D3D12_RESOURCE_STATE_RENDER_TARGET:D3D12_RESOURCE_STATE_COMMON;};
     auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=true;
+    if(measured)dispatch->get_instance_proc_addr=+[](XrInstance,const char*,PFN_xrVoidFunction* out)->XrResult{*out=nullptr;return XR_ERROR_FUNCTION_UNSUPPORTED;};
     dispatch->wait_frame=Fixture::wait;dispatch->begin_frame=Fixture::begin;dispatch->end_frame=Fixture::end;
     dispatch->create_swapchain=Fixture::create;dispatch->destroy_swapchain=Fixture::destroy;dispatch->enumerate_swapchain_images=Fixture::enumerate;
     dispatch->acquire_swapchain_image=Fixture::acquire;dispatch->wait_swapchain_image=Fixture::wait_image;dispatch->release_swapchain_image=Fixture::release;dispatch->convert_time_to_qpc=Fixture::to_qpc;
@@ -114,6 +116,13 @@ int main(int argc,char** argv) {
     f.transport=state->private_runtime;state->uevr_application=pooled;
     if(pooled)f.native_chain_limit=4; // two app chains plus two physical publication sinks
     xr_ok(f.transport->start(),"start common consumer");
+    if(measured) {
+        state->fps_overlay=std::make_unique<xrfg::OpenXrFpsOverlay>(dispatch->instance,state->handle,0,
+            state->dispatch->get_instance_proc_addr,content_end_frame,f.device12.Get(),f.queue.Get(),f.device11.Get(),
+            xrfg::autonomous::configuration_path(),false);
+        bind_private_delivery_metrics(state);
+        xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,true);
+    }
     if(separate_queue) {
         ComPtr<ID3D12Fence> gate,progress;
         ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate)),"binding dependency gate");
@@ -167,6 +176,7 @@ int main(int argc,char** argv) {
         XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};return layer_release_swapchain_image_impl(handle,&release);
     };
     for(unsigned n=1;n<=8;++n) {
+        if(measured)xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,true);
         if(switching && (n==3 || n==5 || n==7)) {
             auto desired=xrfg::embedded::snapshot().desired;desired.enabled=true;desired.backend=n==3?1:n==5?3:0;
             desired.frame_generation=0;desired.separate_synthesis=0;desired.lower_vram=0;
@@ -195,6 +205,21 @@ int main(int argc,char** argv) {
     for(unsigned i=1;i<f.handoffs.size();++i) {
         if(f.handoffs[i]-f.handoffs[i-1]<period)std::fprintf(stderr,"handoff interval%lldns required%lldns\n",f.handoffs[i]-f.handoffs[i-1],period);
         check(f.handoffs[i]-f.handoffs[i-1]>=period,"all route outputs obey common physical cadence");
+    }
+    if(measured) {
+        // Refresh observations after physical FIFO drain. This is test-only CPU
+        // time; no timing policy or sleep is added to the production director.
+        std::this_thread::sleep_for(260ms);
+        xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,true);
+        XrCompositionLayerProjection probe{XR_TYPE_COMPOSITION_LAYER_PROJECTION};auto* header=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&probe);
+        XrFrameEndInfo sample{XR_TYPE_FRAME_END_INFO};sample.layerCount=1;sample.layers=&header;
+        state->fps_overlay->application_frame(&sample);
+        const auto m=xrfg::autonomous::snapshot().runtime.telemetry;
+        check(m.cycle_valid && m.cycle_estimated_valid,"shipping generator publishes complete physical cycle and predicted display");
+        check(m.cycle_source==xrfg::InterfaceSource::native_frame_cycle_qpc && m.cycle_estimated_source==xrfg::InterfaceSource::native_predicted_display_qpc,"all shipping route measurements reach native director endpoint");
+        check(m.cycle_estimated_ms>=m.cycle_length_ms && m.ofxr_time_ms<=m.cycle_length_ms,"same physical frame has consistent complete-cycle values");
+        std::printf("Native measured cycle %.3fms, predicted display %.3fms, producer calls %.3fms\n",m.cycle_length_ms,m.cycle_estimated_ms,m.ofxr_time_ms);
+        xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,false);
     }
     if(split_eyes) {
         check(f.chains.size()==(pooled?4:10),"only UEVR separate eyes share native publication sinks");

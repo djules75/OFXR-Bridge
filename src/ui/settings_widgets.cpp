@@ -65,9 +65,9 @@ void status(const Snapshot& state) {
         value("OFXR time", m.ofxr_time_ms, current && m.ofxr_time_valid, false,
             "Wall time in this frame's app Wait/Begin/Acquire/Wait/Release/End calls, including blocking runtime calls and waits after submission. Concurrent calls counted once; game code between calls excluded.");
         value("Cycle length", m.cycle_length_ms, current && m.cycle_valid, false,
-            "CPU cycle: entry into this frame's app WaitFrame to the later of its real submission accepted by the runtime and app EndFrame return. Includes game production and all producer waits; not GPU completion or measured display latency.");
+            "Cycle from this frame's app WaitFrame entry to the later of app EndFrame return and its real native EndFrame return. SteamVR includes director queuing, GPU preparation and native submission. Not measured headset scanout.");
         value("Cycle estimated", m.cycle_estimated_ms, current && m.cycle_estimated_valid, false,
-            "Estimated full cycle: real frame assigned to the first display slot after the generated frame that can receive it. Includes the measured cycle without adding waits twice. Uses SteamVR display period when available, otherwise OpenXR period. Assumes distinct outputs are shown; not measured scanout or streaming. N/A without a confirmed generated frame and known period.");
+            "SteamVR: full cycle to this real frame's actual native predicted display time, including director queuing and GPU preparation; never adds another refresh to slots already delivered. N/A until matching real and confirmed generated outputs reach the runtime. Other runtimes use the generated-to-real slot estimate. Prediction, not measured scanout or streaming.");
         ImGui::TableNextColumn();
         ImGui::TextDisabled("State");
         const auto text = interface_state_text(state);

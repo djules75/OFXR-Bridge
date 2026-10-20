@@ -77,6 +77,43 @@ void complete_cycle() {
     InterfaceCycle regression(100);regression.call(99,105);regression.producer_returned(200);
     check(!regression.read(201,a,b), "clock/identity regression has no timing");
 }
+void native_delivery_cycle() {
+    auto c=std::make_shared<InterfaceCycle>(100'000'000);
+    c->call(100'000'000,103'000'000);c->producer_returned(109'000'000);
+    c->synthetic_accepted(103'500'000,11'111'111);
+    float ms{},calls{};
+    check(c->read_estimated(109'000'000,ms) && ms<15,"reproduce old virtual15ms estimate");
+    auto generated=std::make_shared<InterfaceDeliveryReceipt>(true);
+    auto real=std::make_shared<InterfaceDeliveryReceipt>(false);
+    c->attach_native_delivery(generated);c->attach_native_delivery(real);
+    InterfaceTimingWindow window;InterfaceFrameStamp stamp{607,105'000'000,100'000'000,c};
+    check(window.submitted(stamp,109'000'000,true,true,false,true,110'000'000,109'000'000),"retain accepted virtual identity while native delivery is pending");
+    InterfaceTelemetry pending;window.snapshot(110'000'000,pending);
+    check(!pending.cycle_valid && !pending.cycle_estimated_valid && !pending.delay_valid,"queued virtual success cannot publish partial native timing");
+    generated->completed(true,145'000'000,146'000'000,155'000'000);
+    real->completed(true,156'111'111,157'000'000,166'111'111);
+    check(c->read(109'000'000,calls,ms) && calls==3 && ms==57,"native full cycle includes47ms beyond virtual return, producer call total unchanged");
+    check(!c->read_estimated(109'000'000,ms),"native success alone cannot confirm generated content");
+    generated->synthetic_confirmed=true;
+    check(c->read_estimated(109'000'000,ms) && std::abs(ms-66.111111F)<.001F,"native predicted real slot counted once, no additional refresh");
+    InterfaceTelemetry actual;window.snapshot(160'000'000,actual);
+    check(actual.cycle_source==InterfaceSource::native_frame_cycle_qpc && actual.cycle_estimated_source==InterfaceSource::native_predicted_display_qpc,"physical observations have distinct source labels");
+    check(std::abs(actual.ofxr_delay_ms-51.111111F)<.001F && std::abs(actual.presentation_ms-10.F)<.001F,"delay and presentation use real native handoff rather than virtual submission");
+    auto failed=std::make_shared<InterfaceCycle>(100'000'000);failed->producer_returned(109'000'000);
+    auto rejected=std::make_shared<InterfaceDeliveryReceipt>(false);failed->attach_native_delivery(rejected);
+    rejected->completed(false,150'000'000,151'000'000,160'000'000);
+    check(!failed->read(109'000'000,calls,ms),"failed or empty physical End never becomes a delivered-cycle sample");
+    auto no_clock=std::make_shared<InterfaceCycle>(100'000'000);no_clock->producer_returned(109'000'000);
+    auto no_clock_real=std::make_shared<InterfaceDeliveryReceipt>(false);no_clock->attach_native_delivery(generated);no_clock->attach_native_delivery(no_clock_real);
+    no_clock_real->completed(true,156'111'111,157'000'000,0);
+    check(no_clock->read(109'000'000,calls,ms) && ms==57 && !no_clock->read_estimated(109'000'000,ms),"native handoff remains measurable without inventing an unknown display target");
+    auto triple=std::make_shared<InterfaceCycle>(100'000'000);triple->producer_returned(109'000'000);
+    auto second=std::make_shared<InterfaceDeliveryReceipt>(true);second->synthetic_confirmed=true;second->completed(true,156'111'111,157'000'000,166'111'111);
+    auto triple_real=std::make_shared<InterfaceDeliveryReceipt>(false);triple_real->completed(true,167'222'222,168'000'000,177'222'222);
+    triple->attach_native_delivery(generated);triple->attach_native_delivery(second);triple->attach_native_delivery(triple_real);
+    check(triple->read_estimated(109'000'000,ms) && std::abs(ms-77.222222F)<.001F,"3X uses actual real target, two delivered synthetic slots are not added twice");
+    window.snapshot(1'200'000'000,actual);check(!actual.cycle_valid,"native observations expire normally");
+}
 void estimated_cycle() {
     auto make=[](std::int64_t returned=125'000'000) {
         auto c=std::make_shared<InterfaceCycle>(100'000'000);
@@ -186,7 +223,7 @@ int main() {
         const auto fixture=std::filesystem::temp_directory_path()/(L"ofxr-v460-timing-"+std::to_wstring(GetCurrentProcessId()));
         std::filesystem::create_directories(fixture);
         SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",fixture.c_str());
-        timing();complete_cycle();estimated_cycle();wording();
+        timing();complete_cycle();estimated_cycle();native_delivery_cycle();wording();
         const auto before=snapshot();
         check(!interface_telemetry_requested(), "hidden by default");
         set_interface_visible(InterfaceSurface::desktop,true);

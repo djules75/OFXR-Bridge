@@ -11,6 +11,7 @@
 #include "xrfg/private_output_distributor.hpp"
 
 namespace xrfg {
+struct InterfaceDeliveryReceipt;
 // Downstream functions are the REAL runtime, never the layer intercepts.
 struct PrivateRuntimeDispatch {
     XrInstance instance{};
@@ -104,7 +105,8 @@ public:
     XrResult wait_frame(const XrFrameWaitInfo*, XrFrameState*);
     XrResult predict_frame(XrFrameState*); // upper virtual application clock
     XrResult begin_frame(const XrFrameBeginInfo*);
-    XrResult end_frame(const XrFrameEndInfo*);
+    XrResult end_frame(const XrFrameEndInfo*,
+        const std::shared_ptr<InterfaceDeliveryReceipt>& delivery={});
     XrResult create_swapchain(const XrSwapchainCreateInfo*, XrSwapchain*,
         D3D12_RESOURCE_STATES image_state=D3D12_RESOURCE_STATE_RENDER_TARGET,
         std::uint32_t image_count=3,

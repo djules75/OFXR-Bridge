@@ -44,6 +44,7 @@ struct OpenXrFpsOverlay::Impl {
     XrSystemId system{};
     PFN_xrGetInstanceProcAddr get{};
     PFN_xrEndFrame downstream_end{};
+    ObservedEndFrame private_delivery_end;
     PFN_xrCreateReferenceSpace create_space{};
     PFN_xrDestroySpace destroy_space{};
     PFN_xrCreateSwapchain create_swapchain{};
@@ -70,6 +71,7 @@ struct OpenXrFpsOverlay::Impl {
         std::shared_ptr<InterfaceCycle> cycle;
         std::int64_t accepted_qpc{}, period{};
         SceneIdentity scene;
+        std::shared_ptr<InterfaceDeliveryReceipt> delivery;
     };
     std::vector<PendingNativeCount> pending_native_counts;
     void poll_native_counts(std::int64_t now) noexcept {
@@ -81,6 +83,7 @@ struct OpenXrFpsOverlay::Impl {
                 counter.submitted(i->submitted_ns,true,true);
                 if(luke_scene_measurement)accepted_scenes.accepted(i->submitted_ns,i->scene);
                 if(i->cycle)i->cycle->synthetic_accepted(i->accepted_qpc,i->period);
+                if(i->delivery)i->delivery->synthetic_confirmed.store(true,std::memory_order_release);
             }
             i=pending_native_counts.erase(i);
         }
@@ -1099,6 +1102,10 @@ std::optional<OverlayPlacement> OpenXrFpsOverlay::marker_placement() const noexc
     return impl_->placement;
 }
 
+void OpenXrFpsOverlay::set_private_delivery_end(ObservedEndFrame end) {
+    std::scoped_lock lock(impl_->mutex);impl_->private_delivery_end=std::move(end);
+}
+
 XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic, bool new_content,
     std::span<const std::shared_ptr<D3D12NativeFrameResult>> native_results, unsigned native_output,
     InterfaceFrameStamp stamp) {
@@ -1129,8 +1136,14 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
     std::int64_t display{};
     if (measure && !synthetic && nonempty && impl_->converter)
         if (!impl_->converter(impl_->converter_user, info->displayTime, display)) display = 0;
+    std::shared_ptr<InterfaceDeliveryReceipt> delivery;
+    if(measure && nonempty && stamp.cycle && impl_->private_delivery_end) {
+        stamp.cycle->require_native_delivery();
+        try {delivery=std::make_shared<InterfaceDeliveryReceipt>(synthetic);
+            stamp.cycle->attach_native_delivery(delivery);}catch(...) {} // Missing receipt stays N/A.
+    }
     const auto submit_clock = measure ? interface_clock_ns() : 0;
-    const auto result = impl_->downstream_end(impl_->session, submitted);
+    const auto result = delivery?impl_->private_delivery_end(submitted,delivery):impl_->downstream_end(impl_->session, submitted);
     const auto accepted_clock = measure ? interface_clock_ns() : 0;
     if (measure && !synthetic) impl_->timings.submitted(stamp, submit_clock, result == XR_SUCCESS,
         nonempty, synthetic, new_content, display, accepted_clock);
@@ -1149,13 +1162,14 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
         impl_->counter.submitted(now,metrics.synthetic,metrics.new_content);
         if(measure && stamp.cycle && metrics.synthetic)
             stamp.cycle->synthetic_accepted(accepted_clock,impl_->estimate_period());
+        if(delivery && metrics.synthetic)delivery->synthetic_confirmed.store(true,std::memory_order_release);
         if(synthetic && new_content && !metrics.synthetic) {
             bool pending=false;
             for(const auto& r:native_results) pending |= r && r->resolve()==D3D12NativeFrameResult::pending;
             if(pending && impl_->pending_native_counts.size()<64)
                 impl_->pending_native_counts.push_back({{native_results.begin(),native_results.end()},now,native_output,
                     measure ? stamp.cycle : nullptr,accepted_clock,impl_->estimate_period(),
-                    {stamp.scene_owner,stamp.scene_serial,native_output+1}});
+                    {stamp.scene_owner,stamp.scene_serial,native_output+1},delivery});
         }
     }
     return result;

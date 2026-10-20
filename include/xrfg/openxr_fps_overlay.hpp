@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <array>
 #include <memory>
+#include <functional>
 #include <optional>
 
 namespace xrfg {
@@ -34,6 +35,8 @@ public:
     void application_frame(const XrFrameEndInfo* info) noexcept;
     void set_afw_active(bool active) noexcept;
     void set_delivery_source(SteamVrDelivery* delivery) noexcept;
+    using ObservedEndFrame=std::function<XrResult(const XrFrameEndInfo*,const std::shared_ptr<InterfaceDeliveryReceipt>&)>;
+    void set_private_delivery_end(ObservedEndFrame);
     void set_unique_content_only(bool enabled) noexcept;
     void set_luke_scene_measurement(bool enabled) noexcept;
     [[nodiscard]] XrResult end_frame(const XrFrameEndInfo* info, bool synthetic, bool new_content = true,
