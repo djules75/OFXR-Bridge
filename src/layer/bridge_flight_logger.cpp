@@ -335,7 +335,8 @@ struct BridgeFlightLogger::Impl {
     // V540: records a session has a handful of that say how it was set up,
     // and that the recent ones would push out (the alternating eyes'
     // anchors, 862, and their lag, 864: Cyberpunk 2077's 3042 probe records
-    // left none of the anchor's).
+    // left none of the anchor's; V546, a stream pair's measured eye order,
+    // 868).
     static constexpr std::size_t kKeptPinned = 64;
     std::mutex kept_mutex;
     std::vector<std::string> kept_first; // kept_mutex
@@ -503,7 +504,7 @@ struct BridgeFlightLogger::Impl {
             try {
                 keep(line.data(), static_cast<std::size_t>(length),
                     operation == BridgeFlightOperation::embedded_configuration &&
-                        (result == 862 || result == 864));
+                        (result == 862 || result == 864 || result == 868));
             } catch (...) {
             }
         }

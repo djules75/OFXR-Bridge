@@ -178,6 +178,13 @@ struct DlssMotionVectorSet {
                kDlssMotionVectorEyeCount>
         eyes;
     std::uint32_t eye_count{};
+    // V546: an eye of a swapchain per eye whose two DLSS streams nothing
+    // tells apart (the same input offset, no camera) while their order is
+    // still being measured: the other stream's evaluation, and the eye (0
+    // left, 1 right) this set was resolved for. The synthesizer compares
+    // both against the eye's images (report_dlss_eye_order).
+    std::shared_ptr<const DlssMotionVectorFrame> alternate;
+    int resolved_eye{-1};
 };
 
 enum class DlssMotionVectorStatus : std::uint32_t {
@@ -324,6 +331,23 @@ int dlss_alternating_eye(
 // had its contour off by the strafe's speed. Measured (the eye measurement's
 // votes, record 864).
 void set_dlss_alternating_skips(std::uint32_t newest, std::uint32_t other) noexcept;
+// V546: two DLSS streams, one per eye, that nothing tells apart - each eye
+// in a swapchain of its own, both inputs at the same offset, no camera (Star
+// Citizen) - went to the eyes by which one the resolver saw first, and that
+// came from the order the capture iterated its features: right after a
+// session that started with Hybrid on, swapped after Hybrid was switched on
+// in game. The order is now measured. While a pair is undecided, each eye's
+// set carries the other stream's evaluation (DlssMotionVectorSet::alternate)
+// and the synthesizer reports, over the pixels where the two streams'
+// vectors part, how many the eye's own images favour each: the current
+// pixel against the previous image read at the end of each vector. Once the
+// votes agree, the pair's left stream is fixed for the session.
+// `informative` is the pixels compared.
+void report_dlss_eye_order(std::uint32_t eye, std::uint64_t assigned_stream,
+    std::uint64_t alternate_stream, std::uint64_t assigned_votes,
+    std::uint64_t alternate_votes, std::uint64_t informative) noexcept;
+// The left stream decided for the pair, or 0 while it is undecided.
+std::uint64_t dlss_eye_order_left(std::uint64_t first, std::uint64_t second) noexcept;
 struct DlssStreamPosition {
     bool known{};
     // Its newest evaluation has an eye: by its tag, or by its serial parity

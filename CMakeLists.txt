@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.545.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.546.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -158,6 +158,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     # V539: the hybrid's coverage mask.
     set(XRFG_COVERAGE_MASK_CLEAR_HEADER "${XRFG_GENERATED_SHADER_DIR}/coverage_mask_clear_shader.hpp")
     set(XRFG_COVERAGE_MASK_BUILD_HEADER "${XRFG_GENERATED_SHADER_DIR}/coverage_mask_build_shader.hpp")
+    # V546: the eye order of two DLSS streams nothing else tells apart.
+    set(XRFG_EYE_ORDER_CLEAR_HEADER "${XRFG_GENERATED_SHADER_DIR}/eye_order_clear_shader.hpp")
+    set(XRFG_EYE_ORDER_MEASURE_HEADER "${XRFG_GENERATED_SHADER_DIR}/eye_order_measure_shader.hpp")
     add_custom_command(
         OUTPUT
             "${XRFG_PACK_INPUT_HEADER}"
@@ -182,6 +185,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_DEPTH_TILES_DILATE_HEADER}"
             "${XRFG_COVERAGE_MASK_CLEAR_HEADER}"
             "${XRFG_COVERAGE_MASK_BUILD_HEADER}"
+            "${XRFG_EYE_ORDER_CLEAR_HEADER}"
+            "${XRFG_EYE_ORDER_MEASURE_HEADER}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E ClearCoverageMask
             /D XRFG_HYBRID=1 /D XRFG_COVERAGE_MASK=1
@@ -192,6 +197,16 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             /D XRFG_HYBRID=1 /D XRFG_COVERAGE_MASK=1
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_COVERAGE_MASK_BUILD_HEADER}" /Vn g_xrfg_coverage_mask_build_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E ClearEyeOrder
+            /D XRFG_HYBRID=1 /D XRFG_EYE_ORDER=1
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_EYE_ORDER_CLEAR_HEADER}" /Vn g_xrfg_eye_order_clear_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E MeasureEyeOrder
+            /D XRFG_HYBRID=1 /D XRFG_EYE_ORDER=1
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_EYE_ORDER_MEASURE_HEADER}" /Vn g_xrfg_eye_order_measure_shader
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E BuildDepthTiles
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
@@ -300,6 +315,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_DEPTH_TILES_DILATE_HEADER}"
         "${XRFG_COVERAGE_MASK_CLEAR_HEADER}"
         "${XRFG_COVERAGE_MASK_BUILD_HEADER}"
+        "${XRFG_EYE_ORDER_CLEAR_HEADER}"
+        "${XRFG_EYE_ORDER_MEASURE_HEADER}"
         "${XRFG_GAME_MOTION_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_FULLSCREEN_VERTEX_HEADER}"
         "${XRFG_SYNTHESIZE_PIXEL_HEADER}"

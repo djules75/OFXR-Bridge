@@ -407,6 +407,32 @@ the surface sliding left won, leaving a ghost behind one sliding right.
   rows; `b` 1 when the game's depth decides the nearer surface, 0 the
   faster.
 
+### Measured eye order of two DLSS streams (V546)
+
+A game that runs one DLSS feature per eye, with each eye in a swapchain of
+its own, both inputs at the same offset and no camera (Star Citizen), gave
+the resolver nothing to tell the two streams apart, and it took the one it
+had seen first as the left eye. Which one that was came from the order the
+capture iterated its features: right in a session that started with Hybrid
+on, the eyes' vectors swapped after Hybrid was switched on in game - double
+edges on every sideways head move, fine with the head still.
+
+The order is now measured. While a pair is undecided, each eye's
+synthesizer compares, every second vector texel where the two streams'
+vectors part by more than a pixel, the current eye image's pixel with the
+previous image read at the end of each vector, and counts which lands on the
+same surface. After 24 measurements and 20000 pixels, the order with half as
+many votes again as the other is the pair's for the session; until then the
+first-seen order stands. A still head in a still scene gives no votes.
+
+- `embedded_configuration` 867, a measurement, the first 64 and every 100th
+  after: `a` the eye `<< 56` or the assigned stream's low 28 bits `<< 28` or
+  the other's; `b` the pixels that favoured the assigned stream `<< 32` or
+  the other; `c` the pixels compared.
+- 868, the pair's order, once a session (kept through the log's wraps): `a`
+  the left stream, `b` the right, `c` the votes for the lower stream as the
+  left `<< 40` or for the higher `<< 16` (24 bits each) or the measurements.
+
 ### The diagnostic tint (V539)
 
 Two boxes at the top of the tray's "Frame generation tuning (live)" window

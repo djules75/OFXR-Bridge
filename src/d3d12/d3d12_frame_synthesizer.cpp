@@ -13,6 +13,8 @@
 #include "depth_tiles_dilate_shader.hpp"
 #include "coverage_mask_build_shader.hpp"
 #include "coverage_mask_clear_shader.hpp"
+#include "eye_order_clear_shader.hpp"
+#include "eye_order_measure_shader.hpp"
 #include "fullscreen_vertex_shader.hpp"
 #include "game_motion_synthesize_midpoint_pixel_shader.hpp"
 #include "guide_compose_clear_shader.hpp"
@@ -110,8 +112,11 @@ constexpr UINT kTileDescriptorBase =
 // u0 is the mask.
 constexpr UINT kMaskDescriptorBase =
     kTileDescriptorBase + 2U * kDescriptorBlockSize * kMaxReprojectionViews;
-constexpr UINT kSlotDescriptorCount =
+// V546: one block after those for the eye-order measurement, whose t10 is the
+// other stream's vectors and u0 the verdict.
+constexpr UINT kEyeOrderDescriptorBase =
     kMaskDescriptorBase + kDescriptorBlockSize * kMaxReprojectionViews;
+constexpr UINT kSlotDescriptorCount = kEyeOrderDescriptorBase + kDescriptorBlockSize;
 // V539: synthesis_flags bit 4 says the eye's coverage mask is bound.
 constexpr UINT kCoverageMaskFlag = 16U;
 // The depth search's tiles: 8 depth texels a side (V531; 16 in V530),
@@ -123,6 +128,10 @@ constexpr UINT kDepthTilesRadiusShift = 24U;
 constexpr UINT kDepthTilesRadiusMask = 7U << kDepthTilesRadiusShift;
 // The composition's per-eye verdict words (guide_compose.hlsl): four each.
 constexpr UINT kComposeVerdictBytes = 256;
+// V546: the eye-order measurement's verdict words (frame_synthesis.hlsl,
+// MeasureEyeOrder): pixels compared, pixels for the assigned stream, for the
+// other.
+constexpr UINT kEyeOrderVerdictBytes = 16;
 constexpr UINT kNvidiaTimestampCount = 5;
 constexpr UINT kNvidiaTimestampPackBegin = 0;
 constexpr UINT kNvidiaTimestampPackEnd = 1;
@@ -929,6 +938,13 @@ struct D3D12FrameSynthesizer::Impl {
         UINT coverage_mask_width{};
         UINT coverage_mask_height{};
         D3D12_RESOURCE_STATES coverage_mask_state{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+        // V546: the eye-order measurement's verdict, read once the slot's work
+        // has finished (reset_work_slot), and what it measured.
+        ComPtr<ID3D12Resource> eye_order_readback;
+        bool eye_order_pending{};
+        std::uint32_t eye_order_eye{};
+        std::uint64_t eye_order_assigned{};
+        std::uint64_t eye_order_alternate{};
         std::array<NvidiaEyeResources, kMaxReprojectionViews> nvidia_eyes;
         D3D12NvidiaGpuTiming timing_metadata{};
         D3D12NvidiaGpuTiming cached_timing{};
@@ -996,6 +1012,11 @@ struct D3D12FrameSynthesizer::Impl {
     ComPtr<ID3D12PipelineState> coverage_mask_clear_pipeline;
     ComPtr<ID3D12PipelineState> coverage_mask_build_pipeline;
     std::array<std::atomic<std::uint64_t>, kMaxReprojectionViews> coverage_mask_recorded{};
+    // V546: the eye-order measurement (frame_synthesis.hlsl, XRFG_EYE_ORDER)
+    // and its verdict, copied into the slot's eye_order_readback.
+    ComPtr<ID3D12PipelineState> eye_order_clear_pipeline;
+    ComPtr<ID3D12PipelineState> eye_order_measure_pipeline;
+    ComPtr<ID3D12Resource> eye_order_verdict;
     // What each eye's 850 last recorded (record_depth_tiles).
     std::array<std::atomic<std::uint64_t>, kMaxReprojectionViews> depth_tiles_recorded{};
     ComPtr<ID3D12Resource> composed_vectors;
@@ -1290,7 +1311,7 @@ struct D3D12FrameSynthesizer::Impl {
 
         if (nvidia_options.hybrid) {
             // V516: the foveated inset's composition.
-            const std::array<std::pair<D3D12_SHADER_BYTECODE, ComPtr<ID3D12PipelineState>*>, 7>
+            const std::array<std::pair<D3D12_SHADER_BYTECODE, ComPtr<ID3D12PipelineState>*>, 9>
                 compose{{
                     {{g_xrfg_guide_compose_clear_shader, sizeof(g_xrfg_guide_compose_clear_shader)},
                         &compose_clear_pipeline},
@@ -1309,6 +1330,11 @@ struct D3D12FrameSynthesizer::Impl {
                         &coverage_mask_clear_pipeline},
                     {{g_xrfg_coverage_mask_build_shader, sizeof(g_xrfg_coverage_mask_build_shader)},
                         &coverage_mask_build_pipeline},
+                    // V546: the eye-order measurement.
+                    {{g_xrfg_eye_order_clear_shader, sizeof(g_xrfg_eye_order_clear_shader)},
+                        &eye_order_clear_pipeline},
+                    {{g_xrfg_eye_order_measure_shader, sizeof(g_xrfg_eye_order_measure_shader)},
+                        &eye_order_measure_pipeline},
                 }};
             for (const auto& [code, pipeline] : compose) {
                 compute_description.CS = code;
@@ -2082,6 +2108,15 @@ struct D3D12FrameSynthesizer::Impl {
                     &readback, D3D12_HEAP_FLAG_NONE, &buffer,
                     D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                     IID_PPV_ARGS(slot.compose_readback.GetAddressOf()));
+                if (FAILED(result)) {
+                    return result;
+                }
+                // V546: the eye-order measurement's verdict, read back.
+                buffer.Width = kEyeOrderVerdictBytes;
+                result = device->CreateCommittedResource(
+                    &readback, D3D12_HEAP_FLAG_NONE, &buffer,
+                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                    IID_PPV_ARGS(slot.eye_order_readback.GetAddressOf()));
                 if (FAILED(result)) {
                     return result;
                 }
@@ -3936,6 +3971,193 @@ struct D3D12FrameSynthesizer::Impl {
         return flags;
     }
 
+    // V546: the eye-order measurement (frame_synthesis.hlsl, MeasureEyeOrder)
+    // for a swapchain of one eye whose guides carry the other stream's
+    // evaluation (DlssMotionVectorSet::alternate), recorded on `list` with the
+    // pair's sources readable. Every second vector texel where the two
+    // streams' vectors part by more than a pixel, the current image's pixel
+    // is compared with the previous image read at the end of each vector; the
+    // verdict - the pixels compared and those favouring each stream - is
+    // copied into the slot and reported once the slot's work has finished
+    // (report_eye_order_verdict). draw_parameters holds the pair's image size.
+    void record_eye_order(
+        WorkSlot& slot,
+        ID3D12GraphicsCommandList* list,
+        const DlssMotionVectorSet& guides,
+        const SynthesisParameters& draw_parameters,
+        ID3D12Resource* previous_resource,
+        ID3D12Resource* current_resource) noexcept {
+        if (!eye_order_clear_pipeline || !eye_order_measure_pipeline || !slot.eye_order_readback ||
+            slot.eye_order_pending || !guides.alternate || guides.eye_count != 1 ||
+            guides.resolved_eye < 0 || guides.resolved_eye > 1 || !guides.eyes[0] ||
+            image_description.DepthOrArraySize != 1 || previous_resource == nullptr ||
+            current_resource == nullptr) {
+            return;
+        }
+        const DlssMotionVectorFrame& guide = *guides.eyes[0];
+        const DlssMotionVectorFrame& other = *guides.alternate;
+        // The other stream is read through this one's rectangle and scale:
+        // the same shape, or nothing to compare.
+        if (guide.placed || other.placed || !guide.motion_vectors || !other.motion_vectors ||
+            !same_device(device.Get(), guide.motion_vectors.Get()) ||
+            !same_device(device.Get(), other.motion_vectors.Get()) ||
+            guide.motion_x != other.motion_x || guide.motion_y != other.motion_y ||
+            guide.motion_width != other.motion_width || guide.motion_height != other.motion_height ||
+            guide.output_x != other.output_x || guide.output_y != other.output_y ||
+            guide.output_width != other.output_width || guide.output_height != other.output_height ||
+            guide.motion_width == 0 || guide.motion_height == 0) {
+            return;
+        }
+        const DXGI_FORMAT guide_format =
+            motion_vector_view_format(guide.motion_vectors->GetDesc().Format);
+        const DXGI_FORMAT other_format =
+            motion_vector_view_format(other.motion_vectors->GetDesc().Format);
+        if (guide_format == DXGI_FORMAT_UNKNOWN || other_format == DXGI_FORMAT_UNKNOWN) return;
+        if (!eye_order_verdict) {
+            D3D12_HEAP_PROPERTIES heap{};
+            heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+            heap.CreationNodeMask = 1;
+            heap.VisibleNodeMask = 1;
+            D3D12_RESOURCE_DESC buffer{};
+            buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            buffer.Width = kEyeOrderVerdictBytes;
+            buffer.Height = 1;
+            buffer.DepthOrArraySize = 1;
+            buffer.MipLevels = 1;
+            buffer.SampleDesc.Count = 1;
+            buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            buffer.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                    IID_PPV_ARGS(eye_order_verdict.GetAddressOf())))) {
+                eye_order_verdict.Reset();
+                return;
+            }
+            eye_order_verdict->SetName(L"OFXR Eye Order Verdict");
+        }
+
+        const D3D12_CPU_DESCRIPTOR_HANDLE cpu_start =
+            slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+        const D3D12_GPU_DESCRIPTOR_HANDLE gpu_start =
+            slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+        const UINT base = kEyeOrderDescriptorBase;
+        D3D12_SHADER_RESOURCE_VIEW_DESC null_view{};
+        null_view.Format = DXGI_FORMAT_R32_FLOAT;
+        null_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        null_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        null_view.Texture2DArray.MipLevels = 1;
+        null_view.Texture2DArray.ArraySize = 1;
+        for (UINT index = 0; index < kSrvDescriptorCount; ++index) {
+            device->CreateShaderResourceView(nullptr, &null_view,
+                offset_cpu_handle(cpu_start, base + index, descriptor_increment));
+        }
+        // t0 and t1: the pair's sources, as create_source_views makes them.
+        D3D12_SHADER_RESOURCE_VIEW_DESC source = null_view;
+        source.Format = view_format;
+        source.Texture2DArray.ArraySize = image_description.DepthOrArraySize;
+        device->CreateShaderResourceView(previous_resource, &source,
+            offset_cpu_handle(cpu_start, base, descriptor_increment));
+        device->CreateShaderResourceView(current_resource, &source,
+            offset_cpu_handle(cpu_start, base + 1U, descriptor_increment));
+        // t6 this stream's vectors, t10 the other's.
+        const auto vectors = [&](UINT index, const DlssMotionVectorFrame& frame, DXGI_FORMAT format) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC view = null_view;
+            view.Format = format;
+            view.Texture2DArray.FirstArraySlice =
+                frame.motion_slice < frame.motion_vectors->GetDesc().DepthOrArraySize
+                ? frame.motion_slice : 0U;
+            device->CreateShaderResourceView(frame.motion_vectors.Get(), &view,
+                offset_cpu_handle(cpu_start, base + index, descriptor_increment));
+        };
+        vectors(6U, guide, guide_format);
+        vectors(10U, other, other_format);
+        D3D12_UNORDERED_ACCESS_VIEW_DESC verdict{};
+        verdict.Format = DXGI_FORMAT_R32_TYPELESS;
+        verdict.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        verdict.Buffer.NumElements = kEyeOrderVerdictBytes / 4U;
+        verdict.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        device->CreateUnorderedAccessView(eye_order_verdict.Get(), nullptr, &verdict,
+            offset_cpu_handle(cpu_start, base + kSrvDescriptorCount, descriptor_increment));
+        D3D12_UNORDERED_ACCESS_VIEW_DESC null_target{};
+        null_target.Format = DXGI_FORMAT_R32_FLOAT;
+        null_target.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        for (UINT index = 1; index < kUavDescriptorCount; ++index) {
+            device->CreateUnorderedAccessView(nullptr, nullptr, &null_target,
+                offset_cpu_handle(cpu_start, base + kSrvDescriptorCount + index, descriptor_increment));
+        }
+
+        SynthesisParameters parameters = draw_parameters;
+        apply_hybrid_guide_constants(parameters, guide);
+        parameters.slice = 0;
+        parameters.view_index = 0;
+        const auto& rect = parameters.game_motion_rect;
+        const UINT columns = (guide.motion_width + 1U) / 2U;
+        const UINT rows = (guide.motion_height + 1U) / 2U;
+        if (!(rect[2] >= 1.0F) || !(rect[3] >= 1.0F)) return;
+
+        dred_marker(list, "OFXR eye order begin");
+        // The other stream's vectors readable for the pass; this stream's
+        // already are (guide_barriers).
+        const bool other_moves = other.resource_state != kShaderReadState &&
+            other.motion_vectors.Get() != guide.motion_vectors.Get();
+        if (other_moves) {
+            const D3D12_RESOURCE_BARRIER to_read = transition_barrier(
+                other.motion_vectors.Get(), other.resource_state, kShaderReadState);
+            list->ResourceBarrier(1, &to_read);
+        }
+        ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
+        list->SetDescriptorHeaps(1, heaps);
+        list->SetComputeRootSignature(root_signature.Get());
+        list->SetComputeRootDescriptorTable(0, offset_gpu_handle(gpu_start, base, descriptor_increment));
+        list->SetComputeRootDescriptorTable(1,
+            offset_gpu_handle(gpu_start, base + kSrvDescriptorCount, descriptor_increment));
+        list->SetComputeRoot32BitConstants(2, kSynthesisConstantCount, &parameters, 0);
+        D3D12_RESOURCE_BARRIER written{};
+        written.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        written.UAV.pResource = eye_order_verdict.Get();
+        list->SetPipelineState(eye_order_clear_pipeline.Get());
+        list->Dispatch(1, 1, 1);
+        list->ResourceBarrier(1, &written);
+        list->SetPipelineState(eye_order_measure_pipeline.Get());
+        list->Dispatch((columns + 7U) / 8U, (rows + 7U) / 8U, 1);
+        std::array<D3D12_RESOURCE_BARRIER, 2> after{};
+        UINT after_count = 0;
+        after[after_count++] = transition_barrier(eye_order_verdict.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        if (other_moves) {
+            after[after_count++] = transition_barrier(
+                other.motion_vectors.Get(), kShaderReadState, other.resource_state);
+        }
+        list->ResourceBarrier(after_count, after.data());
+        list->CopyBufferRegion(slot.eye_order_readback.Get(), 0, eye_order_verdict.Get(), 0,
+            kEyeOrderVerdictBytes);
+        const D3D12_RESOURCE_BARRIER back = transition_barrier(eye_order_verdict.Get(),
+            D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list->ResourceBarrier(1, &back);
+        dred_marker(list, "OFXR eye order complete");
+        slot.eye_order_pending = true;
+        slot.eye_order_eye = static_cast<std::uint32_t>(guides.resolved_eye);
+        slot.eye_order_assigned = guide.stream;
+        slot.eye_order_alternate = other.stream;
+    }
+
+    // V546: the slot's eye-order verdict, once its work has finished, to the
+    // resolver (report_dlss_eye_order).
+    void report_eye_order_verdict(WorkSlot& slot) noexcept {
+        if (!slot.eye_order_pending) return;
+        slot.eye_order_pending = false;
+        if (!slot.eye_order_readback) return;
+        void* mapped = nullptr;
+        const D3D12_RANGE read{0, kEyeOrderVerdictBytes};
+        if (FAILED(slot.eye_order_readback->Map(0, &read, &mapped)) || mapped == nullptr) return;
+        std::array<UINT, kEyeOrderVerdictBytes / 4U> words{};
+        std::memcpy(words.data(), mapped, sizeof(words));
+        const D3D12_RANGE none{0, 0};
+        slot.eye_order_readback->Unmap(0, &none);
+        xrfg::report_dlss_eye_order(slot.eye_order_eye, slot.eye_order_assigned,
+            slot.eye_order_alternate, words[1], words[2], words[0]);
+    }
+
     [[nodiscard]] HRESULT record_game_motion_pair(
         WorkSlot& slot,
         const RollingSource& previous_source,
@@ -4130,8 +4352,10 @@ struct D3D12FrameSynthesizer::Impl {
 
     [[nodiscard]] HRESULT reset_work_slot(WorkSlot& slot) noexcept {
         // The slot's previous pair has finished: its inset verdict is
-        // readable and its composed guides no longer read (V516).
+        // readable and its composed guides no longer read (V516), and its
+        // eye-order verdict too (V546).
         log_compose_verdict(slot);
+        report_eye_order_verdict(slot);
         slot.composed_guides.reset();
         HRESULT result = slot.allocator->Reset();
         if (FAILED(result)) {
@@ -4585,6 +4809,11 @@ struct D3D12FrameSynthesizer::Impl {
         const std::array<UINT, kMaxReprojectionViews> coverage_mask = guides != nullptr
             ? record_coverage_mask(slot, synthesis, *guides, parameters, target_views)
             : std::array<UINT, kMaxReprojectionViews>{};
+        // V546: the eye order of two streams nothing else tells apart.
+        if (guides != nullptr) {
+            record_eye_order(slot, synthesis, *guides, parameters, previous_resource,
+                current_resource);
+        }
 
         synthesis->SetDescriptorHeaps(1, heaps);
         synthesis->SetGraphicsRootSignature(root_signature.Get());
@@ -5443,6 +5672,11 @@ struct D3D12FrameSynthesizer::Impl {
         const std::array<UINT, kMaxReprojectionViews> coverage_mask = guides != nullptr
             ? record_coverage_mask(slot, slot.command_list.Get(), *guides, parameters, target_views)
             : std::array<UINT, kMaxReprojectionViews>{};
+        // V546: the eye order of two streams nothing else tells apart.
+        if (guides != nullptr) {
+            record_eye_order(slot, slot.command_list.Get(), *guides, parameters,
+                previous_resource, current_resource);
+        }
 
         slot.command_list->SetDescriptorHeaps(1, heaps);
         slot.command_list->SetGraphicsRootSignature(root_signature.Get());

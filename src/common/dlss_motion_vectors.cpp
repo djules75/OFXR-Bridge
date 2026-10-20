@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <unordered_map>
 #include <utility>
@@ -181,6 +182,16 @@ struct Registry {
     // V542: set_dlss_alternating_skips - the newest evaluation's eye's, the
     // other's.
     std::array<std::uint32_t, 2> alternating_skips{0, 1};
+    // V546: the measured eye order of two streams nothing else tells apart
+    // (report_dlss_eye_order), by the pair's lower and higher stream.
+    struct EyeOrder {
+        // The pixels that favoured each stream as the left eye's.
+        std::uint64_t lower_left_votes{};
+        std::uint64_t higher_left_votes{};
+        std::uint64_t measurements{};
+        std::uint64_t left{};
+    };
+    std::map<std::pair<std::uint64_t, std::uint64_t>, EyeOrder> eye_orders;
 };
 
 Registry& registry() {
@@ -710,6 +721,7 @@ void retire_disabled_dlss_motion_vector_resources() noexcept {
             if (queue) retire_snapshots(state, std::move(stream), {}, queue.Get());
         }
         state.streams.clear();
+        state.eye_orders.clear();
         release_finished_snapshots(state);
         state.statistics = {};
         state.statistics.status = DlssMotionVectorStatus::disabled;
@@ -727,6 +739,10 @@ void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept {
         // Never published: no copy of it was ever queued.
         if (queue) retire_snapshots(state, std::move(found->second), {}, queue.Get());
         state.streams.erase(found);
+        // V546: a pair with this stream in it is a pair no more.
+        std::erase_if(state.eye_orders, [&](const auto& entry) {
+            return entry.first.first == stream || entry.first.second == stream;
+        });
         release_finished_snapshots(state);
     } catch (...) {
     }
@@ -1123,6 +1139,84 @@ void set_dlss_alternating_skips(std::uint32_t newest, std::uint32_t other) noexc
     }
 }
 
+// V546: when the eye images' votes decide a stream pair's order. A
+// measurement counts with at least kEyeOrderMinimumPixels compared; the
+// pair is decided after kEyeOrderMeasurements of them and kEyeOrderVotes
+// pixels, once one order has half as many votes again as the other. A head
+// still and a scene standing still give no pixel where the two streams'
+// vectors part, so no vote: the decision waits for motion.
+constexpr std::uint64_t kEyeOrderMinimumPixels = 64;
+constexpr std::uint64_t kEyeOrderMeasurements = 24;
+constexpr std::uint64_t kEyeOrderVotes = 20000;
+
+void report_dlss_eye_order(std::uint32_t eye, std::uint64_t assigned_stream,
+    std::uint64_t alternate_stream, std::uint64_t assigned_votes,
+    std::uint64_t alternate_votes, std::uint64_t informative) noexcept {
+    try {
+        if (eye > 1 || assigned_stream == alternate_stream) return;
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        // 867: a measurement, the first 64 and every 100th after: a the eye
+        // << 56 | the assigned stream's low 28 bits << 28 | the alternate's,
+        // b the pixels that favoured the assigned stream << 32 | the
+        // alternate, c the pixels compared.
+        static std::uint64_t measured = 0;
+        if (measured < 64 || measured % 100 == 0) {
+            bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 867,
+                (static_cast<std::uint64_t>(eye) << 56U) |
+                    ((assigned_stream & 0xFFFFFFFULL) << 28U) | (alternate_stream & 0xFFFFFFFULL),
+                (std::min<std::uint64_t>(assigned_votes, 0xFFFFFFFFULL) << 32U) |
+                    std::min<std::uint64_t>(alternate_votes, 0xFFFFFFFFULL),
+                informative);
+        }
+        ++measured;
+        const auto key = std::minmax(assigned_stream, alternate_stream);
+        auto& order = state.eye_orders[{key.first, key.second}];
+        if (order.left != 0 || informative < kEyeOrderMinimumPixels) return;
+        // An assigned stream that matches is this eye's; the left eye's for
+        // eye 0, and for eye 1 it makes the other stream the left one.
+        const std::uint64_t left_if_assigned = eye == 0 ? assigned_stream : alternate_stream;
+        const std::uint64_t left_if_alternate = eye == 0 ? alternate_stream : assigned_stream;
+        (left_if_assigned == key.first ? order.lower_left_votes : order.higher_left_votes) +=
+            assigned_votes;
+        (left_if_alternate == key.first ? order.lower_left_votes : order.higher_left_votes) +=
+            alternate_votes;
+        ++order.measurements;
+        const std::uint64_t lower = order.lower_left_votes;
+        const std::uint64_t higher = order.higher_left_votes;
+        if (order.measurements < kEyeOrderMeasurements || lower + higher < kEyeOrderVotes) return;
+        if (lower * 2U >= higher * 3U) {
+            order.left = key.first;
+        } else if (higher * 2U >= lower * 3U) {
+            order.left = key.second;
+        } else {
+            return;
+        }
+        // 868: the pair's order, once a session (kept through the flight
+        // log's wraps): a the left stream, b the right, c the votes for the
+        // lower stream as the left << 40 | for the higher << 16 (24 bits
+        // each) | the measurements (16 bits).
+        bridge_flight_logger().event(BridgeFlightOperation::embedded_configuration, 868,
+            order.left, order.left == key.first ? key.second : key.first,
+            (std::min<std::uint64_t>(lower, 0xFFFFFFULL) << 40U) |
+                (std::min<std::uint64_t>(higher, 0xFFFFFFULL) << 16U) |
+                std::min<std::uint64_t>(order.measurements, 0xFFFFULL));
+    } catch (...) {
+    }
+}
+
+std::uint64_t dlss_eye_order_left(std::uint64_t first, std::uint64_t second) noexcept {
+    try {
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        const auto key = std::minmax(first, second);
+        const auto found = state.eye_orders.find({key.first, key.second});
+        return found != state.eye_orders.end() ? found->second.left : 0U;
+    } catch (...) {
+        return 0;
+    }
+}
+
 // V534: an eye image that is the middle window of a slightly larger DLSS
 // output, without a camera to say so. R.E.A.L. VR's Kingdom Come renders
 // 3776 x 3088 and submits each eye on 3679 x 3088 swapchains with no
@@ -1370,6 +1464,35 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             ++state.statistics.resolve_stale_pairs;
             state.statistics.status = DlssMotionVectorStatus::temporal_mismatch;
             return {};
+        };
+        // V546: two streams sorted by input offset, then first seen. Where
+        // nothing tells them apart - the same input offset and no camera -
+        // the order the pair's measurement decided replaces first seen
+        // (report_dlss_eye_order); true while the pair is still undecided,
+        // and its sets then carry the other stream for the measurement.
+        const auto order_measured_pair = [&](std::vector<Candidate>& pair) {
+            if (pair.size() != 2 || !pair[0].frame || !pair[1].frame ||
+                pair[0].frame->stream == pair[1].frame->stream ||
+                input_offset(*pair[0].frame) != input_offset(*pair[1].frame) ||
+                pair[0].frame->view.known || pair[1].frame->view.known) {
+                return false;
+            }
+            const auto key = std::minmax(pair[0].frame->stream, pair[1].frame->stream);
+            const auto found = state.eye_orders.find({key.first, key.second});
+            const std::uint64_t left =
+                found != state.eye_orders.end() ? found->second.left : 0U;
+            if (left == 0) return true;
+            if (pair[1].frame->stream == left) std::swap(pair[0], pair[1]);
+            return false;
+        };
+        const auto attach_alternate = [&](const std::shared_ptr<DlssMotionVectorSet>& result,
+                                          const std::shared_ptr<const DlssMotionVectorFrame>& other) {
+            if (!result || !other || result->eye_count != 1 || !result->eyes[0] ||
+                other->stream == result->eyes[0]->stream) {
+                return;
+            }
+            result->alternate = other;
+            result->resolved_eye = eye;
         };
         // One evaluation for both eyes, on texture arrays with a slice per
         // eye: both eyes take the same publication, each reading its slice,
@@ -1684,6 +1807,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             if (chosen && shared_stream && array_eyes(*chosen)) {
                 return one_eye(chosen, false);
             }
+            std::shared_ptr<const DlssMotionVectorFrame> alternate;
             if (chosen && other && chosen == other) {
                 if (candidates.size() >= 2) {
                     // Both evaluated before either release. Exactly two
@@ -1695,9 +1819,13 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                             const auto ao = input_offset(*a.frame), bo = input_offset(*b.frame);
                             return ao != bo ? ao < bo : a.first_publication < b.first_publication;
                         });
-                    const auto& candidate = candidates[static_cast<std::size_t>(eye)];
-                    chosen = candidate.frame->publication <= released_at
-                        ? candidate.frame : candidate.previous;
+                    const bool measuring = order_measured_pair(candidates);
+                    const auto at_release = [&](const Candidate& candidate) {
+                        return candidate.frame->publication <= released_at
+                            ? candidate.frame : candidate.previous;
+                    };
+                    chosen = at_release(candidates[static_cast<std::size_t>(eye)]);
+                    if (measuring) alternate = at_release(candidates[static_cast<std::size_t>(1 - eye)]);
                 } else {
                     // One shared stream, both eyes evaluated before either
                     // release: the cameras say which was the left
@@ -1724,7 +1852,9 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 return stale();
             if (other && other != chosen)
                 shared_stream = other->stream == chosen->stream;
-            return one_eye(chosen, shared_stream);
+            auto result = one_eye(chosen, shared_stream);
+            attach_alternate(result, alternate);
+            return result;
         }
 
         if (!direct_match && eye_count == 1 && (eye == 0 || eye == 1)) {
@@ -1745,6 +1875,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                         if (ao != bo) return ao < bo;
                         return a.first_publication < b.first_publication;
                     });
+                const bool measuring = order_measured_pair(candidates);
                 auto frame = std::make_shared<DlssMotionVectorFrame>(
                     *candidates[static_cast<std::size_t>(eye)].frame);
                 place_inset(*frame);
@@ -1752,6 +1883,9 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 result->eye_count = 1;
                 result->eyes[0] = std::move(frame);
                 ++state.statistics.matched;
+                if (measuring) {
+                    attach_alternate(result, candidates[static_cast<std::size_t>(1 - eye)].frame);
+                }
                 return result;
             }
             if (candidates.size() == 1 && streams_with_frames == 1) {
