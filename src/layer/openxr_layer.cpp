@@ -19,8 +19,6 @@
 #include "xrfg/d3d11_color_identity.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/benchmark_log.hpp"
-#include "xrfg/frame_production.hpp"
-#include "xrfg/third_party/uevr_api.h"
 #include "xrfg/dlssg_profile.hpp"
 #include "xrfg/fsr_cadence_probe.hpp"
 #include "xrfg/luke_render_identity.hpp"
@@ -91,7 +89,6 @@
 
 // Standalone layer: the tray publishes desired settings; this process owns GPU work.
 namespace {
-#include "uevr_production_timing.inc"
 
 [[nodiscard]] std::filesystem::path current_layer_directory() noexcept;
 
@@ -851,9 +848,6 @@ struct SessionState {
     std::deque<PendingApplicationFrame> pending_frames;
     // Timing handoffs have their own tiny atomic ownership, not the GPU worker's
     // session mutex. Profiling a swapchain hook must not introduce a worker wait.
-    xrfg::FrameProductionTracker frame_production;
-    std::shared_ptr<uevr_production_timing::Registration> production_callbacks;
-    std::uint64_t production_registration_retry{};
     std::atomic<std::shared_ptr<xrfg::InterfaceCycle>> interface_waited_cycle;
     std::atomic<std::shared_ptr<xrfg::InterfaceCycle>> interface_active_cycle;
     std::uint64_t next_application_frame_serial{1}; // mutex
@@ -4071,10 +4065,6 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_locate_views(
         if (!state || !state->dispatch->locate_views) return XR_ERROR_HANDLE_INVALID;
         const auto result = state->dispatch->locate_views(
             session, info, view_state, capacity, count, views);
-        if(XR_SUCCEEDED(result) && info && view_state && count && capacity>=2 && *count==2 &&
-           (view_state->viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) &&
-           (view_state->viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) && xrfg::interface_measurement_requested())
-            state->frame_production.locate(uevr_production_timing::active,*info,views,*count);
         if (XR_SUCCEEDED(result) && info && views && count && *count && capacity &&
             view_state && (view_state->viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT))
             blackbar_record_locate(*state,*info,views[0].pose);
@@ -5632,7 +5622,7 @@ XrResult layer_create_session_impl(
     // app/synthesis waits. The old optional binding queue now prepares PRIVATE
     // outputs; it cannot also be the final consumer's graphics binding.
     XrGraphicsBindingD3D12KHR delivery_binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
-    if(initial_control.desired.pacing_mode!=0 && dispatch->steamvr_runtime && state->graphics_binding==SessionGraphicsBinding::d3d12 &&
+    if(dispatch->steamvr_runtime && state->graphics_binding==SessionGraphicsBinding::d3d12 &&
        forwarded_info && forwarded_info->next) {
         const auto* binding=static_cast<const XrBaseInStructure*>(forwarded_info->next);
         if(binding->type==XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
@@ -5676,7 +5666,6 @@ XrResult layer_create_session_impl(
             9,handle_value(created_session),0,0);
 
     state->steamvr_delivery = std::make_unique<xrfg::SteamVrDelivery>(dispatch->steamvr_runtime);
-    try {state->production_callbacks=uevr_production_timing::acquire();} catch(...) {}
     const auto private_result=install_private_runtime(state);
     if(FAILED(private_result)){dispatch->destroy_session(created_session);return XR_ERROR_INITIALIZATION_FAILED;}
     log_video_memory(*state, VideoMemoryStage::session, 0);
@@ -5810,7 +5799,7 @@ XrResult layer_create_session_impl(
     *session = created_session;
     xrfg::autonomous::publish_runtime_status(state->native_dlss_generated_frames,
         xrfg::autonomous::GenerationState::waiting, S_OK, state->vulkan_binding.device != VK_NULL_HANDLE,0,nullptr,
-        state->private_runtime?(single_director_pacing(*state)?1:2):0,state->dispatch->steamvr_runtime);
+        state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime);
     return result;
 }
 
@@ -6350,10 +6339,6 @@ XrResult layer_wait_frame_impl(
             frame_state->predictedDisplayPeriod=djules_application_period(*state,frame_state->predictedDisplayPeriod);
         const std::uint64_t frame_serial = state->next_application_frame_serial++;
         if (interface_call.started_ns()) {
-            if(!state->production_callbacks && GetTickCount64()>=state->production_registration_retry) {
-                state->production_registration_retry=GetTickCount64()+1000;
-                try {state->production_callbacks=uevr_production_timing::acquire();} catch(...) {}
-            }
             try { interface_call.cycle = std::make_shared<xrfg::InterfaceCycle>(interface_call.started_ns()); }
             catch (...) {} // Telemetry allocation cannot refuse an application frame.
         }
@@ -14098,8 +14083,11 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
             if (state->private_runtime && state->dispatch->steamvr_runtime &&
                 continuous_presenter_active(state) && XR_FAILED(wait_for_presenter_idle(state)))
                 return E_FAIL;
-            if(state->private_runtime && control.desired.pacing_mode!=0)
+            if(state->private_runtime) {
+                const auto policy=state->private_runtime->set_director_enabled(control.desired.pacing_mode!=0);
+                if(XR_FAILED(policy))return E_FAIL;
                 state->single_director_requested=control.desired.pacing_mode==1;
+            }
             state->applied_generation_settings=control.desired;
             state->control_revision=control.revision;
             ++state->djules_configuration_epoch;
@@ -14167,8 +14155,11 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     if (!ordinary_djules_route(*state)) state->presenter_restore_after_bypass=false;
     state->separate_synthesis = effective_separation;
     state->lower_vram = effective_reduction;
-    if(state->private_runtime && control.desired.pacing_mode!=0)
+    if(state->private_runtime) {
+        const auto policy=state->private_runtime->set_director_enabled(control.desired.pacing_mode!=0);
+        if(XR_FAILED(policy))return E_FAIL;
         state->single_director_requested = control.desired.pacing_mode==1;
+    }
     state->dlss_motion_vectors = control.desired.motion_vectors == 1 ||
         generation_mode != xrfg::D3D12FrameGenerationMode::ofxr ||
         state->luke_afw_enabled;
@@ -14794,7 +14785,7 @@ XrResult layer_end_frame_impl(
             state->generation_initialization_result.load(std::memory_order_relaxed),
             state->vulkan_binding.device != VK_NULL_HANDLE,
             state->interface_provider_error.load(std::memory_order_relaxed),&budget,
-            state->private_runtime?(single_director_pacing(*state)?1:2):0,state->dispatch->steamvr_runtime); }
+            state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime); }
     } runtime_report_scope{state};
     configure_session_guide_capture(*state);
     const std::uint32_t diagnostic_capture_frame =
@@ -14856,8 +14847,6 @@ XrResult layer_end_frame_impl(
             end_info ? end_info->displayTime : 0, consume_in_submission_order, match_latest_by_submission);
         if (interface_frame && interface_frame->interface_cycle == state->interface_active_cycle.load()) {
             interface_stamp.cycle = interface_call.cycle = interface_frame->interface_cycle;
-            if(end_info)if(const auto start=state->frame_production.match(*end_info,interface_entered_ns))
-                interface_stamp.cycle->production_started(start.at);
         }
         state->interface_active_cycle.store(nullptr);
     }

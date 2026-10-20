@@ -1,3 +1,16 @@
+## V613: tre tempi e Framework senza riavvio
+
+Carica tray e gioco V613 insieme una prima volta. I meter tornano a OFXR time,
+Cycle length e Cycle estimated, mantenendo la misura corretta fino al runtime
+reale. L'esperimento Game time e rimosso.
+
+Su SteamVR cambia durante la run Framework -> Director -> Framework+director
+-> Framework, nella stessa scena. Non serve riavviare per questi cambi; prima
+completa i frame gia accodati. Framework toglie il pacing finale del director,
+restano texture private/copie e attese necessarie del runtime. F9 facoltativo;
+utile per il confronto. Non serve F8 o un benchmark completo.
+VDXR continua a usare Framework e mostra le altre scelte disabilitate.
+
 ## V612: Estimated indipendente dal Game time
 
 Cycle estimated torna alla misura da Wait al target reale, anche se manca

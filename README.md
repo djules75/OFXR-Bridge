@@ -1,3 +1,11 @@
+## V613 local candidate: live Framework bypass and three timings
+
+Restore OFXR time, Cycle length and Cycle estimated with corrected native
+delivery coverage. Remove the incomplete UEVR Game observer. SteamVR Framework
+now bypasses final director pacing inside the same private bridge; all three
+pacing choices switch live after old work drains. VDXR retains Framework.
+[Details](docs/V613_FRAMEWORK_BYPASS.md). Owner headset validation is pending.
+
 ## V612 local candidate: benchmark estimate restored
 
 Cycle estimated retains the established Wait-to-real-display interval even

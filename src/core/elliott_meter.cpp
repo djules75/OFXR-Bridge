@@ -334,9 +334,8 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
         {value(m.game_fps,current&&m.rates_valid,true),"Real submitted",metric_tone(m.rates_valid)},
         {value(m.generated_fps,current&&m.rates_valid,true),"Gen submitted",metric_tone(m.rates_valid)},
         {value(m.display_hz,current&&m.display_hz>0,true),"Display Hz",PanelTone::dim},
-        {value(m.game_time_ms,current&&m.game_time_valid,false),"Game time",metric_tone(m.game_time_valid)},
-        {value(m.generation_time_ms,current&&m.stages_valid,false),"Generation time",metric_tone(m.stages_valid)},
-        {value(m.delivery_time_ms,current&&m.stages_valid,false),"Delivery time",metric_tone(m.stages_valid)},
+        {value(m.ofxr_time_ms,current&&m.ofxr_time_valid,false),"OFXR time",metric_tone(m.ofxr_time_valid)},
+        {value(m.cycle_length_ms,current&&m.cycle_valid,false),"Cycle length",metric_tone(m.cycle_valid)},
         {value(m.cycle_estimated_ms,current&&m.cycle_estimated_valid,false),"Cycle (estimated)",metric_tone(m.cycle_estimated_valid)}};
     const std::string vectors=std::string(autonomous::interface_vectors_text(state,now_ms));
     const std::string explanation=autonomous::interface_status_text(state);
@@ -352,9 +351,9 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     const int header_status_scale=status.size()>24 ? 1 : body;
     c.text(w-margin-8*header_status_scale*int(status.size()),18,status,header_status_scale,tone);
     c.rule(margin,w-margin,50,2);
-    const int column=(w-2*margin)/4;
-    for(int i=0;i<8;++i){
-        const int centre=margin+column*(i%4)+column/2;
+    for(int i=0;i<int(std::size(numbers));++i){
+        const int column=(w-2*margin)/(i<4?4:3);
+        const int centre=margin+column*(i<4?i:i-4)+column/2;
         const auto& n=numbers[i]; const int y=i<4?62:138;
         const int scale=i<4?big:body;
         const auto lines=wrap(n.value,std::size_t(column/(8*scale)));

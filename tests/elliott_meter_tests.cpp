@@ -32,13 +32,12 @@ int main(int argc,char** argv){try{
     unsigned rows{};auto pixels=rasterize_elliott_meter(s,1000,false,false,&rows);
     check(pixels.size()==1024*512&&rows>250&&rows<=512,"two metric rows and diagnostics fit");
     check(pixels[0]==0&&pixels[100*1024+30]!=0,"rounded upstream canvas");
-    for(int stage=0;stage<4;++stage) {
+    for(int stage=0;stage<3;++stage) {
         auto changed=s;auto& v=changed.runtime.telemetry;
-        if(stage==0)v.game_time_ms=65;
-        if(stage==1)v.generation_time_ms=65;
-        if(stage==2)v.delivery_time_ms=65;
-        if(stage==3)v.cycle_estimated_ms=65;
-        check(rasterize_elliott_meter(changed,1000,false,false)!=pixels,"each of the four supplied stage counters is drawn");
+        if(stage==0)v.ofxr_time_ms=65;
+        if(stage==1)v.cycle_length_ms=65;
+        if(stage==2)v.cycle_estimated_ms=65;
+        check(rasterize_elliott_meter(changed,1000,false,false)!=pixels,"each of the three corrected timing counters is drawn");
     }
     auto stale=rasterize_elliott_meter(s,4000,false,false);
     check(stale!=pixels,"stale metrics show unavailable");

@@ -93,6 +93,7 @@ public:
         // Stage26: source read leases released after completed copy; packet ID,
         // QPC ns and lease count. This does not retire real targets or FIFO credits.
         std::function<void(int,std::uint64_t,std::int64_t,std::int64_t)> trace;
+        bool director_enabled{true}; // false: ordered native-runtime paced bypass
     };
     explicit PrivateOpenXrRuntime(Options);
     ~PrivateOpenXrRuntime();
@@ -102,6 +103,10 @@ public:
     XrResult start(); // after successful real xrBeginSession
     void stop(); // wakes producers; consumer closes/joins native Wait; drains GPU reads
     XrResult drain();
+    // Drain accepted packets and change only final delivery policy. Session,
+    // native binding, private images and worker ownership remain unchanged.
+    XrResult set_director_enabled(bool);
+    [[nodiscard]] bool director_enabled() const noexcept;
     XrResult wait_frame(const XrFrameWaitInfo*, XrFrameState*);
     XrResult predict_frame(XrFrameState*); // upper virtual application clock
     XrResult begin_frame(const XrFrameBeginInfo*);

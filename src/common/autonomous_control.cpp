@@ -955,8 +955,8 @@ std::string interface_status_text(const Snapshot& s) {
         if (!result.empty()) result += " | "; result += text;
     };
     const auto& r = s.runtime;
-    if(r.steamvr_runtime && r.pacing_mode>=0 && ((r.pacing_mode==0)!=(s.desired.pacing_mode==0)))
-        add("Pacing transport change: restart the game");
+    if(r.steamvr_runtime && r.pacing_mode>=0 && r.pacing_mode!=s.desired.pacing_mode)
+        add("Applying pacing policy");
     switch (r.generation_state) {
     case GenerationState::missing_motion: add("Missing game vectors"); break;
     case GenerationState::missing_depth: add("Missing depth"); break;

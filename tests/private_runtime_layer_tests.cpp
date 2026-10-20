@@ -13,7 +13,7 @@ int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
     framework_session_probe=route=="framework-session";if(framework_session_probe)route="session";
     const bool measured=route.starts_with("metrics-");if(measured)route=route.substr(8);
-    const bool no_origin=route.starts_with("no-origin-");if(no_origin)route=route.substr(10);
+    if(route.starts_with("no-origin-"))route=route.substr(10);
     const bool deep=route.starts_with("deep-");if(deep)route=route.substr(5);
     const bool toggling=route.starts_with("toggle-");if(toggling)route=route.substr(7);
     const bool blocked=route.starts_with("blocked-");if(blocked)route=route.substr(8);
@@ -74,14 +74,20 @@ int main(int argc,char** argv) {
         XrSession handle{};xr_ok(layer_create_session_impl(dispatch->instance,&info,&handle),"shipping session creates private delivery binding");
         auto created=find_session(handle);
         if(framework_session_probe) {
-            check(created && !created->private_runtime && !created->private_delivery_queue,"Framework does not allocate or install the final director");
-            auto next=xrfg::autonomous::snapshot().desired;next.pacing_mode=1;
-            check(xrfg::autonomous::request(next),"request director for next session");
-            xrfg::autonomous::apply_runtime_settings();ok(apply_embedded_control(created),"persist transport selection without replacing active session");
-            check(!created->private_runtime && !single_director_pacing(*created),"Framework session stays safe until restart");
+            check(created && created->private_runtime && created->private_delivery_queue,"Framework keeps the stable private binding in bypass");
+            auto transport=created->private_runtime;
+            check(!transport->director_enabled() && !single_director_pacing(*created),"Framework startup bypasses final director pacing");
+            for(int mode:{1,2,0,2,1,0}) {
+                auto next=xrfg::autonomous::snapshot().desired;next.pacing_mode=mode;
+                check(xrfg::autonomous::request(next),"request a live pacing policy");
+                xrfg::autonomous::apply_runtime_settings();ok(apply_embedded_control(created),"apply live policy without recreating session");
+                check(created->private_runtime==transport && transport->director_enabled()==(mode!=0) &&
+                    single_director_pacing(*created)==(mode==1),"every pacing choice applies to the original endpoint");
+            }
+            f.transport=transport;
             xr_ok(layer_destroy_session_impl(handle),"framework session cleanup");
             {std::scoped_lock lock(g_state_mutex);g_instances.clear();}
-            std::puts("Framework startup has no private director; cross-transport change waits for restart PASS");return 0;
+            std::puts("Framework startup and live three-mode switch retain one native binding PASS");return 0;
         }
         check(created && created->private_runtime,"shipping session installed transport");
         f.transport=created->private_runtime; // fixture teardown owns a valid stopped endpoint
@@ -238,14 +244,14 @@ int main(int argc,char** argv) {
     };
     for(unsigned n=1;n<=8;++n) {
         if(measured)xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,true);
-        if(toggling && (n==4 || n==6)) {
+        if(toggling && (n==3 || n==5 || n==7)) {
             auto desired=xrfg::autonomous::snapshot().desired;
-            desired.pacing_mode=state->single_director_requested.load()?2:1;
+            desired.pacing_mode=n==3?0:n==5?2:1;
             check(xrfg::autonomous::request(desired),"publish only the single-director hot switch");
             xrfg::autonomous::apply_runtime_settings();
             ok(apply_embedded_control(state),"drained single-director hot switch");
-            check(single_director_pacing(*state)==(desired.pacing_mode==1),"active policy matches the applied global checkbox");
-            check(state->private_runtime==f.transport,"hot switch retains the sole physical endpoint");
+            check(single_director_pacing(*state)==(desired.pacing_mode==1),"active policy matches live Framework/Director/combined choice");
+            check(state->private_runtime==f.transport && f.transport->director_enabled()==(desired.pacing_mode!=0),"live bypass retains the sole physical endpoint");
         }
         if(switching && (n==3 || n==5 || n==7)) {
             auto desired=xrfg::embedded::snapshot().desired;desired.enabled=true;desired.backend=n==3?1:n==5?3:0;
@@ -257,9 +263,7 @@ int main(int argc,char** argv) {
         f.write(chain,n*20);if(split_eyes)f.write(right,n*20+7);
         if(vectors && !split_eyes){auto c=find_swapchain(chain);auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();guides->eye_count=2;
             for(unsigned eye=0;eye<2;++eye){auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=eye+1;g->epoch=1;g->serial=n;g->previous_serial=n-1;g->publication=2*n+eye;g->producer_queue=f.queue;g->output=images[*c->last_released_index].texture;g->output_slice=eye;g->depth=depth;g->motion_vectors=motion;g->motion_slice=eye;g->output_width=g->depth_width=g->motion_width=256;g->output_height=g->depth_height=g->motion_height=128;guides->eyes[eye]=g;}c->last_released_motion_vectors=guides;}
-        const auto engine_started=xrfg::interface_clock_ns();
         XrFrameState prediction{XR_TYPE_FRAME_STATE};xr_ok(layer_wait_frame_impl(state->handle,nullptr,&prediction),"shipping virtual Wait");xr_ok(layer_begin_frame_impl(state->handle,nullptr),"shipping virtual Begin");
-        if(measured && !no_origin)if(auto ticket=state->interface_active_cycle.load())ticket->production_started(engine_started);
         std::array<XrCompositionLayerProjectionView,2> views;
         for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=(sole?float(n):0.F)+(eye?.032F:-.032F);v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=split_eyes && eye?right:chain;v.subImage.imageArrayIndex=split_eyes?0:eye;v.subImage.imageRect.extent={256,128};}
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=2;projection.views=views.data();auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
@@ -294,9 +298,11 @@ int main(int argc,char** argv) {
                 "every accepted real source reaches native End, including final drain");
         check(!f.pixels.empty() && f.pixels.back()==160,"last real retains its own pixels through bridge/drain");
     }
+    check(f.director_policies.size()==f.handoffs.size(),"native handoffs record their effective delivery policy");
     for(unsigned i=1;i<f.handoffs.size();++i) {
+        if(!f.director_policies[i])continue; // Framework explicitly bypasses the final cadence.
         if(f.handoffs[i]-f.handoffs[i-1]<period)std::fprintf(stderr,"handoff interval%lldns required%lldns\n",f.handoffs[i]-f.handoffs[i-1],period);
-        check(f.handoffs[i]-f.handoffs[i-1]>=period,"all route outputs obey common physical cadence");
+        check(f.handoffs[i]-f.handoffs[i-1]>=period,"all director-paced route outputs obey common physical cadence");
     }
     if(measured) {
         // Refresh observations after physical FIFO drain. This is test-only CPU
@@ -308,7 +314,7 @@ int main(int argc,char** argv) {
         state->fps_overlay->application_frame(&sample);
         const auto m=xrfg::autonomous::snapshot().runtime.telemetry;
         check(m.cycle_valid && m.cycle_estimated_valid,"shipping generator publishes XR interval and predicted display independently of engine origin");
-        if(no_origin)check(!m.game_time_valid,"no engine origin does not invent Game time or hide the Excel estimate");
+        check(!m.game_time_valid,"abandoned Game timing stays absent without hiding the corrected Excel estimate");
         check(m.cycle_source==xrfg::InterfaceSource::native_frame_cycle_qpc && m.cycle_estimated_source==xrfg::InterfaceSource::native_predicted_display_qpc,"all shipping route measurements reach native director endpoint");
         check(m.cycle_estimated_ms>=m.cycle_length_ms && m.ofxr_time_ms<=m.cycle_length_ms,"same physical frame has consistent complete-cycle values");
         check(m.stages_valid && m.game_time_ms>=0 && m.generation_time_ms>=0 && m.delivery_time_ms>=0,
