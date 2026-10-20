@@ -1,3 +1,15 @@
+## V614 local candidate: SteamVR pacing benchmark matrix (2026-10-20)
+
+SteamVR suites now test Framework / Director / Framework+director with Normal
+and Fast mode: 31 optical or 49 complete trials. Luke runs 39 trials: AFW alone
+once per quality and four optical OFXR routes x three pacing x three AFW qualities;
+no 3X. Ten seconds after application, first three discarded, end VRAM retained.
+CSV columns carry unique pacing identity and group Luke qualities per route.
+The owner-only adapter maps the actual AI:CS block (63 cells), outside the product.
+VDXR suites/renderer/director and all generation algorithms remain unchanged.
+See autonomous/docs/V614_STEAMVR_BENCHMARK_MATRIX.md and V614_VALIDATION.json.
+CMake0.614.0; IPC61101/provider45601 unchanged. Headset result pending.
+
 ## V613 local candidate: live Framework bypass and three timings
 
 Restore OFXR time, Cycle length and Cycle estimated with corrected native

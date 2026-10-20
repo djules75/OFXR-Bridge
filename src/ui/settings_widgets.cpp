@@ -382,8 +382,13 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     }
     if(state.benchmark.message[0])ImGui::TextWrapped("%s",state.benchmark.message);
     if(state.benchmark.csv_path[0])ImGui::TextWrapped("CSV: %s",state.benchmark.csv_path);
-    ImGui::TextWrapped("Luke Ross: 18 tests through OFXR 0.3.0, Lower VRAM has no effect. Three AFW quality passes: 1x1, 2x2, 4x4. Each includes AFW alone once. AFW-disabled tests are omitted; CSV groups the three qualities for each route.");
-    ImGui::TextWrapped("Close the menu and keep the same test scene. Original settings are restored after Stop or completion. Normal suites compare Normal and Lower VRAM only. Memory is sampled once near the end of each trial. Tests keep the startup DLSS-G preset and never change its NVIDIA profile. A is the initial preference; changing presets requires restarting the game.");
+    if(state.runtime.steamvr_runtime) {
+        ImGui::TextWrapped("SteamVR: Framework, Director, Framework+director for every route. Normal and Fast mode: 31 optical or 49 complete tests including one OFXR Off reference.");
+        ImGui::TextWrapped("Luke Ross: 39 tests through OFXR 0.3.0, no 3X. Three AFW quality passes: 1x1, 2x2, 4x4. AFW alone once per quality, then each route with all three pacing modes. Fast mode has no effect. CSV groups each route/pacing's three qualities.");
+    } else {
+        ImGui::TextWrapped("VDXR suites unchanged: 11 optical, 17 complete, 18 Luke Ross tests. The selected pacing is kept. Normal suites compare Normal and Fast mode; Luke runs three AFW quality passes through OFXR 0.3.0.");
+    }
+    ImGui::TextWrapped("Close the menu and keep the same test scene. Original settings are restored after Stop or completion. Memory is sampled once near the end of each trial. Tests keep the startup DLSS-G preset and never change its NVIDIA profile. A is the initial preference; changing presets requires restarting the game.");
     if(ImGui::CollapsingHeader("Experimental features")) {
         changed |= ImGui::Checkbox("Reduce black bars during headset rotation###R19 synthetic camera (experimental)", &draft.r19_camera);
     }

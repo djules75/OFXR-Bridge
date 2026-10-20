@@ -5,6 +5,8 @@
 #include <sstream>
 #include <iostream>
 #include <stdexcept>
+#include <set>
+#include <tuple>
 using namespace xrfg::autonomous;
 void check(bool condition,const char* text) {if(!condition)throw std::runtime_error(text);}
 int main() {
@@ -12,14 +14,31 @@ int main() {
     SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",folder.c_str());
     try {
         const auto optical=benchmark_plan(false),full=benchmark_plan(true);
-        check(optical.size()==11 && full.size()==17,"Normal and combined Lower VRAM only; no standalone Prefer FPS test");
+        check(optical.size()==31 && full.size()==49,"SteamVR: three pacing modes, Normal/Fast, one Off reference");
+        for(const bool luke:{false,true}) for(const bool complete:{false,true}) {
+            const auto legacy=benchmark_plan(complete,luke,false);
+            check(legacy.size()==(luke ? 18 : complete ? 17 : 11),"VDXR retains its previous trial counts");
+            for(const auto& step:legacy) {
+                Settings original;original.pacing_mode=2;
+                check(step.pacing==-1 && benchmark_settings(original,step).pacing_mode==2,
+                    "VDXR does not inherit the SteamVR pacing matrix");
+            }
+        }
+        std::set<std::tuple<bool,int,int,bool,int,int,int>> identities;
+        std::set<std::string> names;
+        for(const auto& step:full) {
+            check(identities.emplace(step.disabled,step.generation,step.backend,step.triple,step.pacing,step.a,step.b).second,
+                "Every SteamVR configuration occurs exactly once");
+            check(names.insert(step.label).second,"Every main CSV column has an unambiguous name");
+            check(step.a==step.b && step.pacing>=0 && step.pacing<=2,"Fast toggles both memory operations at every pacing");
+        }
         for(const auto& step:optical)check(step.generation==0,"Optical suite must never request vector-only generators");
         unsigned dlssg_steps=0,prefer=0;
         Settings baseline;baseline.diagnostics=false;baseline.nr_enabled=true;baseline.afw_mode=2;baseline.pacing_mode=1;
         for(const auto& step:full) {
             auto s=benchmark_settings(baseline,step);
             check(!s.diagnostics && s.nr_enabled && s.afw_mode==2,"Keep diagnostics, Neural and AFW choices");
-            check(s.pacing_mode==1,"automatic route/Lower VRAM changes keep the global director choice");
+            check(s.pacing_mode==step.pacing,"Every SteamVR trial explicitly selects its pacing mode");
             check(!s.triple_frame_gen || s.separate_synthesis || !s.lower_vram,"Never silently test 2X as 3X");
             if(step.generation==2){
                 ++dlssg_steps;
@@ -36,7 +55,7 @@ int main() {
             }
             if(step.prefer && !step.triple)++prefer;
         }
-        check(dlssg_steps==2 && prefer==0,"Two DLSS-G memory variants and no Prefer FPS trial");
+        check(dlssg_steps==6 && prefer==0,"Three pacing modes times two DLSS-G memory variants and no Prefer FPS trial");
         BenchmarkSamples samples;xrfg::InterfaceTelemetry m{};
         m.rates_valid=true;m.output_source=xrfg::InterfaceSource::steamvr_delivery;
         m.cycle_estimated_valid=true;m.generating=true;
@@ -55,7 +74,7 @@ int main() {
         ++m.updated_ms;m.output_source=xrfg::InterfaceSource::accepted_scene_submissions;
         unknown.observe(m,1000,11000);check(unknown.fps.size()==2,"Distinct accepted Luke total enters benchmark with explicit source");
         baseline.benchmark_csv=true;check(request(baseline),"Save isolated test profile");baseline=snapshot().desired;
-        RuntimeStatus runtime{};runtime.sessions=1;runtime.dlssg_preset_request=1;
+        RuntimeStatus runtime{};runtime.sessions=1;runtime.steamvr_runtime=true;runtime.dlssg_preset_request=1;
         runtime.applied_revision=snapshot().revision;report_runtime(runtime);
         check(!benchmark_enabled() && !start_benchmark(true),"INI flag defaults off and blocks suite commands");
         check(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable isolated benchmarks in the single INI");
@@ -67,7 +86,13 @@ int main() {
         runtime.applied_revision=state.revision;report_runtime(runtime);
         auto clock=first_requested+500;
         for(std::size_t i=0;i<full.size();++i) {
-            state=snapshot();runtime.applied_revision=state.revision;report_runtime(runtime);
+            state=snapshot();runtime.applied_revision=state.revision;runtime.pacing_mode=state.desired.pacing_mode;report_runtime(runtime);
+            if(i==3) {
+                runtime.pacing_mode=(state.desired.pacing_mode+1)%3;report_runtime(runtime);
+                tick_benchmark(clock-1);
+                check(snapshot().benchmark.phase==BenchmarkPhase::applying,"Wait for effective pacing, even after settings revision is applied");
+                runtime.pacing_mode=state.desired.pacing_mode;report_runtime(runtime);
+            }
             tick_benchmark(clock);state=snapshot();
             check(state.benchmark.phase==BenchmarkPhase::running && state.benchmark.index==i,"Advance after actual application without an open menu");
             check(interface_telemetry_requested(),"Hidden suite requests metrics even with diagnostics off");
@@ -86,11 +111,12 @@ int main() {
         std::ifstream csv(std::filesystem::u8path(state.benchmark.csv_path));std::stringstream text;text<<csv.rdbuf();
         check(text.str().find("Output FPS median")!=std::string::npos && text.str().find("Cycle estimated median ms")!=std::string::npos,"CSV has both medians");
         const auto csv_text=text.str();
+        std::cout<<"FULL_CSV="<<std::filesystem::u8path(state.benchmark.csv_path).string()<<'\n';
         const auto details_path=std::filesystem::u8path(state.benchmark.csv_path);
         std::ifstream details(details_path.parent_path()/(details_path.stem().wstring()+L"-details.csv"));
         std::stringstream details_text;details_text<<details.rdbuf();
         check(details_text.str().find("Status,PacingMode\n")!=std::string::npos,
-            "details CSV identifies the global pacing mode without changing the sheet layout");
+            "details CSV identifies the requested pacing of every trial");
         check(details_text.str().find(",A startup request,")!=std::string::npos &&
             details_text.str().find("C startup request")==std::string::npos,"CSV records A receipt instead of inventing C");
         check(csv_text.find("VRAM end MiB,100.000,101.000")!=std::string::npos,"Memory belongs to the trial that just finished, before the next switch");
@@ -103,7 +129,13 @@ int main() {
         check(snapshot().benchmark.phase==BenchmarkPhase::stopped && !snapshot().desired.nr_enabled,"Manual changes cancel automation and are kept");
         runtime.applied_revision=snapshot().revision;report_runtime(runtime);check(start_benchmark(false),"Restart optical suite");stop_benchmark();tick_benchmark();
         check(snapshot().benchmark.phase==BenchmarkPhase::stopped,"Explicit Stop");
-        const auto luke=benchmark_plan(false,true);check(luke.size()==18,"Luke has six routes times three AFW qualities");
+        const auto luke=benchmark_plan(false,true);check(luke.size()==39,"Luke: AFW-only three qualities plus four routes times three pacing times three qualities");
+        identities.clear();
+        for(const auto& step:luke) {
+            check(!step.triple && !step.prefer,"Luke omits unsupported 3X and Prefer FPS");
+            check(identities.emplace(step.disabled,step.generation,step.backend,step.triple,step.pacing,step.shading,step.afw).second,
+                "Luke never repeats an AFW-only or route/pacing/quality trial");
+        }
         unsigned afw_only=0;
         for(const auto& step:luke) {
             check(step.afw==3,"Luke never tests AFW disabled");
@@ -115,14 +147,16 @@ int main() {
         check(start_benchmark(false,true),"Start Luke suite");clock=snapshot().benchmark.requested_ms+500;
         for(std::size_t i=0;i<luke.size();++i) {
             state=snapshot();runtime.applied_revision=state.revision;
+            runtime.pacing_mode=state.desired.pacing_mode;
             runtime.afw_shading_rate=state.desired.afw_shading_rate;
             runtime.afw_running=state.desired.afw_mode!=0;report_runtime(runtime);
             tick_benchmark(clock);check(snapshot().benchmark.phase==BenchmarkPhase::running,"Luke quality applied before timing");
             tick_benchmark(clock+10000);clock+=10200;
         }
         state=snapshot();check(state.benchmark.phase==BenchmarkPhase::complete,"Luke completes");
+        std::cout<<"LUKE_CSV="<<std::filesystem::u8path(state.benchmark.csv_path).string()<<'\n';
         std::ifstream layout(std::filesystem::u8path(state.benchmark.csv_path));std::string header;std::getline(layout,header);
-        const auto blank=header.find("Fidelity 00 / blank"),one=header.find("Fidelity 00 / 1x1"),two=header.find("Fidelity 00 / 2x2"),four=header.find("Fidelity 00 / 4x4");
+        const auto blank=header.find("Fidelity Framework / blank"),one=header.find("Fidelity Framework / 1x1"),two=header.find("Fidelity Framework / 2x2"),four=header.find("Fidelity Framework / 4x4");
         check(blank==std::string::npos && one<two && two<four && four!=std::string::npos,"Luke CSV groups only1x1/2x2/4x4; no disabled AFW tests");
         runtime.applied_revision=snapshot().revision;report_runtime(runtime);
         check(start_benchmark(false),"start trial before disabling flag");
@@ -136,7 +170,7 @@ int main() {
             check(snapshot().runtime.dlssg_preset_request==preset,"Suite does not change the startup receipt");
             clock=snapshot().benchmark.requested_ms+500;
             for(std::size_t i=0;i<full.size();++i) {
-                runtime.applied_revision=snapshot().revision;report_runtime(runtime);tick_benchmark(clock);
+                runtime.applied_revision=snapshot().revision;runtime.pacing_mode=snapshot().desired.pacing_mode;report_runtime(runtime);tick_benchmark(clock);
                 check(snapshot().benchmark.phase==BenchmarkPhase::running,"A/C/default use the same uninterrupted suite");
                 tick_benchmark(clock+10000);clock+=10200;
             }
@@ -147,6 +181,13 @@ int main() {
             check(recorded.str().find(preset==3 ? ",C startup request," : ",Game default / unverified,")!=std::string::npos,
                 "CSV preserves the actual startup receipt including an unverified default");
         }
+        runtime.steamvr_runtime=false;runtime.luke_detected=false;
+        runtime.applied_revision=snapshot().revision;report_runtime(runtime);
+        check(start_benchmark(false) && snapshot().benchmark.count==11,"VDXR controller selects the legacy optical suite");
+        stop_benchmark();tick_benchmark();
+        runtime.luke_detected=true;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
+        check(start_benchmark(false,true) && snapshot().benchmark.count==18,"VDXR Luke suite remains unchanged");
+        stop_benchmark();tick_benchmark();
         std::cout<<"Automatic suite: full/optical with A/C/default, no preset enforcement, truthful A CSV, hidden sampling without F9, timing, median, restore/manual cancellation PASS\n";
         return 0;
     } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}

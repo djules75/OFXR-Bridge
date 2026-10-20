@@ -558,6 +558,7 @@ struct SuiteRecorder {
     std::vector<SuiteResult> results;
     bool afw_success{};
     bool memory_requested{};
+    bool steamvr{};
     BenchmarkMemory memory{};
 };
 SuiteRecorder& suite_recorder() { static SuiteRecorder value;return value; }
@@ -615,15 +616,7 @@ bool same_trial(const Settings& a,const Settings& b) {
 }
 void csv_layout(const SuiteRecorder& rec,const BenchmarkStatus& b) {
     if(rec.layout_path.empty())return;
-    auto steps=benchmark_plan(b.full,b.luke);
-    if(b.luke) {
-        // Execute whole quality passes, export each route's1x1/2x2/4x4 together.
-        std::vector<BenchmarkStep> ordered;
-        constexpr std::size_t routes=6;
-        for(std::size_t route=0;route<routes;++route)
-            for(std::size_t quality=0;quality<3;++quality)ordered.push_back(steps[quality*routes+route]);
-        steps=std::move(ordered);
-    }
+    const auto steps=benchmark_export_plan(b.full,b.luke,rec.steamvr);
     std::ofstream output(rec.layout_path,std::ios::trunc);output.imbue(std::locale::classic());
     if(!output)throw std::runtime_error("Cannot write layout CSV");
     output<<"Game,Build,Metric";
@@ -679,8 +672,9 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
     }
     rec.revision=0;rec.samples={};
 }
-void csv_open(SuiteRecorder& rec,BenchmarkStatus& b,unsigned preset) {
+void csv_open(SuiteRecorder& rec,BenchmarkStatus& b,unsigned preset,bool steamvr) {
     rec=SuiteRecorder{};rec.run=b.run_id;
+    rec.steamvr=steamvr;
     rec.dlssg_preset=preset;
     rec.game=utf8_path(benchmark_game_path(b.game_pid).filename());
     if(!b.csv)return;
@@ -717,7 +711,7 @@ bool start_benchmark(bool full,bool luke) noexcept {
         const auto run=std::max(b.run_id+1,(now<<16)^GetCurrentProcessId());
         b={};b.full=full;b.luke=luke;b.csv=s.desired.benchmark_csv;b.game_pid=s.runtime.process_id;
         b.run_id=run;
-        const auto plan=benchmark_plan(full,luke);b.count=static_cast<unsigned>(plan.size());
+        const auto plan=benchmark_plan(full,luke,s.runtime.steamvr_runtime);b.count=static_cast<unsigned>(plan.size());
         b.phase=BenchmarkPhase::applying;
         std::snprintf(b.label,sizeof(b.label),"%s",plan[0].label.c_str());
         if(!suite_publish(shared,benchmark_settings(shared.benchmark_saved,plan[0]),now)) {
@@ -755,7 +749,7 @@ void tick_benchmark(std::uint64_t now) noexcept {
         b.controller_pid=own_pid;
         std::atomic_ref<std::uint64_t>(shared.benchmark_metrics_until_ms).store(GetTickCount64()+2000,std::memory_order_release);
         try {
-            if(rec.run!=b.run_id)csv_open(rec,b,s.runtime.dlssg_preset_request);
+            if(rec.run!=b.run_id)csv_open(rec,b,s.runtime.dlssg_preset_request,s.runtime.steamvr_runtime);
             if(!suite_runtime_fresh(s.runtime) || s.runtime.process_id!=b.game_pid) {
                 csv_finish(rec,b,now,"game disconnected / partial");
                 suite_restore(shared,BenchmarkPhase::error,"Game disconnected. Original settings restored.",now);rec.stream.close();return;
@@ -767,7 +761,8 @@ void tick_benchmark(std::uint64_t now) noexcept {
             if(b.phase==BenchmarkPhase::applying) {
                 const bool quality_pending=b.luke && s.desired.afw_mode &&
                     s.runtime.afw_shading_rate!=s.desired.afw_shading_rate;
-                if(s.runtime.applied_revision!=b.revision || s.runtime.pending || quality_pending) {
+                const bool pacing_pending=rec.steamvr && s.runtime.pacing_mode!=static_cast<unsigned>(s.desired.pacing_mode);
+                if(s.runtime.applied_revision!=b.revision || s.runtime.pending || quality_pending || pacing_pending) {
                     if(now>=b.requested_ms+30000)
                         suite_restore(shared,BenchmarkPhase::error,"Settings not applied within 30 seconds; stopped.",now);
                     return;
@@ -795,7 +790,7 @@ void tick_benchmark(std::uint64_t now) noexcept {
             if(now<b.started_ms+10000)return;
             csv_finish(rec,b,now,b.luke && s.desired.afw_mode && !rec.afw_success ? "no confirmed AFW output" : rec.samples.fps.empty() ? "no measured presentation rate" :
                 s.desired.enabled && !rec.samples.generated ? "no confirmed generation" : "complete");
-            const auto plan=benchmark_plan(b.full,b.luke);
+            const auto plan=benchmark_plan(b.full,b.luke,rec.steamvr);
             if(++b.index>=plan.size()) {
                 suite_restore(shared,BenchmarkPhase::complete,"Complete. Original settings restored.",now);rec.stream.close();return;
             }

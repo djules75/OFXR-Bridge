@@ -1,3 +1,16 @@
+## V614: SteamVR benchmark matrix
+
+Load tray and game V614, enable `[benchmark] enabled=1` in `ofxr-bridge.ini`,
+then select Output CSV and the desired Display test button. Keep one fixed
+scene and close the menu. F9 is optional. SteamVR compares all three pacing
+choices with Normal/Fast (31 optical, 49 complete tests). Luke compares all
+three AFW qualities with the three pacing choices (39 tests), AFW alone once
+per quality, no 3X and no Fast permutations. Ten seconds per applied trial;
+only the first three seconds are discarded. Minimum durations: 5m10 / 8m10 /
+6m30 plus settings application. Original settings restore after Stop/completion.
+The separate local owner adapter exports one 63-cell row to paste at AI:CS.
+VDXR suites are unchanged. Full method: docs/V614_STEAMVR_BENCHMARK_MATRIX.md.
+
 ## V613: tre tempi e Framework senza riavvio
 
 Carica tray e gioco V613 insieme una prima volta. I meter tornano a OFXR time,

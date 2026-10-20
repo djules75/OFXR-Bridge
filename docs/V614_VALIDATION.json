@@ -1,0 +1,45 @@
+{
+  "version": "V614",
+  "base": "b75f53c4cd72854313a84b411ef50d4d73b02f56",
+  "scope": "SteamVR-only benchmark pacing matrix, truthful unique CSV labels and effective-pacing gate; owner-only AI:CS adapter. VDXR suites and all renderer/pacing algorithms unchanged.",
+  "passed": 13,
+  "failed": 0,
+  "ctest_passed": 12,
+  "ctest_seconds": 21.65,
+  "checked_tests": [
+    "xrfg_openxr_elliott_meter_d3d12",
+    "xrfg_openxr_elliott_meter_d3d11",
+    "xrfg_openxr_fps_overlay_d3d12",
+    "xrfg_openxr_fps_overlay_d3d11",
+    "xrfg_benchmark_log_tests",
+    "xrfg_interface_cycle_layer",
+    "xrfg_benchmark_suite_tests",
+    "xrfg_settings_widgets_tests",
+    "xrfg_autonomous_control_live",
+    "xrfg_autonomous_control_tests",
+    "xrfg_elliott_meter_tests",
+    "xrfg_interface_metrics_tests"
+  ],
+  "owner_adapter": {
+    "passed": true,
+    "columns": 63,
+    "range": "AI:CS",
+    "normal_trials": 49,
+    "luke_trials": 39,
+    "optical_trials": 31,
+    "all_cells_unique": true,
+    "actual_controller_csvs": true,
+    "local_only": true,
+    "source_sha256": "a890fd8bf9567561262358cb1f4a3c3ac0da330c1fac926ae82a823772208ac2",
+    "tests_sha256": "f9e218905969b7f435a3b1ebd6961b64bdb461d2d48d35f8f9e7b1fc8be0919c",
+    "sheet_snapshot_sha256": "c1ada1054ce1a8e38bcf4db2c5b74cd2a3aefc11ec07c7b99b46bffa1c615382"
+  },
+  "qualification": [
+    "Initial CTest:11/12. The general GUI fixture still activated the old Lower VRAM ID and assumed DLSS-G retained the Djules backend. Corrected test-only IDs and explicit engine selection to match existing V611/V609 contracts; no generation behavior changed.",
+    "Final12/12 focused CTest includes actual shared controller, desktop/headset widgets, logging-off metrics, timing, end-VRAM attribution, A/C/default preset preservation, manual cancellation/restoration and existing meter regressions. Separate owner adapter tests pass, including both real C++ fixture CSVs.",
+    "No renderer/director algorithms or GPU resource changes: the broad V613 renderer matrix was not unnecessarily rerun."
+  ],
+  "headset_validation": "Pending owner SteamVR benchmark rerun; no VDXR experiment or headset performance claim.",
+  "ipc_abi": 61101,
+  "provider_abi": 45601
+}

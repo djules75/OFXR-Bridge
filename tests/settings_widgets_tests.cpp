@@ -99,7 +99,8 @@ struct Context {
         for (auto* window : context->Windows)
             if (window->Active && (window->Flags & ImGuiWindowFlags_Popup) &&
                 std::strstr(window->Name, "##Combo")) popup = window;
-        require(popup != nullptr, "generation combo opens its real popup");
+        if(!popup)throw std::runtime_error(std::string("combo did not open: ")+label+" in "+child+
+            " generation="+std::to_string(snapshot().desired.frame_generation)+" backend="+std::to_string(snapshot().desired.backend));
         const auto seed = ImHashData(&index, sizeof(index), popup->IDStack.back());
         ImGui::ActivateItemByID(ImHashStr(item, 0, seed));
         draw();
@@ -213,11 +214,15 @@ void route_multiplier_widgets() {
         "DLSS-G keeps its own 2X after DJ selects 3X");
     headset.choose("Multiplier", 1, "3X");
     tray.draw(); tray.choose("Frame generation", 0, "OFXR (fast)");
+    // Since V609, DLSS-G has canonical backend0. Select Djules explicitly
+    // after leaving it instead of assuming DLSS-G retained a Djules presenter.
+    tray.choose("OFXR engine", 2, "Nvidia 0.2.13 (medium latency, high compatibility)");
     tray.choose("Multiplier", 0, "2X");
     headset.draw(); headset.choose("Frame generation", 3, "DLSS Frame Generation (slowest, needs DLSS)");
     require(snapshot().desired.triple_frame_gen,
         "DLSS-G keeps its 3X after DJ selects 2X");
     tray.draw(); tray.choose("Frame generation", 0, "OFXR (fast)");
+    tray.choose("OFXR engine", 2, "Nvidia 0.2.13 (medium latency, high compatibility)");
     require(!snapshot().desired.triple_frame_gen, "DJ keeps its own 2X");
 }
 void actual_widgets() {
@@ -236,13 +241,13 @@ void actual_widgets() {
     require(headset.widgets.draft.enabled == enabled.desired.enabled,
         "headset reflects hot tray checkbox edit");
     require(enabled.desired.lower_vram == 0, "opening settings preserves Lower VRAM off");
-    tray.activate("/Generation_", "Lower VRAM");
+    tray.activate("/Generation_", "Fast mode (lower vram, lower latency, may reduce performance)");
     tray.draw(); tray.draw();
     require(snapshot().desired.separate_synthesis == 1 && snapshot().desired.lower_vram == 1,
         "Lower VRAM enables private textures and reduced rings together");
     headset.draw();
     require(headset.widgets.draft.lower_vram == 1, "headset reflects Lower VRAM on");
-    headset.activate("/Generation_", "Lower VRAM");
+    headset.activate("/Generation_", "Fast mode (lower vram, lower latency, may reduce performance)");
     headset.draw(); headset.draw();
     require(snapshot().desired.separate_synthesis == 0 && snapshot().desired.lower_vram == 0,
         "Lower VRAM off restores both controls");
@@ -387,15 +392,23 @@ void offline_preset() {
 void automatic_buttons() {
     require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable benchmark GUI fixture in single INI");
     RuntimeStatus runtime{};runtime.sessions=1;runtime.luke_detected=true;
+    runtime.steamvr_runtime=true;
     runtime.dlssg_preset_request=3;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
     const auto prior=snapshot().desired;
     Context tray({690,900},false);tray.draw();tray.draw();tray.select_tab("Display");tray.draw(true);
     for(const auto label:{"Tests without vectors","Complete tests","Test Luke Ross","Output CSV"})
         require(tray.rendered_text.find(label)!=std::string::npos,"All automatic controls are in Display");
+    require(tray.rendered_text.find("31 optical or 49 complete")!=std::string::npos &&
+        tray.rendered_text.find("Luke Ross: 39 tests")!=std::string::npos,
+        "SteamVR Display describes its actual pacing and AFW matrix");
     tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
-    require(benchmark_active(snapshot().benchmark),"Display button starts actual shared suite command");
+    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==31,
+        "Display button starts the actual SteamVR optical matrix");
     tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
     require(snapshot().benchmark.phase==BenchmarkPhase::stopped && snapshot().desired==prior,"Display Stop restores original settings");
+    runtime.steamvr_runtime=false;report_runtime(runtime);tray.draw(true);
+    require(tray.rendered_text.find("VDXR suites unchanged: 11 optical, 17 complete, 18 Luke")!=std::string::npos,
+        "VDXR Display keeps its previous suite guidance");
 }
 } // namespace
 
