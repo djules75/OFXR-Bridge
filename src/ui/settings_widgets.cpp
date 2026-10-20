@@ -222,6 +222,8 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     ImGui::EndDisabled();
     ImGui::TextWrapped(state.runtime.luke_detected ? "Fast mode has no effect with Luke Ross."
         : "Uses private synthesis textures and fewer XR swapchains.");
+    if(state.runtime.steamvr_runtime && draft.triple_frame_gen && !state.runtime.luke_detected)
+        ImGui::TextWrapped("Fast mode preserves the output capacity needed for 3X; VRAM reduction may be limited.");
     const bool framework_only=state.connected && !state.runtime.steamvr_runtime;
     int pacing=framework_only?0:draft.pacing_mode;
     ImGui::BeginDisabled(framework_only);

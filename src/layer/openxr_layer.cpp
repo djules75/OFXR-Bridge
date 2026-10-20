@@ -1593,11 +1593,23 @@ private:
 
 // Capacity follows the selected multiplier, even during a disabled/drained control transaction.
 [[nodiscard]] bool extra_output_capacity(const SessionState& state) noexcept {
-    return state.djules_triple_requested && djules_native_scheduler(state) && !direct_reduced_outputs(state);
+    return state.djules_triple_requested && djules_native_scheduler(state) &&
+        (!direct_reduced_outputs(state) || (state.private_runtime && state.dispatch->steamvr_runtime));
+}
+[[nodiscard]] unsigned native_synthetic_rings(const SessionState& state) noexcept {
+    // Fast 3X still needs two distinct S destinations, never alias S1/S2.
+    const bool private_triple=state.private_runtime && state.dispatch->steamvr_runtime && extra_output_capacity(state);
+    return reduced_native_outputs(state) && !private_triple ? 1U : 2U;
+}
+[[nodiscard]] unsigned native_current_rings(const SessionState& state) noexcept {
+    // The framework may retain A while B is prepared. 3X must keep both even
+    // with Fast selected; one B handle would alias an owned source descriptor.
+    const bool private_triple=state.private_runtime && state.dispatch->steamvr_runtime && extra_output_capacity(state);
+    return reduced_native_outputs(state) && !private_triple ? 1U : 2U;
 }
 
 [[nodiscard]] bool djules_triple_active(const SessionState& state) noexcept {
-    if(direct_reduced_outputs(state)) return false; // one owned S/B pair, no ambiguous same-handle extra S
+    if(direct_reduced_outputs(state) && !extra_output_capacity(state)) return false;
     if (state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::native_dlss)
         return state.djules_triple_requested && state.menu_enabled &&
             djules_native_scheduler(state) && state.native_dlss_generated_frames >= 2;
@@ -3191,13 +3203,11 @@ create_d3d12_frame_generation_swapchains(
 
         auto generation = std::make_shared<FrameGenerationSwapchainState>();
         generation->staged_outputs = staged_native_outputs(*state->session);
-        const bool reduced = reduced_native_outputs(*state->session);
-        const auto output_slots = reduced ? 1U : static_cast<unsigned>(kCurrentSlotCount);
+        const auto output_slots = native_current_rings(*state->session);
         // Two runtime S handles serve both 2X and 3X. Direct 3X retains each
         // descriptor through physical submission before the next pair reuses it.
-        const unsigned full_synthetic = 2U;
         generation->current_runtime_rings = output_slots;
-        generation->synthetic_runtime_rings = reduced ? full_synthetic / 2 : full_synthetic;
+        generation->synthetic_runtime_rings = native_synthetic_rings(*state->session);
         generation->direct_extra_outputs = !generation->staged_outputs && extra_output_capacity(*state->session);
         if(generation->direct_extra_outputs)
             for(auto& lease:generation->direct_synthetic_leases) lease=std::make_shared<DirectSyntheticLease>();
@@ -9902,7 +9912,7 @@ void stop_continuous_presenter(
     return !presenter_forbidden(*state) && !djules_inline_runtime(*state) && state->menu_enabled && state->frame_generation_mode !=
                xrfg::D3D12FrameGenerationMode::fsr3 &&
            state->optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
-           state->nvidia_new_route && !direct_reduced_outputs(*state) &&
+           state->nvidia_new_route && (!direct_reduced_outputs(*state) || extra_output_capacity(*state)) &&
            (state->graphics_binding == SessionGraphicsBinding::d3d11 ||
             state->graphics_binding == SessionGraphicsBinding::d3d12) &&
            !state->pipelined_presenter_mode;
@@ -11466,15 +11476,24 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
 
         const bool request_extra=request_pair && djules_triple_active(*state->session) &&
             (generation->staged_outputs || generation->direct_extra_outputs);
+        // A private SteamVR route handoff joins the old presenter before inline
+        // priming can promote its replacement. Its latched stop request belongs
+        // to that retired owner, not to this new output transaction. Live owners
+        // still cancel their lease waits immediately; other runtimes are unchanged.
+        const auto publication_stopping=[&] {
+            return state->session->presenter_stop_requested &&
+                (state->session->presenter_active || !state->session->private_runtime ||
+                 !state->session->dispatch->steamvr_runtime);
+        };
         auto& extra_image = generation->synthetic[(synthetic_slot + (generation->synthetic_runtime_rings==4 ? 2 : 1)) % generation->synthetic_runtime_rings];
         if(request_extra && !generation->staged_outputs) {
             std::unique_lock lock(state->session->presenter_mutex);
             state->session->presenter_condition.wait(lock,[&] {
                 return (generation->direct_synthetic_leases[0].use_count()==1 &&
                     generation->direct_synthetic_leases[1].use_count()==1) ||
-                    state->session->presenter_stop_requested || XR_FAILED(state->session->presenter_failure);
+                    publication_stopping() || XR_FAILED(state->session->presenter_failure);
             });
-            if(state->session->presenter_stop_requested || XR_FAILED(state->session->presenter_failure)) {
+            if(publication_stopping() || XR_FAILED(state->session->presenter_failure)) {
                 output.reason=GenerationPrepareReason::synthesis_busy;return output;
             }
             output.direct_synthetic_lease=generation->direct_synthetic_leases[synthetic_runtime_slot];
@@ -11512,9 +11531,9 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             state->session->presenter_condition.wait(lock,[&] {
                 return (!current_busy.load(std::memory_order_acquire) &&
                     (!request_pair || !synthetic_busy.load(std::memory_order_acquire))) ||
-                    state->session->presenter_stop_requested || XR_FAILED(state->session->presenter_failure);
+                    publication_stopping() || XR_FAILED(state->session->presenter_failure);
             });
-            if(state->session->presenter_stop_requested || XR_FAILED(state->session->presenter_failure)) {
+            if(publication_stopping() || XR_FAILED(state->session->presenter_failure)) {
                 output.reason=GenerationPrepareReason::synthesis_busy;return output;
             }
             auto claim=[&](PrivateSwapchainState& image,std::atomic_bool& busy,bool synthetic) {
@@ -13969,6 +13988,8 @@ HRESULT reconcile_multiplier_outputs(const std::shared_ptr<SessionState>& state)
         const auto ready=generation->synthesizer->wait_for_idle();
         if(FAILED(ready)) return ready;
         if((generation->staged_outputs && generation->staging_stride!=(extra?2U:1U)) ||
+            generation->synthetic_runtime_rings!=native_synthetic_rings(*state) ||
+            generation->current_runtime_rings!=native_current_rings(*state) ||
             state->frame_generation_mode==xrfg::D3D12FrameGenerationMode::native_dlss) {
             lock.unlock();
             generation.reset();
@@ -14245,8 +14266,8 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         const bool admitted_shape_change = changed && chain->frame_generation &&
             state->graphics_binding == SessionGraphicsBinding::d3d12 &&
             (chain->frame_generation->staged_outputs != staged_native_outputs(*state) ||
-             chain->frame_generation->current_runtime_rings != (reduced_native_outputs(*state) ? 1U : 2U) ||
-             chain->frame_generation->synthetic_runtime_rings != (reduced_native_outputs(*state) ? 1U : 2U) ||
+             chain->frame_generation->current_runtime_rings != native_current_rings(*state) ||
+             chain->frame_generation->synthetic_runtime_rings != native_synthetic_rings(*state) ||
              chain->frame_generation->direct_extra_outputs != (!staged_native_outputs(*state) && extra_output_capacity(*state)) ||
              chain->frame_generation->staging_stride != (staged_native_outputs(*state) && extra_output_capacity(*state) ? 2U : 1U));
         if (admitted_shape_change) {

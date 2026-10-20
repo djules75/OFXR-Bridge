@@ -1,3 +1,12 @@
+## V615: SteamVR3X restart after Fast
+
+Load matching tray/game V615, same Valhalla scene. Re-run the optical suite
+with Output CSV enabled; F9 optional. All three pacing choices must generate
+3X with Fast off and on. Fast3X preserves the minimum3X output buffers; VRAM
+saving may be limited. Check3X ->2X afterwards too. VDXR remains unchanged.
+The local spreadsheet adapter finds the current SteamVR block (now BV:EF).
+Scope and GPU negative/positive control: docs/V615_STEAMVR_3X_RESTART.md.
+
 ## V614: SteamVR benchmark matrix
 
 Load tray and game V614, enable `[benchmark] enabled=1` in `ofxr-bridge.ini`,

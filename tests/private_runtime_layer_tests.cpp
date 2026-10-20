@@ -11,6 +11,8 @@
 static bool framework_session_probe{};
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    const bool benchmark_sequence=route=="benchmark-sequence";
+    if(benchmark_sequence)route="solo-djules3";
     framework_session_probe=route=="framework-session";if(framework_session_probe)route="session";
     const bool measured=route.starts_with("metrics-");if(measured)route=route.substr(8);
     if(route.starts_with("no-origin-"))route=route.substr(10);
@@ -29,6 +31,13 @@ int main(int argc,char** argv) {
     const bool native12=!route.starts_with("d11-");if(!native12)route=route.substr(4);
     const bool triple=route.ends_with('3');if(triple)route.pop_back();
     xrfg_fixture::ControlProfile profile;
+    if(benchmark_sequence && GetEnvironmentVariableW(L"XRFG_BENCH_TRACE",nullptr,0)) {
+        const auto folder=xrfg::autonomous::configuration_path().parent_path()/L"trace";
+        std::filesystem::create_directories(folder);
+        WritePrivateProfileStringW(L"diagnostics",L"logging_enabled",L"1",(folder/L"ofxr_bridge.ini").c_str());
+        xrfg::bridge_flight_logger().initialize(folder);
+        std::fprintf(stderr,"TRACE=%s\n",xrfg::bridge_flight_logger().log_path().string().c_str());
+    }
     if(framework_session_probe) {
         auto desired=xrfg::autonomous::snapshot().desired;desired.pacing_mode=0;
         check(xrfg::autonomous::request(desired),"select framework transport before session");
@@ -121,6 +130,19 @@ int main(int argc,char** argv) {
         check(single_director_pacing(*state),"only private SteamVR enables sole-director pacing");
         state->single_director_requested=false;
         check(!single_director_pacing(*state),"OFF restores the existing route policy");
+        state->djules_route=true;state->nvidia_new_route=true;
+        state->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::nvidia;
+        state->djules_triple_requested=true;state->lower_vram=state->separate_synthesis=1;
+        check(extra_output_capacity(*state) && native_current_rings(*state)==2 && native_synthetic_rings(*state)==2,
+            "SteamVR private Fast 3X keeps independent A/B/S1/S2 capacity");
+        state->private_runtime.reset();dispatch->steamvr_runtime=false;dispatch->virtual_desktop_runtime=true;
+        check(staged_native_outputs(*state) && extra_output_capacity(*state) &&
+            native_current_rings(*state)==1 && native_synthetic_rings(*state)==1,
+            "VDXR staged Fast 3X retains its earlier one-ring runtime contract");
+        state->private_runtime=f.transport;dispatch->steamvr_runtime=true;dispatch->virtual_desktop_runtime=false;
+        state->djules_triple_requested=false;
+        check(!extra_output_capacity(*state) && native_current_rings(*state)==1 && native_synthetic_rings(*state)==1,
+            "SteamVR Fast 2X still reduces both runtime rings");
         std::puts("Single director scope: OFF/private SteamVR/VDXR/nonprivate PASS");return 0;
     }
     if(route=="memory") {
@@ -166,6 +188,7 @@ int main(int argc,char** argv) {
     state->nvidia_new_route=route!="ref" && route!="fidelity";state->djules_route=route=="djules";
     state->separate_synthesis=a;state->lower_vram=b;
     state->djules_triple_requested=triple;state->djules_deep_pipeline=triple || deep;
+    if(benchmark_sequence)state->djules_pipeline_switchable=true; // shipping xrCreateSession enables live multiplier polling
     const bool vectors=route=="fsr" || route=="hybrid" || route=="dlssg";
     if(vectors)state->dlss_motion_vectors=true;
     if(route=="fsr")state->frame_generation_mode=xrfg::D3D12FrameGenerationMode::fsr3;
@@ -242,7 +265,28 @@ int main(int argc,char** argv) {
         {std::scoped_lock lock(c->mutex);c->acquired_indices.push_back(index);++c->waited_count;}
         XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};return layer_release_swapchain_image_impl(handle,&release);
     };
-    for(unsigned n=1;n<=8;++n) {
+    unsigned phase_outputs{};
+    const unsigned trial_frames=16;
+    const unsigned input_count=benchmark_sequence?7*trial_frames:8;
+    for(unsigned n=1;n<=input_count;++n) {
+        if(benchmark_sequence && n%trial_frames==1) {
+            const auto phase=(n-1)/trial_frames;
+            auto desired=xrfg::autonomous::snapshot().desired;
+            desired.pacing_mode=phase<6?phase/2:2;
+            desired.lower_vram=desired.separate_synthesis=phase<6?phase%2:1;
+            desired.triple_frame_gen=phase<6;desired.prefer_fps=phase<6;
+            check(xrfg::autonomous::request(desired),"actual benchmark pacing/Fast request");
+            xrfg::autonomous::apply_runtime_settings();
+            if(phase==6) {
+                // Exercise both actual pipeline observations without a wall-clock
+                // sleep: first records the candidate, second reconciles capacity.
+                for(int observation=0;observation<2;++observation) {
+                    state->djules_pipeline_poll={};
+                    xr_ok(poll_djules_pipeline(state),"live3X->2X Fast capacity reconciliation");
+                }
+            }
+            phase_outputs=f.real_ends.load();
+        }
         if(measured)xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,true);
         if(toggling && (n==3 || n==5 || n==7)) {
             auto desired=xrfg::autonomous::snapshot().desired;
@@ -260,7 +304,7 @@ int main(int argc,char** argv) {
             ok(apply_embedded_control(state),"apply route hot handoff");check(state->private_runtime==f.transport,"route switch must retain one common distributor");
         }
         std::fprintf(stderr,"frame %u write (physical=%u)\n",n,f.real_ends.load());
-        f.write(chain,n*20);if(split_eyes)f.write(right,n*20+7);
+        const auto color=((n-1)%8+1)*20;f.write(chain,color);if(split_eyes)f.write(right,color+7);
         if(vectors && !split_eyes){auto c=find_swapchain(chain);auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();guides->eye_count=2;
             for(unsigned eye=0;eye<2;++eye){auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=eye+1;g->epoch=1;g->serial=n;g->previous_serial=n-1;g->publication=2*n+eye;g->producer_queue=f.queue;g->output=images[*c->last_released_index].texture;g->output_slice=eye;g->depth=depth;g->motion_vectors=motion;g->motion_slice=eye;g->output_width=g->depth_width=g->motion_width=256;g->output_height=g->depth_height=g->motion_height=128;guides->eyes[eye]=g;}c->last_released_motion_vectors=guides;}
         XrFrameState prediction{XR_TYPE_FRAME_STATE};xr_ok(layer_wait_frame_impl(state->handle,nullptr,&prediction),"shipping virtual Wait");xr_ok(layer_begin_frame_impl(state->handle,nullptr),"shipping virtual Begin");
@@ -277,12 +321,32 @@ int main(int argc,char** argv) {
             xr_ok(producer.get(),"shipping End while native End is withheld");
             check(independent,"bridge acceptance returns to game before blocked native End with spare credits");
         } else xr_ok(layer_end_frame_impl(state->handle,&end),"shipping OFXR End handoff");
-        if(sole && !blocked && !toggling && n==2 && state->three_slot_director) {
+        if(sole && !benchmark_sequence && !blocked && !toggling && n==2 && state->three_slot_director) {
             xr_ok(wait_for_synthesis_handoff(state),"second real generated without a future source");
             f.wait_count(2);
             check(f.real_ends>=2,"ready real is delivered before a third application source exists");
         }
         std::fprintf(stderr,"frame %u accepted\n",n);
+        if(benchmark_sequence && n%trial_frames==0) {
+            xr_ok(wait_for_synthesis_handoff(state),"phase synthesis complete");
+            if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"phase presenter complete");
+            xr_ok(f.transport->drain(),"phase physical FIFO complete");
+            const auto phase=n/trial_frames-1,outputs=f.real_ends.load()-phase_outputs;
+            std::fprintf(stderr,"BENCH phase%u mode%u fast%u physical%u expected3X=%u state%u director%u queue%u extra%u\n",
+                phase,phase<6?phase/2:2,phase<6?phase%2:1,outputs,unsigned(phase<6),unsigned(state->generation_status.load()),
+                unsigned(state->three_slot_director),unsigned(state->queued_nvidia_presenter),unsigned(extra_output_capacity(*state)));
+            xrfg::bridge_flight_logger().flush();
+            auto c=find_swapchain(chain);
+            std::fprintf(stderr,"CHAIN fg%u pending%u declined%u refusal%u capture%u active%u forbidden%u cooldown%u\n",
+                unsigned(bool(c->frame_generation)),unsigned(c->generation_eligible_pending),unsigned(c->generation_declined),
+                unsigned(c->generation_refusal),unsigned(bool(c->last_released_capture)),unsigned(state->presenter_active),
+                unsigned(presenter_forbidden(*state)),unsigned(state->generation_resume_display_time!=0));
+            check(c->frame_generation && c->frame_generation->current_runtime_rings==(phase<6?2U:1U) &&
+                c->frame_generation->synthetic_runtime_rings==(phase<6?2U:1U) &&
+                c->frame_generation->direct_extra_outputs==(phase<6),
+                "Fast 3X preserves the minimum distinct A/B and S1/S2 output ownership");
+            check(outputs>=(phase<6?2*trial_frames+1:trial_frames+1),"Every normal 3X phase must deliver two generated frames per real, including after Fast");
+        }
     }
     xr_ok(wait_for_synthesis_handoff(state),"worker complete");
     if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"generator transport drained");

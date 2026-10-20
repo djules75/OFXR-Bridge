@@ -1,3 +1,15 @@
+## V615 local candidate: SteamVR3X after Fast (2026-10-20)
+
+Actual GPU replay reproduces V614 Valhalla3X failure after Fast: retired
+presenter stop latch refuses every synthetic pair. Private SteamVR lease gates
+now distinguish a retired owner from a live cancellation. Fast3X keeps the
+minimum distinct A/B/S1/S2 buffers instead of silently becoming2X; its VRAM
+saving may be limited. Fast2X reduction and VDXR staged3X remain unchanged.
+Benchmark matrix/10s/3s/metrics/preset are unchanged. Framework still uses the
+private transport with final pacing bypassed, not the pre-director architecture.
+See autonomous/docs/V615_STEAMVR_3X_RESTART.md and V615_VALIDATION.json.
+CMake0.615.0; IPC61101/provider45601 unchanged. Owner Valhalla result pending.
+
 ## V614 local candidate: SteamVR pacing benchmark matrix (2026-10-20)
 
 SteamVR suites now test Framework / Director / Framework+director with Normal
