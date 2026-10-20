@@ -221,6 +221,8 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     ImGui::EndDisabled();
     ImGui::TextWrapped(state.runtime.luke_detected ? "Lower VRAM has no effect with Luke Ross."
         : "Uses private synthesis textures and fewer XR swapchains.");
+    changed |= ImGui::Checkbox("Single director (SteamVR)", &draft.single_director);
+    ImGui::TextWrapped("Experimental: removes route presentation holds. SteamVR only; generation history and GPU safety remain active.");
     ImGui::Separator();
     if (!ImGui::CollapsingHeader("Details")) return changed;
     const auto& telemetry = state.runtime.telemetry;

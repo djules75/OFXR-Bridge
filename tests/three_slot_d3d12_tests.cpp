@@ -386,6 +386,7 @@ int main(int argc,char** argv) {
         if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
         auto dispatch=std::make_shared<Dispatch>(); session_state=std::make_shared<SessionState>(dispatch);
         auto& s=session_state;s->handle=reinterpret_cast<XrSession>(0x211);s->graphics_binding=SessionGraphicsBinding::d3d12;
+        s->single_director_requested=argc>2 && std::string_view(argv[2])=="single-director";
         s->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::nvidia;
         s->nvidia_new_route = true; s->djules_route=kTestDjules;
         const std::string_view mode = argc>1 ? argv[1] : "";
@@ -511,6 +512,8 @@ int main(int argc,char** argv) {
             s->lower_vram=mode.back()=='1';
             dispatch->steamvr_runtime=mode.find("-steam-")!=std::string_view::npos;
             dispatch->virtual_desktop_runtime=!dispatch->steamvr_runtime;
+            if(s->single_director_requested && dispatch->virtual_desktop_runtime)
+                require(!single_director_pacing(*s),"VDXR transport must retain its existing internal timing policy");
             dispatch->inline_unless_pipelined=dispatch->virtual_desktop_runtime;
             transport_inline=s->djules_route && dispatch->virtual_desktop_runtime;
             // VDXR's split-thread shape retains its existing synchronous owner.

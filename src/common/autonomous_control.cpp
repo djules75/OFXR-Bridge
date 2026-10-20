@@ -76,7 +76,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465852;
-constexpr std::uint32_t kAbi = 60801;
+constexpr std::uint32_t kAbi = 61001;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==72); // V471 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==69); // previously reserved padding
@@ -187,7 +187,7 @@ public:
             identity ^= static_cast<std::uint64_t>(std::towlower(character));
             identity *= 1099511628211ULL;
         }
-        const auto prefix = L"Local\\OFXRAutonomousV608-" + std::to_wstring(identity);
+        const auto prefix = L"Local\\OFXRAutonomousV610-" + std::to_wstring(identity);
         mutex = CreateMutexW(nullptr, FALSE, (prefix + L"-mutex").c_str());
         if (!mutex) return;
         const DWORD waited = WaitForSingleObject(mutex, 2000);
@@ -346,7 +346,7 @@ Settings parse_settings(std::string_view text) {
 #define READ_FIELD(name) if (key == #name) value.name = static_cast<decltype(value.name)>(number);
         READ_FIELD(enabled) READ_FIELD(backend) READ_FIELD(motion_vectors)
         READ_FIELD(frame_generation) READ_FIELD(hybrid_backend) READ_FIELD(preset) READ_FIELD(scale)
-        READ_FIELD(backward) READ_FIELD(separate_synthesis) READ_FIELD(lower_vram) READ_FIELD(prefer_fps)
+        READ_FIELD(single_director) READ_FIELD(backward) READ_FIELD(separate_synthesis) READ_FIELD(lower_vram) READ_FIELD(prefer_fps)
         READ_FIELD(triple_frame_gen) READ_FIELD(native_scale) READ_FIELD(r19_camera)
         READ_FIELD(afw_mode) READ_FIELD(afw_debug) READ_FIELD(afw_clear_before_warping)
         READ_FIELD(afw_ignore_motion_threshold) READ_FIELD(afw_depth_dilate_mode) READ_FIELD(afw_shading_rate)
@@ -381,7 +381,7 @@ std::string serialize_settings(const Settings& settings) {
 #define WRITE_FIELD(name) output << #name << '=' << value.name << '\n';
     WRITE_FIELD(enabled) WRITE_FIELD(backend) WRITE_FIELD(motion_vectors)
     WRITE_FIELD(frame_generation) WRITE_FIELD(hybrid_backend) WRITE_FIELD(preset) WRITE_FIELD(scale)
-    WRITE_FIELD(backward) WRITE_FIELD(separate_synthesis) WRITE_FIELD(lower_vram) WRITE_FIELD(prefer_fps)
+    WRITE_FIELD(single_director) WRITE_FIELD(backward) WRITE_FIELD(separate_synthesis) WRITE_FIELD(lower_vram) WRITE_FIELD(prefer_fps)
     WRITE_FIELD(triple_frame_gen) WRITE_FIELD(native_scale) WRITE_FIELD(r19_camera)
     WRITE_FIELD(afw_mode) WRITE_FIELD(afw_debug) WRITE_FIELD(afw_clear_before_warping)
     WRITE_FIELD(afw_ignore_motion_threshold) WRITE_FIELD(afw_depth_dilate_mode) WRITE_FIELD(afw_shading_rate)
@@ -503,7 +503,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
 #undef MERGE_PROFILE
     }
 #define MERGE_FIELD(name) if (base.name != desired.name) current.name = desired.name;
-    MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(hybrid_backend) MERGE_FIELD(r19_camera)
+    MERGE_FIELD(single_director) MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(hybrid_backend) MERGE_FIELD(r19_camera)
     MERGE_FIELD(afw_mode) MERGE_FIELD(afw_debug) MERGE_FIELD(afw_clear_before_warping)
     MERGE_FIELD(afw_ignore_motion_threshold) MERGE_FIELD(afw_depth_dilate_mode) MERGE_FIELD(afw_shading_rate)
     MERGE_FIELD(nr_enabled) MERGE_FIELD(nr_before_sr) MERGE_FIELD(nr_intensity)
@@ -603,7 +603,7 @@ void csv_mib(std::ostream& stream,bool valid,std::uint64_t bytes) {
     else stream<<"N/A";
 }
 bool same_trial(const Settings& a,const Settings& b) {
-    return a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation &&
+    return a.single_director==b.single_director && a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation &&
         a.triple_frame_gen==b.triple_frame_gen && a.prefer_fps==b.prefer_fps &&
         a.separate_synthesis==b.separate_synthesis && a.lower_vram==b.lower_vram &&
         a.afw_mode==b.afw_mode && (!a.afw_mode || a.afw_shading_rate==b.afw_shading_rate);
@@ -667,7 +667,7 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
         csv_mib(rec.stream,rec.memory.vram_valid,rec.memory.vram_bytes);rec.stream<<',';
         csv_mib(rec.stream,rec.memory.shared_gpu_valid,rec.memory.shared_gpu_bytes);rec.stream<<',';
         csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_working_set_bytes);rec.stream<<',';
-        csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_private_commit_bytes);rec.stream<<','<<quoted(verdict)<<'\n';
+        csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_private_commit_bytes);rec.stream<<','<<quoted(verdict)<<','<<s.single_director<<'\n';
         rec.stream.flush();
         if(!rec.stream)throw std::runtime_error("CSV write failed");
         rec.results.push_back({rec.settings,rec.samples,rec.memory});csv_layout(rec,b);
@@ -687,7 +687,7 @@ void csv_open(SuiteRecorder& rec,BenchmarkStatus& b,unsigned preset) {
     rec.stream.open(path,std::ios::out|std::ios::trunc);
     rec.stream.imbue(std::locale::classic());rec.stream<<std::fixed<<std::setprecision(3);
     if(!rec.stream)throw std::runtime_error("Cannot create benchmark CSV");
-    rec.stream<<"Build,Run,GamePID,Game,Step,Route,SeparateA,ReduceB,Multiplier,PreferFPS,Neural,AFWMode,AFWShadingRate,DLSSGPreset,SettleSeconds,UsefulSeconds,OutputFPSMin,OutputFPSMedian,OutputFPSMax,FPSSamples,CycleEstimatedMinMs,CycleEstimatedMedianMs,CycleEstimatedMaxMs,CycleSamples,MemorySnapshotMs,VRAMEndMiB,SharedGPUEndMiB,RAMWorkingSetEndMiB,RAMPrivateCommitEndMiB,Status\n";
+    rec.stream<<"Build,Run,GamePID,Game,Step,Route,SeparateA,ReduceB,Multiplier,PreferFPS,Neural,AFWMode,AFWShadingRate,DLSSGPreset,SettleSeconds,UsefulSeconds,OutputFPSMin,OutputFPSMedian,OutputFPSMax,FPSSamples,CycleEstimatedMinMs,CycleEstimatedMedianMs,CycleEstimatedMaxMs,CycleSamples,MemorySnapshotMs,VRAMEndMiB,SharedGPUEndMiB,RAMWorkingSetEndMiB,RAMPrivateCommitEndMiB,Status,SingleDirector\n";
     rec.stream.flush();if(!rec.stream)throw std::runtime_error("Cannot write benchmark CSV header");
     std::snprintf(b.csv_path,sizeof(b.csv_path),"%s",utf8_path(rec.layout_path).c_str());
 }

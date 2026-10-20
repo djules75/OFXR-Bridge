@@ -36,6 +36,16 @@ void codec() {
         passive.motion && !passive.depth && passive.last_seen_ms!=0,
         "passive observation distinguishes motion from depth without activating guide capture");
     xrfg::autonomous::Settings desired;
+    require(!desired.single_director,"Single director experiment defaults OFF");
+    auto experiment=desired;experiment.single_director=true;
+    auto experiment_saved=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(experiment));
+    require(experiment_saved.single_director,"global single-director setting persists in the existing INI");
+    xrfg::autonomous::select_generation(experiment_saved,0,3);
+    require(experiment_saved.single_director,"changing generation profile preserves the global experiment");
+    auto changed_elsewhere=desired;changed_elsewhere.enabled=false;
+    const auto experiment_merged=xrfg::autonomous::merge_changes(changed_elsewhere,desired,experiment);
+    require(experiment_merged.single_director && !experiment_merged.enabled,
+        "global checkbox merge preserves another interface's concurrent edits");
     for (int inherited = 0; inherited != 4; ++inherited) {
         auto manual = desired;
         manual.backend = inherited;

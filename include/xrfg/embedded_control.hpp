@@ -9,6 +9,7 @@ bool layer_active() noexcept;
 // CPU-only interface: no NGX/FFX structures cross the host/backend ABI boundary.
 struct Settings {
     bool enabled{true};
+    bool single_director{}; // experimental SteamVR-only upstream pacing bypass
     int backend{}; // 0 FidelityFX, 1 NVIDIA legacy, 2 NVIDIA new, 3 NVIDIA djules
     int preset{1}; // 0 slow, 1 medium, 2 fast
     int scale{2}; // 0 full, 1 three-quarter, 2 half, 3 quarter

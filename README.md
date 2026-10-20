@@ -1,3 +1,12 @@
+## V609 / V610 local comparison
+
+V609 makes native DLSS-G manual selection match the benchmark presenter.
+V610 additionally offers **Single director (SteamVR)**, defaultOFF below
+Lower VRAM. It bypasses upstream presentation holds while preserving temporal
+history and resource safety; the final private director is unchanged. VDXR
+retains its previous behavior. [Experiment details](docs/V610_SINGLE_DIRECTOR.md).
+Headset latency and smoothness gains are pending owner comparison.
+
 ## V604: explicit framework labels and cached VRAM
 
 Display the active framework in F10/Elliott and show the existing VRAM sample

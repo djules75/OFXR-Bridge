@@ -46,6 +46,7 @@ struct Control {
             L"ofxr", L"single_swapchain_rings", 0, ini().c_str())), 0, 1);
         settings.separate_synthesis = std::clamp(static_cast<int>(GetPrivateProfileIntW(
             L"ofxr", L"separate_synthesis", settings.lower_vram, ini().c_str())), 0, 1);
+        settings.single_director = GetPrivateProfileIntW(L"ofxr", L"single_director", 0, ini().c_str()) != 0;
         settings.enabled = GetPrivateProfileIntW(L"ofxr", L"enabled", 1, ini().c_str()) != 0;
         wchar_t motion[16]{};
         GetPrivateProfileStringW(L"ofxr", L"motion_vectors", L"off", motion, 16, ini().c_str());
@@ -122,6 +123,7 @@ bool request(Settings s) {
     const auto old = c.settings;
     bool ok = true;
     // Do not rewrite diagnostics, comments, or unrelated configuration.
+    if (old.single_director != s.single_director) ok &= write(L"ofxr", L"single_director", s.single_director ? L"1" : L"0");
     if (old.enabled != s.enabled) ok &= write(L"ofxr", L"enabled", s.enabled ? L"1" : L"0");
     if (old.backend != s.backend) ok &= write(L"ofxr", L"backend", s.backend ? L"nvidia" : L"fidelityfx");
     if (old.backend != s.backend) ok &= write(L"ofxr", L"nvidia_route", s.backend == 3 ? L"djules" : s.backend == 2 ? L"new" : L"legacy");

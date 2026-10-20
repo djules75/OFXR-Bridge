@@ -11,6 +11,10 @@
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
     const bool measured=route.starts_with("metrics-");if(measured)route=route.substr(8);
+    const bool deep=route.starts_with("deep-");if(deep)route=route.substr(5);
+    const bool toggling=route.starts_with("toggle-");if(toggling)route=route.substr(7);
+    const bool blocked=route.starts_with("blocked-");if(blocked)route=route.substr(8);
+    const bool sole=route.starts_with("solo-");if(sole)route=route.substr(5);
     const bool canonical=route.starts_with("canonical-");if(canonical)route=route.substr(10);
     const bool pooled=route.starts_with("pooled-");if(pooled)route=route.substr(7);
     const bool unpooled=route.starts_with("unpooled-");if(unpooled)route=route.substr(9);
@@ -18,12 +22,29 @@ int main(int argc,char** argv) {
     const bool separate_queue=route.starts_with("separate-");if(separate_queue)route=route.substr(9);
     int a{},b{};if(route.size()>3 && route[route.size()-3]=='-'){a=route[route.size()-2]-'0';b=route.back()-'0';route.resize(route.size()-3);}
     const bool switching=route=="switch";if(switching)route="new";
+    const bool luke=route.starts_with("luke-");if(luke)route=route.substr(5);
     const bool native12=!route.starts_with("d11-");if(!native12)route=route.substr(4);
     const bool triple=route.ends_with('3');if(triple)route.pop_back();
     xrfg_fixture::ControlProfile profile;
+    if(sole) {
+        auto desired=xrfg::autonomous::snapshot().desired;
+        xrfg::autonomous::select_generation(desired,route=="fsr"?1:route=="dlssg"?2:route=="hybrid"?3:0,
+            route=="ref"?1:route=="new"?2:route=="djules"?3:0);
+        desired.enabled=true;desired.single_director=true;
+        desired.lower_vram=b;desired.separate_synthesis=a;
+        desired.motion_vectors=route=="fsr" || route=="hybrid" || route=="dlssg";
+        desired.triple_frame_gen=triple;desired.prefer_fps=triple || deep;
+        check(xrfg::autonomous::request(desired),"publish the global experiment with its actual route");
+        xrfg::autonomous::apply_runtime_settings();
+    }
+    if(luke) {
+        auto desired=xrfg::autonomous::snapshot().desired;desired.afw_mode=0;
+        check(xrfg::autonomous::request(desired),"isolate Luke color-only OFXR");
+        xrfg::autonomous::apply_runtime_settings();
+    }
     ComPtr<ID3D12Debug> debug;
     if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
-    Fixture f(native12);f.transport->stop();if(route!="memory")f.transport.reset();f.throttled=false;f.real_common=true;f.expected_views=2;f.unblock();
+    Fixture f(native12);f.transport->stop();if(route!="memory" && route!="scope")f.transport.reset();f.throttled=false;f.real_common=true;f.expected_views=2;f.unblock();
     f.create_state=[] {std::scoped_lock lock(g_state_mutex);return g_swapchains.empty()?D3D12_RESOURCE_STATE_RENDER_TARGET:D3D12_RESOURCE_STATE_COMMON;};
     auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=true;
     if(measured)dispatch->get_instance_proc_addr=+[](XrInstance,const char*,PFN_xrVoidFunction* out)->XrResult{*out=nullptr;return XR_ERROR_FUNCTION_UNSUPPORTED;};
@@ -63,6 +84,20 @@ int main(int argc,char** argv) {
     if(!native12)ok(xrfg::create_d3d12_device_for_d3d11(f.device11.Get(),f.device12.GetAddressOf(),f.queue.GetAddressOf()),"D11 generator interop device");
     state->d3d12_device=f.device12;state->d3d12_queue=f.queue;
     state->d3d11_device=f.device11;state->d3d11_context=f.context;
+    state->single_director_requested=sole;
+    state->luke_afw_enabled=luke;
+    if(route=="scope") {
+        state->single_director_requested=true;
+        check(!single_director_pacing(*state),"a request alone cannot bypass a native runtime's pacing");
+        state->private_runtime=f.transport;
+        dispatch->steamvr_runtime=false;dispatch->virtual_desktop_runtime=true;
+        check(!single_director_pacing(*state),"VDXR remains unchanged with the experimental flag requested");
+        dispatch->steamvr_runtime=true;dispatch->virtual_desktop_runtime=false;
+        check(single_director_pacing(*state),"only private SteamVR enables sole-director pacing");
+        state->single_director_requested=false;
+        check(!single_director_pacing(*state),"OFF restores the existing route policy");
+        std::puts("Single director scope: OFF/private SteamVR/VDXR/nonprivate PASS");return 0;
+    }
     if(route=="memory") {
         using namespace xrfg::autonomous;
         check(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable isolated memory benchmark");
@@ -105,7 +140,7 @@ int main(int argc,char** argv) {
     state->optical_flow_backend=route=="fidelity"?xrfg::D3D12OpticalFlowBackend::fidelity_fx:xrfg::D3D12OpticalFlowBackend::nvidia;
     state->nvidia_new_route=route!="ref" && route!="fidelity";state->djules_route=route=="djules";
     state->separate_synthesis=a;state->lower_vram=b;
-    state->djules_triple_requested=triple;state->djules_deep_pipeline=triple;
+    state->djules_triple_requested=triple;state->djules_deep_pipeline=triple || deep;
     const bool vectors=route=="fsr" || route=="hybrid" || route=="dlssg";
     if(vectors)state->dlss_motion_vectors=true;
     if(route=="fsr")state->frame_generation_mode=xrfg::D3D12FrameGenerationMode::fsr3;
@@ -116,7 +151,8 @@ int main(int argc,char** argv) {
         state->nvidia_new_route=false;state->djules_route=false;
     }
     if(route=="hybrid"){state->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::fidelity_fx;state->hybrid_requested=true;state->nvidia_options.hybrid=true;state->nvidia_new_route=false;}
-    state->control_revision=xrfg::embedded::snapshot().revision;
+    if(sole)ok(apply_embedded_control(state),"initial settings match the real public route selection");
+    else state->control_revision=xrfg::embedded::snapshot().revision;
     {std::scoped_lock lock(g_state_mutex);g_sessions[state->handle]=state;g_instances[dispatch->instance]=dispatch;}
     ok(install_private_runtime(state),"install real SteamVR private dispatch");
     f.transport=state->private_runtime;state->uevr_application=pooled;
@@ -183,6 +219,15 @@ int main(int argc,char** argv) {
     };
     for(unsigned n=1;n<=8;++n) {
         if(measured)xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,true);
+        if(toggling && (n==4 || n==6)) {
+            auto desired=xrfg::autonomous::snapshot().desired;
+            desired.single_director=!state->single_director_requested.load();
+            check(xrfg::autonomous::request(desired),"publish only the single-director hot switch");
+            xrfg::autonomous::apply_runtime_settings();
+            ok(apply_embedded_control(state),"drained single-director hot switch");
+            check(single_director_pacing(*state)==desired.single_director,"active policy matches the applied global checkbox");
+            check(state->private_runtime==f.transport,"hot switch retains the sole physical endpoint");
+        }
         if(switching && (n==3 || n==5 || n==7)) {
             auto desired=xrfg::embedded::snapshot().desired;desired.enabled=true;desired.backend=n==3?1:n==5?3:0;
             desired.frame_generation=0;desired.separate_synthesis=0;desired.lower_vram=0;
@@ -195,10 +240,23 @@ int main(int argc,char** argv) {
             for(unsigned eye=0;eye<2;++eye){auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=eye+1;g->epoch=1;g->serial=n;g->previous_serial=n-1;g->publication=2*n+eye;g->producer_queue=f.queue;g->output=images[*c->last_released_index].texture;g->output_slice=eye;g->depth=depth;g->motion_vectors=motion;g->motion_slice=eye;g->output_width=g->depth_width=g->motion_width=256;g->output_height=g->depth_height=g->motion_height=128;guides->eyes[eye]=g;}c->last_released_motion_vectors=guides;}
         XrFrameState prediction{XR_TYPE_FRAME_STATE};xr_ok(layer_wait_frame_impl(state->handle,nullptr,&prediction),"shipping virtual Wait");xr_ok(layer_begin_frame_impl(state->handle,nullptr),"shipping virtual Begin");
         std::array<XrCompositionLayerProjectionView,2> views;
-        for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=eye?.032F:-.032F;v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=split_eyes && eye?right:chain;v.subImage.imageArrayIndex=split_eyes?0:eye;v.subImage.imageRect.extent={256,128};}
+        for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=(sole?float(n):0.F)+(eye?.032F:-.032F);v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=split_eyes && eye?right:chain;v.subImage.imageArrayIndex=split_eyes?0:eye;v.subImage.imageRect.extent={256,128};}
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=2;projection.views=views.data();auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
         XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=prediction.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;end.layerCount=1;end.layers=&layer;
-        xr_ok(layer_end_frame_impl(state->handle,&end),"shipping OFXR End handoff");
+        if(blocked && n==2) {
+            f.wait_count(1); // all three endpoint credits are free before the probe
+            f.block_end=true;f.end_entered=false;
+            auto producer=std::async(std::launch::async,[&]{return layer_end_frame_impl(state->handle,&end);});
+            const bool independent=producer.wait_for(500ms)==std::future_status::ready;
+            f.unblock();
+            xr_ok(producer.get(),"shipping End while native End is withheld");
+            check(independent,"bridge acceptance returns to game before blocked native End with spare credits");
+        } else xr_ok(layer_end_frame_impl(state->handle,&end),"shipping OFXR End handoff");
+        if(sole && !blocked && !toggling && n==2 && state->three_slot_director) {
+            xr_ok(wait_for_synthesis_handoff(state),"second real generated without a future source");
+            f.wait_count(2);
+            check(f.real_ends>=2,"ready real is delivered before a third application source exists");
+        }
         std::fprintf(stderr,"frame %u accepted\n",n);
     }
     xr_ok(wait_for_synthesis_handoff(state),"worker complete");
@@ -208,6 +266,13 @@ int main(int argc,char** argv) {
     auto generated=count>0 && f.real_ends>=(switching?10:12);
     std::printf("%s physical outputs=%u generation state=%u\n",route.c_str(),f.real_ends.load(),unsigned(state->generation_status.load()));
     check(generated,"actual generator must produce beyond eight real inputs");
+    if(sole) {
+        check(std::is_sorted(f.positions.begin(),f.positions.end()),"all generated and real metadata leave in source order");
+        for(unsigned source=1;source<=8;++source)
+            check(std::any_of(f.positions.begin(),f.positions.end(),[&](float x){return std::abs(x-(float(source)-.032F))<.001F;}),
+                "every accepted real source reaches native End, including final drain");
+        check(!f.pixels.empty() && f.pixels.back()==160,"last real retains its own pixels through bridge/drain");
+    }
     for(unsigned i=1;i<f.handoffs.size();++i) {
         if(f.handoffs[i]-f.handoffs[i-1]<period)std::fprintf(stderr,"handoff interval%lldns required%lldns\n",f.handoffs[i]-f.handoffs[i-1],period);
         check(f.handoffs[i]-f.handoffs[i-1]>=period,"all route outputs obey common physical cadence");

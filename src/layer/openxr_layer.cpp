@@ -884,6 +884,8 @@ struct SessionState {
     std::atomic_bool djules_deep_pipeline{};
     int separate_synthesis{};
     int lower_vram{};
+    std::atomic_bool single_director_requested{};
+    std::optional<xrfg::embedded::Settings> applied_generation_settings;
     std::atomic<xrfg::autonomous::GenerationState> generation_status{xrfg::autonomous::GenerationState::waiting};
     std::atomic_uint32_t interface_provider_error{};
     std::atomic<HRESULT> generation_initialization_result{S_OK};
@@ -1001,6 +1003,7 @@ struct SessionState {
     bool synthesis_busy{};
     bool director_draining{};
     std::uint64_t next_source_sequence{1};
+    std::uint64_t director_anchor_sequence{}; // presenter_mutex; history identity, not a retained output
     // When the presenter last handed a frame to the runtime, and the period it
     // was told to expect. The presenter paces itself against these because
     // xrWaitFrame cannot be relied on to do it: see pace_presenter_submission.
@@ -1542,6 +1545,13 @@ private:
     state.graphics_binding_capabilities |= 16ULL;
     return S_OK;
 }
+// Only the existing private SteamVR endpoint may own the sole presentation clock.
+// Requested state is atomic because a drained worker may already await its next job.
+[[nodiscard]] bool single_director_pacing(const SessionState& state) noexcept {
+    return state.single_director_requested.load(std::memory_order_relaxed) &&
+        state.private_runtime && state.dispatch->steamvr_runtime;
+}
+
 [[nodiscard]] bool staged_native_outputs(const SessionState& state) noexcept {
     return !state.private_runtime && configurable_native_outputs(state) && state.separate_synthesis > 0;
 }
@@ -1714,6 +1724,7 @@ void log_benchmark_configuration(SessionState& state) noexcept {
         (state.binding_queue ? 1ULL << 15 : 0ULL) | (state.luke_afw_enabled ? 1ULL << 16 : 0ULL) |
         (std::uint64_t(xrfg::standalone::process_dlssg_preset()) << 17) |
         (std::uint64_t(std::max(0,xrfg::embedded::afw_snapshot().active_shading_rate)) << 20) |
+        (s.single_director ? 1ULL << 40 : 0ULL) | (single_director_pacing(state) ? 1ULL << 41 : 0ULL) |
         (xrfg::autonomous::benchmark_active(control.benchmark) ? (1ULL<<24) | (std::uint64_t(control.benchmark.index)<<25) : 0ULL);
     logger.event(xrfg::BridgeFlightOperation::benchmark_configuration, 0, control.revision, bits,
         std::uint64_t(s.preset) | (std::uint64_t(s.scale) << 8) | (std::uint64_t(s.native_scale) << 16));
@@ -2634,7 +2645,7 @@ XrResult wait_presenter_runtime_frame(const std::shared_ptr<SessionState>& state
 // V461's counted-release principle adapted to the native queued2X bridge.
 // Keep other runtime/bridge/deep/one-ring contracts at the V553 baseline.
 [[nodiscard]] bool steamvr_counted_native_release(const SessionState& state) noexcept {
-    return state.dispatch->steamvr_runtime &&
+    return !single_director_pacing(state) && state.dispatch->steamvr_runtime &&
         state.graphics_binding==SessionGraphicsBinding::d3d12 &&
         !state.d3d11_bridge && !state.vulkan_bridge && !state.luke_afw_enabled &&
         !state.luke_outlaws_preframe && !state.three_slot_director &&
@@ -5377,6 +5388,8 @@ XrResult layer_create_session_impl(
         (state->luke_afw_enabled && xrfg::embedded::afw_snapshot().desired.mode!=0);
     state->separate_synthesis = effective_memory_control(*state,initial_control.desired.separate_synthesis);
     state->lower_vram = effective_memory_control(*state,initial_control.desired.lower_vram);
+    state->single_director_requested = initial_control.desired.single_director;
+    state->applied_generation_settings = initial_control.desired;
     xrfg::embedded::applied(state->control_id, state->control_revision, state->menu_enabled, 0);
     XrStructureType binding_structure_type = XR_TYPE_UNKNOWN;
     if (create_info != nullptr) {
@@ -8622,7 +8635,7 @@ void continuous_presenter_main(
             // cadence, and only once the grid exists to be corrected.
             const XrDuration locked_period =
                 state->presenter_display_period;
-            if (state->presenter_last_predicted_valid &&
+            if (!single_director_pacing(*state) && state->presenter_last_predicted_valid &&
                 state->presenter_schedule_valid && locked_period > 0) {
                 const XrTime previous =
                     state->presenter_last_predicted_display;
@@ -8843,7 +8856,7 @@ void continuous_presenter_main(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now().time_since_epoch())
                     .count();
-            {
+            if (!single_director_pacing(*state)) {
                 // Advance the schedule by exactly one period so this loop's
                 // own cost does not compound into the cadence, and resync
                 // rather than chase if a stall has put the schedule in the
@@ -9392,11 +9405,11 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                 state->presenter_condition.wait(lock, [&] {
                     return state->presenter_stop_requested || XR_FAILED(state->presenter_failure) ||
                         !state->presenter_submissions.empty() ||
-                        (state->three_slots.releasable(state->director_draining) &&
+                        (state->three_slots.releasable(state->director_draining || single_director_pacing(*state)) &&
                          state->three_slots.slot(0)->value->frame);
                 });
                 if (state->presenter_stop_requested || XR_FAILED(state->presenter_failure)) break;
-                if (state->three_slots.releasable(state->director_draining) &&
+                if (state->three_slots.releasable(state->director_draining || single_director_pacing(*state)) &&
                     state->three_slots.slot(0)->value->frame) {
                     selected = state->three_slots.slot(0)->value;
                     state->presenter_inflight_frame = selected->frame;
@@ -9663,40 +9676,42 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                     if (FAILED(copied)) { fail(XR_ERROR_RUNTIME_FAILURE); return; }
                 }
             }
-            if (state->fsr_two_slot_presenter && !fsr_steamvr_phase_clock(*state))
-                fsr_schedule.submitted(submission_slot, std::chrono::nanoseconds(state->presenter_display_period),
-                    std::chrono::steady_clock::now());
-            else if ((djules_native_scheduler(*state) && (state->three_slot_director || state->queued_nvidia_presenter)) ||
-                    fsr_steamvr_phase_clock(*state)) {
-                djules_last_returned = std::chrono::steady_clock::now();
-                djules_schedule.submitted(submission_slot,
-                    std::chrono::nanoseconds(state->presenter_display_period), djules_last_returned,
-                    XR_SUCCEEDED(result) ? phase_step : std::chrono::nanoseconds{});
-            }
-            else if (state->three_slot_director)
-                midpoint_schedule.submitted(submission_slot,
-                    std::chrono::nanoseconds(state->presenter_display_period));
-            else
-                // Runtime blocking already consumed wall time. Advance the
-                // intended grid, not the late actual-submit time, and let
-                // claim() reanchor after a complete missed interval.
-                director_schedule.submitted(submission_slot,
-                    std::chrono::nanoseconds(state->presenter_display_period),
-                    // A stalled Reference End must leave S a full exposure
-                    // before B; ordinary jitter keeps the intended grid.
-                    state->dispatch->steamvr_runtime && state->queued_nvidia_presenter &&
-                        state->graphics_binding==SessionGraphicsBinding::d3d12 &&
-                        !state->nvidia_new_route && !state->luke_afw_enabled &&
-                        !state->luke_outlaws_preframe && !state->hybrid_requested && !state->nvidia_options.hybrid &&
-                        state->frame_generation_mode==xrfg::D3D12FrameGenerationMode::ofxr
-                        ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
+            if (!single_director_pacing(*state)) {
+                if (state->fsr_two_slot_presenter && !fsr_steamvr_phase_clock(*state))
+                    fsr_schedule.submitted(submission_slot, std::chrono::nanoseconds(state->presenter_display_period),
+                        std::chrono::steady_clock::now());
+                else if ((djules_native_scheduler(*state) && (state->three_slot_director || state->queued_nvidia_presenter)) ||
+                        fsr_steamvr_phase_clock(*state)) {
+                    djules_last_returned = std::chrono::steady_clock::now();
+                    djules_schedule.submitted(submission_slot,
+                        std::chrono::nanoseconds(state->presenter_display_period), djules_last_returned,
+                        XR_SUCCEEDED(result) ? phase_step : std::chrono::nanoseconds{});
+                }
+                else if (state->three_slot_director)
+                    midpoint_schedule.submitted(submission_slot,
+                        std::chrono::nanoseconds(state->presenter_display_period));
+                else
+                    // Runtime blocking already consumed wall time. Advance the
+                    // intended grid, not the late actual-submit time, and let
+                    // claim() reanchor after a complete missed interval.
+                    director_schedule.submitted(submission_slot,
+                        std::chrono::nanoseconds(state->presenter_display_period),
+                        // A stalled Reference End must leave S a full exposure
+                        // before B; ordinary jitter keeps the intended grid.
+                        state->dispatch->steamvr_runtime && state->queued_nvidia_presenter &&
+                            state->graphics_binding==SessionGraphicsBinding::d3d12 &&
+                            !state->nvidia_new_route && !state->luke_afw_enabled &&
+                            !state->luke_outlaws_preframe && !state->hybrid_requested && !state->nvidia_options.hybrid &&
+                            state->frame_generation_mode==xrfg::D3D12FrameGenerationMode::ofxr
+                            ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
+            } // The private director owns timing; no upstream schedule advances.
             {
                 std::scoped_lock lock(state->presenter_mutex);
                 if (selected) {
                     if(!repeat_held) {
                         if(XR_SUCCEEDED(result) && djules_deep_active(*state))
                             djules_last_owned=selected->frame;
-                        static_cast<void>(state->three_slots.release_front(state->director_draining));
+                        static_cast<void>(state->three_slots.release_front(state->director_draining || single_director_pacing(*state)));
                     }
                 } else {
                     borrowed->result = result;
@@ -9754,6 +9769,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
         state->fsr_two_slot_presenter = fsr_two_slot_session(state);
         state->queued_nvidia_presenter = queued_nvidia_session(state);
         state->three_slots.configure(djules_triple_director(*state)?3:2);
+      state->director_anchor_sequence = 0;
         state->synthesis_job.reset();
         state->synthesis_busy = false;
         state->director_draining = false;
@@ -9861,6 +9877,7 @@ void stop_continuous_presenter(
             state->synthesis_busy = false;
             state->synthesis_job.reset();
             state->three_slots.clear();
+            state->director_anchor_sequence = 0;
             state->three_slot_director = false;
             state->fsr_two_slot_presenter = false;
             state->queued_nvidia_presenter = false;
@@ -12216,6 +12233,10 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                 std::unique_lock lock(state->presenter_mutex);
                 job->current->frame = std::move(real);
                 if (job->pair) {
+                    // With immediate real delivery there may be no retained A.
+                    // Align B beside its S slots, without requiring another input.
+                    if (single_director_pacing(*state) && !state->three_slots.slot(0))
+                        static_cast<void>(state->three_slots.shift_empty());
                     // A may still be inside downstream EndFrame. Never replace
                     // its descriptor until the director has acknowledged it.
                     const auto slot_token = xrfg::bridge_flight_logger().begin(
@@ -12246,6 +12267,16 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
                     // no image copies. A is now held in logical slot 1.
                     for(std::size_t i=1;i<state->three_slots.capacity();++i)
                         static_cast<void>(state->three_slots.shift_empty());
+                }
+                if (single_director_pacing(*state)) {
+                    // No additional ready-pair backlog. The endpoint credit is the
+                    // only delivery admission; retain this batch until accepted,
+                    // not until native EndFrame/display. The app may render ahead.
+                    state->presenter_condition.notify_all();
+                    state->presenter_condition.wait(lock,[&] {
+                        return (state->three_slots.empty() && !state->presenter_inflight_frame) ||
+                            state->presenter_stop_requested || XR_FAILED(state->presenter_failure);
+                    });
                 }
                 state->synthesis_busy = false;
             }
@@ -12848,6 +12879,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     if (!metadata_pairable) {
         const XrResult drain = wait_for_presenter_idle(state);
         if (XR_FAILED(drain)) return drain;
+        std::scoped_lock lock(state->presenter_mutex);state->director_anchor_sequence = 0;
     }
     if (post_afw_frame && state->luke_aux_budget_inline)
         return XR_ERROR_LAYER_INVALID; // synchronous-only packet cannot escape its EndFrame
@@ -12935,6 +12967,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
                     xrfg::BridgeFlightOperation::continuity_reset, 2, handle_value(state->handle));
                 const XrResult drain = wait_for_presenter_idle(state);
                 if (XR_FAILED(drain)) return drain;
+                { std::scoped_lock anchor_lock(state->presenter_mutex);state->director_anchor_sequence = 0; }
                 // An empty director buffer makes job->pair false below;
                 // prepare_frame_generation retires/prime-copies BOTH eyes.
             }
@@ -12945,11 +12978,15 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         lock.lock();
         if (XR_FAILED(state->presenter_failure)) return state->presenter_failure;
         if (state->presenter_stop_requested) return XR_ERROR_SESSION_NOT_RUNNING;
-        job->pair = !state->three_slots.empty();
+        job->pair = single_director_pacing(*state)
+            ? metadata_pairable && state->director_anchor_sequence != 0
+            : !state->three_slots.empty();
         job->triple=djules_triple_director(*state);
         job->current->source_sequence = state->next_source_sequence++;
         job->current->previous_sequence = job->pair
-            ? state->three_slots.slot(0)->value->source_sequence : 0;
+            ? single_director_pacing(*state) ? state->director_anchor_sequence
+                : state->three_slots.slot(0)->value->source_sequence : 0;
+        state->director_anchor_sequence = job->current->source_sequence;
         // One atomic handoff starts generation AND makes A eligible for the
         // director. Worker GPU latency does not delay the release of A.
         static_cast<void>(state->three_slots.push_real(job->current));
@@ -13479,6 +13516,7 @@ void clear_generation_continuity(
             std::scoped_lock lock(state->mutex);
             state->previous_projection.reset();
         }
+        { std::scoped_lock lock(state->presenter_mutex); state->director_anchor_sequence = 0; }
         for (const auto& swapchain : find_swapchains(state)) {
             std::scoped_lock call_lock(swapchain->call_mutex);
             std::shared_ptr<FrameGenerationSwapchainState> generation;
@@ -13978,6 +14016,7 @@ HRESULT reconcile_multiplier_outputs(const std::shared_ptr<SessionState>& state)
         ++state->djules_configuration_epoch;
         state->djules_triple_release={};
         state->three_slots.configure(djules_triple_director(*state)?3:2);
+      state->director_anchor_sequence = 0;
         state->application_served_serial=state->presenter_frame_serial;
         state->presenter_last_frame.reset();
     }
@@ -14031,6 +14070,29 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     if (state->control_revision == control.revision && !force_startup_rendezvous && !output_use_changed &&
         hybrid_ready==state->nvidia_options.hybrid) return S_OK;
     const bool explicit_revision = state->control_revision != control.revision;
+    if (!force_startup_rendezvous && !state->control_reconfigure_required && !output_use_changed &&
+        hybrid_ready == state->nvidia_options.hybrid && state->applied_generation_settings) {
+        auto prior=*state->applied_generation_settings;
+        const bool pacing_changed=prior.single_director!=control.desired.single_director;
+        prior.single_director=control.desired.single_director;
+        if (pacing_changed && prior==control.desired) {
+            // A presentation-policy toggle is not a generator reset. In
+            // particular do not re-prime an existing FidelityFX packed input
+            // as though it were a newly allocated UAV. Keep its history/state.
+            if (state->private_runtime && state->dispatch->steamvr_runtime &&
+                continuous_presenter_active(state) && XR_FAILED(wait_for_presenter_idle(state)))
+                return E_FAIL;
+            state->single_director_requested=control.desired.single_director;
+            state->applied_generation_settings=control.desired;
+            state->control_revision=control.revision;
+            ++state->djules_configuration_epoch;
+            if (state->fps_overlay) state->fps_overlay->reset_metrics();
+            xrfg::embedded::applied(state->control_id,control.revision,state->menu_enabled,S_OK);
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::embedded_configuration,
+                610,control.revision,control.desired.single_director,single_director_pacing(*state));
+            return S_OK;
+        }
+    }
     const bool previously_enabled = state->menu_enabled;
     if (continuous_presenter_active(state))
         static_cast<void>(wait_for_presenter_idle(state));
@@ -14088,6 +14150,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     if (!ordinary_djules_route(*state)) state->presenter_restore_after_bypass=false;
     state->separate_synthesis = effective_separation;
     state->lower_vram = effective_reduction;
+    state->single_director_requested = control.desired.single_director;
     state->dlss_motion_vectors = control.desired.motion_vectors == 1 ||
         generation_mode != xrfg::D3D12FrameGenerationMode::ofxr ||
         state->luke_afw_enabled;
@@ -14300,6 +14363,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     }
     configure_session_guide_capture(*state);
     state->control_revision = control.revision;
+    state->applied_generation_settings = control.desired;
     state->generation_outputs_needed=outputs_needed;
     state->control_reconfigure_required = FAILED(result);
     if (FAILED(result)) state->generation_initialization_result = result;
@@ -14307,6 +14371,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     ++state->djules_configuration_epoch;
     { std::scoped_lock lock(state->presenter_mutex);
       state->three_slots.configure(djules_triple_director(*state)?3:2);
+      state->director_anchor_sequence = 0;
       state->djules_triple_release={}; }
 
     if (state->fps_overlay) state->fps_overlay->reset_metrics();
@@ -16193,7 +16258,7 @@ XrResult layer_end_frame_impl(
             // admission at its next EndFrame prevents output reuse/backlog.
             if (presenter_content_lock.owns_lock()) presenter_content_lock.unlock();
             frame_call_lock.unlock();
-            return result;
+            return single_director_pacing(*state) ? wait_for_presenter_idle(state) : result;
         }
         // The once-per-pair hold. The layer submits one pair per application
         // frame and a pair costs two presenter frames, so without this an
@@ -16212,7 +16277,10 @@ XrResult layer_end_frame_impl(
         // The frame lock goes first: an application whose wait runs on another
         // thread must not be shut out of xrWaitFrame while this waits.
         frame_call_lock.unlock();
-        wait_for_presenter_pair(state, pair_ready ? (djules_triple_active(*state) ? 3U : 2U) : 1U);
+        if (single_director_pacing(*state)) {
+            const auto accepted = wait_for_presenter_idle(state);
+            if (XR_FAILED(accepted)) return accepted;
+        } else wait_for_presenter_pair(state, pair_ready ? (djules_triple_active(*state) ? 3U : 2U) : 1U);
         if (pair_ready) delay_djules_application_release(state);
         return result;
     }

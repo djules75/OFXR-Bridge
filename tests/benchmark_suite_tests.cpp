@@ -15,10 +15,11 @@ int main() {
         check(optical.size()==11 && full.size()==17,"Normal and combined Lower VRAM only; no standalone Prefer FPS test");
         for(const auto& step:optical)check(step.generation==0,"Optical suite must never request vector-only generators");
         unsigned dlssg_steps=0,prefer=0;
-        Settings baseline;baseline.diagnostics=false;baseline.nr_enabled=true;baseline.afw_mode=2;
+        Settings baseline;baseline.diagnostics=false;baseline.nr_enabled=true;baseline.afw_mode=2;baseline.single_director=true;
         for(const auto& step:full) {
             auto s=benchmark_settings(baseline,step);
             check(!s.diagnostics && s.nr_enabled && s.afw_mode==2,"Keep diagnostics, Neural and AFW choices");
+            check(s.single_director,"automatic route/Lower VRAM changes keep the global director choice");
             check(!s.triple_frame_gen || s.separate_synthesis || !s.lower_vram,"Never silently test 2X as 3X");
             if(step.generation==2){
                 ++dlssg_steps;
@@ -88,6 +89,8 @@ int main() {
         const auto details_path=std::filesystem::u8path(state.benchmark.csv_path);
         std::ifstream details(details_path.parent_path()/(details_path.stem().wstring()+L"-details.csv"));
         std::stringstream details_text;details_text<<details.rdbuf();
+        check(details_text.str().find("Status,SingleDirector\n")!=std::string::npos,
+            "details CSV identifies the global experiment without changing the sheet layout");
         check(details_text.str().find(",A startup request,")!=std::string::npos &&
             details_text.str().find("C startup request")==std::string::npos,"CSV records A receipt instead of inventing C");
         check(csv_text.find("VRAM end MiB,100.000,101.000")!=std::string::npos,"Memory belongs to the trial that just finished, before the next switch");

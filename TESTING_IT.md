@@ -1,3 +1,14 @@
+## V610: Single director (SteamVR), confronto sperimentale
+
+Riavvia tray e gioco V610 insieme. Sotto Lower VRAM trovi Single director
+(SteamVR), spento di default e indipendente da Lower VRAM. Confronta OFF/ON
+a parita di scena, route, refresh, AFW e Lower VRAM. Il solo cambio del flag
+non richiede un riavvio del gioco: drena il batch e conserva il generatore.
+La frequenza e la capacita del director finale restano le stesse. Il flag
+e ignorato su VDXR. I benchmark conservano la scelta; il CSV dettagliato
+aggiunge SingleDirector, mentre il layout per il foglio resta invariato.
+F9 facoltativo. Resta da misurare il risultato nel visore.
+
 ## V609: DLSS-G manuale uguale al benchmark
 
 Riavvia tray e gioco con V609. DLSS-G usa lo stesso percorso qualunque sia
