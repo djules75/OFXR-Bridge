@@ -55,6 +55,30 @@ void codec_tests() {
                 decoded=xrfg::decode_luke_origin_row(row);
                 require(decoded.token==token && !decoded.ambiguous,"dimmed compact token");
             }
+    // A changing overlay/background can merge the final sync midpoint with
+    // the next transition without erasing either Manchester half-cell. The
+    // old bit0/bit15-only pitch and all-16 edge fit reject this valid token.
+    // Synthetic analogue of the Outlaws F8; no captured pixels are embedded.
+    for (float first_black : {.64f, .61f}) {
+        std::vector<float> dimmed(263, .4f);
+        for (unsigned x = 0; x < xrfg::kLukeOriginWidth; ++x)
+            dimmed[4 + x] = xrfg::luke_origin_white(6098, x) ? .65f : .35f;
+        dimmed[66] = first_black; dimmed[67] = .6f; dimmed[68] = .35f;
+        const auto decoded = xrfg::decode_luke_origin_row(dimmed);
+        require(decoded.token == 6098 && !decoded.ambiguous,
+            "merged final preamble edge lost CRC-valid token");
+        std::vector<float> mixed(1024, .4f);
+        std::copy(dimmed.begin(), dimmed.end(), mixed.begin());
+        for (unsigned x = 0; x < xrfg::kLukeOriginWidth; ++x)
+            mixed[512 + x] = xrfg::luke_origin_white(6100, x) ? 1.f : 0.f;
+        require(xrfg::decode_luke_origin_row(mixed).ambiguous,
+            "recovered marker silently chose a conflicting publication");
+        // A recovered preamble never authorizes a changed payload or CRC.
+        for (unsigned x = 4 + 27 * 4; x < 4 + 28 * 4; ++x)
+            dimmed[x] = 1.f - dimmed[x];
+        require(!xrfg::decode_luke_origin_row(dimmed).token,
+            "merged-edge recovery accepted corrupted payload");
+    }
     std::vector<float> row(1024,.5f);
     require(!xrfg::decode_luke_origin_row(row).token,"blank token invented");
     stamp(row,32,1,0x12345678u);

@@ -1,3 +1,12 @@
+## V626: recover a blended marker preamble
+
+Outlaws' failing F8 retains exact CRC-valid source tokens, but one sync edge
+merges into the changing overlay/background gradient. Derive pitch from either
+of the final two sync midpoints and fit at least 15 of 16 sync edges. All 16
+sync bits, nonzero token, full CRC and ambiguity rejection remain mandatory.
+No pacing, swapchain, AFW quality or camera/depth math change.
+[Evidence and scope](docs/V626_OUTLAWS_ORIGIN_PREAMBLE.md). Local; headset validation pending.
+
 ## V623: Outlaws startup allocation budget
 
 Outlaws' pre-frame output buffers now share one compatible native publication

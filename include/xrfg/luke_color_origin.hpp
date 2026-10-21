@@ -87,22 +87,28 @@ inline LukeColorOriginDecode decode_luke_origin_row(std::span<const float> row) 
                 const double x = 2. * bit, y = best->x - origin;
                 ++n; sx += x; sy += y; sxx += x * x; sxy += x * y;
             }
-            if (n < (known_prefix ? 16. : 64.)) return false;
+            // One blended midpoint can disappear into the overlay/background
+            // gradient. Fit the remaining sync edges; every decoded sync bit
+            // and the complete payload CRC are still required below.
+            if (n < (known_prefix ? 15. : 64.)) return false;
             const double pitch = (n * sxy - sx * sy) / (n * sxx - sx * sx);
             if (pitch < .7 || pitch > 4.05) return false;
             origin += (sy - pitch * sx) / n; cell = pitch;
             return true;
         };
         LukeColorOriginDecode result{};
-        // Preamble bit0 and bit15 both have mandatory falling midpoint edges,
-        // 30 cells apart. Infer a continuous pitch; never scan a rigid scale grid.
+        // Infer continuous pitch from bit0 and either final sync midpoint.
+        // Bit14 rises, bit15 falls. Using only bit15 loses a valid marker when
+        // that one edge is blended into the changing overlay/background.
+        // No rigid scale grid, guessed publication or partial-prefix identity.
         for (std::size_t first = 0; first < edges.size(); ++first) {
             if (!edges[first].falling) continue;
             for (std::size_t last = first + 1; last < edges.size(); ++last) {
                 const double length = edges[last].x - edges[first].x;
                 if (length > 120.) break;
-                if (length < 22.5 || !edges[last].falling) continue;
-                double origin = edges[first].x, cell = length / 30.;
+                if (length < 21.) continue;
+                const unsigned anchor = edges[last].falling ? 15 : 14;
+                double origin = edges[first].x, cell = length / (2. * anchor);
                 if (!prefix_matches(origin, cell) || !fit_edges(origin, cell, 16, true)) continue;
                 fit_edges(origin, cell, kLukeOriginBits, false);
                 std::uint16_t checksum{}; std::uint32_t token{}; bool valid = true;
