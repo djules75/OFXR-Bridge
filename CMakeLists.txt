@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.619.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.620.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -111,6 +111,9 @@ if(XRFG_BUILD_TESTS)
     target_include_directories(xrfg_midpoint_schedule_tests PRIVATE include)
     target_compile_features(xrfg_midpoint_schedule_tests PRIVATE cxx_std_20)
     add_test(NAME xrfg_midpoint_schedule_tests COMMAND xrfg_midpoint_schedule_tests)
+    add_executable(xrfg_horizon_motion_interval_tests tests/horizon_motion_interval_tests.cpp)
+    target_compile_features(xrfg_horizon_motion_interval_tests PRIVATE cxx_std_20)
+    add_test(NAME xrfg_horizon_motion_interval COMMAND xrfg_horizon_motion_interval_tests)
     add_executable(xrfg_luke_color_token_tests tests/luke_color_token_tests.cpp)
     target_include_directories(xrfg_luke_color_token_tests PRIVATE include)
     target_compile_features(xrfg_luke_color_token_tests PRIVATE cxx_std_20)
@@ -1454,6 +1457,12 @@ if(TARGET xrfg_three_slot_director_tests AND TARGET xrfg_sl_fixture_legacy)
         luke-ngx-actual-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
         "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
     set_tests_properties(xrfg_luke_ngx_actual_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+    foreach(horizon_runtime steamvr vdxr)
+      add_test(NAME xrfg_horizon_${horizon_runtime}_capture COMMAND xrfg_three_slot_director_tests
+          horizon-${horizon_runtime}-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
+          "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
+      set_tests_properties(xrfg_horizon_${horizon_runtime}_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+    endforeach()
     foreach(ghost_runtime steamvr vdxr)
       add_test(NAME xrfg_ghost_${ghost_runtime}_capture COMMAND xrfg_three_slot_director_tests
           ghost-${ghost_runtime}-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"

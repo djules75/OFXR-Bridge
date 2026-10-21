@@ -118,6 +118,7 @@ bool test_kcd_scene_camera{};
 bool test_outlaws_production_identity{};
 bool test_crimson_native_motion{};
 bool test_ghost_native_motion{};
+bool test_horizon_native_motion{};
 #endif
 bool kingdom_come_process() {
     static const bool selected=[] {
@@ -168,18 +169,19 @@ bool crimson_desert_process() {
 #endif
 }
 std::atomic_bool capture_steamvr_runtime{};
-bool ghost_steamvr_native_motion() noexcept {
+bool steamvr_same_eye_native_motion() noexcept {
     static const bool selected=[] {
         wchar_t process[MAX_PATH]{};GetModuleFileNameW(nullptr,process,MAX_PATH);
         const auto* basename=wcsrchr(process,L'\\');basename=basename?basename+1:process;
-        return !_wcsicmp(basename,L"GhostOfTsushima.exe");
+        return !_wcsicmp(basename,L"GhostOfTsushima.exe") ||
+            !_wcsicmp(basename,L"HorizonForbiddenWest.exe");
     }();
 #ifdef XRFG_NATIVE_INGRESS_TESTS
-    const bool ghost=selected||test_ghost_native_motion;
+    const bool same_eye=selected||test_ghost_native_motion||test_horizon_native_motion;
 #else
-    const bool ghost=selected;
+    const bool same_eye=selected;
 #endif
-    return ghost && capture_steamvr_runtime.load(std::memory_order_relaxed);
+    return same_eye && capture_steamvr_runtime.load(std::memory_order_relaxed);
 }
 bool outlaws_public_process() {
     return outlaws_process()&&native_ingress::luke_detected();
@@ -812,7 +814,10 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     // Keep the measured field contract separate from camera receipt order.
     // V568 Ghost SteamVR F8: native motion matches same-eye N-2 at .1px,
     // opposite-eye N-1 misses by5.9px. Preserve the accepted VDXR contract.
-    if(luke && !invocation_camera && (crimson_desert_process()||ghost_steamvr_native_motion()))
+    // V620 Horizon SteamVR F8: native N-2 residual .018/.023px; N-1
+    // misses by3.74/4.54px. The advertised SL clip matrix is not the
+    // motion field's temporal endpoint. Keep the existing VDXR contract.
+    if(luke && !invocation_camera && (crimson_desert_process()||steamvr_same_eye_native_motion()))
         g.raw_motion_native_span=2;
     if(observed_motion_span)g.raw_motion_native_span=observed_motion_span;
     // Scoped camera values replace apply_camera's camera read, while its Luke

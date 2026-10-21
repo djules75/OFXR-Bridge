@@ -1,0 +1,46 @@
+{
+  "version": "V620",
+  "base": "1fdeae3b4da3913f19e7376b06ecb384e4aa9c64",
+  "status": "runtime-pending",
+  "scope": "Horizon SteamVR native same-eye N-2 motion interval; preserves V619 colour workaround; no pacing, threshold or shader changes",
+  "passed": 11,
+  "failed": 0,
+  "ctest_seconds": 22.25,
+  "tests": [
+    "xrfg_horizon_motion_interval",
+    "xrfg_luke_ngx_actual_capture",
+    "xrfg_horizon_steamvr_capture",
+    "xrfg_horizon_vdxr_capture",
+    "xrfg_ghost_steamvr_capture",
+    "xrfg_ghost_vdxr_capture",
+    "xrfg_luke_kcd_quality_bundled",
+    "xrfg_luke_interleaved_quality_bundled",
+    "xrfg_luke_beta6_shading_4",
+    "xrfg_luke_beta6_shading_8",
+    "xrfg_luke_beta6_shading_9"
+  ],
+  "headset_validation": "Owner confirms V619 coloured edge gone but intermittent flicker and green remain. V620 headset green/flicker acceptance pending.",
+  "provider_sha256": "5f3cfc38903ac438241a3c47cb4bc3ac329cb39b056e33a63c20045fe15336f9",
+  "evidence": {
+    "native_motion_endpoint": "N-2 same-eye, while SL clip matrix advertises N-1",
+    "static_grid_median_error_px": {
+      "N1": [
+        11.2204,
+        11.8463
+      ],
+      "N2": [
+        0.018295,
+        0.0207501
+      ]
+    },
+    "replay_frame2_full_RGB_MAE_vs_capture": 0.0006533445881107257,
+    "replay_frame2_green_full_before": 0.805968871721094,
+    "replay_frame2_green_full_after": 0.002291795387545682,
+    "replay_frame2_green_central_before": 0.862983,
+    "replay_frame2_green_central_after": 0.000291549,
+    "replay_note": "Debug stays enabled; captured native D24 decoded and native RG16F cropped unchanged. Original shaders/provider/motion gain and ignore2.5 retained. Approximate seeding affects first evaluation; second baseline closely reproduces captured pixels."
+  },
+  "VDXR_native_interval_unchanged": true,
+  "live_installation": false,
+  "pushed": false
+}

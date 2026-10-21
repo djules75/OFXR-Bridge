@@ -1,3 +1,12 @@
+## V620: Horizon SteamVR same-eye native motion
+
+Captured native vectors refer to N-2 while the SL clip matrix advertises N-1.
+Correct the title/runtime field interval; retain mandatory depth/subtraction
+and V619 colour reduction. Actual-provider replay closely matches the captured
+failure, then removes almost all erroneous debug green with the corrected input.
+11 checks pass; headset/flicker acceptance remains pending.
+[Scope](docs/V620_HORIZON_NATIVE_INTERVAL.md), [checks](docs/V620_VALIDATION.json).
+
 ## V619: reduced AFW colour raster candidate
 
 Horizon captures place the contour artifact before the final XR copy. Combined
