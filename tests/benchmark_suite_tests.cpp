@@ -78,6 +78,10 @@ int main() {
         runtime.applied_revision=snapshot().revision;report_runtime(runtime);
         check(!benchmark_enabled() && !start_benchmark(true),"INI flag defaults off and blocks suite commands");
         check(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable isolated benchmarks in the single INI");
+        runtime.pacing_mode=kAfwOnlyPacingMode;report_runtime(runtime);
+        check(!start_benchmark(true) && snapshot().benchmark.phase==BenchmarkPhase::error,
+            "AFW-only session cannot be labelled as an OFXR route matrix");
+        runtime.pacing_mode=2;report_runtime(runtime);
         check(start_benchmark(true),"Start full suite with A without changing profile or requesting restart");
         auto state=snapshot();check(!start_benchmark(false),"A second UI cannot start a competing suite");
         const auto first_requested=state.benchmark.requested_ms;

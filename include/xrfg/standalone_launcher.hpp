@@ -62,6 +62,9 @@ struct LauncherSettings {
     // Tray-only session choice; independent of the active generator and A/B.
     // Native D3D12 SteamVR only. Changing it requires restarting the game.
     bool steamvr_separate_queue{true};
+    // Tray-only startup experiment: Luke AFW goes straight to native OpenXR.
+    // OFXR is disabled for this session; Neural Rendering remains independent.
+    bool afw_only{};
     // The Vulkan bridge (see the layer's vulkan_session_bridge): a Vulkan
     // game's session is handed to the runtime as D3D12. On by default; no
     // menu entry.

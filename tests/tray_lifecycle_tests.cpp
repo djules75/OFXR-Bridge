@@ -228,6 +228,36 @@ void integrity_scope_policy() {
         "current process scope must be valid");
 }
 
+void experimental_preferences() {
+    Fixture test;
+    test.state.settings_path=test.state.local_directory/L"ofxr-bridge.ini";
+    std::wstring error;
+    const auto revision=xrfg::autonomous::snapshot().revision;
+    require(set_afw_only_preference(test.state,true,&error),"save AFW-only while unarmed");
+    AppState restarted;restarted.settings_path=test.state.settings_path;load_settings(restarted);
+    require(restarted.settings.afw_only,"AFW only survives tray restart");
+    const auto runtime=runtime_directory(test.state.local_directory);
+    std::filesystem::create_directories(runtime);const auto shim=runtime/L"ofxr_bridge.ini";
+    std::ofstream(shim)<<"[ofxr]\nenabled=1\n[neural]\nenabled=1\n[experimental]\nkeep=42\n";
+    test.state.armed=true;
+    for(bool enabled:{false,true,false}) {
+        require(set_afw_only_preference(test.state,enabled,&error),"armed next-session toggle");
+        require(GetPrivateProfileIntW(L"ofxr",L"afw_only",-1,shim.c_str())==int(enabled),"runtime startup toggle");
+        require(GetPrivateProfileIntW(L"ofxr",L"enabled",-1,shim.c_str())==1 &&
+            GetPrivateProfileIntW(L"neural",L"enabled",-1,shim.c_str())==1 &&
+            GetPrivateProfileIntW(L"experimental",L"keep",-1,shim.c_str())==42,"retain OFXR preference, DLSS5 and unrelated keys");
+    }
+    for(bool enabled:{true,false,true,false}) {
+        require(set_benchmark_preference(test.state.settings_path,enabled,&error),"tray benchmark INI switch");
+        require(GetPrivateProfileIntW(L"benchmark",L"enabled",-1,test.state.settings_path.c_str())==int(enabled),"benchmark canonical value");
+        load_settings(restarted);require(!restarted.settings.afw_only,"benchmark write preserves AFW-only selection");
+    }
+    require(xrfg::autonomous::snapshot().revision==revision,"tray toggles must not reconfigure a running renderer");
+    test.state.armed=false;test.state.settings_path=test.state.local_directory;
+    require(!set_afw_only_preference(test.state,true,&error) && !test.state.settings.afw_only,"failed AFW-only write rolls back");
+    require(!set_benchmark_preference(test.state.settings_path,true,&error),"benchmark persistence failure reported");
+}
+
 void queue_preference() {
     Fixture test;
     test.state.settings_path = test.state.local_directory / L"tray.ini";
@@ -259,6 +289,8 @@ void queue_preference() {
 } // namespace
 
 int main() {
+    Fixture isolated_control;
+    SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",isolated_control.state.local_directory.c_str());
     try {
         ownership();
         cross_version_cleanup();
@@ -267,6 +299,7 @@ int main() {
         runtime_stop_and_watchdog();
         integrity_scope_policy();
         queue_preference();
+        experimental_preferences();
         std::cout << "V074 dual-hive registry recovery and production tray lifecycle checks passed\n";
         return 0;
     } catch (const std::exception& error) {

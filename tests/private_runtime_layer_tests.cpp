@@ -8,9 +8,12 @@
 #include "autonomous_layer_fixture.hpp"
 #include <d3d12sdklayers.h>
 
+#include "afw_only_session_test.inc"
+
 static bool framework_session_probe{};
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    if(route.starts_with("afw-only"))return afw_only_session_test(route,argc>2?argv[2]:nullptr);
     const bool benchmark_sequence=route=="benchmark-sequence";
     if(benchmark_sequence)route="solo-djules3";
     const bool off_session_probe=route=="off-pacing-session";if(off_session_probe)route="session";

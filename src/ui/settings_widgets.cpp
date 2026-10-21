@@ -161,6 +161,10 @@ void dlssg_preset(SettingsWidgetState& ui, const Snapshot& state, bool compact) 
     ImGui::TextWrapped("C uses Lite blending; A uses Full quality. If the driver rejects C, OFXR tries A. A saved request does not verify the model loaded by NVIDIA; global overrides may still apply.");
 }
 bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
+    if(state.connected && state.runtime.pacing_mode==kAfwOnlyPacingMode) {
+        ImGui::TextWrapped("AFW only: direct OpenXR delivery. OFXR is disabled for this session. AFW, Neural Rendering and latency meters remain available. Disable AFW only in the tray and restart the game to restore OFXR.");
+        return false;
+    }
     auto& draft = ui.draft;
     bool changed = ImGui::Checkbox("Enable frame generation", &draft.enabled);
     int selected_generation = generation_ui_index(draft.frame_generation);
@@ -355,7 +359,7 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     if (ImGui::Button("Open ofxr-bridge.ini"))
         ShellExecuteW(GetActiveWindow(), L"open", configuration_path().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     const bool permitted=benchmark_enabled();
-    if (!permitted) ImGui::TextWrapped("Benchmarks disabled. Set [benchmark] enabled=1 in ofxr-bridge.ini to enable sampling and these buttons.");
+    if (!permitted) ImGui::TextWrapped("Benchmarks disabled. Enable Benchmark mode in the tray to enable sampling and these buttons.");
     const bool active=benchmark_active(state.benchmark);
     ImGui::BeginDisabled(active || !permitted);
     changed |= ImGui::Checkbox("Output CSV",&draft.benchmark_csv);

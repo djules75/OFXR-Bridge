@@ -57,6 +57,8 @@ enum MenuCommand : UINT {
     change_pause_key = 92,
     steamvr_queue_separate = 93,
     steamvr_queue_shared = 94,
+    toggle_afw_only = 95,
+    toggle_benchmark_mode = 96,
     show_settings = 100,
     open_logs = 130,
     donate_creator = 138,
@@ -814,6 +816,10 @@ void show_context_menu(AppState& state) {
         toggle_pause, state.paused ? L"Resume frame generation" : L"Pause frame generation");
     std::wstring binding = L"Pause key: " + pause_key_display(state.settings.pause_hotkey);
     AppendMenuW(menu, MF_STRING, change_pause_key, binding.c_str());
+    AppendMenuW(menu,MF_STRING | (state.settings.afw_only ? MF_CHECKED : MF_UNCHECKED),
+        toggle_afw_only,L"AFW only (Luke Ross, restart game)");
+    AppendMenuW(menu,MF_STRING | (xrfg::autonomous::benchmark_enabled() ? MF_CHECKED : MF_UNCHECKED),
+        toggle_benchmark_mode,L"Benchmark mode");
     HMENU queue_menu = CreatePopupMenu();
     if (queue_menu) {
         AppendMenuW(queue_menu, MF_STRING | (state.settings.steamvr_separate_queue ? MF_CHECKED : MF_UNCHECKED),
@@ -840,6 +846,38 @@ void show_context_menu(AppState& state) {
     PostMessageW(state.window, WM_NULL, 0, 0);
     DestroyMenu(menu);
     if (pause_bitmap) DeleteObject(pause_bitmap);
+}
+
+[[nodiscard]] bool set_benchmark_preference(const std::filesystem::path& ini, bool enabled, std::wstring* error) {
+    if(!xrfg::autonomous::write_configuration_sections(ini,
+        enabled ? "[benchmark]\nenabled=1\n" : "[benchmark]\nenabled=0\n")) {
+        if(error)*error=L"Could not save benchmark mode in ofxr-bridge.ini.";
+        return false;
+    }
+    if(!enabled) {
+        xrfg::autonomous::stop_benchmark();
+        xrfg::autonomous::tick_benchmark(); // retire the sampler lease immediately
+    }
+    return true;
+}
+
+[[nodiscard]] bool set_afw_only_preference(AppState& state, bool enabled, std::wstring* error) {
+    const bool previous=state.settings.afw_only;
+    state.settings.afw_only=enabled;
+    if (!xrfg::autonomous::write_configuration_sections(state.settings_path,xrfg::standalone::serialize_settings(state.settings))) {
+        state.settings.afw_only=previous;
+        if(error)*error=L"Could not save ofxr-bridge.ini.";
+        return false;
+    }
+    if(state.armed) {
+        const auto ini=runtime_directory(state.local_directory)/L"ofxr_bridge.ini";
+        if(!WritePrivateProfileStringW(L"ofxr",L"afw_only",enabled?L"1":L"0",ini.c_str())) {
+            if(error)*error=last_error_message(L"Saving AFW only");
+            state.settings.afw_only=previous;save_settings(state);return false;
+        }
+    }
+    log_lifecycle(state.local_directory,enabled?L"afw-only-next-session":L"full-ofxr-next-session");
+    return true;
 }
 
 [[nodiscard]] bool set_steamvr_queue_preference(AppState& state, bool separate, std::wstring* error) {
@@ -905,6 +943,17 @@ void handle_command(AppState& state, UINT command) {
     case change_pause_key:
         change_pause_hotkey(state);
         break;
+    case toggle_benchmark_mode: {
+        std::wstring error;
+        if(!set_benchmark_preference(state.settings_path,!xrfg::autonomous::benchmark_enabled(),&error))
+            show_error(state.window,error);
+        return;
+    }
+    case toggle_afw_only: {
+        std::wstring error;
+        if(!set_afw_only_preference(state,!state.settings.afw_only,&error))show_error(state.window,error);
+        return;
+    }
     case steamvr_queue_separate:
     case steamvr_queue_shared: {
         std::wstring error;

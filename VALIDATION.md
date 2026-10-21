@@ -1,3 +1,13 @@
+## V622: AFW-only direct OpenXR and tray benchmark switch
+
+The tray adds **AFW only (Luke Ross, restart game)**: skip the private OFXR
+transport and temporal generation, retain AFW, DLSS5 and all three latency meters.
+**Benchmark mode** controls the existing `[benchmark] enabled` INI value live;
+turning it off stops the suite and on-demand sampling. Both default off.
+AFW-only is a local experiment; headset performance is pending. V619/V620 image
+fixes and normal V621 routing are retained.
+[Behavior and comparison](docs/V622_AFW_ONLY.md).
+
 ## V621: OFF always bypasses added SteamVR pacing
 
 The final director previously followed the pacing preference even with OFXR

@@ -126,7 +126,7 @@ struct Fixture {
         transport=std::make_shared<xrfg::PrivateOpenXrRuntime>(std::move(options));
         ok(transport->initialize(),"initialize actual private endpoint");xr_ok(transport->start(),"start endpoint");
     }
-    ~Fixture(){block_end=false;changed.notify_all();if(gate)gate->Signal(1);transport->stop();transport.reset();CloseHandle(event);if(preparation_timer)CloseHandle(preparation_timer);if(frame_wait_timer)CloseHandle(frame_wait_timer);current=nullptr;}
+    ~Fixture(){block_end=false;changed.notify_all();if(gate)gate->Signal(1);if(transport)transport->stop();transport.reset();CloseHandle(event);if(preparation_timer)CloseHandle(preparation_timer);if(frame_wait_timer)CloseHandle(frame_wait_timer);current=nullptr;}
     void gpu_wait(ID3D12CommandQueue* target=nullptr) {
         if(!target)target=queue.Get();const auto expected=++serial;
         ok(target->Signal(fence.Get(),expected),"test signal");

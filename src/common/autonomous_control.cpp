@@ -702,6 +702,10 @@ bool start_benchmark(bool full,bool luke) noexcept {
             b={};b.phase=BenchmarkPhase::error;
             std::snprintf(b.message,sizeof(b.message),"Open the game and load the test scene first.");return false;
         }
+        if(s.runtime.pacing_mode==kAfwOnlyPacingMode) {
+            b={};b.phase=BenchmarkPhase::error;
+            std::snprintf(b.message,sizeof(b.message),"AFW only is active. Disable it in the tray and restart the game for the OFXR matrix.");return false;
+        }
         if(luke && !s.runtime.luke_detected) {
             b={};b.phase=BenchmarkPhase::error;
             std::snprintf(b.message,sizeof(b.message),"Luke Ross was not detected in the active game.");return false;
@@ -950,7 +954,7 @@ std::string interface_status_text(const Snapshot& s) {
         if (!result.empty()) result += " | "; result += text;
     };
     const auto& r = s.runtime;
-    if(r.steamvr_runtime && r.pacing_mode>=0 && r.pacing_mode!=s.desired.pacing_mode)
+    if(r.steamvr_runtime && r.pacing_mode>=0 && r.pacing_mode!=kAfwOnlyPacingMode && r.pacing_mode!=s.desired.pacing_mode)
         add("Applying pacing policy");
     switch (r.generation_state) {
     case GenerationState::missing_motion: add("Missing game vectors"); break;

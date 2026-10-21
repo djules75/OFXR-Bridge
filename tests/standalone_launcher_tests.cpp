@@ -21,7 +21,14 @@ int main() {
     using namespace xrfg::standalone;
 
     const LauncherSettings release_defaults;
-    if (!release_defaults.steamvr_separate_queue) return 1;
+    if (!release_defaults.steamvr_separate_queue || release_defaults.afw_only) return 1;
+    for(bool enabled:{false,true}) {
+        auto s=release_defaults;s.afw_only=enabled;
+        const auto key=enabled?"afw_only=1":"afw_only=0";
+        if(parse_settings(serialize_settings(s)).afw_only!=enabled || !contains(build_runtime_ini(s),key))return 1;
+        xrfg::autonomous::Settings controls;controls.nr_enabled=true;controls.enabled=true;
+        if(!contains(build_runtime_ini(s,controls),key))return 1;
+    }
     for (bool separate : {false, true}) {
         auto queue_settings = release_defaults;
         queue_settings.steamvr_separate_queue = separate;

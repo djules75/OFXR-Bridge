@@ -103,6 +103,7 @@ std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) no
 struct VideoMemoryStatus {
     std::uint64_t updated_ms{}, used_bytes{}, budget_bytes{};
 };
+inline constexpr int kAfwOnlyPacingMode=3; // native AFW terminal delivery, no OFXR transport
 struct RuntimeStatus {
     std::uint32_t process_id{};
     int pacing_mode{-1}; // effective session transport, independent of requested mode

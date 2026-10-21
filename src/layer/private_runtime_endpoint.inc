@@ -56,7 +56,7 @@ XrResult XRAPI_CALL private_runtime_get_proc(XrInstance instance,const char* nam
 }
 
 HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
-    if(!state->dispatch->steamvr_runtime)return S_FALSE;
+    if(state->afw_only || !state->dispatch->steamvr_runtime)return S_FALSE;
     state->uevr_application=GetModuleHandleW(L"UEVRBackend.dll")!=nullptr;
     auto original=state->dispatch;
     xrfg::PrivateOpenXrRuntime::Options options;

@@ -705,6 +705,7 @@ struct CompositionImageSlot;
 struct SessionState {
     bool uevr_application{}; // captured once at session creation, never inferred from game name
     bool steamvr_separate_queue{true}; // immutable session preference, tray-only
+    bool afw_only{}; // immutable session transport; does not disable Neural Rendering
     // D25 comparison policy: SteamVR's runtime gets its own binding queue.
     // Shared non-pacing support for both advanced NVIDIA routes.
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> binding_queue;
@@ -1519,7 +1520,20 @@ private:
     return state.graphics_binding == SessionGraphicsBinding::d3d12 && !state.luke_afw_enabled;
 }
 
+// Keep the user's OFXR selection untouched on disk. AFW-only is a startup
+// transport choice, not another generation backend or a Neural Rendering switch.
+[[nodiscard]] xrfg::embedded::Settings effective_session_settings(
+    const SessionState& state, xrfg::embedded::Settings requested) noexcept {
+    if(state.afw_only) {
+        const int pacing=requested.pacing_mode;
+        requested={};requested.enabled=false;requested.backend=1;
+        requested.motion_vectors=1;requested.pacing_mode=pacing;
+    }
+    return requested;
+}
+
 [[nodiscard]] bool runtime_binding_queue_requested(const SessionState& state) noexcept {
+    if(state.afw_only)return false;
     if (!state.dispatch->steamvr_runtime || state.graphics_binding != SessionGraphicsBinding::d3d12) return false;
     if (!state.d3d11_bridge && !state.vulkan_bridge && !state.luke_afw_enabled)
         return state.steamvr_separate_queue;
@@ -2400,7 +2414,7 @@ void configure_session_guide_capture(const SessionState& state) {
         !state.hybrid_requested && xrfg::embedded::afw_snapshot().desired.mode == 0;
     const bool enabled=xrfg::neural_rendering::status().enabled ||
         (!raw_luke_ofxr && state.dlss_motion_vectors && (!state.luke_fresh_only ||
-            xrfg::embedded::snapshot().desired.enabled || xrfg::embedded::afw_snapshot().desired.mode!=0));
+            (!state.afw_only && xrfg::embedded::snapshot().desired.enabled) || xrfg::embedded::afw_snapshot().desired.mode!=0));
     if((state.luke_fresh_only || raw_luke_ofxr) && !enabled)
         xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::configure_ngx_guide_capture(state.d3d12_queue.Get(),enabled);
@@ -2474,7 +2488,7 @@ XrResult XRAPI_CALL content_end_frame(XrSession session,const XrFrameEndInfo* in
     return observed_content_end_frame(find_session(session),info,{});
 }
 void bind_private_delivery_metrics(const std::shared_ptr<SessionState>& state) {
-    if(!state->private_runtime || !state->fps_overlay)return;
+    if((!state->private_runtime && !state->afw_only) || !state->fps_overlay)return;
     const std::weak_ptr<SessionState> weak=state;
     state->fps_overlay->set_private_delivery_end([weak](const XrFrameEndInfo* info,
         const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery) {
@@ -2641,7 +2655,7 @@ XrResult wait_presenter_runtime_frame(const std::shared_ptr<SessionState>& state
 }
 
 [[nodiscard]] bool presenter_forbidden(const SessionState& state) noexcept {
-    return state.luke_aux_budget_inline || state.luke_fresh_only || (state.graphics_binding == SessionGraphicsBinding::d3d11 &&
+    return state.afw_only || state.luke_aux_budget_inline || state.luke_fresh_only || (state.graphics_binding == SessionGraphicsBinding::d3d11 &&
         (state.single_threaded_d3d11 || state.split_frame_loop));
 }
 
@@ -3324,7 +3338,7 @@ create_d3d12_frame_generation_swapchains(
             state->session->nvidia_options,
             xrfg::bridge_flight_logger().gpu_instrumentation_enabled(),
             state->session->frame_generation_mode,
-            (state->session->graphics_binding_capabilities & 8ULL) != 0);
+            (state->session->graphics_binding_capabilities & 8ULL) != 0, state->session->afw_only);
         xrfg::bridge_flight_logger().end(
             initialize_token,
             xrfg::BridgeFlightOperation::synthesis_initialize,
@@ -3562,7 +3576,7 @@ create_d3d11_frame_generation_swapchains(
         adopt_synthetic_ring(generation, synthetic);
         generation->synthesizer = std::move(synthesizer);
         generation->d3d11_interop = std::move(interop);
-        if (session->luke_afw_enabled) {
+        if (session->luke_afw_enabled && !session->afw_only) {
             auto final_history =
                 std::make_shared<xrfg::D3D12SwapchainHistory>();
             auto temporal =
@@ -5358,7 +5372,11 @@ XrResult layer_create_session_impl(
     auto state = std::make_shared<SessionState>(dispatch);
     state->steamvr_separate_queue = GetPrivateProfileIntW(L"ofxr", L"steamvr_separate_queue", 1,
         (current_layer_directory() / L"ofxr_bridge.ini").c_str()) != 0;
-    const auto initial_control = xrfg::embedded::snapshot();
+    state->luke_afw_enabled=xrfg::native_ingress::luke_detected();
+    state->afw_only=state->luke_afw_enabled && GetPrivateProfileIntW(L"ofxr",L"afw_only",0,
+        (current_layer_directory()/L"ofxr_bridge.ini").c_str())!=0;
+    auto initial_control = xrfg::embedded::snapshot();
+    initial_control.desired=effective_session_settings(*state,initial_control.desired);
     state->optical_flow_backend = initial_control.desired.backend == 0
         ? xrfg::D3D12OpticalFlowBackend::fidelity_fx : xrfg::D3D12OpticalFlowBackend::nvidia;
     state->nvidia_new_route = initial_control.desired.backend >= 2;
@@ -5633,7 +5651,7 @@ XrResult layer_create_session_impl(
     // app/synthesis waits. The old optional binding queue now prepares PRIVATE
     // outputs; it cannot also be the final consumer's graphics binding.
     XrGraphicsBindingD3D12KHR delivery_binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
-    if(dispatch->steamvr_runtime && state->graphics_binding==SessionGraphicsBinding::d3d12 &&
+    if(!state->afw_only && dispatch->steamvr_runtime && state->graphics_binding==SessionGraphicsBinding::d3d12 &&
        forwarded_info && forwarded_info->next) {
         const auto* binding=static_cast<const XrBaseInStructure*>(forwarded_info->next);
         if(binding->type==XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
@@ -5813,7 +5831,7 @@ XrResult layer_create_session_impl(
     *session = created_session;
     xrfg::autonomous::publish_runtime_status(state->native_dlss_generated_frames,
         xrfg::autonomous::GenerationState::waiting, S_OK, state->vulkan_binding.device != VK_NULL_HANDLE,0,nullptr,
-        state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime);
+        state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only);
     return result;
 }
 
@@ -6312,7 +6330,7 @@ XrResult layer_wait_frame_impl(
         // the worker can hold it while waiting for GPU completion. Producer
         // ownership is resolved only at the release/EndFrame handoffs.
         if (!adaptive_nvidia_presenter && !(state->luke_fresh_only &&
-            !xrfg::embedded::snapshot().desired.enabled &&
+            (state->afw_only || !xrfg::embedded::snapshot().desired.enabled) &&
             xrfg::embedded::afw_snapshot().desired.mode==0)) {
             if (!state->d3d12_synthesis_queue)
                 static_cast<void>(wait_for_previous_session_synthesis(state,true));
@@ -7446,7 +7464,7 @@ XrResult release_swapchain_image_locked(
 
     const bool idle_luke = state->session->luke_fresh_only &&
         (!state->session->luke_source_filter_armed ||
-         (!xrfg::embedded::snapshot().desired.enabled &&
+         ((state->session->afw_only || !xrfg::embedded::snapshot().desired.enabled) &&
           xrfg::embedded::afw_snapshot().desired.mode == 0));
     if (idle_luke) { history.reset(); d3d11_interop.reset(); }
     // Worker handoff precedes call_mutex on both APIs. The synchronous/pipelined
@@ -7886,7 +7904,7 @@ XrResult release_swapchain_with_identity(
         return result;
     }
     if (worker_source && !afw_producer &&
-        (!state->session->luke_fresh_only || (state->session->luke_source_filter_armed && xrfg::embedded::snapshot().desired.enabled))) {
+        (!state->session->luke_fresh_only || (state->session->luke_source_filter_armed && !state->session->afw_only && xrfg::embedded::snapshot().desired.enabled))) {
         const XrResult worker_ready = wait_for_synthesis_handoff(state->session);
         if (XR_FAILED(worker_ready)) return worker_ready;
     }
@@ -12340,8 +12358,21 @@ void synthesis_worker_main(const std::shared_ptr<SessionState>& state) noexcept 
 XrResult end_frame_with_private_auxiliary(const std::shared_ptr<SessionState>& state,
     const XrFrameEndInfo* info,const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery) {
     const auto submit=[&](const XrFrameEndInfo* end) {
-        return delivery && state->private_runtime?state->private_runtime->end_frame(end,delivery):
-            state->dispatch->end_frame(state->handle,end);
+        if(delivery && state->private_runtime)return state->private_runtime->end_frame(end,delivery);
+        // AFW-only measures the exact native target after the Luke source clock
+        // has been replaced by the real runtime slot. Observation only: no
+        // director, extra GPU work, or synthetic refresh added to this estimate.
+        const auto entered=delivery?xrfg::interface_clock_ns():0;
+        const auto result=state->dispatch->end_frame(state->handle,end);
+        if(delivery) {
+            const auto returned=xrfg::interface_clock_ns();
+            LARGE_INTEGER qpc{};
+            const bool target=end && state->dispatch->convert_time_to_qpc &&
+                XR_SUCCEEDED(state->dispatch->convert_time_to_qpc(state->dispatch->instance,end->displayTime,&qpc));
+            delivery->completed(result==XR_SUCCESS && end && end->layerCount,entered,returned,
+                target?xrfg::interface_qpc_ns(qpc.QuadPart):0);
+        }
+        return result;
     };
     if (!state->luke_afw_enabled || !state->dispatch->steamvr_runtime ||
         state->graphics_binding!=SessionGraphicsBinding::d3d11 ||
@@ -14080,7 +14111,8 @@ HRESULT reconcile_multiplier_outputs(const std::shared_ptr<SessionState>& state)
 HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
                                bool force_startup_rendezvous = false,
                                const XrFrameEndInfo* current = nullptr) {
-    const auto control = xrfg::embedded::snapshot();
+    auto control = xrfg::embedded::snapshot();
+    control.desired=effective_session_settings(*state,control.desired);
     // A concurrent GUI enable cancels the Off-only startup request; ordinary
     // control application will take that revision on the next safe entry.
     if (force_startup_rendezvous && control.desired.enabled) return E_ABORT;
@@ -14814,7 +14846,7 @@ XrResult layer_end_frame_impl(
             state->generation_initialization_result.load(std::memory_order_relaxed),
             state->vulkan_binding.device != VK_NULL_HANDLE,
             state->interface_provider_error.load(std::memory_order_relaxed),&budget,
-            state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime); }
+            state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only); }
     } runtime_report_scope{state};
     configure_session_guide_capture(*state);
     const std::uint32_t diagnostic_capture_frame =

@@ -69,12 +69,12 @@ inline void apply_runtime_settings() {
 inline void publish_runtime_status(unsigned native_generated_frames=0,
     GenerationState generation=GenerationState::waiting, HRESULT initialization_result=S_OK,
     bool vulkan_detected=false, std::uint32_t provider_error=0,
-    const SwapchainBudgetStatus* swapchains=nullptr,int pacing_mode=-1,bool steamvr=false) {
+    const SwapchainBudgetStatus* swapchains=nullptr,int pacing_mode=-1,bool steamvr=false,bool afw_only=false) {
     const auto control=embedded::snapshot();
     const auto afw=embedded::afw_snapshot();
     const auto nr=neural_rendering::status();
     RuntimeStatus out{};
-    out.pacing_mode=pacing_mode;out.steamvr_runtime=steamvr;
+    out.pacing_mode=afw_only?kAfwOnlyPacingMode:pacing_mode;out.steamvr_runtime=steamvr;
     out.dlssg_preset_request=xrfg::standalone::process_dlssg_preset();
     if (swapchains) out.swapchains=*swapchains;
     out.process_id=GetCurrentProcessId();
@@ -149,6 +149,11 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
             ? GenerationState::unavailable : GenerationState::initialization_failed;
         snprintf(out.message,sizeof(out.message),"%s initialization failed (0x%08lX). Real-frame bypass; select another generator to retry.",
             out.generation_mode==2 ? "DLSS-G" : out.generation_mode==1 ? "FSR" : "OFXR",static_cast<unsigned long>(failure));
+    }
+    if(afw_only) {
+        generation=GenerationState::paused;out.generation_mode=0;out.motion_source=0;out.provider_error=0;
+        char detail[sizeof(out.message)]{};std::copy(std::begin(out.message),std::end(out.message),std::begin(detail));
+        snprintf(out.message,sizeof(out.message),"AFW only: direct OpenXR; OFXR disabled.%s%.130s",detail[0]?" ":"",detail);
     }
     out.generation_state=generation;
     report_runtime(out);

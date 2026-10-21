@@ -1,3 +1,13 @@
+## V622: AFW-only direct OpenXR and tray benchmark switch
+
+The tray adds **AFW only (Luke Ross, restart game)**: skip the private OFXR
+transport and temporal generation, retain AFW, DLSS5 and all three latency meters.
+**Benchmark mode** controls the existing `[benchmark] enabled` INI value live;
+turning it off stops the suite and on-demand sampling. Both default off.
+AFW-only is a local experiment; headset performance is pending. V619/V620 image
+fixes and normal V621 routing are retained.
+[Behavior and comparison](docs/V622_AFW_ONLY.md).
+
 ## V617 local candidate: Luke AFW without helper D12 context (2026-10-20)
 
 Owner selects V615 as base after correcting AERv2/Legacy comparison. Ghost V615
