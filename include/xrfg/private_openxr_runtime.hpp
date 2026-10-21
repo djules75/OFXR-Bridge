@@ -1,6 +1,8 @@
 #pragma once
 
 #include <memory>
+#include <vector>
+#include <optional>
 #include <functional>
 #include <cstdint>
 #include <windows.h>
@@ -124,6 +126,9 @@ public:
     XrResult wait_image(XrSwapchain,const XrSwapchainImageWaitInfo*);
     XrResult release_image(XrSwapchain,const XrSwapchainImageReleaseInfo*);
     [[nodiscard]] bool owns(XrSwapchain) const;
+    struct SwapchainMapping { XrSwapchain handle{}, native{}; };
+    // CPU-only inventory; busy transport returns no partial snapshot.
+    [[nodiscard]] std::optional<std::vector<SwapchainMapping>> native_swapchain_mapping() const;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

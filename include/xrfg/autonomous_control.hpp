@@ -76,6 +76,7 @@ struct Settings {
     float menu_offset_y{};
     std::array<GenerationPreferences, kGenerationProfileCount> generation_profiles{};
     bool profiles_initialized{}; // legacy flat profile migration
+    bool luke_shared_swapchains{}; // startup-only, compatible final native outputs; SteamVR
     bool operator==(const Settings&) const = default;
 };
 
@@ -95,7 +96,8 @@ struct SwapchainBudgetStatus {
     std::uint32_t current{}, synthetic{}, auxiliary_outputs{}, private_snapshots{};
     std::uint32_t fps{}, meter{}, menu{}, refused{}, total{};
     bool fallback{}, details_truncated{};
-    char details[1024]{}; // observed app handles/roles/dimensions; no stack walk
+    char details[1024]{}; // problem app handles/roles/dimensions; no stack walk
+    std::uint32_t unassigned_native{}; // observed endpoint without an assigned owner
 };
 std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) noexcept;
 
@@ -135,6 +137,7 @@ struct RuntimeStatus {
     SwapchainBudgetStatus swapchains{};
     unsigned dlssg_preset_request{}; // frozen process-start profile, not active NGX model proof
     VideoMemoryStatus video_memory{};
+    bool luke_shared_swapchains{}, luke_shared_swapchains_forced{}; // active session, not requested next launch
 };
 enum class BenchmarkPhase : unsigned { idle, applying, running, complete, stopped, error, restart_required };
 struct BenchmarkStatus {

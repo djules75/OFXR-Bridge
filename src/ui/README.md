@@ -31,7 +31,7 @@ Vulkan manifests. The OpenXR layer identity is `XR_APILAYER_OFXRAutonomous`,
 distinct from the original OFXR tray. The DLL retains the existing component
 filename for build and packaging continuity.
 
-`%LOCALAPPDATA%/OFXR Autonomous/autonomous.ini` owns renderer, AFW, NR, overlay
+`%LOCALAPPDATA%/ofxr-bridge/ofxr-bridge.ini` owns renderer, AFW, NR, overlay
 and logging preferences. `tray.ini` in that directory retains activation/API
 bridge and pause-key preferences. The version cache and manifest cleanup stay
 inside this profile's `RuntimeLayer` directory. Manifest filenames use the

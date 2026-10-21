@@ -69,12 +69,14 @@ inline void apply_runtime_settings() {
 inline void publish_runtime_status(unsigned native_generated_frames=0,
     GenerationState generation=GenerationState::waiting, HRESULT initialization_result=S_OK,
     bool vulkan_detected=false, std::uint32_t provider_error=0,
-    const SwapchainBudgetStatus* swapchains=nullptr,int pacing_mode=-1,bool steamvr=false,bool afw_only=false) {
+    const SwapchainBudgetStatus* swapchains=nullptr,int pacing_mode=-1,bool steamvr=false,bool afw_only=false,
+    bool luke_shared=false,bool luke_shared_forced=false) {
     const auto control=embedded::snapshot();
     const auto afw=embedded::afw_snapshot();
     const auto nr=neural_rendering::status();
     RuntimeStatus out{};
     out.pacing_mode=afw_only?kAfwOnlyPacingMode:pacing_mode;out.steamvr_runtime=steamvr;
+    out.luke_shared_swapchains=luke_shared;out.luke_shared_swapchains_forced=luke_shared_forced;
     out.dlssg_preset_request=xrfg::standalone::process_dlssg_preset();
     if (swapchains) out.swapchains=*swapchains;
     out.process_id=GetCurrentProcessId();

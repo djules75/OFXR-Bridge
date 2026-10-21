@@ -36,6 +36,15 @@ void codec() {
         passive.motion && !passive.depth && passive.last_seen_ms!=0,
         "passive observation distinguishes motion from depth without activating guide capture");
     xrfg::autonomous::Settings desired;
+    require(!desired.luke_shared_swapchains,"Luke shared publication is opt-in");
+    auto shared=desired;shared.luke_shared_swapchains=true;
+    auto shared_saved=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(shared));
+    require(shared_saved.luke_shared_swapchains,"Luke startup choice roundtrips in canonical INI");
+    xrfg::autonomous::select_generation(shared_saved,0,3);
+    require(shared_saved.luke_shared_swapchains,"startup choice is global, independent of generation profiles");
+    auto concurrent_shared=desired;concurrent_shared.enabled=false;
+    const auto shared_merged=xrfg::autonomous::merge_changes(concurrent_shared,desired,shared);
+    require(shared_merged.luke_shared_swapchains && !shared_merged.enabled,"startup choice merge preserves concurrent edits");
     require(desired.pacing_mode==2,"Single director experiment defaults OFF");
     for(int mode=0;mode<3;++mode) {
         auto choice=desired;choice.pacing_mode=mode;

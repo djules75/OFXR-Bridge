@@ -1013,5 +1013,12 @@ XrResult PrivateOpenXrRuntime::release_image(XrSwapchain handle,const XrSwapchai
     if(chain.acquired.empty() || !chain.images[chain.acquired.front()].waited)return XR_ERROR_CALL_ORDER_INVALID;
     auto index=chain.acquired.front();chain.acquired.pop_front();chain.images[index].acquired=false;chain.images[index].waited=false;++chain.images[index].generation;chain.released=index;s.changed.notify_all();return XR_SUCCESS;
 }
+std::optional<std::vector<PrivateOpenXrRuntime::SwapchainMapping>> PrivateOpenXrRuntime::native_swapchain_mapping() const {
+    std::unique_lock lock(impl_->mutex,std::try_to_lock);
+    if(!lock.owns_lock())return std::nullopt;
+    std::vector<SwapchainMapping> result;result.reserve(impl_->chains.size());
+    for(const auto& [handle,chain]:impl_->chains)result.push_back({handle,Impl::destination(*chain).handle});
+    return result;
+}
 bool PrivateOpenXrRuntime::owns(XrSwapchain handle) const {std::scoped_lock lock(impl_->mutex);return impl_->chains.contains(handle);}
 } // namespace xrfg

@@ -13,8 +13,11 @@
 static bool framework_session_probe{};
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
-    if(route.starts_with("afw-only"))return afw_only_session_test(route,argc>2?argv[2]:nullptr);
-    const bool outlaws_budget=route=="outlaws-budget";if(outlaws_budget)route="d11-ref";
+    if(route.starts_with("afw-only") || route=="luke-shared-session")return afw_only_session_test(route,argc>2?argv[2]:nullptr);
+    const bool shared_budget=route=="luke-shared-budget",unshared_budget=route=="luke-unshared-budget";
+    const bool outlaws_budget=route=="outlaws-budget";
+    const bool publication_budget=outlaws_budget || shared_budget || unshared_budget;
+    if(publication_budget)route="d11-ref";
     const bool benchmark_sequence=route=="benchmark-sequence";
     if(benchmark_sequence)route="solo-djules3";
     const bool off_session_probe=route=="off-pacing-session";if(off_session_probe)route="session";
@@ -248,17 +251,22 @@ int main(int argc,char** argv) {
         state->nvidia_new_route=false;state->djules_route=false;
     }
     if(route=="hybrid"){state->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::fidelity_fx;state->hybrid_requested=true;state->nvidia_options.hybrid=true;state->nvidia_new_route=false;}
-    if(outlaws_budget){state->luke_afw_enabled=true;state->luke_outlaws_preframe=true;}
+    if(publication_budget) {
+        state->luke_afw_enabled=true;state->luke_outlaws_preframe=outlaws_budget;
+        state->luke_shared_swapchains=shared_budget;
+        state->graphics_binding_capabilities|=8ULL;
+    }
     if(sole)ok(apply_embedded_control(state),"initial settings match the real public route selection");
     else state->control_revision=xrfg::embedded::snapshot().revision;
     {std::scoped_lock lock(g_state_mutex);g_sessions[state->handle]=state;g_instances[dispatch->instance]=dispatch;}
     ok(install_private_runtime(state),"install real SteamVR private dispatch");
     f.transport=state->private_runtime;state->uevr_application=pooled;
     if(pooled)f.native_chain_limit=4; // two app chains plus two physical publication sinks
-    if(outlaws_budget) {
+    if(publication_budget) {
         f.native_chain_limit=16;
+        const unsigned source_count=unshared_budget?2:3;
         std::array<XrSwapchain,3> app{};
-        for(unsigned n=0;n<3;++n) {
+        for(unsigned n=0;n<source_count;++n) {
             XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};ci.width=64;ci.height=n==2?40:32;
             ci.arraySize=ci.faceCount=ci.sampleCount=ci.mipCount=1;ci.format=DXGI_FORMAT_R8G8B8A8_UNORM;
             ci.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
@@ -267,13 +275,20 @@ int main(int argc,char** argv) {
             std::vector<XrSwapchainImageD3D11KHR> images(count,{XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
             xr_ok(layer_enumerate_swapchain_images_impl(app[n],count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),"Outlaws initial complete enum");
             auto chain=find_swapchain(app[n]);
+            if(!outlaws_budget)check(ensure_frame_generation(chain),"ordinary deferred Luke output initialization");
             std::fprintf(stderr,"OUTLAWS source%u: native=%zu generation=%d budget=%d\n",n,f.chains.size(),bool(chain->frame_generation),bool(state->generation_budget_exhausted));
             check(chain->frame_generation && chain->d3d12_history && !state->generation_budget_exhausted,
                 "Outlaws eager startup exhausted16 native chains and discarded already-ready eyes");
         }
-        check(f.chains.size()==6,"three original chains plus one publication sink per source");
+        const auto expected_native=source_count*(unshared_budget?6U:2U);
+        check(f.chains.size()==expected_native,"startup flag preserves old native allocation or opts into one sink per source");
+        state->next_swapchain_inventory_ms=0;
+        const auto budget=luke_swapchain_inventory(state,nullptr);
+        check(budget.total==f.chains.size() && budget.application==source_count &&
+            budget.current+budget.synthetic==expected_native-source_count && !budget.unassigned_native,
+            "inventory deduplicates private output tokens into actual native owners");
         seal_outlaws_initialization(*state);
-        for(auto handle:app)check(find_swapchain(handle)->frame_generation!=nullptr,"startup seal lost warmed eye outputs");
+        for(auto handle:app)if(handle)check(find_swapchain(handle)->frame_generation!=nullptr,"startup seal lost warmed eye outputs");
         xr_ok(f.transport->start(),"start Outlaws native publication consumer");
         std::vector<unsigned> expected_left,expected_right;
         for(unsigned slot:{0U,1U,2U,3U,4U,0U}) {
@@ -295,10 +310,10 @@ int main(int argc,char** argv) {
             f.begin_virtual();xr_ok(f.transport->end_frame(&end),"each independent warmed output reaches native XR");
         }
         f.wait_count(6);xr_ok(f.transport->drain(),"all Outlaws warmed outputs retire");
-        check(f.pixels==expected_left && f.right_pixels==expected_right && f.chains.size()==6,
+        check(f.pixels==expected_left && f.right_pixels==expected_right && f.chains.size()==expected_native,
             "Outlaws shared sinks overwrite another eye/frame or allocate new native handles");
         release_session_generation_budget(state);
-        for(auto handle:app)xr_ok(layer_destroy_swapchain_impl(handle),"Outlaws original chain cleanup");
+        for(auto handle:app)if(handle)xr_ok(layer_destroy_swapchain_impl(handle),"Outlaws original chain cleanup");
         check(f.chains.empty(),"Outlaws pooled publications leaked after all owners retired");
         {std::scoped_lock lock(g_state_mutex);g_sessions.clear();g_instances.clear();}
         std::puts("Outlaws actual D11/private endpoint startup under16: three app sources, six native handles, preserved independent output storage and full cleanup PASS");return 0;

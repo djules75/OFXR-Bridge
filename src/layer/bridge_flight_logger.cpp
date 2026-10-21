@@ -203,7 +203,7 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     if (length == 0 || length >= buffer.size()) {
         return {};
     }
-    return std::filesystem::path(buffer.data()) / L"OFXR Bridge" / L"Logs";
+    return std::filesystem::path(buffer.data()) / L"ofxr-bridge" / L"Logs";
 }
 
 [[nodiscard]] std::wstring log_file_name() {

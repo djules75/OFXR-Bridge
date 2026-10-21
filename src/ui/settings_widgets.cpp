@@ -373,6 +373,13 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     ImGui::BeginDisabled(active || !permitted || !state.connected || !state.runtime.luke_detected);
     const bool luke=ImGui::Button("Test Luke Ross");
     ImGui::EndDisabled();
+    if(ImGui::Button("Open benchmark folder")) {
+        const auto folder=configuration_path().parent_path()/L"Benchmarks";
+        std::error_code error;std::filesystem::create_directories(folder,error);
+        ui.benchmark_folder_failed=bool(error) || reinterpret_cast<INT_PTR>(ShellExecuteW(
+            GetActiveWindow(),L"open",folder.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32;
+    }
+    if(ui.benchmark_folder_failed)ImGui::TextWrapped("Could not open the benchmark folder.");
     if(optical || complete || luke) {
         ui.dirty|=changed;finish_settings_widget_edits(ui);
         if(!ui.dirty) static_cast<void>(start_benchmark(complete,luke));
@@ -443,13 +450,10 @@ static void luke_swapchain_budget(const Snapshot& state) {
     if (!state.connected || !b.updated_ms || GetTickCount64()-b.updated_ms>3000) {
         ImGui::TextDisabled("Waiting for a current Luke session inventory.");return;
     }
-    ImGui::Text("Known XR handles: %u",b.total);
-    ImGui::TextWrapped("Application: %u (eyes %u, auxiliary %u, depth %u, unclassified %u)",
-        b.application,b.projection,b.auxiliary,b.depth,b.other);
-    ImGui::TextWrapped("OFXR: current / AFW scratch %u, synthetic %u, auxiliary outputs %u",
-        b.current,b.synthetic,b.auxiliary_outputs);
-    ImGui::TextWrapped("UI: FPS %u, meter %u, F10 %u. Retained private auxiliary images: %u (no XR handles).",
-        b.fps,b.meter,b.menu,b.private_snapshots);
+    ImGui::Text("Total swapchains: %u",b.total);
+    ImGui::Text("OFXR: %u",b.current+b.synthetic+b.auxiliary_outputs+b.fps+b.meter+b.menu);
+    ImGui::Text("Game / Luke Ross: %u",b.application);
+    if(b.unassigned_native)ImGui::Text("Other / unclassified: %u",b.unassigned_native);
     if (const auto warning=swapchain_budget_warning(b);!warning.empty()) {
         ImGui::TextColored(ImVec4(1.F,.75F,.25F,1.F),"Warning");
         ImGui::TextWrapped("%.*s",static_cast<int>(warning.size()),warning.data());
@@ -472,7 +476,7 @@ static void luke_swapchain_budget(const Snapshot& state) {
         details.remove_prefix(newline+1);
     }
     if (b.details_truncated) ImGui::TextDisabled("Additional app handles omitted from this panel.");
-    ImGui::TextWrapped("Counts cover this session's handles visible to OFXR. OpenXR cannot enumerate hidden allocations inside other layers or the runtime, or identify their module owner.");
+    if(b.unassigned_native)ImGui::TextColored(ImVec4(1.F,.75F,.25F,1.F),"Warning: some native swapchains have no assigned owner.");
 }
 
 bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& state,
@@ -504,6 +508,23 @@ bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& state,
             ImGui::BeginChild("Framewarp", ImVec2(0, 0));
             ImGui::PushItemWidth(std::clamp(ImGui::GetContentRegionAvail().x * .56F, 180.F, 580.F));
             changed |= framewarp(ui.draft, state);
+            const bool forced=state.connected && state.runtime.luke_shared_swapchains_forced;
+            const bool unavailable=state.connected && (!state.runtime.steamvr_runtime ||
+                state.runtime.pacing_mode==kAfwOnlyPacingMode || !state.runtime.luke_detected);
+            bool shared=forced || ui.draft.luke_shared_swapchains;
+            ImGui::BeginDisabled(forced || unavailable);
+            if(ImGui::Checkbox("Swapchain budget fix",&shared)) {
+                ui.draft.luke_shared_swapchains=shared;changed=true;
+            }
+            ImGui::EndDisabled();
+            if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("SteamVR: compatible outputs of each eye share their final swapchain. Private work images stay separate. Saved for the next game start.");
+            ImGui::SameLine();ImGui::PushStyleColor(ImGuiCol_Text,ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("(required for some games, e.g. SW Outlaws)");ImGui::PopStyleColor();
+            ImGui::TextDisabled("Requires restarting the game.");
+            if(forced)ImGui::TextDisabled("Required for Outlaws.");
+            else if(!unavailable && state.connected && state.runtime.luke_detected &&
+                ui.draft.luke_shared_swapchains!=state.runtime.luke_shared_swapchains)
+                ImGui::TextDisabled("Restart game to apply.");
             ImGui::Separator();
             if (ImGui::CollapsingHeader("Details",ImGuiTreeNodeFlags_NoAutoOpenOnLog)) luke_swapchain_budget(state);
             ImGui::PopItemWidth();

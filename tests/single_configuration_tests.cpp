@@ -9,6 +9,9 @@
 int main() {
     using namespace xrfg::autonomous;
     const auto root=std::filesystem::temp_directory_path()/(L"ofxr-single-config-"+std::to_wstring(GetCurrentProcessId()));
+    if(configuration_path().parent_path().filename()!=L"ofxr-bridge") {
+        std::cerr<<"Stable shared data root must be ofxr-bridge\n";return 1;
+    }
     SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",root.c_str());
     const auto check=[](bool ok,const char* why){if(!ok)throw std::runtime_error(why);};
     try {

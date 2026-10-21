@@ -336,7 +336,7 @@ void diagnose(const char *format, ...) {
     wchar_t local[32768]{};
     GetEnvironmentVariableW(L"LOCALAPPDATA", local, 32768);
     if (!*local) return;
-    const auto path = std::filesystem::path(local) / L"OFXR Autonomous" / L"NGX" / L"ofxr-native-dlssg.log";
+    const auto path = std::filesystem::path(local) / L"ofxr-bridge" / L"NGX" / L"ofxr-native-dlssg.log";
     FILE *file = _wfsopen(path.c_str(), L"ab", _SH_DENYNO);
     if (!file) return;
     std::fprintf(file, "%llu pid=%lu ", GetTickCount64(), GetCurrentProcessId());
@@ -368,7 +368,7 @@ HRESULT acquire_ngx(ID3D12Device *d) {
     }
     wchar_t local[32768]{};
     GetEnvironmentVariableW(L"LOCALAPPDATA", local, 32768);
-    auto logs = *local ? std::filesystem::path(local) / L"OFXR Autonomous" / L"NGX" : dir / L"NGX";
+    auto logs = *local ? std::filesystem::path(local) / L"ofxr-bridge" / L"NGX" : dir / L"NGX";
     std::filesystem::create_directories(logs);
     const auto result = NVSDK_NGX_D3D12_Init_with_ProjectID("2152e8d8-a3d7-4d4c-88a5-37f740f81036",
                                                             NVSDK_NGX_ENGINE_TYPE_CUSTOM,
@@ -450,7 +450,7 @@ UINT recover_direct(ID3D12Device* device, NVSDK_NGX_Parameter* private_caps) {
             const auto dir = module_directory();
             NgxFeaturePaths search(nullptr,dir.wstring());
             wchar_t local[32768]{}; GetEnvironmentVariableW(L"LOCALAPPDATA", local, 32768);
-            const auto logs = *local ? std::filesystem::path(local) / L"OFXR Autonomous" / L"NGX" : dir / L"NGX";
+            const auto logs = *local ? std::filesystem::path(local) / L"ofxr-bridge" / L"NGX" : dir / L"NGX";
             NVSDK_NGX_FeatureDiscoveryInfo info{};
             info.SDKVersion = NVSDK_NGX_Version_API; info.FeatureID = NVSDK_NGX_Feature_FrameGeneration;
             info.Identifier.IdentifierType = NVSDK_NGX_Application_Identifier_Type_Application_Id;

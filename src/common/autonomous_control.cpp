@@ -76,7 +76,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465852;
-constexpr std::uint32_t kAbi = 61101;
+constexpr std::uint32_t kAbi = 62401;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -187,7 +187,7 @@ public:
             identity ^= static_cast<std::uint64_t>(std::towlower(character));
             identity *= 1099511628211ULL;
         }
-        const auto prefix = L"Local\\OFXRAutonomousV611-" + std::to_wstring(identity);
+        const auto prefix = L"Local\\OFXRBridgeV624-" + std::to_wstring(identity);
         mutex = CreateMutexW(nullptr, FALSE, (prefix + L"-mutex").c_str());
         if (!mutex) return;
         const DWORD waited = WaitForSingleObject(mutex, 2000);
@@ -363,6 +363,7 @@ Settings parse_settings(std::string_view text) {
         READ_FIELD(nr_compare_zoom) READ_FIELD(nr_compare_swap)
         READ_FIELD(diagnostics) READ_FIELD(benchmark_csv) READ_FIELD(overlay_position)
         READ_FIELD(menu_scale) READ_FIELD(menu_offset_x) READ_FIELD(menu_offset_y)
+        READ_FIELD(luke_shared_swapchains)
 #undef READ_FIELD
     }
     if(!pacing_seen && legacy_single_director>=0)value.pacing_mode=legacy_single_director?1:2;
@@ -399,6 +400,7 @@ std::string serialize_settings(const Settings& settings) {
     WRITE_FIELD(nr_compare_zoom) WRITE_FIELD(nr_compare_swap)
     WRITE_FIELD(diagnostics) WRITE_FIELD(benchmark_csv) WRITE_FIELD(overlay_position)
     WRITE_FIELD(menu_scale) WRITE_FIELD(menu_offset_x) WRITE_FIELD(menu_offset_y)
+    WRITE_FIELD(luke_shared_swapchains)
 #undef WRITE_FIELD
     for (std::size_t i = 0; i < profile_sections.size(); ++i) {
         output << '\n' << profile_sections[i] << '\n';
@@ -426,10 +428,10 @@ std::filesystem::path configuration_path() {
         throw std::runtime_error("Local application data is unavailable");
     std::filesystem::path result(local);
     CoTaskMemFree(local);
-    return result / L"OFXR Autonomous" / L"ofxr-bridge.ini";
+    return result / L"ofxr-bridge" / L"ofxr-bridge.ini";
 #else
     const auto* local = std::getenv("XDG_CONFIG_HOME");
-    return std::filesystem::path(local ? local : ".") / "OFXR Autonomous" / "ofxr-bridge.ini";
+    return std::filesystem::path(local ? local : ".") / "ofxr-bridge" / "ofxr-bridge.ini";
 #endif
 }
 
@@ -520,6 +522,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
     MERGE_FIELD(nr_compare_zoom) MERGE_FIELD(nr_compare_swap)
     MERGE_FIELD(diagnostics) MERGE_FIELD(benchmark_csv) MERGE_FIELD(overlay_position)
     MERGE_FIELD(menu_scale) MERGE_FIELD(menu_offset_x) MERGE_FIELD(menu_offset_y)
+    MERGE_FIELD(luke_shared_swapchains)
 #undef MERGE_FIELD
     restore_preferences(current);
     return sanitize(current);
@@ -943,6 +946,7 @@ bool interface_generation_active(const Snapshot& s) noexcept {
 std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) noexcept {
     if (value.fallback) return "Swapchain fallback: auxiliary allocation refused; synchronous Luke delivery is active until the game restarts.";
     if (value.refused) return "Swapchain allocation refused: one or more game outputs could not obtain generation resources.";
+    if (value.unassigned_native) return "Unclassified native swapchain: an observed OpenXR output has no assigned owner. See Details.";
     if (value.other) return "Unclassified app swapchain: not observed in an eye or auxiliary layer. See handle and dimensions below.";
     return {};
 }

@@ -849,6 +849,15 @@ void pooled_publication(bool reuse=false,bool d12=true) {
     for(unsigned eye=0;eye<2;++eye)for(auto& handle:outputs[eye])
         xr_ok(f.transport->create_swapchain(&info,&handle,D3D12_RESOURCE_STATE_RENDER_TARGET,1,reinterpret_cast<XrSwapchain>(eye+400)),"four independent private buffers fit one real sink per eye");
     check(f.chains.size()==2,"eight generated rings consume exactly two native handles");
+    auto mappings=f.transport->native_swapchain_mapping();
+    for(unsigned retry=0;!mappings && retry<1000;++retry){std::this_thread::yield();mappings=f.transport->native_swapchain_mapping();}
+    check(mappings && mappings->size()==8,"inventory preserves all private buffer identities");
+    std::vector<XrSwapchain> native;
+    for(const auto& m:*mappings) {
+        check(f.chains.contains(m.native),"inventory reports an actual downstream native handle");
+        if(std::find(native.begin(),native.end(),m.native)==native.end())native.push_back(m.native);
+    }
+    check(native.size()==2,"eight logical outputs map to two native swapchains");
     XrSwapchain incompatible{};info.width=2;
     check(f.transport->create_swapchain(&info,&incompatible,D3D12_RESOURCE_STATE_RENDER_TARGET,1,reinterpret_cast<XrSwapchain>(400))==XR_ERROR_LIMIT_REACHED,"incompatible extent never aliases existing publication sink");
     info.width=1;check(f.chains.size()==2,"failed extra sink leaves working pools intact");
@@ -883,6 +892,9 @@ void pooled_publication(bool reuse=false,bool d12=true) {
     check(f.chains.size()==2,"shared publication survives other ring destruction");
     xr_ok(f.transport->destroy_swapchain(left[3]),"last left ring retires its native sink");check(f.chains.size()==1,"one eye publication released on final owner");
     for(auto handle:outputs[1])xr_ok(f.transport->destroy_swapchain(handle),"destroy right rings");check(f.chains.empty(),"all pooled native handles released");
+    auto retired=f.transport->native_swapchain_mapping();
+    for(unsigned retry=0;!retired && retry<1000;++retry){std::this_thread::yield();retired=f.transport->native_swapchain_mapping();}
+    check(retired && retired->empty(),"retired publications leave no stale native inventory");
     // A fresh generation after a preset switch must not reuse a retired pool.
     XrSwapchain rebuilt{};xr_ok(f.transport->create_swapchain(&info,&rebuilt,D3D12_RESOURCE_STATE_RENDER_TARGET,1,reinterpret_cast<XrSwapchain>(400)),"rebuild retired pool");
     check(f.chains.size()==1,"preset rebuild creates one fresh sink");f.write(rebuilt,77);f.expected_views=1;

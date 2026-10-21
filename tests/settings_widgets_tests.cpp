@@ -306,6 +306,8 @@ void actual_widgets() {
         headset.rendered_text.find("OpenXR swapchain limit reached")==std::string::npos,
         "actual settings surfaces clear the warning after a successful retry");
     status=snapshot().runtime;status.swapchains.updated_ms=GetTickCount64();
+    status.luke_detected=true;status.steamvr_runtime=true;status.pacing_mode=2;
+    status.swapchains.current=9;status.swapchains.menu=1;
     status.swapchains.fallback=true;status.swapchains.application=3;status.swapchains.total=14;
     status.swapchains.auxiliary_outputs=1;status.swapchains.private_snapshots=3;
     std::strcpy(status.swapchains.details,"App UNCLASSIFIED: 0x823, 16x16, array 1, format 28");
@@ -314,7 +316,7 @@ void actual_widgets() {
     tray.draw(true);headset.draw(true);
     for(const auto* view:{&tray,&headset}) {
         require(view->rendered_text.find("Framewarp mode")!=std::string::npos &&
-            view->rendered_text.find("Known XR handles:")==std::string::npos,
+            view->rendered_text.find("Total swapchains:")==std::string::npos,
             "Luke controls remain above collapsed swapchain Details");
         require(view->rendered_text.find("Swapchain fallback")!=std::string::npos,
             "status warns even with ownership Details collapsed");
@@ -322,14 +324,26 @@ void actual_widgets() {
     tray.activate("/Framewarp_","Details");headset.activate("/Framewarp_","Details");
     tray.draw(true);headset.draw(true);
     for(const auto* view:{&tray,&headset}) {
-        require(view->rendered_text.find("Framewarp mode")<view->rendered_text.find("Known XR handles:"),
+        require(view->rendered_text.find("Framewarp mode")<view->rendered_text.find("Total swapchains:"),
             "expanded swapchain details follow the Luke controls");
         require(view->rendered_text.find("Swapchain fallback")!=std::string::npos,
             "desktop/headset status and warning expose actual fallback");
-        require(view->rendered_text.find("Known XR handles: 14")!=std::string::npos &&
+        require(view->rendered_text.find("Total swapchains: 14")!=std::string::npos &&
             view->rendered_text.find("0x823")!=std::string::npos,
             "Luke tab exposes handle count and unknown app identity");
     }
+    require(tray.rendered_text.find("OFXR: 11")!=std::string::npos &&
+        tray.rendered_text.find("Game / Luke Ross: 3")!=std::string::npos &&
+        tray.rendered_text.find("Counts cover")==std::string::npos,"concise owner split with no healthy boilerplate");
+    require(tray.rendered_text.find("Swapchain budget fix")<tray.rendered_text.find("Total swapchains:"),"startup flag is above Details");
+    tray.activate("/Framewarp_","Swapchain budget fix");tray.draw(true);
+    require(snapshot().desired.luke_shared_swapchains && !snapshot().runtime.luke_shared_swapchains &&
+        tray.rendered_text.find("Restart game to apply.")!=std::string::npos,"flag saves next startup without claiming a live change");
+    status.luke_shared_swapchains=true;status.luke_shared_swapchains_forced=true;report_runtime(status);tray.draw(true);
+    tray.activate("/Framewarp_","Swapchain budget fix");
+    require(snapshot().desired.luke_shared_swapchains,"required Outlaws publication cannot be disabled");
+    tray.draw(true);require(tray.rendered_text.find("Required for Outlaws.")!=std::string::npos,"forced Outlaws policy is explicit");
+    status.luke_shared_swapchains_forced=false;report_runtime(status);
     auto quality_settings=snapshot().desired;quality_settings.afw_mode=3;
     require(request(quality_settings),"select Combined for live quality control");
     tray.draw();tray.draw();status.afw_shading_rate=0;report_runtime(status);
@@ -396,7 +410,7 @@ void automatic_buttons() {
     runtime.dlssg_preset_request=3;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
     const auto prior=snapshot().desired;
     Context tray({690,900},false);tray.draw();tray.draw();tray.select_tab("Display");tray.draw(true);
-    for(const auto label:{"Tests without vectors","Complete tests","Test Luke Ross","Output CSV"})
+    for(const auto label:{"Tests without vectors","Complete tests","Test Luke Ross","Output CSV","Open benchmark folder"})
         require(tray.rendered_text.find(label)!=std::string::npos,"All automatic controls are in Display");
     require(tray.rendered_text.find("31 optical or 49 complete")!=std::string::npos &&
         tray.rendered_text.find("Luke Ross: 39 tests")!=std::string::npos,

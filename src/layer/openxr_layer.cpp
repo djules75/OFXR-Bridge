@@ -906,6 +906,7 @@ struct SessionState {
     // Luke AFW capability is independent of the currently selected AFW mode.
     // The latter may be Off while ordinary OFXR generation remains enabled.
     bool luke_afw_enabled{};
+    bool luke_shared_swapchains{}; // latched before native session creation; never live-reconfigured
     // Outlaws' initial VR texture constructor excludes the native producer.
     // Spend cold setup there, on its original SINGLETHREADED D11 owner, and
     // permanently close that window before the first application Wait/Begin.
@@ -2997,7 +2998,8 @@ struct CreatedPrivateSwapchain {
     const XrSwapchainCreateInfo& create_info,
     CreatedPrivateSwapchain* output,
     XrResult* refusal = nullptr,
-    D3D12_RESOURCE_STATES image_state=D3D12_RESOURCE_STATE_COMMON) {
+    D3D12_RESOURCE_STATES image_state=D3D12_RESOURCE_STATE_COMMON,
+    bool generation_output=false) {
     if (refusal != nullptr) {
         *refusal = XR_SUCCESS;
     }
@@ -3011,13 +3013,16 @@ struct CreatedPrivateSwapchain {
     // exhaust SteamVR before the third source and retire the warmed eyes.
     // Keep every private GPU output independent; only its final native sink is
     // shared by compatible outputs of THIS source, through the existing FIFO.
-    const bool outlaws_publication=state->session->private_runtime && state->session->luke_outlaws_preframe &&
+    // Other Luke games opt into generation-output sharing at session startup;
+    // auxiliary outputs keep their existing independent publication contract.
+    const bool luke_publication=state->session->private_runtime && state->session->luke_afw_enabled &&
+        (state->session->luke_outlaws_preframe || (generation_output && state->session->luke_shared_swapchains)) &&
         !create_info.next && !create_info.createFlags && create_info.arraySize==1 && create_info.faceCount==1 &&
         (create_info.usageFlags&XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) &&
         !(create_info.usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
     XrResult result = state->session->private_runtime
         ? state->session->private_runtime->create_swapchain(&create_info,&handle,image_state,1,
-            (state->pooled_publication || outlaws_publication)?state->handle:XR_NULL_HANDLE)
+            (state->pooled_publication || luke_publication)?state->handle:XR_NULL_HANDLE)
         : dispatch->create_swapchain(state->session->handle,&create_info,&handle);
     if (XR_FAILED(result) || handle == XR_NULL_HANDLE) {
         // Which error the runtime gave separates a budget it will not exceed
@@ -3131,7 +3136,7 @@ void destroy_current_ring(
     for (std::size_t slot = 0; slot < slot_count; ++slot) {
         if (!create_private_swapchain(
                 state, create_info, &output->slots[slot], refusal,
-                state->session->d3d12_synthesis_queue?D3D12_RESOURCE_STATE_COMMON:D3D12_RESOURCE_STATE_RENDER_TARGET)) {
+                state->session->d3d12_synthesis_queue?D3D12_RESOURCE_STATE_COMMON:D3D12_RESOURCE_STATE_RENDER_TARGET,true)) {
             return false;
         }
         const CreatedPrivateSwapchain& created = output->slots[slot];
@@ -5384,6 +5389,7 @@ XrResult layer_create_session_impl(
     state->luke_afw_enabled=xrfg::native_ingress::luke_detected();
     state->afw_only=state->luke_afw_enabled && GetPrivateProfileIntW(L"ofxr",L"afw_only",0,
         (current_layer_directory()/L"ofxr_bridge.ini").c_str())!=0;
+    state->luke_shared_swapchains=xrfg::autonomous::snapshot().desired.luke_shared_swapchains;
     auto initial_control = xrfg::embedded::snapshot();
     initial_control.desired=effective_session_settings(*state,initial_control.desired);
     state->optical_flow_backend = initial_control.desired.backend == 0
@@ -5840,7 +5846,9 @@ XrResult layer_create_session_impl(
     *session = created_session;
     xrfg::autonomous::publish_runtime_status(state->native_dlss_generated_frames,
         xrfg::autonomous::GenerationState::waiting, S_OK, state->vulkan_binding.device != VK_NULL_HANDLE,0,nullptr,
-        state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only);
+        state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only,
+        state->private_runtime && state->luke_afw_enabled && (state->luke_shared_swapchains || state->luke_outlaws_preframe),
+        state->private_runtime && state->luke_outlaws_preframe);
     return result;
 }
 
@@ -12474,6 +12482,13 @@ xrfg::autonomous::SwapchainBudgetStatus luke_swapchain_inventory(
     if (!state->luke_afw_enabled || now<state->next_swapchain_inventory_ms) return previous;
     state->next_swapchain_inventory_ms=now+1000;
     xrfg::autonomous::SwapchainBudgetStatus out{};out.fallback=previous.fallback;
+    std::vector<xrfg::PrivateOpenXrRuntime::SwapchainMapping> native_mapping;
+    if(state->private_runtime) {
+        auto mapping=state->private_runtime->native_swapchain_mapping();
+        if(!mapping)return previous;
+        native_mapping=std::move(*mapping);
+    }
+    bool incomplete{};
     std::vector<XrSwapchain> projections,auxiliary,seen;
     if (frame && frame->layers) for (unsigned i=0;i<frame->layerCount;++i) {
         const auto* layer=frame->layers[i];if (!layer) continue;
@@ -12486,7 +12501,13 @@ xrfg::autonomous::SwapchainBudgetStatus luke_swapchain_inventory(
         }
     }
     const auto count=[&](XrSwapchain handle,std::uint32_t& category) {
-        if (!handle || std::find(seen.begin(),seen.end(),handle)!=seen.end()) return;
+        if(!handle)return;
+        if(state->private_runtime) {
+            const auto found=std::find_if(native_mapping.begin(),native_mapping.end(),[&](const auto& m){return m.handle==handle;});
+            if(found==native_mapping.end()){incomplete=true;return;}
+            handle=found->native;
+        }
+        if (std::find(seen.begin(),seen.end(),handle)!=seen.end()) return;
         seen.push_back(handle);++category;++out.total;
     };
     std::vector<CompositionImageSlot*> private_images;
@@ -12514,15 +12535,17 @@ xrfg::autonomous::SwapchainBudgetStatus luke_swapchain_inventory(
         if (eye) ++out.projection;else if(aux) ++out.auxiliary;else if(depth)++out.depth;else ++out.other;
         const bool refused=chain->generation_refusal==SwapchainEligibilityReason::budget_exhausted;
         if (refused) ++out.refused;
-        char text[192]{};
-        std::snprintf(text,sizeof(text),"App %s: 0x%llX, %ux%u, array %u, format %lld%s\n",
-            eye ? "eye" : aux ? "auxiliary" : depth ? "depth" : "UNCLASSIFIED",
-            static_cast<unsigned long long>(handle_value(chain->handle)),chain->create_info.width,chain->create_info.height,
-            chain->create_info.arraySize,static_cast<long long>(chain->create_info.format),refused ? " [generation allocation refused]" : "");
-        const auto bytes=std::strlen(text);
-        if (detail_size+bytes<sizeof(out.details)) {
-            std::memcpy(out.details+detail_size,text,bytes);detail_size+=bytes;
-        } else out.details_truncated=true;
+        if((!eye && !aux && !depth) || refused) {
+            char text[192]{};
+            std::snprintf(text,sizeof(text),"App %s: 0x%llX, %ux%u, array %u, format %lld%s\n",
+                eye ? "eye" : aux ? "auxiliary" : depth ? "depth" : "UNCLASSIFIED",
+                static_cast<unsigned long long>(handle_value(chain->handle)),chain->create_info.width,chain->create_info.height,
+                chain->create_info.arraySize,static_cast<long long>(chain->create_info.format),refused ? " [generation allocation refused]" : "");
+            const auto bytes=std::strlen(text);
+            if (detail_size+bytes<sizeof(out.details)) {
+                std::memcpy(out.details+detail_size,text,bytes);detail_size+=bytes;
+            } else out.details_truncated=true;
+        }
         if (chain->frame_generation) {
             for (const auto& image:chain->frame_generation->current)count(image.handle,out.current);
             for (const auto& image:chain->frame_generation->synthetic)count(image.handle,out.synthetic);
@@ -12543,6 +12566,12 @@ xrfg::autonomous::SwapchainBudgetStatus luke_swapchain_inventory(
     if (state->fps_overlay) {
         const auto ui=state->fps_overlay->swapchain_handles();if (!ui) return previous;
         count((*ui)[0],out.fps);count((*ui)[1],out.meter);count((*ui)[2],out.menu);
+    }
+    if(incomplete)return previous;
+    // Count each final native endpoint once, never its independent private tokens.
+    for(const auto& mapping:native_mapping)if(mapping.native &&
+        std::find(seen.begin(),seen.end(),mapping.native)==seen.end()) {
+        seen.push_back(mapping.native);++out.unassigned_native;++out.total;
     }
     out.updated_ms=now;state->swapchain_budget=out;
     return out;
@@ -14855,7 +14884,9 @@ XrResult layer_end_frame_impl(
             state->generation_initialization_result.load(std::memory_order_relaxed),
             state->vulkan_binding.device != VK_NULL_HANDLE,
             state->interface_provider_error.load(std::memory_order_relaxed),&budget,
-            state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only); }
+            state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only,
+        state->private_runtime && state->luke_afw_enabled && (state->luke_shared_swapchains || state->luke_outlaws_preframe),
+        state->private_runtime && state->luke_outlaws_preframe); }
     } runtime_report_scope{state};
     configure_session_guide_capture(*state);
     const std::uint32_t diagnostic_capture_frame =

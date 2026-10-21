@@ -12,14 +12,15 @@ int afw_only_session_test(std::string_view route,const char* fixture) {
         }
         ~Restore(){if(existed){std::ofstream file(path,std::ios::binary);file<<bytes;}else{std::error_code e;std::filesystem::remove(path,e);}WritePrivateProfileStringW(nullptr,nullptr,nullptr,path.c_str());}
     } restore(ini);
+    const bool shared_session=route=="luke-shared-session";
     const bool nonluke=route=="afw-only-nonluke";
     const bool vdxr=route=="afw-only-vdxr";
     HMODULE marker=nonluke?nullptr:LoadLibraryA(fixture);
     check(nonluke || marker,"load actual Luke detection marker");
-    check(WritePrivateProfileStringW(L"ofxr",L"afw_only",L"1",ini.c_str())!=0,"isolated startup flag");
+    check(WritePrivateProfileStringW(L"ofxr",L"afw_only",shared_session?L"0":L"1",ini.c_str())!=0,"isolated startup flag");
     auto desired=xrfg::autonomous::snapshot().desired;
     desired.enabled=true;desired.frame_generation=2;desired.backend=0;desired.afw_mode=3;desired.nr_enabled=true;
-    desired.pacing_mode=2;desired.triple_frame_gen=true;
+    desired.pacing_mode=2;desired.triple_frame_gen=true;desired.luke_shared_swapchains=shared_session;
     check(xrfg::autonomous::request(desired),"preserve requested OFXR/DLSS-G and DLSS5");xrfg::autonomous::apply_runtime_settings();
     Fixture f(true);f.transport->stop();f.transport.reset();f.throttled=false;f.unblock();f.expected_views=2;
     auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);
@@ -38,6 +39,18 @@ int afw_only_session_test(std::string_view route,const char* fixture) {
     XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};binding.device=f.device12.Get();binding.queue=f.queue.Get();
     XrSessionCreateInfo info{XR_TYPE_SESSION_CREATE_INFO};info.next=&binding;info.systemId=1;XrSession handle{};
     xr_ok(layer_create_session_impl(dispatch->instance,&info,&handle),"actual session startup");auto state=find_session(handle);
+    if(shared_session) {
+        check(state && !state->afw_only && state->private_runtime && state->luke_shared_swapchains,"startup choice latched on actual Luke session");
+        check(xrfg::autonomous::snapshot().runtime.luke_shared_swapchains,"runtime reports active choice");
+        auto changed=xrfg::autonomous::snapshot().desired;changed.luke_shared_swapchains=false;
+        check(xrfg::autonomous::request(changed),"save next startup choice");xrfg::autonomous::apply_runtime_settings();
+        const auto transport=state->private_runtime;
+        ok(apply_embedded_control(state),"apply other live controls");
+        check(state->luke_shared_swapchains && state->private_runtime==transport,"live settings do not relatch or rebuild output ownership");
+        f.transport=transport;xr_ok(layer_destroy_session_impl(handle),"shared Luke session cleanup");
+        {std::scoped_lock lock(g_state_mutex);g_instances.clear();}
+        FreeLibrary(marker);std::puts("Luke startup-only shared publication, live choice remains pending PASS");return 0;
+    }
     if(nonluke) {
         check(state && !state->afw_only && state->private_runtime,"non-Luke keeps normal OFXR transport");
         f.transport=state->private_runtime;

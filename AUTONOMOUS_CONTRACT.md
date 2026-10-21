@@ -285,7 +285,7 @@ same fixed fractions as NGX. OFXR DJ retains its independent 3X scheduler.
 
 ## Isolation and dependencies
 
-Profile: `%LOCALAPPDATA%/OFXR Autonomous`. Unique OpenXR/Vulkan layer identities
+Profile: `%LOCALAPPDATA%/ofxr-bridge`. Unique OpenXR/Vulkan layer identities
 and profile-scoped registrations prevent cleanup from touching the original
 tray. Startup is disarmed. `--settings-only` previews controls; automated preview
 does not activate, register a layer, launch a game or replace a game DLL.
