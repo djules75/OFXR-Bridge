@@ -9,10 +9,10 @@
 #include <FidelityFX/host/ffx_opticalflow.h>
 #include <nvOpticalFlowD3D12.h>
 
-#include "depth_tiles_build_shader.hpp"
-#include "depth_tiles_dilate_shader.hpp"
 #include "coverage_mask_build_shader.hpp"
 #include "coverage_mask_clear_shader.hpp"
+#include "depth_splat_build_shader.hpp"
+#include "depth_splat_clear_shader.hpp"
 #include "eye_order_clear_shader.hpp"
 #include "eye_order_measure_shader.hpp"
 #include "fullscreen_vertex_shader.hpp"
@@ -90,8 +90,10 @@ struct NvidiaInputScaleRatio {
 constexpr UINT kMaxReprojectionViews = 2;
 // t7: the game's depth for the hybrid (V505); t8: the live tuning block
 // for the hybrid (V507); t9: the depth search's dilated tiles (V530); t10:
-// the coverage mask (V539).
-constexpr UINT kSrvDescriptorCount = 11;
+// the coverage mask (V539); t11: the depth search's midpoint splat (V554).
+constexpr UINT kSrvDescriptorCount = 12;
+// A pair's synthetic outputs: one, or two at 3X.
+constexpr UINT kMaxSyntheticOutputs = 2;
 // The tuning block's upload buffer, per work slot; the block is 72 bytes.
 constexpr UINT kTuningBufferBytes = 256;
 static_assert(sizeof(xrfg::live_tuning::Block) <= kTuningBufferBytes);
@@ -103,29 +105,28 @@ constexpr UINT kDescriptorCount =
 // V516: a block per eye after them for the inset composition's dispatches,
 // written while the pair's own blocks still wait for the GPU.
 constexpr UINT kComposeDescriptorBase = kDescriptorCount;
-// V530: two blocks per eye after those for the depth search's tile passes:
-// the first's t9 is the eye's undilated tiles and its UAVs the dilated ones,
-// the second's UAVs the undilated ones.
-constexpr UINT kTileDescriptorBase =
-    kComposeDescriptorBase + kDescriptorBlockSize * kMaxReprojectionViews;
 // V539: a block per eye after those for the coverage mask's passes, whose
-// u0 is the mask.
+// u0 is the mask. (V530-V554 had two blocks per eye before them for the
+// depth search's tile passes, replaced by the splat in V555.)
 constexpr UINT kMaskDescriptorBase =
-    kTileDescriptorBase + 2U * kDescriptorBlockSize * kMaxReprojectionViews;
+    kComposeDescriptorBase + kDescriptorBlockSize * kMaxReprojectionViews;
 // V546: one block after those for the eye-order measurement, whose t10 is the
 // other stream's vectors and u0 the verdict.
 constexpr UINT kEyeOrderDescriptorBase =
     kMaskDescriptorBase + kDescriptorBlockSize * kMaxReprojectionViews;
-constexpr UINT kSlotDescriptorCount = kEyeOrderDescriptorBase + kDescriptorBlockSize;
+// V554: a block per eye after that for the depth splat's passes, whose u0
+// is the splat.
+constexpr UINT kSplatDescriptorBase = kEyeOrderDescriptorBase + kDescriptorBlockSize;
+constexpr UINT kSlotDescriptorCount =
+    kSplatDescriptorBase + kDescriptorBlockSize * kMaxReprojectionViews;
 // V539: synthesis_flags bit 4 says the eye's coverage mask is bound.
 constexpr UINT kCoverageMaskFlag = 16U;
-// The depth search's tiles: 8 depth texels a side (V531; 16 in V530),
-// dilated along their row and column by at most 7 (synthesis_flags bits
-// 24-26); bit 3 says they are bound.
-constexpr UINT kDepthTileSize = 8;
-constexpr UINT kDepthTilesFlag = 8U;
-constexpr UINT kDepthTilesRadiusShift = 24U;
-constexpr UINT kDepthTilesRadiusMask = 7U << kDepthTilesRadiusShift;
+// V554: bit 5 says the eye's depth splat is bound, a slice per synthetic
+// output; bits 27-28 which output a draw or splat pass is for.
+constexpr UINT kDepthSplatFlag = 32U;
+constexpr UINT kDepthSplatOutputShift = 27U;
+constexpr UINT kDepthSplatOutputMask = 3U << kDepthSplatOutputShift;
+// (Bit 3 and bits 24-26 were the depth search's tiles, V530-V554.)
 // The composition's per-eye verdict words (guide_compose.hlsl): four each.
 constexpr UINT kComposeVerdictBytes = 256;
 // V546: the eye-order measurement's verdict words (frame_synthesis.hlsl,
@@ -468,12 +469,11 @@ void record_composition_switches() noexcept {
 // them. Each new set of values is recorded once, as embedded_configuration
 // result=813: a the first eight fields of xrfg::live_tuning::Block, 8 bits
 // each from bit 0; b the next eight, likewise; c the window's sequence (0
-// without the window). V543: the fields past the sixteenth, as
-// embedded_configuration result=866: a 8 bits each from bit 0 (the mask
-// band), c the sequence. (811 was V475-V494's record, with the edge
+// without the window). (811 was V475-V494's record, with the edge
 // ghosting reduction values that left with the feature; V497-V506's 813
-// packed the pattern lock and three hybrid values.) Returns the values
-// the hybrid's draws read (V530: the depth tiles are sized from them).
+// packed the pattern lock and three hybrid values; V543-V554's 866 carried
+// the fields past the sixteenth, of which V555 has none.) Returns the
+// values the hybrid's draws read.
 xrfg::live_tuning::Block apply_live_composition_tuning(
     void* tuning_mapped,
     CompositionLayout layout) noexcept {
@@ -503,13 +503,6 @@ xrfg::live_tuning::Block apply_live_composition_tuning(
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::embedded_configuration,
             813, a, b, values.sequence);
-        std::uint64_t more = 0;
-        for (std::size_t index = 16; index < xrfg::live_tuning::kFieldCount; ++index) {
-            more |= static_cast<std::uint64_t>(field[index] & 0xFFU) << (8 * (index - 16));
-        }
-        xrfg::bridge_flight_logger().event(
-            xrfg::BridgeFlightOperation::embedded_configuration,
-            866, more, 0, values.sequence);
     }
     return values;
 }
@@ -926,18 +919,19 @@ struct D3D12FrameSynthesizer::Impl {
         std::shared_ptr<const DlssMotionVectorSet> composed_guides;
         bool compose_pending{};
         std::array<float, kMaxReprojectionViews> compose_shift{};
-        // V530: the depth search's tiles, a slice per eye, undilated then
-        // dilated; replaced only while the slot is idle (reset_work_slot).
-        ComPtr<ID3D12Resource> depth_tiles;
-        ComPtr<ID3D12Resource> depth_tiles_dilated;
-        UINT depth_tiles_width{};
-        UINT depth_tiles_height{};
         // V539: the coverage mask, a slice per eye, at the vectors'
         // resolution; replaced only while the slot is idle.
         ComPtr<ID3D12Resource> coverage_mask;
         UINT coverage_mask_width{};
         UINT coverage_mask_height{};
         D3D12_RESOURCE_STATES coverage_mask_state{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+        // V554: the depth search's midpoint splat, a slice per eye and
+        // synthetic output, at the vectors' resolution; replaced only while
+        // the slot is idle.
+        ComPtr<ID3D12Resource> depth_splat;
+        UINT depth_splat_width{};
+        UINT depth_splat_height{};
+        D3D12_RESOURCE_STATES depth_splat_state{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
         // V546: the eye-order measurement's verdict, read once the slot's work
         // has finished (reset_work_slot), and what it measured.
         ComPtr<ID3D12Resource> eye_order_readback;
@@ -1005,20 +999,19 @@ struct D3D12FrameSynthesizer::Impl {
     ComPtr<ID3D12PipelineState> compose_clear_pipeline;
     ComPtr<ID3D12PipelineState> compose_measure_pipeline;
     ComPtr<ID3D12PipelineState> compose_pipeline;
-    // V530: the depth search's tile passes (depth_tiles.hlsl), hybrid only.
-    ComPtr<ID3D12PipelineState> depth_tiles_build_pipeline;
-    ComPtr<ID3D12PipelineState> depth_tiles_dilate_pipeline;
     // V539: the coverage mask's passes (frame_synthesis.hlsl, XRFG_COVERAGE_MASK).
     ComPtr<ID3D12PipelineState> coverage_mask_clear_pipeline;
     ComPtr<ID3D12PipelineState> coverage_mask_build_pipeline;
     std::array<std::atomic<std::uint64_t>, kMaxReprojectionViews> coverage_mask_recorded{};
+    // V554: the depth splat's passes (frame_synthesis.hlsl, XRFG_DEPTH_SPLAT).
+    ComPtr<ID3D12PipelineState> depth_splat_clear_pipeline;
+    ComPtr<ID3D12PipelineState> depth_splat_build_pipeline;
+    std::array<std::atomic<std::uint64_t>, kMaxReprojectionViews> depth_splat_recorded{};
     // V546: the eye-order measurement (frame_synthesis.hlsl, XRFG_EYE_ORDER)
     // and its verdict, copied into the slot's eye_order_readback.
     ComPtr<ID3D12PipelineState> eye_order_clear_pipeline;
     ComPtr<ID3D12PipelineState> eye_order_measure_pipeline;
     ComPtr<ID3D12Resource> eye_order_verdict;
-    // What each eye's 850 last recorded (record_depth_tiles).
-    std::array<std::atomic<std::uint64_t>, kMaxReprojectionViews> depth_tiles_recorded{};
     ComPtr<ID3D12Resource> composed_vectors;
     ComPtr<ID3D12Resource> composed_depth;
     UINT composed_width{};
@@ -1320,11 +1313,6 @@ struct D3D12FrameSynthesizer::Impl {
                         &compose_measure_pipeline},
                     {{g_xrfg_guide_compose_shader, sizeof(g_xrfg_guide_compose_shader)},
                         &compose_pipeline},
-                    // V530: the depth search's tiles.
-                    {{g_xrfg_depth_tiles_build_shader, sizeof(g_xrfg_depth_tiles_build_shader)},
-                        &depth_tiles_build_pipeline},
-                    {{g_xrfg_depth_tiles_dilate_shader, sizeof(g_xrfg_depth_tiles_dilate_shader)},
-                        &depth_tiles_dilate_pipeline},
                     // V539: the coverage mask.
                     {{g_xrfg_coverage_mask_clear_shader, sizeof(g_xrfg_coverage_mask_clear_shader)},
                         &coverage_mask_clear_pipeline},
@@ -1335,6 +1323,11 @@ struct D3D12FrameSynthesizer::Impl {
                         &eye_order_clear_pipeline},
                     {{g_xrfg_eye_order_measure_shader, sizeof(g_xrfg_eye_order_measure_shader)},
                         &eye_order_measure_pipeline},
+                    // V554: the depth search's midpoint splat.
+                    {{g_xrfg_depth_splat_clear_shader, sizeof(g_xrfg_depth_splat_clear_shader)},
+                        &depth_splat_clear_pipeline},
+                    {{g_xrfg_depth_splat_build_shader, sizeof(g_xrfg_depth_splat_build_shader)},
+                        &depth_splat_build_pipeline},
                 }};
             for (const auto& [code, pipeline] : compose) {
                 compute_description.CS = code;
@@ -2357,6 +2350,13 @@ struct D3D12FrameSynthesizer::Impl {
                     offset_cpu_handle(cpu_start,
                         block * kDescriptorBlockSize + 10U,
                         descriptor_increment));
+                // V554: the depth splat at t11, two slices.
+                D3D12_SHADER_RESOURCE_VIEW_DESC null_splat = null_mask;
+                null_splat.Texture2DArray.ArraySize = kMaxSyntheticOutputs;
+                device->CreateShaderResourceView(nullptr, &null_splat,
+                    offset_cpu_handle(cpu_start,
+                        block * kDescriptorBlockSize + 11U,
+                        descriptor_increment));
             }
         }
         return S_OK;
@@ -2734,11 +2734,11 @@ struct D3D12FrameSynthesizer::Impl {
                 DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R32_UINT,
                 DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT,
                 DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R32G32_FLOAT,
-                DXGI_FORMAT_R32_UINT,
+                DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT,
             };
             for (UINT index = 0; index < kSrvDescriptorCount; ++index) {
                 const bool array = index == 0 || index == 1 || index == 6 || index == 7 ||
-                    index == 9 || index == 10;
+                    index == 9 || index == 10 || index == 11;
                 D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
                 srv.Format = kSrvFormats[index];
                 srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -3542,154 +3542,120 @@ struct D3D12FrameSynthesizer::Impl {
         return count;
     }
 
-    // V530: the depth search's tiles (depth_tiles.hlsl) for each eye whose
-    // guide brings depth, recorded on `list` before the pair's draws; the
-    // eye's block gets the dilated ones at t9. Returns per eye the
-    // synthesis_flags bits its draws carry, 0 where the search runs as
-    // before. create_game_motion_views has bound each eye's depth at t7.
-    [[nodiscard]] std::array<UINT, kMaxReprojectionViews> record_depth_tiles(
+    // V554: the depth search's midpoint splat (frame_synthesis.hlsl,
+    // BuildDepthSplat) for each view's eye whose guide brings depth, with the
+    // menu's depth search on: recorded on `list` before the pair's draws,
+    // which find it at t11 of the eye's block, a slice per synthetic output
+    // (the midpoint depends on the output's fraction). Per eye the
+    // synthesis_flags bit its draws carry, 0 where there is none and the
+    // search does not run (V555: the probes and their tiles are gone).
+    [[nodiscard]] std::array<UINT, kMaxReprojectionViews> record_depth_splat(
         WorkSlot& slot,
         ID3D12GraphicsCommandList* list,
         const DlssMotionVectorSet& guides,
+        const SynthesisParameters& draw_parameters,
+        std::span<const D3D12ReprojectionView> target_views,
         const xrfg::live_tuning::Block& tuning) noexcept {
         std::array<UINT, kMaxReprojectionViews> flags{};
-        // The harness compares the composition with and without them.
+        // The harness compares the composition with and without it.
         const bool disabled =
-            GetEnvironmentVariableW(L"XRFG_DISABLE_DEPTH_TILES", nullptr, 0) != 0;
-        // The farthest point the search reads, in image pixels.
-        const UINT reach = std::max(tuning.depth_near_reach_px, tuning.depth_far_reach_px);
-        if (disabled || !depth_tiles_build_pipeline || !depth_tiles_dilate_pipeline ||
-            tuning.depth_search == 0U || reach == 0U) {
+            GetEnvironmentVariableW(L"XRFG_DISABLE_DEPTH_SPLAT", nullptr, 0) != 0;
+        if (disabled || tuning.depth_search == 0U ||
+            !depth_splat_clear_pipeline || !depth_splat_build_pipeline) {
             return flags;
         }
-        struct EyeTiles {
+        struct EyeSplat {
             SynthesisParameters parameters{};
-            UINT first_x{}, first_y{}, columns{}, rows{}, radius{};
+            UINT columns{}, rows{};
         };
-        std::array<EyeTiles, kMaxReprojectionViews> eyes{};
+        std::array<EyeSplat, kMaxReprojectionViews> eyes{};
         std::array<bool, kMaxReprojectionViews> built{};
         UINT width = 0, height = 0;
-        const UINT eye_count = std::min<UINT>(guides.eye_count, kMaxReprojectionViews);
-        for (UINT eye = 0; eye < eye_count; ++eye) {
-            const auto& guide = guides.eyes[eye];
-            if (!guide || !usable_guide_depth(*guide) ||
-                !same_device(device.Get(), guide->depth.Get()) ||
-                guide->output_width == 0 || guide->output_height == 0) {
+        for (UINT view_index = 0; view_index < static_cast<UINT>(target_views.size()); ++view_index) {
+            const UINT slice = resolved_array_slice(target_views[view_index], view_index,
+                target_views.size(), image_description.DepthOrArraySize);
+            const UINT eye = guide_eye(guides, view_index, slice);
+            if (eye >= kMaxReprojectionViews || eye >= guides.eye_count || !guides.eyes[eye] ||
+                built[eye]) {
                 continue;
             }
-            EyeTiles& tiles = eyes[eye];
-            // The draw's own rectangle, so the texels match game_depth_texel's.
-            apply_hybrid_guide_constants(tiles.parameters, *guide);
-            const auto& rect = tiles.parameters.game_motion_rect;
-            if (!(rect[2] >= 1.0F) || !(rect[3] >= 1.0F) || rect[0] < 0.0F || rect[1] < 0.0F) {
+            const auto& guide = *guides.eyes[eye];
+            if (!guide.motion_vectors || guide.output_width == 0 || guide.output_height == 0) continue;
+            if (!usable_guide_depth(guide) || !same_device(device.Get(), guide.depth.Get())) continue;
+            EyeSplat& splat = eyes[eye];
+            splat.parameters = draw_parameters;
+            apply_hybrid_guide_constants(splat.parameters, guide);
+            splat.parameters.slice = eye;
+            splat.parameters.view_index = view_index;
+            const auto& rect = splat.parameters.game_motion_rect;
+            if (!(rect[2] >= 1.0F) || !(rect[3] >= 1.0F) || rect[2] > 16384.0F || rect[3] > 16384.0F) {
                 continue;
             }
-            const UINT lowest_x = static_cast<UINT>(rect[0]);
-            const UINT lowest_y = static_cast<UINT>(rect[1]);
-            const UINT highest_x = static_cast<UINT>(rect[0] + rect[2] - 1.0F);
-            const UINT highest_y = static_cast<UINT>(rect[1] + rect[3] - 1.0F);
-            if (highest_x < lowest_x || highest_y < lowest_y) continue;
-            // The depth texels between a pixel's two farthest points, a
-            // texel more each way for the shader's margin; the tiles they
-            // span, from the middle one either way (V531).
-            const float per_pixel = std::max(
-                rect[2] / static_cast<float>(guide->output_width),
-                rect[3] / static_cast<float>(guide->output_height));
-            const UINT texels = static_cast<UINT>(
-                std::ceil(2.0F * static_cast<float>(reach) * per_pixel + 0.01F)) + 2U;
-            const UINT span = (texels + kDepthTileSize - 1U) / kDepthTileSize;
-            const UINT radius = (span + 1U) / 2U;
-            if (radius > (kDepthTilesRadiusMask >> kDepthTilesRadiusShift)) continue;
-            tiles.first_x = lowest_x / kDepthTileSize;
-            tiles.first_y = lowest_y / kDepthTileSize;
-            tiles.columns = highest_x / kDepthTileSize + 1U;
-            tiles.rows = highest_y / kDepthTileSize + 1U;
-            tiles.radius = radius;
-            tiles.parameters.width = tiles.columns;
-            tiles.parameters.height = tiles.rows;
-            tiles.parameters.packed_width = radius;
-            tiles.parameters.slice = eye;
-            width = std::max(width, tiles.columns);
-            height = std::max(height, tiles.rows);
+            splat.columns = static_cast<UINT>(std::ceil(rect[2])) + 1U;
+            splat.rows = static_cast<UINT>(std::ceil(rect[3])) + 1U;
+            width = std::max(width, splat.columns);
+            height = std::max(height, splat.rows);
             built[eye] = true;
         }
         if (width == 0 || height == 0) return flags;
-        if (!slot.depth_tiles || !slot.depth_tiles_dilated ||
-            slot.depth_tiles_width < width || slot.depth_tiles_height < height) {
+        if (!slot.depth_splat || slot.depth_splat_width < width ||
+            slot.depth_splat_height < height) {
             D3D12_HEAP_PROPERTIES heap{};
             heap.Type = D3D12_HEAP_TYPE_DEFAULT;
             heap.CreationNodeMask = 1;
             heap.VisibleNodeMask = 1;
             D3D12_RESOURCE_DESC texture{};
             texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-            texture.Width = std::max(width, slot.depth_tiles_width);
-            texture.Height = std::max(height, slot.depth_tiles_height);
-            texture.DepthOrArraySize = kMaxReprojectionViews;
+            texture.Width = std::max(width, slot.depth_splat_width);
+            texture.Height = std::max(height, slot.depth_splat_height);
+            texture.DepthOrArraySize = kMaxReprojectionViews * kMaxSyntheticOutputs;
             texture.MipLevels = 1;
-            texture.Format = DXGI_FORMAT_R32_FLOAT;
+            texture.Format = DXGI_FORMAT_R32_UINT;
             texture.SampleDesc.Count = 1;
             texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-            // Dilated along the row (x) and along the column (y).
-            D3D12_RESOURCE_DESC dilated_texture = texture;
-            dilated_texture.Format = DXGI_FORMAT_R32G32_FLOAT;
-            ComPtr<ID3D12Resource> tiles, dilated;
+            ComPtr<ID3D12Resource> splat;
             if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texture,
-                    kShaderReadState, nullptr, IID_PPV_ARGS(tiles.GetAddressOf()))) ||
-                FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &dilated_texture,
-                    kShaderReadState, nullptr, IID_PPV_ARGS(dilated.GetAddressOf())))) {
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                    IID_PPV_ARGS(splat.GetAddressOf())))) {
                 return flags;
             }
-            tiles->SetName(L"OFXR Depth Tiles");
-            dilated->SetName(L"OFXR Depth Tiles Dilated");
-            slot.depth_tiles = std::move(tiles);
-            slot.depth_tiles_dilated = std::move(dilated);
-            slot.depth_tiles_width = static_cast<UINT>(texture.Width);
-            slot.depth_tiles_height = texture.Height;
+            splat->SetName(L"OFXR Depth Splat");
+            slot.depth_splat = std::move(splat);
+            slot.depth_splat_width = static_cast<UINT>(texture.Width);
+            slot.depth_splat_height = texture.Height;
+            slot.depth_splat_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         }
 
         const D3D12_CPU_DESCRIPTOR_HANDLE cpu_start =
             slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
         const D3D12_GPU_DESCRIPTOR_HANDLE gpu_start =
             slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart();
-        D3D12_SHADER_RESOURCE_VIEW_DESC slice_view{};
-        slice_view.Format = DXGI_FORMAT_R32_FLOAT;
-        slice_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-        slice_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        slice_view.Texture2DArray.MipLevels = 1;
-        slice_view.Texture2DArray.ArraySize = 1;
+        D3D12_SHADER_RESOURCE_VIEW_DESC eye_view{};
+        eye_view.Format = DXGI_FORMAT_R32_UINT;
+        eye_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        eye_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        eye_view.Texture2DArray.MipLevels = 1;
+        eye_view.Texture2DArray.ArraySize = kMaxSyntheticOutputs;
         D3D12_UNORDERED_ACCESS_VIEW_DESC array_view{};
-        array_view.Format = DXGI_FORMAT_R32_FLOAT;
+        array_view.Format = DXGI_FORMAT_R32_UINT;
         array_view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-        array_view.Texture2DArray.ArraySize = kMaxReprojectionViews;
-        const auto tile_block = [](UINT eye, UINT which) {
-            return kTileDescriptorBase + (2U * eye + which) * kDescriptorBlockSize;
-        };
+        array_view.Texture2DArray.ArraySize = kMaxReprojectionViews * kMaxSyntheticOutputs;
         for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
-            D3D12_SHADER_RESOURCE_VIEW_DESC view = slice_view;
-            view.Texture2DArray.FirstArraySlice = eye;
-            D3D12_SHADER_RESOURCE_VIEW_DESC dilated_view = view;
-            dilated_view.Format = DXGI_FORMAT_R32G32_FLOAT;
-            // The draw's t9: this eye's dilated tiles, or nothing.
-            device->CreateShaderResourceView(built[eye] ? slot.depth_tiles_dilated.Get() : nullptr,
-                &dilated_view, offset_cpu_handle(cpu_start, eye * kDescriptorBlockSize + 9U,
-                    descriptor_increment));
+            D3D12_SHADER_RESOURCE_VIEW_DESC view = eye_view;
+            view.Texture2DArray.FirstArraySlice = eye * kMaxSyntheticOutputs;
+            // The draw's t11: this eye's slices, one per output, or nothing.
+            device->CreateShaderResourceView(built[eye] ? slot.depth_splat.Get() : nullptr, &view,
+                offset_cpu_handle(cpu_start, eye * kDescriptorBlockSize + 11U, descriptor_increment));
             if (!built[eye]) continue;
-            device->CreateShaderResourceView(slot.depth_tiles.Get(), &view,
-                offset_cpu_handle(cpu_start, tile_block(eye, 0) + 9U, descriptor_increment));
-            D3D12_UNORDERED_ACCESS_VIEW_DESC dilated_array = array_view;
-            dilated_array.Format = DXGI_FORMAT_R32G32_FLOAT;
-            device->CreateUnorderedAccessView(slot.depth_tiles_dilated.Get(), nullptr, &dilated_array,
-                offset_cpu_handle(cpu_start, tile_block(eye, 0) + kSrvDescriptorCount,
-                    descriptor_increment));
-            device->CreateUnorderedAccessView(slot.depth_tiles.Get(), nullptr, &array_view,
-                offset_cpu_handle(cpu_start, tile_block(eye, 1) + kSrvDescriptorCount,
+            device->CreateUnorderedAccessView(slot.depth_splat.Get(), nullptr, &array_view,
+                offset_cpu_handle(cpu_start,
+                    kSplatDescriptorBase + eye * kDescriptorBlockSize + kSrvDescriptorCount,
                     descriptor_increment));
         }
 
-        dred_marker(list, "OFXR depth tiles begin");
-        // The depths into the shader-read state and back after, once a
-        // resource; the registry's snapshots and the composed field already are.
-        std::array<D3D12_RESOURCE_BARRIER, 2U + kMaxReprojectionViews> barriers{};
+        dred_marker(list, "OFXR depth splat begin");
+        // The depths into the shader-read state for the pass and back after,
+        // once a resource; the vectors already are.
         std::array<std::pair<ID3D12Resource*, D3D12_RESOURCE_STATES>, kMaxReprojectionViews> sources{};
         UINT source_count = 0;
         for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
@@ -3702,78 +3668,81 @@ struct D3D12FrameSynthesizer::Impl {
             }
             if (!known) sources[source_count++] = {depth, state};
         }
+        std::array<D3D12_RESOURCE_BARRIER, 1U + kMaxReprojectionViews> barriers{};
         UINT barrier_count = 0;
-        barriers[barrier_count++] = transition_barrier(slot.depth_tiles.Get(),
-            kShaderReadState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        barriers[barrier_count++] = transition_barrier(slot.depth_tiles_dilated.Get(),
-            kShaderReadState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (slot.depth_splat_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+            barriers[barrier_count++] = transition_barrier(slot.depth_splat.Get(),
+                slot.depth_splat_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
         for (UINT index = 0; index < source_count; ++index) {
             barriers[barrier_count++] = transition_barrier(sources[index].first,
                 sources[index].second, kShaderReadState);
         }
-        list->ResourceBarrier(barrier_count, barriers.data());
+        if (barrier_count != 0) list->ResourceBarrier(barrier_count, barriers.data());
         ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
         list->SetDescriptorHeaps(1, heaps);
         list->SetComputeRootSignature(root_signature.Get());
-        list->SetPipelineState(depth_tiles_build_pipeline.Get());
-        for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
-            if (!built[eye]) continue;
-            const EyeTiles& tiles = eyes[eye];
+        const UINT outputs = synthetic_output_count();
+        // Each output's pass carries that output's fraction and index, as
+        // its draws will.
+        const auto bind = [&](UINT eye, UINT output) {
+            SynthesisParameters parameters = eyes[eye].parameters;
+            parameters.synthesis_flags =
+                (parameters.synthesis_flags & 0xFF0000FFU & ~kDepthSplatOutputMask) |
+                packed_synthesis_fraction(synthetic_output_fraction(output)) |
+                (output << kDepthSplatOutputShift);
             list->SetComputeRootDescriptorTable(0,
                 offset_gpu_handle(gpu_start, eye * kDescriptorBlockSize, descriptor_increment));
             list->SetComputeRootDescriptorTable(1, offset_gpu_handle(gpu_start,
-                tile_block(eye, 1) + kSrvDescriptorCount, descriptor_increment));
-            list->SetComputeRoot32BitConstants(2, kSynthesisConstantCount, &tiles.parameters, 0);
-            list->Dispatch(tiles.columns - tiles.first_x, tiles.rows - tiles.first_y, 1);
-        }
-        const D3D12_RESOURCE_BARRIER tiles_written = transition_barrier(slot.depth_tiles.Get(),
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kShaderReadState);
-        list->ResourceBarrier(1, &tiles_written);
-        list->SetPipelineState(depth_tiles_dilate_pipeline.Get());
+                kSplatDescriptorBase + eye * kDescriptorBlockSize + kSrvDescriptorCount,
+                descriptor_increment));
+            list->SetComputeRoot32BitConstants(2, kSynthesisConstantCount, &parameters, 0);
+        };
+        list->SetPipelineState(depth_splat_clear_pipeline.Get());
         for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
             if (!built[eye]) continue;
-            const EyeTiles& tiles = eyes[eye];
-            list->SetComputeRootDescriptorTable(0,
-                offset_gpu_handle(gpu_start, tile_block(eye, 0), descriptor_increment));
-            list->SetComputeRootDescriptorTable(1, offset_gpu_handle(gpu_start,
-                tile_block(eye, 0) + kSrvDescriptorCount, descriptor_increment));
-            list->SetComputeRoot32BitConstants(2, kSynthesisConstantCount, &tiles.parameters, 0);
-            list->Dispatch((tiles.columns - tiles.first_x + 7U) / 8U,
-                (tiles.rows - tiles.first_y + 7U) / 8U, 1);
-            flags[eye] = kDepthTilesFlag | (tiles.radius << kDepthTilesRadiusShift);
+            for (UINT output = 0; output < outputs; ++output) {
+                bind(eye, output);
+                list->Dispatch((eyes[eye].columns + 7U) / 8U, (eyes[eye].rows + 7U) / 8U, 1);
+            }
+        }
+        D3D12_RESOURCE_BARRIER cleared{};
+        cleared.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        cleared.UAV.pResource = slot.depth_splat.Get();
+        list->ResourceBarrier(1, &cleared);
+        list->SetPipelineState(depth_splat_build_pipeline.Get());
+        for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
+            if (!built[eye]) continue;
+            for (UINT output = 0; output < outputs; ++output) {
+                bind(eye, output);
+                list->Dispatch((eyes[eye].columns + 6U) / 8U, (eyes[eye].rows + 6U) / 8U, 1);
+            }
+            flags[eye] = kDepthSplatFlag;
         }
         barrier_count = 0;
-        barriers[barrier_count++] = transition_barrier(slot.depth_tiles_dilated.Get(),
+        barriers[barrier_count++] = transition_barrier(slot.depth_splat.Get(),
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kShaderReadState);
         for (UINT index = 0; index < source_count; ++index) {
             barriers[barrier_count++] = transition_barrier(sources[index].first,
                 kShaderReadState, sources[index].second);
         }
         list->ResourceBarrier(barrier_count, barriers.data());
-        dred_marker(list, "OFXR depth tiles complete");
-        // 856, a synthesizer's first tiles for an eye and whenever its grid or
-        // dilation changes: a the eye << 48 | the radius << 40 | columns << 20
-        // | rows, b the first tile x << 32 | y, c the reach in pixels << 32 |
-        // the depth texels per image pixel in 1000ths. Per synthesizer: in
-        // MSFS each eye has its own, both recording as eye 0.
+        slot.depth_splat_state = kShaderReadState;
+        dred_marker(list, "OFXR depth splat complete");
+        // 867, a synthesizer's first splat for an eye and whenever its grid
+        // or its outputs change: a the eye << 48 | columns << 20 | rows, b
+        // the synthetic outputs splatted.
         for (UINT eye = 0; eye < kMaxReprojectionViews; ++eye) {
             if (!built[eye]) continue;
-            const EyeTiles& tiles = eyes[eye];
             const std::uint64_t a = (static_cast<std::uint64_t>(eye) << 48U) |
-                (static_cast<std::uint64_t>(tiles.radius) << 40U) |
-                (static_cast<std::uint64_t>(tiles.columns & 0xFFFFFU) << 20U) | (tiles.rows & 0xFFFFFU);
-            if (depth_tiles_recorded[eye].exchange(a + 1U, std::memory_order_relaxed) == a + 1U) {
+                (static_cast<std::uint64_t>(eyes[eye].columns & 0xFFFFFU) << 20U) |
+                (eyes[eye].rows & 0xFFFFFU);
+            const std::uint64_t key = (a << 2U) | outputs;
+            if (depth_splat_recorded[eye].exchange(key + 1U, std::memory_order_relaxed) == key + 1U) {
                 continue;
             }
-            const auto& rect = tiles.parameters.game_motion_rect;
-            const float per_pixel = std::max(
-                rect[2] / static_cast<float>(guides.eyes[eye]->output_width),
-                rect[3] / static_cast<float>(guides.eyes[eye]->output_height));
             xrfg::bridge_flight_logger().event(
-                xrfg::BridgeFlightOperation::embedded_configuration, 856, a,
-                (static_cast<std::uint64_t>(tiles.first_x) << 32U) | tiles.first_y,
-                (static_cast<std::uint64_t>(reach) << 32U) |
-                    static_cast<std::uint64_t>(std::lround(per_pixel * 1000.0F)));
+                xrfg::BridgeFlightOperation::embedded_configuration, 867, a, outputs);
         }
         return flags;
     }
@@ -4261,8 +4230,10 @@ struct D3D12FrameSynthesizer::Impl {
 
         const auto rtv_start = rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
-            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFF0000FFU) |
-                packed_synthesis_fraction(synthetic_output_fraction(output));
+            parameters.synthesis_flags =
+                (parameters.synthesis_flags & 0xFF0000FFU & ~kDepthSplatOutputMask) |
+                packed_synthesis_fraction(synthetic_output_fraction(output)) |
+                (output << kDepthSplatOutputShift);
             const UINT first_rtv =
                 synthetic_output_destination(output, synthetic_destination_index) * image_description.DepthOrArraySize;
             for (UINT view_index = 0; view_index < target_views.size(); ++view_index) {
@@ -4801,9 +4772,10 @@ struct D3D12FrameSynthesizer::Impl {
                 synthesis->ResourceBarrier(count, guide_transitions.data());
             }
         }
-        // V530: inside the composition's timing, which it is part of.
-        const std::array<UINT, kMaxReprojectionViews> depth_tiles = guides != nullptr
-            ? record_depth_tiles(slot, synthesis, *guides, tuning)
+        // V554: the depth splat, inside the composition's timing, which it
+        // is part of.
+        const std::array<UINT, kMaxReprojectionViews> depth_splat = guides != nullptr
+            ? record_depth_splat(slot, synthesis, *guides, parameters, target_views, tuning)
             : std::array<UINT, kMaxReprojectionViews>{};
         // V539: the coverage mask.
         const std::array<UINT, kMaxReprojectionViews> coverage_mask = guides != nullptr
@@ -4832,8 +4804,10 @@ struct D3D12FrameSynthesizer::Impl {
         const D3D12_CPU_DESCRIPTOR_HANDLE rtv_start =
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
-            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFF0000FFU) |
-                packed_synthesis_fraction(synthetic_output_fraction(output));
+            parameters.synthesis_flags =
+                (parameters.synthesis_flags & 0xFF0000FFU & ~kDepthSplatOutputMask) |
+                packed_synthesis_fraction(synthetic_output_fraction(output)) |
+                (output << kDepthSplatOutputShift);
             const UINT first_rtv =
                 synthetic_output_destination(output, synthetic_destination_index) *
                 image_description.DepthOrArraySize;
@@ -4864,8 +4838,9 @@ struct D3D12FrameSynthesizer::Impl {
                     apply_hybrid_guide_constants(parameters, *guides->eyes[eye]);
                     parameters.synthesis_flags =
                         (parameters.synthesis_flags &
-                            ~(kDepthTilesFlag | kDepthTilesRadiusMask | kCoverageMaskFlag)) |
-                        (eye < kMaxReprojectionViews ? depth_tiles[eye] | coverage_mask[eye] : 0U);
+                            ~(kCoverageMaskFlag | kDepthSplatFlag)) |
+                        (eye < kMaxReprojectionViews
+                            ? coverage_mask[eye] | depth_splat[eye] : 0U);
                 }
                 synthesis->SetGraphicsRoot32BitConstants(
                     2,
@@ -5664,9 +5639,10 @@ struct D3D12FrameSynthesizer::Impl {
                 before_pixel.data());
         }
         flow_output_consumed = true;
-        // V530: the depth search's tiles.
-        const std::array<UINT, kMaxReprojectionViews> depth_tiles = guides != nullptr
-            ? record_depth_tiles(slot, slot.command_list.Get(), *guides, tuning)
+        // V554: the depth splat.
+        const std::array<UINT, kMaxReprojectionViews> depth_splat = guides != nullptr
+            ? record_depth_splat(slot, slot.command_list.Get(), *guides, parameters, target_views,
+                  tuning)
             : std::array<UINT, kMaxReprojectionViews>{};
         // V539: the coverage mask.
         const std::array<UINT, kMaxReprojectionViews> coverage_mask = guides != nullptr
@@ -5697,8 +5673,10 @@ struct D3D12FrameSynthesizer::Impl {
         const D3D12_CPU_DESCRIPTOR_HANDLE rtv_start =
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
-            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFF0000FFU) |
-                packed_synthesis_fraction(synthetic_output_fraction(output));
+            parameters.synthesis_flags =
+                (parameters.synthesis_flags & 0xFF0000FFU & ~kDepthSplatOutputMask) |
+                packed_synthesis_fraction(synthetic_output_fraction(output)) |
+                (output << kDepthSplatOutputShift);
             const UINT first_rtv =
                 synthetic_output_destination(output, synthetic_destination_index) *
                 image_description.DepthOrArraySize;
@@ -5724,8 +5702,9 @@ struct D3D12FrameSynthesizer::Impl {
                     apply_hybrid_guide_constants(parameters, *guides->eyes[eye]);
                     parameters.synthesis_flags =
                         (parameters.synthesis_flags &
-                            ~(kDepthTilesFlag | kDepthTilesRadiusMask | kCoverageMaskFlag)) |
-                        (eye < kMaxReprojectionViews ? depth_tiles[eye] | coverage_mask[eye] : 0U);
+                            ~(kCoverageMaskFlag | kDepthSplatFlag)) |
+                        (eye < kMaxReprojectionViews
+                            ? coverage_mask[eye] | depth_splat[eye] : 0U);
                 }
                 slot.command_list->SetGraphicsRoot32BitConstants(
                     2,
@@ -5945,8 +5924,10 @@ struct D3D12FrameSynthesizer::Impl {
         const D3D12_CPU_DESCRIPTOR_HANDLE rtv_start =
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
-            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFF0000FFU) |
-                packed_synthesis_fraction(synthetic_output_fraction(output));
+            parameters.synthesis_flags =
+                (parameters.synthesis_flags & 0xFF0000FFU & ~kDepthSplatOutputMask) |
+                packed_synthesis_fraction(synthetic_output_fraction(output)) |
+                (output << kDepthSplatOutputShift);
             const UINT first_rtv =
                 synthetic_output_destination(output, synthetic_destination_index) *
                 image_description.DepthOrArraySize;

@@ -376,19 +376,15 @@ inset, or if the pass cannot run, the pair keeps the periphery alone (V515).
   left eye's flags `<< 32` or the right's (bit 0 inset, 1 its previous field
   known, 2 periphery depth, 3 inset depth).
 
-### Depth search tiles (V530)
+### Depth search tiles (V530-V554, removed in V555)
 
-Before a hybrid pair's draws, each eye whose guide brings the game's depth
-gets a map of the nearest depth per 8 x 8 depth texels (16 x 16 in V530),
-dilated along each tile's row and along its column by the tiles the depth
-search's reach can span (V531; V530 dilated in a square). A pixel reads the
-row-dilated value of each tile row its search points can fall in (columns
-for a steep motion, at most eight reads) and skips the search when none
-holds anything nearer than its answer: no point could have started a solve,
-so the image is the one the search gives (the harness checks it byte for
-byte, motion along x and along y). The passes run inside the composition's
-GPU timing. Off with the depth search, without depth, or for a dilation
-past 7 tiles.
+V530-V554 built, before a hybrid pair's draws, a map of the nearest depth
+per 8 x 8 depth texels (16 x 16 in V530), dilated along each tile's row and
+column, so a pixel could skip the depth search's probes where nothing
+within their reach was nearer than its answer. V555 replaced the probes
+with the midpoint splat (below), which has no reach to skip, and the tiles
+with them; the tuning window's Near reach, Far reach and Depth solves
+sliders left at the same time. Record 856 is no longer written.
 
 The depth search itself runs only with the tray's "Hybrid: depth search" on
 (V532; off by default, `[ofxr] hybrid_depth_search`, followed live); the live
@@ -397,7 +393,7 @@ the menu's value.
 
 - `embedded_configuration` 857, at each change of "Hybrid: depth search": `a`
   1 on, 0 off.
-- `embedded_configuration` 856, at an eye's first tiles and whenever its grid
+- `embedded_configuration` 856 (V530-V554), at an eye's first tiles and whenever its grid
   or dilation changes, per synthesizer (in MSFS each eye has its own, both
   recording as eye 0; V530 recorded only the first): `a` the eye `<< 48` or the dilation in tiles `<< 40`
   or the columns `<< 20` or the rows; `b` the first tile column `<< 32` or
@@ -425,6 +421,35 @@ the surface sliding left won, leaving a ghost behind one sliding right.
   and whenever its grid changes: `a` the eye `<< 48` or columns `<< 20` or
   rows; `b` 1 when the game's depth decides the nearer surface, 0 the
   faster.
+
+### Depth search by midpoint splat (V555)
+
+The depth search of V505-V554 read the game's depth at up to sixteen points
+along each pixel's motion and solved from the nearer ones; the tiles (V530)
+skipped it where nothing nearer lay within reach, but every output pixel
+still paid the reads, at the eye's resolution. V555 replaces the probes and
+the tiles with a splat. Before the pair's draws a
+compute pass at the vectors' resolution writes, per texel of the current
+frame, the surface's word (the coverage mask's: its displacement to the
+previous frame, and its log-depth rank) at the texel it occupies at the
+generated instant, one slice per synthetic output since that instant
+differs at 3X; the nearest surface keeps a contested texel. Each pixel then
+reads one word and, where the word's surface is nearer than its own by the
+Nearer margin, solves once from where that surface is in the current frame,
+verified by the Depth agreement as the probes' solves were. Runs with
+"Hybrid: depth search" on and only where the game's depth is published.
+`XRFG_DISABLE_DEPTH_SPLAT=1` in the game's environment leaves the search
+out (the harness's A/B).
+
+Measured 2026-10-21 against the probes with tiles, MSFS 2024 at 7032x5504
+per eye, 3X: 0.27-0.28 ms less composition per eye per pair on FidelityFX
+and on NVIDIA alike; 1.1 ms in an exterior view at 5884x4608. No visible
+difference.
+
+- `embedded_configuration` 867, at a synthesizer's first splat for an eye
+  and whenever its grid or its outputs change: `a` the eye `<< 48` or
+  columns `<< 20` or rows; `b` the synthetic outputs splatted (1, or 2 at
+  3X).
 
 ### Two DLSS streams ordered by their depth's offset (V553)
 
@@ -515,8 +540,8 @@ R.E.A.L. VR's eye between two of its evaluations, render-resolution
 vectors, an anti-aliased fringe. Off by default: in Cyberpunk 2077 it did
 not reach the ghost left at fast edges (that one shows with the optical flow
 alone too), and it costs about 0.2 ms a pair at 20%, more moving faster.
-866 records the tuning fields past 813's
-sixteen (`a` the mask band, `c` the window's sequence).
+V543-V554 recorded it as 866 (the tuning fields past 813's sixteen); since
+V555 the window has fourteen fields and 813 carries them all.
 
 The second-surface search (Edge surface solves) accepts a surface only
 where the coverage mask does not give its previous-frame spot to another

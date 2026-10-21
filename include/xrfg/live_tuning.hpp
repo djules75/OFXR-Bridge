@@ -27,7 +27,10 @@ inline constexpr std::uint32_t kMagic = 0x4C565446U;  // "FTVL"
 // the V374 flow-history window, which never reached main.
 // 8 (V539): hybrid_tint, the diagnostic tint of generated frames.
 // 9 (V543): mask_band_percent.
-inline constexpr std::uint32_t kVersion = 9U;
+// 10: a test build's switch between the probes and the splat, never
+// released. 11 (V555): the splat is the depth search; the probes' reach
+// and solve count left with them.
+inline constexpr std::uint32_t kVersion = 11U;
 
 // Each slider in the tray runs from cheaper on the GPU (left) to costlier
 // (right); the comments say which way that is for a value.
@@ -69,17 +72,15 @@ struct Block {
     std::uint32_t revealed_error_1000ths;         // 0-250, default 0
     std::uint32_t vector_snap_tenths;             // 0-40, default 0
 
-    // The depth search for thin near surfaces (V505): off, nothing of it
-    // runs. Along the motion the game's depth is read every 2 px out to
-    // depth_near_reach, then every 4 px out to depth_far_reach, either side;
-    // a point depth_nearer_percent nearer than the answer starts a solve
-    // (smaller = more starts = costlier), at most depth_solves of them; a
-    // nearer surface whose frames agree within depth_agree replaces the
-    // answer (no cost).
+    // The depth search for thin near surfaces (V505; the midpoint splat
+    // since V554/V555): off, nothing of it runs. A compute pass at the
+    // vectors' resolution writes each current-frame texel's surface at the
+    // texel it occupies at the generated instant; a pixel whose word names a
+    // surface depth_nearer_percent nearer than its answer solves once from
+    // it (smaller = more solves = costlier); a nearer surface whose frames
+    // agree within depth_agree replaces the answer (no cost). The menu's
+    // "Hybrid: depth search" sets depth_search; the window does not.
     std::uint32_t depth_search;                   // 0 off, 1 on
-    std::uint32_t depth_near_reach_px;            // 0-32 by 2, default 0
-    std::uint32_t depth_far_reach_px;             // 0-80 by 4, default 32
-    std::uint32_t depth_solves;                   // 1-4, default 1
     std::uint32_t depth_nearer_percent;           // 0-50, default 50
     std::uint32_t depth_agree_1000ths;            // 0-250, default 250
 
@@ -109,7 +110,7 @@ inline constexpr Block kDefaults{
     kMagic, kVersion, 0U,
     62U, 8U, 3U, 8U,
     100U, 1U, 50U, 0U, 0U,
-    1U, 0U, 32U, 1U, 50U, 250U,
+    1U, 50U, 250U,
     0U,
     0U,
 };
@@ -126,9 +127,6 @@ inline constexpr Block kDefaults{
     block.revealed_error_1000ths = std::min(block.revealed_error_1000ths, 250U);
     block.vector_snap_tenths = std::min(block.vector_snap_tenths, 40U);
     block.depth_search = block.depth_search != 0U ? 1U : 0U;
-    block.depth_near_reach_px = std::min(block.depth_near_reach_px, 32U) & ~1U;
-    block.depth_far_reach_px = std::min(block.depth_far_reach_px, 80U) & ~3U;
-    block.depth_solves = std::clamp(block.depth_solves, 1U, 4U);
     block.depth_nearer_percent = std::min(block.depth_nearer_percent, 50U);
     block.depth_agree_1000ths = std::min(block.depth_agree_1000ths, 250U);
     block.hybrid_tint = std::min(block.hybrid_tint, 2U);
@@ -137,8 +135,9 @@ inline constexpr Block kDefaults{
 }
 
 // The fields after the header, in order: what the shader indexes and what the
-// 813 record packs, 8 bits a value (every range fits).
-inline constexpr std::size_t kFieldCount = 17;
+// 813 record packs, 8 bits a value (every range fits; since V555 all of them
+// fit 813's sixteen).
+inline constexpr std::size_t kFieldCount = 14;
 [[nodiscard]] inline const std::uint32_t* fields(const Block& block) noexcept {
     return &block.hybrid_agree_threshold_255ths;
 }

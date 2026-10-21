@@ -5691,9 +5691,9 @@ void test_hybrid_side_by_side(D3D12WarpFixture& fixture, bool one_field = false)
 // the generated frame - the bars look half transparent at 90 Hz. With the
 // game's depth the nearer surface reaching the pixel is found and kept.
 // Returns the share of the bars' true pixels that show bar. V530: `length`
-// past 256 adds background far from every bar, where the depth tiles skip
-// the search; `image` receives the generated frame. V531: `vertical` turns
-// the scene a quarter round, bars and motion along y.
+// past 256 adds background far from every bar (where the depth tiles of
+// V530-V554 skipped the search); `image` receives the generated frame.
+// V531: `vertical` turns the scene a quarter round, bars and motion along y.
 // V546: the eye-order measurement on the GPU, for a swapchain of one eye
 // whose two DLSS streams nothing tells apart. A textured object moves 16
 // pixels over a background moving 4; this eye's stream has the object where
@@ -5840,7 +5840,10 @@ void test_eye_order_measurement_on_gpu(D3D12WarpFixture& fixture) {
 
 double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
     xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx,
-    UINT length = 256, StereoPattern* image = nullptr, bool vertical = false) {
+    UINT length = 256, StereoPattern* image = nullptr, bool vertical = false,
+    // V554: a second synthetic at the same instant from the same pair, as a
+    // 3X pair writes, read as the first is.
+    bool three_x = false) {
     const UINT width = vertical ? 128U : length;
     const UINT height = vertical ? length : 128U;
     // Along the motion (u) and across it (v), in image pixels.
@@ -5891,14 +5894,15 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
         create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
     std::array<ComPtr<ID3D12Resource>, 2> current_destinations{
         create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
-    std::array<ComPtr<ID3D12Resource>, 1> synthetic_destinations{
-        create_source_texture(fixture, width, height)};
+    std::array<ComPtr<ID3D12Resource>, 2> synthetic_destinations{
+        create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
     upload_pattern(fixture, sources[0].Get(), previous);
     upload_pattern(fixture, sources[1].Get(), current);
     std::array<ID3D12Resource*, 2> source_pointers{sources[0].Get(), sources[1].Get()};
     std::array<ID3D12Resource*, 2> current_pointers{
         current_destinations[0].Get(), current_destinations[1].Get()};
-    std::array<ID3D12Resource*, 1> synthetic_pointers{synthetic_destinations[0].Get()};
+    std::array<ID3D12Resource*, 2> synthetic_pointers{
+        synthetic_destinations[0].Get(), synthetic_destinations[1].Get()};
     auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
     require(operation_succeeded(history->initialize(fixture.device(), fixture.queue(),
                 source_pointers, D3D12_RESOURCE_STATE_RENDER_TARGET)),
@@ -5950,12 +5954,17 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
             operation_succeeded(history->commit(capture_b)),
         "bars capture B failed");
     require(operation_succeeded(synthesizer.submit_pair(capture_b, views, views, 0, 1, &pair,
-                std::nullopt, guides(2))),
+                std::nullopt, guides(2), false, 0.5F,
+                three_x ? std::make_optional(xrfg::D3D12ExtraSynthetic{1U, 0.5F}) : std::nullopt)),
         "bars pair failed");
     fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
-    const StereoPattern actual = readback_pattern(fixture, synthetic_destinations[0].Get(),
-        D3D12_RESOURCE_STATE_RENDER_TARGET);
+    const UINT outputs = three_x ? 2U : 1U;
     double coverage_total = 0;
+    StereoPattern first;
+    for (UINT output = 0; output < outputs; ++output) {
+    const StereoPattern actual = readback_pattern(fixture, synthetic_destinations[output].Get(),
+        D3D12_RESOURCE_STATE_RENDER_TARGET);
+    if (output == 0) first = actual;
     for (UINT eye = 0; eye < kEyeCount; ++eye) {
         std::size_t bar_pixels = 0, shown = 0;
         for (int v = bar_top + 4; v < bar_bottom - 4; ++v) {
@@ -5975,13 +5984,15 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
         const double coverage = static_cast<double>(shown) / static_cast<double>(bar_pixels);
         std::cout << "hybrid bars " << (with_depth ? "with" : "without") << " depth eye=" << eye
                   << " length=" << length << (vertical ? " vertical" : "")
+                  << (three_x ? " output=" + std::to_string(output) : std::string())
                   << " bar_coverage=" << coverage << '\n';
         coverage_total += coverage;
     }
-    if (image != nullptr) *image = actual;
+    }
+    if (image != nullptr) *image = first;
     require(operation_succeeded(synthesizer.wait_for_idle()), "bars final drain failed");
     require(operation_succeeded(history->invalidate()), "bars history invalidate failed");
-    return coverage_total / kEyeCount;
+    return coverage_total / (kEyeCount * outputs);
 }
 
 // V509: a flat panel's own generated image. UEVR's HUD is a quad layer with
@@ -6232,29 +6243,23 @@ int main(int argc, char** argv) {
             // generated frame.
             require(test_hybrid_bars(hybrid_fixture, true) >= 0.95,
                 "hybrid bars with depth are not whole in the generated frame");
-            // V530: the depth tiles skip the search only where it would
-            // have found nothing, so the frame is the same without them;
-            // V531 reads them by row or by column, so both orientations.
+            // V554/V555: the search is the midpoint splat, a slice per
+            // synthetic output: whole along either axis and in both of a 3X
+            // pair's outputs, and nothing of it with the splat disabled.
             for (const bool vertical : {false, true}) {
-                StereoPattern with_tiles, without_tiles;
                 require(test_hybrid_bars(hybrid_fixture, true,
-                            xrfg::D3D12OpticalFlowBackend::fidelity_fx, 512, &with_tiles,
+                            xrfg::D3D12OpticalFlowBackend::fidelity_fx, 512, nullptr,
                             vertical) >= 0.95,
-                    "hybrid bars with depth tiles are not whole in the generated frame");
-                SetEnvironmentVariableW(L"XRFG_DISABLE_DEPTH_TILES", L"1");
-                test_hybrid_bars(hybrid_fixture, true,
-                    xrfg::D3D12OpticalFlowBackend::fidelity_fx, 512, &without_tiles, vertical);
-                SetEnvironmentVariableW(L"XRFG_DISABLE_DEPTH_TILES", nullptr);
-                std::size_t differing = 0;
-                for (UINT eye = 0; eye < kEyeCount; ++eye) {
-                    for (std::size_t index = 0; index < with_tiles[eye].size(); ++index) {
-                        if (with_tiles[eye][index] != without_tiles[eye][index]) ++differing;
-                    }
-                }
-                std::cout << "hybrid bars depth tiles" << (vertical ? " vertical" : "") << ": "
-                          << differing << " bytes differ\n";
-                require(differing == 0, "the depth tiles changed the generated frame");
+                    "hybrid bars by the depth splat are not whole in the generated frame");
             }
+            require(test_hybrid_bars(hybrid_fixture, true,
+                        xrfg::D3D12OpticalFlowBackend::fidelity_fx, 256, nullptr, false,
+                        true) >= 0.95,
+                "hybrid bars by the depth splat are not whole in a 3X pair's outputs");
+            SetEnvironmentVariableW(L"XRFG_DISABLE_DEPTH_SPLAT", L"1");
+            require(test_hybrid_bars(hybrid_fixture, true) <= bars_without_depth + 0.05,
+                "with the splat disabled the bars should be as without depth");
+            SetEnvironmentVariableW(L"XRFG_DISABLE_DEPTH_SPLAT", nullptr);
             // V532: the menu's "Hybrid: depth search" off, the bars are as
             // without depth again.
             xrfg::set_hybrid_depth_search(false);
@@ -6262,8 +6267,9 @@ int main(int argc, char** argv) {
                 "Hybrid: depth search off did not reach the shader");
             xrfg::set_hybrid_depth_search(true);
             // V507: the tray's live tuning block reaches the shader. With a
-            // block whose depth reach is nothing and (V543) no mask band, the
-            // bars go again, as before V543.
+            // block whose depth agreement is nothing (no found surface passes
+            // it; V555, the probes' reach left with them) and (V543) no mask
+            // band, the bars go again, as before V543.
             // Skipped where a tray already owns the block, so a live window
             // is not written over.
             {
@@ -6277,20 +6283,22 @@ int main(int argc, char** argv) {
                     require(block != nullptr, "mapping the live tuning block");
                     xrfg::live_tuning::Block values = xrfg::live_tuning::kDefaults;
                     values.sequence = 1;
-                    values.depth_near_reach_px = 0;
-                    values.depth_far_reach_px = 0;
+                    values.depth_agree_1000ths = 0;
                     values.mask_band_percent = 0;
                     *block = values;
                     // The synthesizer retries a failed open once a second.
                     SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", nullptr);
                     Sleep(1100);
                     const double with_block = test_hybrid_bars(hybrid_fixture, true);
-                    SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
                     require(with_block <= 0.05,
-                        "the live tuning block's depth reach and mask band did not reach the shader");
-                    values.depth_far_reach_px = xrfg::live_tuning::kDefaults.depth_far_reach_px;
+                        "the live tuning block's depth agreement and mask band did not reach the shader");
+                    // Back to the built-in values, the bars are whole again.
+                    values.depth_agree_1000ths = xrfg::live_tuning::kDefaults.depth_agree_1000ths;
                     values.sequence = 2;
                     *block = values;
+                    require(test_hybrid_bars(hybrid_fixture, true) >= 0.95,
+                        "the live tuning block's built-in values did not restore the bars");
+                    SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
                     UnmapViewOfFile(block);
                     CloseHandle(mapping);
                 } else if (mapping != nullptr) {

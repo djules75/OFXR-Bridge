@@ -8,16 +8,20 @@ Texture2DArray<float2> GameMotionVectors : register(t6);
 #ifdef XRFG_HYBRID
 // The game's depth beside its vectors, at the same render resolution (V505).
 Texture2DArray<float> GameDepth : register(t7);
-// V530: the nearest of the game's depth within a few 8-texel tiles of each
-// tile, along its row (x) and its column (y) (depth_tiles.hlsl), for
-// skipping the depth search.
-Texture2DArray<float2> DepthTiles : register(t9);
+// t9 was the depth search's tiles (V530-V554); the midpoint splat at t11
+// replaced them in V555.
 // V539: the coverage mask (BuildCoverageMask below): per vector texel of
 // the previous frame's image, the surface of the current frame that came
 // from there - its vector, and how near or how fast it is - so a pixel
 // whose A sample lies under another surface knows it is background that
 // surface has uncovered, however far the surface has moved since.
 Texture2DArray<uint> CoverageMask : register(t10);
+// V554: the depth search's midpoint splat (BuildDepthSplat below), a slice
+// per synthetic output of this eye: per vector texel of the generated
+// image, the surface of the current frame that occupies it at the generated
+// instant - the nearest by the game's depth - as the mask's word: its
+// displacement to the previous frame, and how near it is.
+Texture2DArray<uint> DepthSplat : register(t11);
 #endif
 // Linear filtering with clamped addressing, a static sampler in the root
 // signature: one fetch per bilinear tap where four loads and three lerps used
@@ -41,6 +45,11 @@ RWTexture2D<float4> NvidiaCurrentColor : register(u2);
 // The pass that writes the coverage mask (V539), on the pack's register,
 // which that pass does not use.
 RWTexture2DArray<uint> CoverageMaskOut : register(u0);
+#endif
+#ifdef XRFG_DEPTH_SPLAT
+// V554: the pass that writes the depth splat, every eye's and output's
+// slice, on the pack's register likewise.
+RWTexture2DArray<uint> DepthSplatOut : register(u0);
 #endif
 #ifdef XRFG_EYE_ORDER
 // V546: the eye-order measurement (MeasureEyeOrder below), in a descriptor
@@ -99,13 +108,14 @@ bool coverage_mask_available() {
     return (SynthesisFlags & 16u) != 0u;
 }
 
-// V530: bit 3, this eye's depth tiles are at t9; bits 24-26 their dilation
-// in tiles.
-bool depth_tiles_available() {
-    return (SynthesisFlags & 8u) != 0u;
+// V554: bit 5, this eye's depth splat is at t11, a slice per synthetic
+// output; bits 27-28 which output this draw (or splat pass) is. (Bit 3 and
+// bits 24-26 were the depth tiles' until V555.)
+bool depth_splat_available() {
+    return (SynthesisFlags & 32u) != 0u;
 }
-int depth_tiles_radius() {
-    return int((SynthesisFlags >> 24) & 7u);
+uint depth_splat_output() {
+    return (SynthesisFlags >> 27) & 3u;
 }
 
 // The tray's live tuning window (xrfg::live_tuning), for the hybrid
@@ -127,7 +137,7 @@ int depth_tiles_radius() {
 ByteAddressBuffer HybridTuning : register(t8);
 
 static const uint kTuningMagic = 0x4C565446u;
-static const uint kTuningVersion = 9u;
+static const uint kTuningVersion = 11u;
 // Field indices: xrfg::live_tuning::Block's order after its header.
 static const uint kTuningAgree = 0u;
 static const uint kTuningChoiceSlope = 1u;
@@ -139,13 +149,10 @@ static const uint kTuningEdgeSurfaceAgree = 6u;
 static const uint kTuningRevealedError = 7u;
 static const uint kTuningVectorSnap = 8u;
 static const uint kTuningDepthSearch = 9u;
-static const uint kTuningDepthNearReach = 10u;
-static const uint kTuningDepthFarReach = 11u;
-static const uint kTuningDepthSolves = 12u;
-static const uint kTuningDepthNearer = 13u;
-static const uint kTuningDepthAgree = 14u;
-static const uint kTuningTint = 15u;
-static const uint kTuningMaskBand = 16u;
+static const uint kTuningDepthNearer = 10u;
+static const uint kTuningDepthAgree = 11u;
+static const uint kTuningTint = 12u;
+static const uint kTuningMaskBand = 13u;
 
 bool tuning_present() {
     return HybridTuning.Load(0u) == kTuningMagic && HybridTuning.Load(4u) == kTuningVersion;
@@ -210,9 +217,6 @@ float vector_snap_pixels() {
     return float(min(tuning_value(kTuningVectorSnap, 0u), 40u)) / 10.0;
 }
 bool depth_search_enabled() { return tuning_value(kTuningDepthSearch, 1u) != 0u; }
-uint depth_near_reach() { return min(tuning_value(kTuningDepthNearReach, 0u), 32u) & ~1u; }
-uint depth_far_reach() { return min(tuning_value(kTuningDepthFarReach, 32u), 80u) & ~3u; }
-uint depth_solve_limit() { return clamp(tuning_value(kTuningDepthSolves, 1u), 1u, 4u); }
 float depth_nearer_factor() {
     return 1.0 + float(min(tuning_value(kTuningDepthNearer, 50u), 50u)) / 100.0;
 }
@@ -1324,46 +1328,6 @@ float game_nearness(float2 pixel) {
     return (GameMotionPadding & 0x80000000u) != 0u ? depth : 1.0 - depth;
 }
 
-// V530: whether any depth texel between the segment's two ends could be
-// nearer than `threshold`. The ends' texels, a texel wider either way, bound
-// every point between them (the mapping is monotonic along each axis), so
-// every point's 8-texel tile lies in the box of the ends' tiles. V531: along
-// the box's longer side, one value per tile row (or column) covers the box
-// when the row's dilation reaches both of its ends from the middle tile; the
-// rows are read one by one, at most kDepthTileReads. False only when none of
-// those tiles holds a texel nearer than `threshold`.
-static const int kDepthTileReads = 8;
-bool depth_tiles_may_hold_nearer(float2 a, float2 b, float threshold) {
-    bool may = true;
-    [branch] if (depth_tiles_available()) {
-        int2 lowest = int2(GameMotionRect.xy);
-        int2 highest = int2(GameMotionRect.xy + GameMotionRect.zw - 1.0);
-        int2 ta = game_depth_texel(a), tb = game_depth_texel(b);
-        int2 low = clamp(min(ta, tb) - 1, lowest, highest) >> 3;
-        int2 high = clamp(max(ta, tb) + 1, lowest, highest) >> 3;
-        int2 span = high - low;
-        int radius = depth_tiles_radius();
-        // Rows along x for a flat box, columns along y for a steep one.
-        bool rows = span.x >= span.y;
-        int long_low = rows ? low.x : low.y;
-        int long_high = rows ? high.x : high.y;
-        int short_low = rows ? low.y : low.x;
-        int short_high = rows ? high.y : high.x;
-        int middle = (long_low + long_high) >> 1;
-        [branch] if (middle - long_low <= radius && long_high - middle <= radius &&
-                     short_high - short_low < kDepthTileReads) {
-            float nearest = asfloat(0xff800000u);
-            [loop] for (int strip = short_low; strip <= short_high; ++strip) {
-                int2 tile = rows ? int2(middle, strip) : int2(strip, middle);
-                float2 dilated = DepthTiles.Load(int4(tile, 0, 0));
-                nearest = max(nearest, rows ? dilated.x : dilated.y);
-            }
-            may = nearest > threshold;
-        }
-    }
-    return may;
-}
-
 bool nearer(float a, float b) { return a > b * depth_nearer_factor() + 1.0e-6; }
 
 // V539: the mask's texel for a coordinate of A's image: the vectors' texel
@@ -1908,39 +1872,31 @@ float4 synthesize_midpoint(
                         if (game_depth_available() && depth_search_enabled() && !covered_case &&
                             repeated_capture_flag() == 0) {
                             float here = game_nearness(current_coordinate);
-                            float2 along = length(last_displacement) > 0.5
-                                ? normalize(last_displacement) : float2(1.0, 0.0);
-                            uint depth_solves = 0;
-                            bool depth_found = false;
-                            // Every 2 px out to the near reach, then every 4
-                            // out to the far reach, either side: a 3 px bar is
-                            // not stepped over.
-                            uint near_steps = depth_near_reach() / 2u;
-                            uint far_steps = depth_far_reach() > depth_near_reach()
-                                ? (depth_far_reach() - depth_near_reach()) / 4u : 0u;
-                            uint depth_steps = 2u * (near_steps + far_steps);
-                            uint depth_limit = depth_solve_limit();
-                            // V530: a start is nearer above this; where the
-                            // tiles say no point can be, the search is
-                            // skipped and its answer stands.
+                            // A surface is nearer above this.
                             float start_threshold = here * depth_nearer_factor() + 1.0e-6;
-                            float farthest = far_steps != 0u
-                                ? float(depth_near_reach()) + 4.0 * float(far_steps)
-                                : 2.0 * float(near_steps);
-                            if (depth_steps != 0u && !depth_tiles_may_hold_nearer(
-                                    pixel + farthest * along, pixel + (-farthest) * along,
-                                    start_threshold)) {
-                                depth_steps = 0u;
-                            }
-                            [loop] for (uint k = 0; k < depth_steps && !depth_found &&
-                                        depth_solves < depth_limit; ++k) {
-                                uint step = k >> 1u;
-                                float distance = step < near_steps
-                                    ? 2.0 * float(step + 1u)
-                                    : float(depth_near_reach()) + 4.0 * float(step - near_steps + 1u);
-                                float2 start = pixel + ((k & 1u) != 0u ? -distance : distance) * along;
-                                if (game_nearness(start) > start_threshold) {
-                                    ++depth_solves;
+                            [branch] if (depth_splat_available()) {
+                                // V554 (the only search since V555; V505-
+                                // V554 probed the depth at up to sixteen
+                                // points along the motion, skipped by the
+                                // V530 tiles): the splat has already found,
+                                // per texel, the nearest surface that
+                                // occupies it at the generated instant. One
+                                // word read; where that surface is nearer
+                                // than the answer by the margin, one solve
+                                // from where the surface is in B - the
+                                // pixel less the generated share of its
+                                // displacement - verified as the probes'
+                                // solves were. The priority byte is the
+                                // mask's log-depth rank, so the compare is
+                                // on the rank of the threshold; the solve
+                                // then checks the exact depth.
+                                uint word = DepthSplat.Load(int4(coverage_mask_texel(pixel),
+                                    int(depth_splat_output()), 0));
+                                uint rank = uint(saturate(
+                                    coverage_mask_depth_priority(start_threshold)) * 255.0);
+                                if (word != 0u && (word >> 24u) >= rank) {
+                                    float2 displacement = coverage_mask_motion(word);
+                                    float2 start = pixel - (1.0 - synthesis_fraction()) * displacement;
                                     float4 a, b;
                                     float2 endpoint;
                                     if (game_motion_surface_at(pixel, start, a, b, endpoint) &&
@@ -1948,7 +1904,6 @@ float4 synthesize_midpoint(
                                         rgb_error(a, b) < depth_agree_limit()) {
                                         output_color = saturate(lerp(a, b, synthesis_fraction()));
                                         explained = rgb_error(a, b);
-                                        depth_found = true;
                                         last_vectors_case = 6u;
                                     }
                                 }
@@ -2173,6 +2128,56 @@ void BuildCoverageMask(uint3 id : SV_DispatchThreadID) {
             if (all(texel >= 0) && all(texel <= limit)) {
                 InterlockedMax(CoverageMaskOut[uint3(uint2(texel), Slice)], word);
             }
+        }
+    }
+}
+#endif
+
+#ifdef XRFG_DEPTH_SPLAT
+// V554: the depth search's midpoint splat, at the vectors' resolution over
+// the output rectangle, a slice per eye and synthetic output (Slice the
+// eye, the output in the flags). ClearDepthSplat empties a slice;
+// BuildDepthSplat writes, for each texel of B's vectors, the surface's
+// word at the texel of the generated image it occupies at the generated
+// instant: B's position plus the generated share of its displacement to A,
+// the fixed point the probes' solve converges to - the 2 x 2 texels around
+// the point, so no gap opens between neighbours - the nearest by the
+// game's depth keeping a contested texel. The composition then reads one
+// word per pixel instead of probing the depth along its motion, and solves
+// once where the word's surface is nearer than its own.
+[numthreads(8, 8, 1)]
+void ClearDepthSplat(uint3 id : SV_DispatchThreadID) {
+    float2 limit = ceil(GameMotionRect.zw);
+    if (float(id.x) <= limit.x && float(id.y) <= limit.y) {
+        DepthSplatOut[uint3(id.xy, 2u * Slice + depth_splat_output())] = 0u;
+    }
+}
+
+[numthreads(8, 8, 1)]
+void BuildDepthSplat(uint3 id : SV_DispatchThreadID) {
+    float2 extent = GameMotionRect.zw;
+    if (float(id.x) >= extent.x || float(id.y) >= extent.y) return;
+    // The output pixel under this texel's centre: game_motion_texel's map,
+    // inverted.
+    float4 output_rect = game_motion_output_rect();
+    float2 uv = (float2(id.xy) + 0.5) / max(extent, float2(1.0, 1.0));
+    float2 pixel = output_rect.xy + uv * output_rect.zw - 0.5;
+    float2 motion = game_motion_for_pixel(pixel, Slice, ViewIndex);
+    MappedCoordinate previous = map_source_to_target(pixel + motion, PreviousMappings[ViewIndex]);
+    if (previous.valid < 0.5) return;
+    float2 displacement = previous.coordinate - pixel;
+    float priority = coverage_mask_depth_priority(game_nearness(pixel));
+    uint word = coverage_mask_word(displacement, priority);
+    float2 midpoint = pixel + (1.0 - synthesis_fraction()) * displacement;
+    float2 per_pixel = extent / max(output_rect.zw, float2(1.0, 1.0));
+    float2 at = (midpoint - output_rect.xy + 0.5) * per_pixel;
+    int2 limit = int2(ceil(extent));
+    int2 base = int2(floor(at - 0.5));
+    uint slice = 2u * Slice + depth_splat_output();
+    [unroll] for (uint corner = 0; corner < 4; ++corner) {
+        int2 texel = base + int2(corner & 1u, corner >> 1);
+        if (all(texel >= 0) && all(texel <= limit)) {
+            InterlockedMax(DepthSplatOut[uint3(uint2(texel), slice)], word);
         }
     }
 }

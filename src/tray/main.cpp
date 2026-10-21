@@ -123,7 +123,7 @@ struct AppState {
     // values set once hold for every game started after them.
     HWND tuning_window{};
     std::array<HWND, 2> tuning_switches{};
-    std::array<HWND, 15> tuning_sliders{};
+    std::array<HWND, 12> tuning_sliders{};
     std::array<HWND, 15> tuning_labels{};
     HANDLE tuning_mapping{};
     xrfg::live_tuning::Block* tuning_block{};
@@ -1139,7 +1139,7 @@ struct TuningSlider {
     bool reversed;
 };
 
-constexpr std::array<TuningSlider, 15> kTuningSliders{{
+constexpr std::array<TuningSlider, 12> kTuningSliders{{
     {L"Agree threshold", 0, 62,
      &xrfg::live_tuning::Block::hybrid_agree_threshold_255ths, 1U, 1.0, L"/255",
      L"the flow is asked only where the vectors' two frames disagree by more",
@@ -1177,19 +1177,11 @@ constexpr std::array<TuningSlider, 15> kTuningSliders{{
      &xrfg::live_tuning::Block::vector_snap_tenths, 1U, 0.1, L"px",
      L"nearest vector where the four texels differ by more; 0 always (no cost)",
      nullptr, false},
-    {L"Near reach", 0, 16,
-     &xrfg::live_tuning::Block::depth_near_reach_px, 2U, 2.0, L"px",
-     L"the game's depth read every 2 px out to here, either side",
-     L"Depth search for thin near surfaces (V505; on with Hybrid: depth search)", false},
-    {L"Far reach", 0, 20,
-     &xrfg::live_tuning::Block::depth_far_reach_px, 4U, 4.0, L"px",
-     L"then every 4 px out to here", nullptr, false},
-    {L"Depth solves", 1, 4,
-     &xrfg::live_tuning::Block::depth_solves, 1U, 1.0, L"",
-     L"solves per pixel from nearer starts", nullptr, false},
     {L"Nearer margin", 0, 50,
      &xrfg::live_tuning::Block::depth_nearer_percent, 1U, 1.0, L"%",
-     L"how much nearer a start must be; smaller tries more", nullptr, true},
+     L"how much nearer the splatted surface must be to solve; smaller tries more",
+     L"Depth search for thin near surfaces (V505, midpoint splat V555; on with Hybrid: depth search)",
+     true},
     {L"Depth agreement", 0, 250,
      &xrfg::live_tuning::Block::depth_agree_1000ths, 1U, 0.001, L"",
      L"a nearer surface's two frames must agree within this (no cost)", nullptr, false},
@@ -1200,18 +1192,21 @@ constexpr std::array<TuningSlider, 15> kTuningSliders{{
 static_assert(kTuningSliders.size() == std::tuple_size_v<decltype(AppState::tuning_sliders)>);
 
 // V539: the diagnostic tint of generated frames, a value of one field; the
-// boxes exclude each other. Unticked at every tray start, never saved.
+// boxes of one group exclude each other. Unticked at every tray start,
+// never saved. (V554's depth splat switch, a group of its own, left with
+// V555: the splat is the depth search.)
 struct TuningSwitch {
     const wchar_t* label;
     std::uint32_t xrfg::live_tuning::Block::*field;
     std::uint32_t value;
+    int group;
 };
 
 constexpr std::array<TuningSwitch, 2> kTuningSwitches{{
     {L"Tint generated frames by what Hybrid did at each pixel (diagnostic, not saved)",
-     &xrfg::live_tuning::Block::hybrid_tint, 1U},
+     &xrfg::live_tuning::Block::hybrid_tint, 1U, 0},
     {L"Tint generated frames by the coverage mask's verdict instead (diagnostic, not saved)",
-     &xrfg::live_tuning::Block::hybrid_tint, 2U},
+     &xrfg::live_tuning::Block::hybrid_tint, 2U, 0},
 }};
 static_assert(kTuningSwitches.size() == std::tuple_size_v<decltype(AppState::tuning_switches)>);
 constexpr int kTuningSwitchBaseId = 2101;
@@ -1300,11 +1295,12 @@ LRESULT CALLBACK tuning_procedure(
             if (LOWORD(wparam) == kTuningResetId) {
                 reset_tuning_controls(*state);
             }
-            // One tint at a time.
+            // One tint at a time: a box unticks the others of its group.
             const int clicked = LOWORD(wparam) - kTuningSwitchBaseId;
             if (clicked >= 0 && clicked < static_cast<int>(kTuningSwitches.size())) {
                 for (std::size_t index = 0; index < kTuningSwitches.size(); ++index) {
-                    if (static_cast<int>(index) != clicked) {
+                    if (static_cast<int>(index) != clicked &&
+                        kTuningSwitches[index].group == kTuningSwitches[clicked].group) {
                         SendMessageW(state->tuning_switches[index], BM_SETCHECK, BST_UNCHECKED, 0);
                     }
                 }
