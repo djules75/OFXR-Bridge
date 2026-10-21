@@ -14285,8 +14285,12 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         const bool auxiliary_only=(chain->diagnostic_layer_roles&3)==2;
         const bool unused_projection=submitted_sources_known && !projected &&
             (!state->luke_afw_enabled || auxiliary_only);
+        // Outlaws can create these on its original SINGLETHREADED owner only
+        // before the first frame. Off pauses their use; it must not retire the
+        // warmed set that the sealed initialization window cannot recreate.
+        const bool sealed_outlaws_output=state->luke_outlaws_preframe && state->luke_outlaws_frame_started;
         if ((explicit_revision || output_use_changed) && projected_budget_control && chain->frame_generation &&
-            (unused_projection || !outputs_needed)) {
+            !sealed_outlaws_output && (unused_projection || !outputs_needed)) {
             auto generation=chain->frame_generation;
             result=generation->synthesizer ? generation->synthesizer->wait_for_idle() : S_OK;
             if (SUCCEEDED(result) && generation->afw_temporal_synthesizer)

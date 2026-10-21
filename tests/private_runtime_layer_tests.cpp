@@ -289,6 +289,39 @@ int main(int argc,char** argv) {
             "inventory deduplicates private output tokens into actual native owners");
         seal_outlaws_initialization(*state);
         for(auto handle:app)if(handle)check(find_swapchain(handle)->frame_generation!=nullptr,"startup seal lost warmed eye outputs");
+        if(outlaws_budget) {
+            // The owner starts with both switches Off, then enables AFW/OFXR.
+            // These are the real control calls AFTER Outlaws sealed cold setup.
+            std::array<XrCompositionLayerProjectionView,2> views{};
+            for(unsigned eye=0;eye<2;++eye) {
+                views[eye]={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};views[eye].pose.orientation.w=1;
+                views[eye].fov={-.7f,.7f,.7f,-.7f};views[eye].subImage.swapchain=app[eye];
+                views[eye].subImage.imageRect.extent={64,32};
+            }
+            XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);
+            projection.viewCount=2;projection.views=views.data();
+            const auto* header=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+            XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO};frame.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+            frame.layerCount=1;frame.layers=&header;frame.displayTime=epoch+ns();
+            std::array<std::shared_ptr<FrameGenerationSwapchainState>,3> warmed;
+            for(unsigned n=0;n<3;++n)warmed[n]=find_swapchain(app[n])->frame_generation;
+            for(const auto [on,afw]:{std::pair{false,0},std::pair{false,3},std::pair{true,3},
+                                    std::pair{false,3},std::pair{false,0},std::pair{true,0},std::pair{true,3}}) {
+                auto desired=xrfg::autonomous::snapshot().desired;
+                desired.enabled=on;desired.afw_mode=afw;desired.backend=1;
+                check(xrfg::autonomous::request(desired),"Outlaws owner's Off/AFW/OFXR control sequence");
+                xrfg::autonomous::apply_runtime_settings();state->control_revision=0;
+                ok(apply_embedded_control(state,false,&frame),"actual sealed Outlaws control application");
+                for(unsigned n=0;n<3;++n)check(find_swapchain(app[n])->frame_generation==warmed[n],
+                    "sealed Outlaws warm outputs were retired by an Off/AFW/OFXR switch and cannot be rearmed");
+                ProjectionSnapshot snapshot{};
+                check(capture_projection_snapshot(&frame,&snapshot),"Outlaws submitted stereo projection");
+                const auto mappings=build_projection_resource_mappings(snapshot);
+                check(mappings.ready() && !projection_frame_generation_pending(state,mappings.mappings),
+                    "valid warmed Outlaws eyes remain trapped in pending generation");
+                check(f.chains.size()==expected_native,"control sequence allocated or destroyed native publication sinks");
+            }
+        }
         xr_ok(f.transport->start(),"start Outlaws native publication consumer");
         std::vector<unsigned> expected_left,expected_right;
         for(unsigned slot:{0U,1U,2U,3U,4U,0U}) {

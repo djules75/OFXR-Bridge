@@ -1,3 +1,11 @@
+## V625: Outlaws warm-output lifetime
+
+Preserve Outlaws' startup-only generation resources across Off/AFW/OFXR changes;
+otherwise general cleanup destroys them after cold setup is permanently sealed.
+The reproduced V624 Off->On failure is corrected without reopening late setup
+or changing pacing, motion math or other games. V624 UI/storage retained.
+[Evidence and scope](docs/V625_OUTLAWS_WARM_OUTPUTS.md). Local, headset validation pending.
+
 ## V624: Luke swapchain option and one user-data root
 
 Luke Ross adds a startup-only output-sharing checkbox above compact swapchain
