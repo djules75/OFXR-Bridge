@@ -22,6 +22,12 @@ int main() {
 
     const LauncherSettings release_defaults;
     if (!release_defaults.steamvr_separate_queue || release_defaults.afw_only) return 1;
+    if(!release_defaults.vdxr_legacy)return 1;
+    for(bool legacy:{false,true}) {
+        auto choice=release_defaults;choice.vdxr_legacy=legacy;
+        const auto key=legacy?"vdxr_legacy=1":"vdxr_legacy=0";
+        if(parse_settings(serialize_settings(choice)).vdxr_legacy!=legacy || !contains(build_runtime_ini(choice),key))return 1;
+    }
     for(bool enabled:{false,true}) {
         auto s=release_defaults;s.afw_only=enabled;
         const auto key=enabled?"afw_only=1":"afw_only=0";

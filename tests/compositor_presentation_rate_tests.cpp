@@ -76,6 +76,9 @@ int main() {
             t.output_source=xrfg::InterfaceSource::accepted_scene_submissions;
             if(!xrfg::output_rate_valid(t)||xrfg::presented_output_valid(t))
                 throw std::runtime_error("accepted images misrepresented as physical presentation");
+            t.output_source=xrfg::InterfaceSource::runtime_accepted_delivery;
+            if(!xrfg::output_rate_valid(t)||xrfg::presented_output_valid(t))
+                throw std::runtime_error("VDXR native Ends misrepresented as physical scanout");
         }
         struct Delivery {
             std::optional<float> rate{45};unsigned calls{};

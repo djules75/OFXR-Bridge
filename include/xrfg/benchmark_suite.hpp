@@ -14,38 +14,29 @@ struct BenchmarkStep {
     int pacing{-1}; // -1 preserves the pre-V614 runtime's global choice.
 };
 inline std::vector<BenchmarkStep> legacy_benchmark_plan(bool full,bool luke=false) {
-    if(luke) {
-        std::vector<BenchmarkStep> result;
-        for(const int quality:{0,4,8}) {
-            for(auto step:legacy_benchmark_plan(false)) {
-                if(step.a || step.b || (step.prefer && !step.triple))continue;
-                step.afw=3;step.shading=quality;
-                if(step.disabled)step.label="AFW only";
-                else if(step.label.ends_with(" Normal"))step.label.replace(step.label.size()-7,7," 00");
-                result.push_back(std::move(step));
-            }
+    std::vector<BenchmarkStep> steps;
+    for(const int quality : (luke ? std::vector<int>{0,4,8} : std::vector<int>{-1})) {
+        BenchmarkStep off{0,0,0,0,false,false,true,luke?"AFW only":"Disabled"};
+        off.pacing=0;if(luke){off.afw=3;off.shading=quality;}steps.push_back(off);
+        const auto route=[&](const char* name,int generation,int backend,bool triple,bool fast) {
+            BenchmarkStep s{generation,backend,luke?0:int(fast),luke?0:int(fast),triple,triple,false,
+                std::string(name)+(luke?" 00":fast?" Lower VRAM":" Normal")};
+            s.pacing=0;if(luke){s.afw=3;s.shading=quality;}steps.push_back(std::move(s));
+        };
+        route("Fidelity",0,0,false,true);route("0.2.1",0,1,false,true);route("Djules 2X",0,3,false,true);
+        if(!luke){route("Djules 3X",0,3,true,false);route("Djules 3X",0,3,true,true);}
+        route("0.3.0",0,2,false,true);
+        if(full&&!luke)for(auto [name,mode]:{std::pair{"Hybrid",3},std::pair{"FSR",1},std::pair{"DLSS-G",2}}) {
+            route(name,mode,0,false,false);route(name,mode,0,false,true);
         }
-        return result;
     }
-    std::vector<BenchmarkStep> steps{{0,0,0,0,false,false,true,"Disabled"}};
-    const auto route=[&](const char* name,int generation,int backend,bool triple=false) {
-        // Normal and combined Lower VRAM only. Both retain their requested multiplier.
-        for (const auto flags : {0,3}) {
-            const int a=flags&1,b=(flags>>1)&1;
-            steps.push_back({generation,backend,a,b,triple,triple,false,
-                std::string(name)+(flags ? " Lower VRAM" : " Normal")});
-        }
-    };
-    route("Fidelity",0,0);route("0.2.1",0,1);route("Djules 2X",0,3);
-    route("Djules 3X",0,3,true);route("0.3.0",0,2);
-    if(full) {route("Hybrid",3,0);route("FSR",1,0);route("DLSS-G",2,0);}
     return steps;
 }
 inline const char* benchmark_pacing_label(int mode) {
     return mode==0 ? "Framework" : mode==1 ? "Director" : "Framework+director";
 }
 inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false,bool steamvr=true) {
-    // VDXR remains on the exact earlier suite until its director comparison is authorized.
+    // The session-latched transport selects the new matrix or Legacy VDXR plan.
     if(!steamvr)return legacy_benchmark_plan(full,luke);
     std::vector<BenchmarkStep> steps;
     const auto route=[&](const char* name,int generation,int backend,bool triple,int quality) {
@@ -110,7 +101,8 @@ struct BenchmarkSamples {
         last_ms=m.updated_ms;
         if((m.output_source==InterfaceSource::steamvr_delivery ||
             m.output_source==InterfaceSource::steamvr_scene_delivery ||
-            m.output_source==InterfaceSource::accepted_scene_submissions) && m.rates_valid &&
+            m.output_source==InterfaceSource::accepted_scene_submissions ||
+            m.output_source==InterfaceSource::runtime_accepted_delivery) && m.rates_valid &&
             std::isfinite(m.output_fps) && m.output_fps>=0) fps.push_back(m.output_fps);
         if(m.cycle_estimated_valid && std::isfinite(m.cycle_estimated_ms) && m.cycle_estimated_ms>=0)
             latency.push_back(m.cycle_estimated_ms);

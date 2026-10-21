@@ -23,7 +23,8 @@ void check(bool condition,const char* message){if(!condition){std::fprintf(stder
 void ok(HRESULT result,const char* message){check(SUCCEEDED(result),message);}
 void xr_ok(XrResult result,const char* message){if(XR_FAILED(result))std::fprintf(stderr,"XR result=%d: %s\n",result,message);check(XR_SUCCEEDED(result),message);}
 std::int64_t ns(){LARGE_INTEGER q{},f{};QueryPerformanceCounter(&q);QueryPerformanceFrequency(&f);return q.QuadPart/f.QuadPart*1'000'000'000LL+q.QuadPart%f.QuadPart*1'000'000'000LL/f.QuadPart;}
-constexpr std::int64_t period=11'111'111,epoch=1'000'000'000'000LL;
+std::int64_t period=11'111'111;
+constexpr std::int64_t epoch=1'000'000'000'000LL;
 struct Chain {
     std::vector<ComPtr<ID3D12Resource>> d12;
     std::vector<ComPtr<ID3D11Texture2D>> d11;

@@ -56,7 +56,7 @@ XrResult XRAPI_CALL private_runtime_get_proc(XrInstance instance,const char* nam
 }
 
 HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
-    if(state->afw_only || !state->dispatch->steamvr_runtime)return S_FALSE;
+    if(state->afw_only || !comparison_delivery_runtime(*state))return S_FALSE;
     state->uevr_application=GetModuleHandleW(L"UEVRBackend.dll")!=nullptr;
     auto original=state->dispatch;
     xrfg::PrivateOpenXrRuntime::Options options;
@@ -89,10 +89,16 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
             stage<0?5719:5710+stage,sequence,at,hold);
     };
+    if(original->virtual_desktop_runtime) {
+        state->runtime_acceptance=std::make_shared<xrfg::RuntimeAcceptanceRate>();
+        const auto rate=state->runtime_acceptance;
+        options.accepted_output=[rate](auto at){rate->accepted(at);};
+    }
     options.trace_enabled=[]{return xrfg::bridge_flight_logger().enabled();};
     auto transport=std::make_shared<xrfg::PrivateOpenXrRuntime>(std::move(options));
     auto result=transport->initialize();if(FAILED(result))return result;
     auto dispatch=std::make_shared<Dispatch>(*original);
+    dispatch->inline_unless_pipelined=false; // common endpoint owns the runtime frame loop
     dispatch->wait_frame=private_runtime_wait;dispatch->begin_frame=private_runtime_begin;dispatch->end_frame=private_runtime_end;
     dispatch->create_swapchain=private_runtime_create;dispatch->destroy_swapchain=private_runtime_destroy;
     dispatch->enumerate_swapchain_images=private_runtime_enumerate;

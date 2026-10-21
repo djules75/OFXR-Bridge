@@ -59,6 +59,7 @@ enum MenuCommand : UINT {
     steamvr_queue_shared = 94,
     toggle_afw_only = 95,
     toggle_benchmark_mode = 96,
+    toggle_vdxr_legacy = 97,
     show_settings = 100,
     open_logs = 130,
     donate_creator = 138,
@@ -816,6 +817,8 @@ void show_context_menu(AppState& state) {
         toggle_pause, state.paused ? L"Resume frame generation" : L"Pause frame generation");
     std::wstring binding = L"Pause key: " + pause_key_display(state.settings.pause_hotkey);
     AppendMenuW(menu, MF_STRING, change_pause_key, binding.c_str());
+    AppendMenuW(menu,MF_STRING | (state.settings.vdxr_legacy ? MF_CHECKED : MF_UNCHECKED),
+        toggle_vdxr_legacy,L"Legacy VDXR (restart game)");
     AppendMenuW(menu,MF_STRING | (state.settings.afw_only ? MF_CHECKED : MF_UNCHECKED),
         toggle_afw_only,L"AFW only (Luke Ross, restart game)");
     AppendMenuW(menu,MF_STRING | (xrfg::autonomous::benchmark_enabled() ? MF_CHECKED : MF_UNCHECKED),
@@ -877,6 +880,25 @@ void show_context_menu(AppState& state) {
         }
     }
     log_lifecycle(state.local_directory,enabled?L"afw-only-next-session":L"full-ofxr-next-session");
+    return true;
+}
+
+[[nodiscard]] bool set_vdxr_legacy_preference(AppState& state, bool enabled, std::wstring* error) {
+    const bool previous=state.settings.vdxr_legacy;
+    state.settings.vdxr_legacy=enabled;
+    if (!xrfg::autonomous::write_configuration_sections(state.settings_path,xrfg::standalone::serialize_settings(state.settings))) {
+        state.settings.vdxr_legacy=previous;
+        if(error)*error=L"Could not save ofxr-bridge.ini.";
+        return false;
+    }
+    if(state.armed) {
+        const auto ini=runtime_directory(state.local_directory)/L"ofxr_bridge.ini";
+        if(!WritePrivateProfileStringW(L"ofxr",L"vdxr_legacy",enabled?L"1":L"0",ini.c_str())) {
+            if(error)*error=last_error_message(L"Saving Legacy VDXR");
+            state.settings.vdxr_legacy=previous;save_settings(state);return false;
+        }
+    }
+    log_lifecycle(state.local_directory,enabled?L"legacy-vdxr-next-session":L"director-vdxr-next-session");
     return true;
 }
 
@@ -948,6 +970,11 @@ void handle_command(AppState& state, UINT command) {
         if(!set_benchmark_preference(state.settings_path,!xrfg::autonomous::benchmark_enabled(),&error))
             show_error(state.window,error);
         return;
+    }
+    case toggle_vdxr_legacy: {
+        std::wstring error;
+        if(!set_vdxr_legacy_preference(state,!state.settings.vdxr_legacy,&error))show_error(state.window,error);
+        break;
     }
     case toggle_afw_only: {
         std::wstring error;

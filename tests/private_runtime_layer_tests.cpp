@@ -10,9 +10,12 @@
 
 #include "afw_only_session_test.inc"
 
-static bool framework_session_probe{};
+static bool framework_session_probe{},vdxr_legacy_probe{};
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    const bool vdxr_probe=route.starts_with("vdxr-");if(vdxr_probe)route=route.substr(5);
+    if(vdxr_probe)period=8'333'333; // 120Hz runtime predictions, no SteamVR timing API
+    vdxr_legacy_probe=route=="legacy-session";if(vdxr_legacy_probe)route="session";
     if(route.starts_with("afw-only") || route=="luke-shared-session")return afw_only_session_test(route,argc>2?argv[2]:nullptr);
     const bool shared_budget=route=="luke-shared-budget",unshared_budget=route=="luke-unshared-budget";
     const bool outlaws_budget=route=="outlaws-budget";
@@ -39,6 +42,15 @@ int main(int argc,char** argv) {
     const bool native12=!route.starts_with("d11-");if(!native12)route=route.substr(4);
     const bool triple=route.ends_with('3');if(triple)route.pop_back();
     xrfg_fixture::ControlProfile profile;
+    const auto startup_ini=current_layer_directory()/L"ofxr_bridge.ini";
+    struct StartupRestore {
+        std::filesystem::path p;bool existed{};std::string bytes;
+        StartupRestore(std::filesystem::path path):p(path),existed(std::filesystem::exists(path)) {
+            if(existed){std::ifstream f(p,std::ios::binary);bytes.assign(std::istreambuf_iterator<char>(f),{});}
+        }
+        ~StartupRestore(){if(existed){std::ofstream f(p,std::ios::binary);f<<bytes;}else{std::error_code e;std::filesystem::remove(p,e);}WritePrivateProfileStringW(nullptr,nullptr,nullptr,p.c_str());}
+    } startup_restore(startup_ini);
+    if(vdxr_probe)check(WritePrivateProfileStringW(L"ofxr",L"vdxr_legacy",vdxr_legacy_probe?L"1":L"0",startup_ini.c_str()),"isolated VDXR startup flag");
     if(benchmark_sequence && GetEnvironmentVariableW(L"XRFG_BENCH_TRACE",nullptr,0)) {
         const auto folder=xrfg::autonomous::configuration_path().parent_path()/L"trace";
         std::filesystem::create_directories(folder);
@@ -76,7 +88,7 @@ int main(int argc,char** argv) {
     if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
     Fixture f(native12);f.transport->stop();if(route!="memory" && route!="scope" && !framework_session_probe)f.transport.reset();f.throttled=false;f.real_common=true;f.expected_views=2;f.unblock();
     f.create_state=[] {std::scoped_lock lock(g_state_mutex);return g_swapchains.empty()?D3D12_RESOURCE_STATE_RENDER_TARGET:D3D12_RESOURCE_STATE_COMMON;};
-    auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=true;
+    auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=!vdxr_probe;dispatch->virtual_desktop_runtime=vdxr_probe;
     if(measured)dispatch->get_instance_proc_addr=+[](XrInstance,const char*,PFN_xrVoidFunction* out)->XrResult{*out=nullptr;return XR_ERROR_FUNCTION_UNSUPPORTED;};
     dispatch->wait_frame=Fixture::wait;dispatch->begin_frame=Fixture::begin;dispatch->end_frame=Fixture::end;
     dispatch->create_swapchain=Fixture::create;dispatch->destroy_swapchain=Fixture::destroy;dispatch->enumerate_swapchain_images=Fixture::enumerate;
@@ -86,7 +98,7 @@ int main(int argc,char** argv) {
         dispatch->create_session=+[](XrInstance,const XrSessionCreateInfo* info,XrSession* out)->XrResult{
             auto& f=*current;auto* binding=static_cast<const XrGraphicsBindingD3D12KHR*>(info->next);
             check(binding && binding->type==XR_TYPE_GRAPHICS_BINDING_D3D12_KHR,"actual raw D12 binding");
-            if(!framework_session_probe)check(binding->queue!=f.queue.Get(),"real XR must not receive producer queue");
+            if(!framework_session_probe && !vdxr_legacy_probe)check(binding->queue!=f.queue.Get(),"real XR must not receive producer queue");
             f.delivery_queue=binding->queue;*out=reinterpret_cast<XrSession>(2);return XR_SUCCESS;
         };
         dispatch->destroy_session=+[](XrSession)->XrResult{return XR_SUCCESS;};
@@ -95,6 +107,15 @@ int main(int argc,char** argv) {
         XrSessionCreateInfo info{XR_TYPE_SESSION_CREATE_INFO};info.next=&binding;info.systemId=1;
         XrSession handle{};xr_ok(layer_create_session_impl(dispatch->instance,&info,&handle),"shipping session creates private delivery binding");
         auto created=find_session(handle);
+        if(vdxr_legacy_probe) {
+            check(created && created->vdxr_legacy && !created->private_runtime && !created->private_delivery_queue,
+                "Legacy VDXR keeps original native binding without a private director");
+            check(f.delivery_queue==f.queue,"Legacy keeps the exact application runtime queue");
+            xr_ok(layer_destroy_session_impl(handle),"Legacy VDXR session cleanup");
+            {std::scoped_lock lock(g_state_mutex);g_instances.clear();}return 0;
+        }
+        if(vdxr_probe)check(created && !created->vdxr_legacy && created->dispatch->virtual_desktop_runtime &&
+            !created->dispatch->steamvr_runtime && created->runtime_acceptance,"VDXR session identity and actual-End measurement remain distinct");
         if(off_session_probe) {
             check(created && created->private_runtime && !created->menu_enabled,"OFXR-off startup installed the stable private endpoint");
             auto transport=created->private_runtime;f.transport=transport;f.expected_views=1;
@@ -146,6 +167,14 @@ int main(int argc,char** argv) {
                     single_director_pacing(*created)==(mode==1),"every pacing choice applies to the original endpoint");
             }
             f.transport=transport;
+            if(vdxr_probe) {
+                f.expected_views=1;xr_ok(transport->start(),"VDXR start from native prediction clock only");
+                auto chain=f.make_chain();
+                for(unsigned n=1;n<=12;++n){f.write(chain,n*7);f.begin_virtual();xr_ok(f.submit(chain,float(n)),"VDXR ordered content packet");}
+                f.wait_count(12);xr_ok(transport->drain(),"VDXR FIFO drained");
+                for(unsigned n=0;n<12;++n)check(f.pixels[n]==(n+1)*7 && f.positions[n]==float(n+1),"VDXR exact GPU pixels and pose order");
+                xr_ok(transport->destroy_swapchain(chain),"VDXR publication cleanup");
+            }
             xr_ok(layer_destroy_session_impl(handle),"framework session cleanup");
             {std::scoped_lock lock(g_state_mutex);g_instances.clear();}
             std::puts("Framework startup and live three-mode switch retain one native binding PASS");return 0;
@@ -170,6 +199,7 @@ int main(int argc,char** argv) {
     if(!native12)ok(xrfg::create_d3d12_device_for_d3d11(f.device11.Get(),f.device12.GetAddressOf(),f.queue.GetAddressOf()),"D11 generator interop device");
     state->d3d12_device=f.device12;state->d3d12_queue=f.queue;
     state->d3d11_device=f.device11;state->d3d11_context=f.context;
+    state->vdxr_legacy=!vdxr_probe;
     state->single_director_requested=sole;
     state->luke_afw_enabled=luke;
     if(route=="scope") {
@@ -178,6 +208,9 @@ int main(int argc,char** argv) {
         state->private_runtime=f.transport;
         dispatch->steamvr_runtime=false;dispatch->virtual_desktop_runtime=true;
         check(!single_director_pacing(*state),"VDXR remains unchanged with the experimental flag requested");
+        state->vdxr_legacy=false;
+        check(single_director_pacing(*state),"opt-in private VDXR enables sole-director pacing");
+        state->vdxr_legacy=true;
         dispatch->steamvr_runtime=true;dispatch->virtual_desktop_runtime=false;
         check(single_director_pacing(*state),"only private SteamVR enables sole-director pacing");
         state->single_director_requested=false;

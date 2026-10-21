@@ -65,6 +65,7 @@ struct LauncherSettings {
     // Tray-only startup experiment: Luke AFW goes straight to native OpenXR.
     // OFXR is disabled for this session; Neural Rendering remains independent.
     bool afw_only{};
+    bool vdxr_legacy{true}; // tray-only startup choice; preserve original VDXR by default
     // The Vulkan bridge (see the layer's vulkan_session_bridge): a Vulkan
     // game's session is handed to the runtime as D3D12. On by default; no
     // menu entry.

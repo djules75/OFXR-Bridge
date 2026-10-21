@@ -35,6 +35,7 @@ public:
     void application_frame(const XrFrameEndInfo* info) noexcept;
     void set_afw_active(bool active) noexcept;
     void set_delivery_source(SteamVrDelivery* delivery) noexcept;
+    void set_runtime_acceptance_source(std::function<std::optional<float>(std::int64_t)> source, bool direct=false) noexcept;
     using ObservedEndFrame=std::function<XrResult(const XrFrameEndInfo*,const std::shared_ptr<InterfaceDeliveryReceipt>&)>;
     void set_private_delivery_end(ObservedEndFrame);
     void set_unique_content_only(bool enabled) noexcept;

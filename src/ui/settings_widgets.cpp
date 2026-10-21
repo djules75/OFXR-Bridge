@@ -226,17 +226,17 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     ImGui::EndDisabled();
     ImGui::TextWrapped(state.runtime.luke_detected ? "Fast mode has no effect with Luke Ross."
         : "Uses private synthesis textures and fewer XR swapchains.");
-    if(state.runtime.steamvr_runtime && draft.triple_frame_gen && !state.runtime.luke_detected)
+    if(pacing_comparison_runtime(state.runtime) && draft.triple_frame_gen && !state.runtime.luke_detected)
         ImGui::TextWrapped("Fast mode preserves the output capacity needed for 3X; VRAM reduction may be limited.");
-    const bool framework_only=state.connected && !state.runtime.steamvr_runtime;
+    const bool framework_only=state.connected && !pacing_comparison_runtime(state.runtime);
     int pacing=framework_only?0:draft.pacing_mode;
     ImGui::BeginDisabled(framework_only);
     if(ImGui::Combo("Pacing",&pacing,"Framework\0Director\0Framework+director\0")) {
         draft.pacing_mode=pacing;changed=true;
     }
     ImGui::EndDisabled();
-    ImGui::TextWrapped(framework_only ? "This runtime uses Framework pacing. Director choices apply to SteamVR."
-        : "SteamVR: Framework bypasses director pacing; Director uses only the final director; Framework+director combines both. Changes apply live after queued frames complete.");
+    ImGui::TextWrapped(framework_only ? "Legacy VDXR uses the original Framework path. Disable Legacy VDXR in the tray and restart the game to compare director pacing."
+        : "Framework bypasses director pacing; Director uses only the final director; Framework+director combines both. Changes apply live after queued frames complete.");
     ImGui::Separator();
     if (!ImGui::CollapsingHeader("Details")) return changed;
     const auto& telemetry = state.runtime.telemetry;
@@ -395,11 +395,11 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     }
     if(state.benchmark.message[0])ImGui::TextWrapped("%s",state.benchmark.message);
     if(state.benchmark.csv_path[0])ImGui::TextWrapped("CSV: %s",state.benchmark.csv_path);
-    if(state.runtime.steamvr_runtime) {
-        ImGui::TextWrapped("SteamVR: Framework, Director, Framework+director for every route. Normal and Fast mode: 31 optical or 49 complete tests including one OFXR Off reference.");
+    if(pacing_comparison_runtime(state.runtime)) {
+        ImGui::TextWrapped("Framework, Director, Framework+director for every route. Normal and Fast mode: 31 optical or 49 complete tests including one OFXR Off reference.");
         ImGui::TextWrapped("Luke Ross: 39 tests through OFXR 0.3.0, no 3X. Three AFW quality passes: 1x1, 2x2, 4x4. AFW alone once per quality, then each route with all three pacing modes. Fast mode has no effect. CSV groups each route/pacing's three qualities.");
     } else {
-        ImGui::TextWrapped("VDXR suites unchanged: 11 optical, 17 complete, 18 Luke Ross tests. The selected pacing is kept. Normal suites compare Normal and Fast mode; Luke runs three AFW quality passes through OFXR 0.3.0.");
+        ImGui::TextWrapped("Legacy VDXR: 7 optical or 13 complete tests. Fidelity, 0.2.1, Djules 2X and 0.3.0 use Fast; 3X and vector routes compare Normal/Fast. Luke: 15 tests, three AFW qualities through 0.3.0, no 3X.");
     }
     ImGui::TextWrapped("Close the menu and keep the same test scene. Original settings are restored after Stop or completion. Memory is sampled once near the end of each trial. Tests keep the startup DLSS-G preset and never change its NVIDIA profile. A is the initial preference; changing presets requires restarting the game.");
     if(ImGui::CollapsingHeader("Experimental features")) {

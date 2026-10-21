@@ -13,7 +13,8 @@ namespace xrfg {
 // useful delivery measurements, but never claim those are physical scanout.
 [[nodiscard]] inline bool output_rate_valid(const InterfaceTelemetry& value) noexcept {
     return presented_output_valid(value) || (value.rates_valid &&
-        value.output_source==InterfaceSource::accepted_scene_submissions &&
+        (value.output_source==InterfaceSource::accepted_scene_submissions ||
+         value.output_source==InterfaceSource::runtime_accepted_delivery) &&
         std::isfinite(value.output_fps) && value.output_fps>=0);
 }
 

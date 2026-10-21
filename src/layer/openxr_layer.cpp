@@ -45,6 +45,7 @@
 #include "xrfg/openxr_fps_overlay.hpp"
 #include "xrfg/steamvr_delivery.hpp"
 #include "xrfg/private_openxr_runtime.hpp"
+#include "xrfg/runtime_acceptance_rate.hpp"
 #include "xrfg/private_delivery_queue.hpp"
 
 #include <windows.h>
@@ -706,6 +707,7 @@ struct SessionState {
     bool uevr_application{}; // captured once at session creation, never inferred from game name
     bool steamvr_separate_queue{true}; // immutable session preference, tray-only
     bool afw_only{}; // immutable session transport; does not disable Neural Rendering
+    bool vdxr_legacy{true}; // immutable VDXR transport comparison
     // D25 comparison policy: SteamVR's runtime gets its own binding queue.
     // Shared non-pacing support for both advanced NVIDIA routes.
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> binding_queue;
@@ -764,6 +766,7 @@ struct SessionState {
 
     std::shared_ptr<Dispatch> dispatch;
     std::shared_ptr<xrfg::PrivateOpenXrRuntime> private_runtime;
+    std::shared_ptr<xrfg::RuntimeAcceptanceRate> runtime_acceptance;
     xrfg::implicit_layer::ManualArmControl manual_control;
     xrfg::FsrCadenceProbe fsr_cadence;
     FsrStereoAdmission fsr_stereo_admission; // frame_call_mutex; never persisted
@@ -1496,6 +1499,10 @@ private:
         state.frame_generation_mode, state.dlss_motion_vectors, state.luke_afw_enabled);
 }
 
+[[nodiscard]] bool comparison_delivery_runtime(const SessionState& state) noexcept {
+    return state.dispatch->steamvr_runtime || (state.dispatch->virtual_desktop_runtime && !state.vdxr_legacy);
+}
+
 [[nodiscard]] bool advanced_native_outputs(const SessionState& state) noexcept {
     return state.nvidia_new_route && !state.luke_afw_enabled &&
         state.frame_generation_mode != xrfg::D3D12FrameGenerationMode::fsr3 &&
@@ -1506,7 +1513,7 @@ private:
 // Reference keeps its fixed-midpoint/linear-flow algorithm. Only ordinary
 // native D12 SteamVR transport may overlap a retained pair with the next capture.
 [[nodiscard]] bool steamvr_reference_capture_overlap(const SessionState& state) noexcept {
-    return state.dispatch->steamvr_runtime && !state.nvidia_new_route &&
+    return comparison_delivery_runtime(state) && !state.nvidia_new_route &&
         state.graphics_binding == SessionGraphicsBinding::d3d12 &&
         !state.d3d11_bridge && !state.vulkan_bridge && !state.luke_afw_enabled &&
         !state.luke_outlaws_preframe && !state.hybrid_requested && !state.nvidia_options.hybrid &&
@@ -1535,7 +1542,7 @@ private:
 
 [[nodiscard]] bool runtime_binding_queue_requested(const SessionState& state) noexcept {
     if(state.afw_only)return false;
-    if (!state.dispatch->steamvr_runtime || state.graphics_binding != SessionGraphicsBinding::d3d12) return false;
+    if (!comparison_delivery_runtime(state) || state.graphics_binding != SessionGraphicsBinding::d3d12) return false;
     if (!state.d3d11_bridge && !state.vulkan_bridge && !state.luke_afw_enabled)
         return state.steamvr_separate_queue;
     // Preserve established interop and Luke transport contracts.
@@ -1565,7 +1572,7 @@ private:
 [[nodiscard]] bool single_director_pacing(const SessionState& state) noexcept {
     return state.menu_enabled.load(std::memory_order_relaxed) &&
         state.single_director_requested.load(std::memory_order_relaxed) &&
-        state.private_runtime && state.dispatch->steamvr_runtime;
+        state.private_runtime && comparison_delivery_runtime(state);
 }
 
 [[nodiscard]] bool staged_native_outputs(const SessionState& state) noexcept {
@@ -1610,17 +1617,17 @@ private:
 // Capacity follows the selected multiplier, even during a disabled/drained control transaction.
 [[nodiscard]] bool extra_output_capacity(const SessionState& state) noexcept {
     return state.djules_triple_requested && djules_native_scheduler(state) &&
-        (!direct_reduced_outputs(state) || (state.private_runtime && state.dispatch->steamvr_runtime));
+        (!direct_reduced_outputs(state) || (state.private_runtime));
 }
 [[nodiscard]] unsigned native_synthetic_rings(const SessionState& state) noexcept {
     // Fast 3X still needs two distinct S destinations, never alias S1/S2.
-    const bool private_triple=state.private_runtime && state.dispatch->steamvr_runtime && extra_output_capacity(state);
+    const bool private_triple=state.private_runtime && extra_output_capacity(state);
     return reduced_native_outputs(state) && !private_triple ? 1U : 2U;
 }
 [[nodiscard]] unsigned native_current_rings(const SessionState& state) noexcept {
     // The framework may retain A while B is prepared. 3X must keep both even
     // with Fast selected; one B handle would alias an owned source descriptor.
-    const bool private_triple=state.private_runtime && state.dispatch->steamvr_runtime && extra_output_capacity(state);
+    const bool private_triple=state.private_runtime && extra_output_capacity(state);
     return reduced_native_outputs(state) && !private_triple ? 1U : 2U;
 }
 
@@ -2648,7 +2655,7 @@ XrResult wait_presenter_runtime_frame(const std::shared_ptr<SessionState>& state
     const bool native = state.graphics_binding == SessionGraphicsBinding::d3d12 &&
         !state.d3d11_bridge && !state.vulkan_bridge && !state.luke_afw_enabled;
     const bool luke = state.graphics_binding == SessionGraphicsBinding::d3d11 && state.luke_afw_enabled;
-    if (state.dispatch->steamvr_runtime && (native || luke) && !state.luke_outlaws_preframe &&
+    if (comparison_delivery_runtime(state) && (native || luke) && !state.luke_outlaws_preframe &&
         state.presenter_display_period >= 2'000'000 &&
         state.presenter_display_period <= 50'000'000)
         return state.presenter_display_period;
@@ -2668,12 +2675,12 @@ XrResult wait_presenter_runtime_frame(const std::shared_ptr<SessionState>& state
         state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr;
 }
 [[nodiscard]] bool presenter_holds_djules_prime(const SessionState& state) noexcept {
-    return !(ordinary_djules_route(state) && state.dispatch->steamvr_runtime);
+    return !(ordinary_djules_route(state) && comparison_delivery_runtime(state));
 }
 // V461's counted-release principle adapted to the native queued2X bridge.
 // Keep other runtime/bridge/deep/one-ring contracts at the V553 baseline.
 [[nodiscard]] bool steamvr_counted_native_release(const SessionState& state) noexcept {
-    return !single_director_pacing(state) && state.dispatch->steamvr_runtime &&
+    return !single_director_pacing(state) && comparison_delivery_runtime(state) &&
         state.graphics_binding==SessionGraphicsBinding::d3d12 &&
         !state.d3d11_bridge && !state.vulkan_bridge && !state.luke_afw_enabled &&
         !state.luke_outlaws_preframe && !state.three_slot_director &&
@@ -2693,7 +2700,7 @@ void release_pending_bridge_image_locked(const std::shared_ptr<SwapchainState>& 
 void release_pending_bridge_images(const std::shared_ptr<SessionState>& state) noexcept;
 
 [[nodiscard]] bool djules_inline_runtime(const SessionState& state) noexcept {
-    return state.djules_route && state.nvidia_new_route && !state.luke_afw_enabled &&
+    return !state.private_runtime && state.djules_route && state.nvidia_new_route && !state.luke_afw_enabled &&
         state.frame_generation_mode != xrfg::D3D12FrameGenerationMode::fsr3 &&
         state.dispatch->inline_unless_pipelined && !state.pipelined_presenter_mode &&
         !(state.dispatch->virtual_desktop_runtime &&
@@ -5387,6 +5394,8 @@ XrResult layer_create_session_impl(
     state->steamvr_separate_queue = GetPrivateProfileIntW(L"ofxr", L"steamvr_separate_queue", 1,
         (current_layer_directory() / L"ofxr_bridge.ini").c_str()) != 0;
     state->luke_afw_enabled=xrfg::native_ingress::luke_detected();
+    state->vdxr_legacy=GetPrivateProfileIntW(L"ofxr",L"vdxr_legacy",1,
+        (current_layer_directory()/L"ofxr_bridge.ini").c_str())!=0;
     state->afw_only=state->luke_afw_enabled && GetPrivateProfileIntW(L"ofxr",L"afw_only",0,
         (current_layer_directory()/L"ofxr_bridge.ini").c_str())!=0;
     state->luke_shared_swapchains=xrfg::autonomous::snapshot().desired.luke_shared_swapchains;
@@ -5666,7 +5675,7 @@ XrResult layer_create_session_impl(
     // app/synthesis waits. The old optional binding queue now prepares PRIVATE
     // outputs; it cannot also be the final consumer's graphics binding.
     XrGraphicsBindingD3D12KHR delivery_binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
-    if(!state->afw_only && dispatch->steamvr_runtime && state->graphics_binding==SessionGraphicsBinding::d3d12 &&
+    if(!state->afw_only && comparison_delivery_runtime(*state) && state->graphics_binding==SessionGraphicsBinding::d3d12 &&
        forwarded_info && forwarded_info->next) {
         const auto* binding=static_cast<const XrBaseInStructure*>(forwarded_info->next);
         if(binding->type==XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
@@ -5730,6 +5739,10 @@ XrResult layer_create_session_impl(
             }, dispatch.get());
         bind_private_delivery_metrics(state);
         state->fps_overlay->set_delivery_source(state->steamvr_delivery.get());
+        if(state->dispatch->virtual_desktop_runtime) {
+            const auto rate=state->runtime_acceptance;
+            state->fps_overlay->set_runtime_acceptance_source(rate?std::function<std::optional<float>(std::int64_t)>([rate](auto now){return rate->rate(now);}):std::function<std::optional<float>(std::int64_t)>{},!rate);
+        }
         state->fps_overlay->set_unique_content_only(state->luke_fresh_only);
         state->fps_overlay->set_luke_scene_measurement(xrfg::native_ingress::luke_detected());
     } catch (...) {}
@@ -5848,7 +5861,8 @@ XrResult layer_create_session_impl(
         xrfg::autonomous::GenerationState::waiting, S_OK, state->vulkan_binding.device != VK_NULL_HANDLE,0,nullptr,
         state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only,
         state->private_runtime && state->luke_afw_enabled && (state->luke_shared_swapchains || state->luke_outlaws_preframe),
-        state->private_runtime && state->luke_outlaws_preframe);
+        state->private_runtime && state->luke_outlaws_preframe,
+        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy);
     return result;
 }
 
@@ -9958,7 +9972,7 @@ void stop_continuous_presenter(
 }
 
 [[nodiscard]] bool fsr_two_slot_session(const std::shared_ptr<SessionState>& state) noexcept {
-    return !state->luke_afw_enabled && state->dispatch->steamvr_runtime && state->menu_enabled &&
+    return !state->luke_afw_enabled && comparison_delivery_runtime(*state) && state->menu_enabled &&
         state->graphics_binding == SessionGraphicsBinding::d3d12 &&
         state->frame_generation_mode == xrfg::D3D12FrameGenerationMode::fsr3;
 }
@@ -10766,7 +10780,7 @@ build_reprojection_views(
 // Luke's source identity and other runtimes retain their existing contract.
 [[nodiscard]] bool capture_order_timeline(
     const SessionState& state) noexcept {
-    return state.dispatch && state.dispatch->steamvr_runtime &&
+    return state.dispatch && comparison_delivery_runtime(state) &&
         state.graphics_binding == SessionGraphicsBinding::d3d12 && !state.luke_afw_enabled;
 }
 
@@ -11387,7 +11401,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
 }
 
 [[nodiscard]] bool defer_native_direct_publication(const SessionState& state) noexcept {
-    return state.dispatch->steamvr_runtime && state.graphics_binding==SessionGraphicsBinding::d3d12 &&
+    return comparison_delivery_runtime(state) && state.graphics_binding==SessionGraphicsBinding::d3d12 &&
         !state.d3d11_bridge && !state.vulkan_bridge && !state.luke_afw_enabled && !state.luke_outlaws_preframe &&
         (state.queued_nvidia_presenter || state.fsr_two_slot_presenter) &&
         (state.nvidia_new_route || state.frame_generation_mode!=xrfg::D3D12FrameGenerationMode::ofxr) &&
@@ -11522,7 +11536,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         const auto publication_stopping=[&] {
             return state->session->presenter_stop_requested &&
                 (state->session->presenter_active || !state->session->private_runtime ||
-                 !state->session->dispatch->steamvr_runtime);
+                 !comparison_delivery_runtime(*state->session));
         };
         auto& extra_image = generation->synthetic[(synthetic_slot + (generation->synthetic_runtime_rings==4 ? 2 : 1)) % generation->synthetic_runtime_rings];
         if(request_extra && !generation->staged_outputs) {
@@ -11817,7 +11831,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         // that queue has to wait for it before the release below hands the
         // images over. GPU-side, so it costs the application thread nothing.
         const bool deferred_runtime_join=late_direct_publication ||
-            (generation->staged_outputs && state->session->dispatch->steamvr_runtime &&
+            (generation->staged_outputs && comparison_delivery_runtime(*state->session) &&
              state->session->graphics_binding==SessionGraphicsBinding::d3d12 &&
              !state->session->d3d11_bridge && !state->session->vulkan_bridge && !state->session->luke_afw_enabled);
         if (!worker_submission && !deferred_runtime_join && state->session->d3d12_synthesis_queue && SUCCEEDED(submit_result)) {
@@ -11833,7 +11847,7 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         }
         if (SUCCEEDED(submit_result) && !worker_submission &&
             (state->session->queued_nvidia_presenter || state->session->fsr_two_slot_presenter) &&
-            state->session->dispatch->steamvr_runtime &&
+            comparison_delivery_runtime(*state->session) &&
             !state->session->luke_afw_enabled && !state->session->luke_outlaws_preframe &&
             state->session->graphics_binding == SessionGraphicsBinding::d3d12 &&
             !djules_deep_active(*state->session) && !djules_triple_active(*state->session)) {
@@ -12391,7 +12405,7 @@ XrResult end_frame_with_private_auxiliary(const std::shared_ptr<SessionState>& s
         }
         return result;
     };
-    if (!state->luke_afw_enabled || !state->dispatch->steamvr_runtime ||
+    if (!state->luke_afw_enabled || !comparison_delivery_runtime(*state) ||
         state->graphics_binding!=SessionGraphicsBinding::d3d11 ||
         !info || !info->layers || !info->layerCount)
         return submit(info);
@@ -12688,7 +12702,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
             return XR_ERROR_RUNTIME_FAILURE;
         };
         auto& capture = *chain->composition_capture;
-        const bool private_auxiliary=session->luke_afw_enabled && session->dispatch->steamvr_runtime &&
+        const bool private_auxiliary=session->luke_afw_enabled && comparison_delivery_runtime(*session) &&
             session->graphics_binding==SessionGraphicsBinding::d3d11 && capture.texture;
         if (private_auxiliary && !capture.public_output) {
             if (!session->d3d11_device) return failed(7);
@@ -14175,7 +14189,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
             // A presentation-policy toggle is not a generator reset. In
             // particular do not re-prime an existing FidelityFX packed input
             // as though it were a newly allocated UAV. Keep its history/state.
-            if (state->private_runtime && state->dispatch->steamvr_runtime &&
+            if (state->private_runtime &&
                 continuous_presenter_active(state) && XR_FAILED(wait_for_presenter_idle(state)))
                 return E_FAIL;
             if(state->private_runtime) {
@@ -14890,7 +14904,8 @@ XrResult layer_end_frame_impl(
             state->interface_provider_error.load(std::memory_order_relaxed),&budget,
             state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only,
         state->private_runtime && state->luke_afw_enabled && (state->luke_shared_swapchains || state->luke_outlaws_preframe),
-        state->private_runtime && state->luke_outlaws_preframe); }
+        state->private_runtime && state->luke_outlaws_preframe,
+        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy); }
     } runtime_report_scope{state};
     configure_session_guide_capture(*state);
     const std::uint32_t diagnostic_capture_frame =

@@ -17,13 +17,18 @@ int main() {
         check(optical.size()==31 && full.size()==49,"SteamVR: three pacing modes, Normal/Fast, one Off reference");
         for(const bool luke:{false,true}) for(const bool complete:{false,true}) {
             const auto legacy=benchmark_plan(complete,luke,false);
-            check(legacy.size()==(luke ? 18 : complete ? 17 : 11),"VDXR retains its previous trial counts");
+            check(legacy.size()==(luke ? 15 : complete ? 13 : 7),"Legacy VDXR fits the dedicated spreadsheet columns");
             for(const auto& step:legacy) {
                 Settings original;original.pacing_mode=2;
-                check(step.pacing==-1 && benchmark_settings(original,step).pacing_mode==2,
-                    "VDXR does not inherit the SteamVR pacing matrix");
+                check(step.pacing==0 && benchmark_settings(original,step).pacing_mode==0,
+                    "Legacy VDXR always tests its Framework path");
             }
         }
+        RuntimeStatus vdxr{};vdxr.vdxr_runtime=true;
+        check(!pacing_comparison_runtime(vdxr),"Legacy VDXR keeps its short suite");
+        vdxr.vdxr_legacy=false;
+        check(pacing_comparison_runtime(vdxr) && benchmark_plan(true,false,pacing_comparison_runtime(vdxr)).size()==49,
+            "VDXR opt-in uses all three pacing modes without a false SteamVR identity");
         std::set<std::tuple<bool,int,int,bool,int,int,int>> identities;
         std::set<std::string> names;
         for(const auto& step:full) {
@@ -119,7 +124,7 @@ int main() {
         const auto details_path=std::filesystem::u8path(state.benchmark.csv_path);
         std::ifstream details(details_path.parent_path()/(details_path.stem().wstring()+L"-details.csv"));
         std::stringstream details_text;details_text<<details.rdbuf();
-        check(details_text.str().find("Status,PacingMode\n")!=std::string::npos,
+        check(details_text.str().find("Status,PacingMode,Runtime,LegacyVDXR\n")!=std::string::npos,
             "details CSV identifies the requested pacing of every trial");
         check(details_text.str().find(",A startup request,")!=std::string::npos &&
             details_text.str().find("C startup request")==std::string::npos,"CSV records A receipt instead of inventing C");
@@ -185,12 +190,15 @@ int main() {
             check(recorded.str().find(preset==3 ? ",C startup request," : ",Game default / unverified,")!=std::string::npos,
                 "CSV preserves the actual startup receipt including an unverified default");
         }
-        runtime.steamvr_runtime=false;runtime.luke_detected=false;
+        runtime.steamvr_runtime=false;runtime.vdxr_runtime=true;runtime.vdxr_legacy=true;runtime.luke_detected=false;
         runtime.applied_revision=snapshot().revision;report_runtime(runtime);
-        check(start_benchmark(false) && snapshot().benchmark.count==11,"VDXR controller selects the legacy optical suite");
+        check(start_benchmark(false) && snapshot().benchmark.count==7,"VDXR controller selects the legacy optical suite");
         stop_benchmark();tick_benchmark();
         runtime.luke_detected=true;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
-        check(start_benchmark(false,true) && snapshot().benchmark.count==18,"VDXR Luke suite remains unchanged");
+        check(start_benchmark(false,true) && snapshot().benchmark.count==15,"VDXR Luke suite remains unchanged");
+        stop_benchmark();tick_benchmark();
+        runtime.vdxr_legacy=false;runtime.luke_detected=false;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
+        check(start_benchmark(true) && snapshot().benchmark.count==49,"New VDXR controller selects full pacing matrix");
         stop_benchmark();tick_benchmark();
         std::cout<<"Automatic suite: full/optical with A/C/default, no preset enforcement, truthful A CSV, hidden sampling without F9, timing, median, restore/manual cancellation PASS\n";
         return 0;

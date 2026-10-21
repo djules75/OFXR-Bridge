@@ -228,6 +228,8 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "single_swapchain_rings") {
                     settings.single_swapchain_rings = value == "1" ||
                         lower_ascii(value) == "true";
+                } else if (key == "vdxr_legacy") {
+                    settings.vdxr_legacy = value != "0" && lower_ascii(value) != "false";
                 } else if (key == "afw_only") {
                     settings.afw_only = value != "0" && lower_ascii(value) != "false";
                 } else if (key == "steamvr_separate_queue") {
@@ -283,6 +285,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\nexcluded_processes=" + settings.excluded_processes +
            "\r\nseparate_synthesis=" + (settings.separate_synthesis ? "1" : "0") +
            "\r\nsingle_swapchain_rings=" + (settings.single_swapchain_rings ? "1" : "0") +
+           "\r\nvdxr_legacy=" + (settings.vdxr_legacy ? "1" : "0") +
            "\r\nafw_only=" + (settings.afw_only ? "1" : "0") +
            "\r\nsteamvr_separate_queue=" + (settings.steamvr_separate_queue ? "1" : "0") +
            "\r\nvulkan_session_bridge=" + (settings.vulkan_session_bridge ? "1" : "0") +
@@ -525,6 +528,7 @@ std::string build_runtime_ini(
            "\r\nexcluded_processes=" + settings.excluded_processes +
            "\r\nseparate_synthesis=" + (settings.separate_synthesis ? "1" : "0") +
            "\r\nsingle_swapchain_rings=" + (settings.single_swapchain_rings ? "1" : "0") +
+           "\r\nvdxr_legacy=" + (settings.vdxr_legacy ? "1" : "0") +
            "\r\nafw_only=" + (settings.afw_only ? "1" : "0") +
            "\r\nsteamvr_separate_queue=" + (settings.steamvr_separate_queue ? "1" : "0") +
            "\r\nvulkan_session_bridge=" + (settings.vulkan_session_bridge ? "1" : "0") +

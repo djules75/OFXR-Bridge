@@ -138,7 +138,12 @@ struct RuntimeStatus {
     unsigned dlssg_preset_request{}; // frozen process-start profile, not active NGX model proof
     VideoMemoryStatus video_memory{};
     bool luke_shared_swapchains{}, luke_shared_swapchains_forced{}; // active session, not requested next launch
+    bool vdxr_runtime{}, vdxr_legacy{true}; // active startup transport, not next-launch preference
 };
+inline bool pacing_comparison_runtime(const RuntimeStatus& r) noexcept {
+    return r.steamvr_runtime || (r.vdxr_runtime && !r.vdxr_legacy);
+}
+
 enum class BenchmarkPhase : unsigned { idle, applying, running, complete, stopped, error, restart_required };
 struct BenchmarkStatus {
     BenchmarkPhase phase{};

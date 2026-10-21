@@ -709,6 +709,7 @@ struct PrivateOpenXrRuntime::Impl {
                     // callback or clock query is added to the handoff edge.
                     if(packet->delivery)packet->delivery->completed(result==XR_SUCCESS && end.layerCount!=0,
                         at_end,clock_ns(),observed_display,packet->prepared_at);
+                    if(options.accepted_output && result==XR_SUCCESS && end.layerCount)options.accepted_output(clock_ns());
                     last_handoff=at_end;
                     // This consumer exclusively owns the schedule. Commit its
                     // saved edge after the call too, leaving no bookkeeping

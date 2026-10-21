@@ -420,9 +420,16 @@ void automatic_buttons() {
         "Display button starts the actual SteamVR optical matrix");
     tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
     require(snapshot().benchmark.phase==BenchmarkPhase::stopped && snapshot().desired==prior,"Display Stop restores original settings");
-    runtime.steamvr_runtime=false;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("VDXR suites unchanged: 11 optical, 17 complete, 18 Luke")!=std::string::npos,
-        "VDXR Display keeps its previous suite guidance");
+    runtime.steamvr_runtime=false;runtime.vdxr_runtime=true;runtime.vdxr_legacy=true;report_runtime(runtime);tray.draw(true);
+    require(tray.rendered_text.find("Legacy VDXR: 7 optical or 13 complete")!=std::string::npos,
+        "VDXR Display describes the Legacy spreadsheet suite");
+    runtime.vdxr_legacy=false;runtime.applied_revision=snapshot().revision;report_runtime(runtime);tray.draw(true);
+    require(tray.rendered_text.find("31 optical or 49 complete")!=std::string::npos,
+        "opt-in VDXR exposes the full comparison in the actual Display surface");
+    tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
+    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==31,
+        "VDXR Display button starts all three pacing variants");
+    tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
 }
 } // namespace
 

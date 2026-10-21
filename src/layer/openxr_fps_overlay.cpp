@@ -64,6 +64,13 @@ struct OpenXrFpsOverlay::Impl {
     void* converter_user{};
     std::int64_t next_telemetry{};
     bool native_content_counter{};
+    bool direct_acceptance{};
+    std::function<std::optional<float>(std::int64_t)> runtime_acceptance;
+    std::optional<float> runtime_rate(std::int64_t now) {
+        if(runtime_acceptance)return runtime_acceptance(now);
+        if(direct_acceptance){const auto s=counter.snapshot(now);if(s.sample_valid)return s.submitted_fps;}
+        return {};
+    }
     struct PendingNativeCount {
         std::vector<std::shared_ptr<D3D12NativeFrameResult>> results;
         std::int64_t submitted_ns{};
@@ -826,6 +833,9 @@ struct OpenXrFpsOverlay::Impl {
         const auto fps = counter.snapshot(now);
         InterfaceTelemetry out{};
         poll_presented_output(delivery, now, out);
+        if(const auto accepted=runtime_rate(now)) {
+            out.output_fps=*accepted;out.output_source=InterfaceSource::runtime_accepted_delivery;
+        }
         out.game_fps = fps.real_fps;
         out.generated_fps = fps.generated_fps;
         out.rates_valid = fps.sample_valid;
@@ -958,6 +968,7 @@ struct OpenXrFpsOverlay::Impl {
                 snapshot.delivered_valid = true;
             }
         }
+        if(const auto accepted=runtime_rate(now)){snapshot.delivered_fps=*accepted;snapshot.delivered_valid=true;}
         if(luke_scene_measurement) {
             snapshot.delivered_valid=false;
             if(const auto scene=accepted_scenes.rate(now)) {
@@ -1020,6 +1031,9 @@ void OpenXrFpsOverlay::set_afw_active(bool active) noexcept {
 void OpenXrFpsOverlay::set_delivery_source(SteamVrDelivery* delivery) noexcept {
     std::scoped_lock lock(impl_->mutex);
     impl_->delivery = delivery;
+}
+void OpenXrFpsOverlay::set_runtime_acceptance_source(std::function<std::optional<float>(std::int64_t)> source,bool direct) noexcept {
+    std::scoped_lock lock(impl_->mutex);impl_->runtime_acceptance=std::move(source);impl_->direct_acceptance=direct;
 }
 void OpenXrFpsOverlay::set_unique_content_only(bool enabled) noexcept {
     std::scoped_lock lock(impl_->mutex);

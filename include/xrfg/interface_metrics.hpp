@@ -220,7 +220,7 @@ struct InterfaceFrameStamp {
     // Exact source identity, independent of XR calls/slots; zero is unknown.
     std::uint64_t scene_owner{},scene_serial{};
 };
-enum class InterfaceSource : std::uint32_t { none, steamvr_pre_submit_gpu, real_frame_qpc, predicted_display_qpc, application_cpu_qpc, steamvr_display, openxr_period, accepted_submissions, steamvr_delivery, producer_call_qpc, frame_cycle_qpc, frame_cycle_slot_estimate, steamvr_scene_delivery, accepted_scene_submissions, native_frame_cycle_qpc, native_predicted_display_qpc };
+enum class InterfaceSource : std::uint32_t { none, steamvr_pre_submit_gpu, real_frame_qpc, predicted_display_qpc, application_cpu_qpc, steamvr_display, openxr_period, accepted_submissions, steamvr_delivery, producer_call_qpc, frame_cycle_qpc, frame_cycle_slot_estimate, steamvr_scene_delivery, accepted_scene_submissions, native_frame_cycle_qpc, native_predicted_display_qpc, runtime_accepted_delivery };
 struct InterfaceTelemetry {
     std::uint64_t updated_ms{};
     float output_fps{}, game_fps{}, generated_fps{}, display_hz{};

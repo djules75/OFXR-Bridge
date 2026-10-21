@@ -95,6 +95,7 @@ public:
         // Stage26: source read leases released after completed copy; packet ID,
         // QPC ns and lease count. This does not retire real targets or FIFO credits.
         std::function<void(int,std::uint64_t,std::int64_t,std::int64_t)> trace;
+        std::function<void(std::int64_t)> accepted_output; // optional native End success, never enqueue
         bool director_enabled{true}; // false: ordered native-runtime paced bypass
     };
     explicit PrivateOpenXrRuntime(Options);

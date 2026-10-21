@@ -1,3 +1,15 @@
+## V627: optional VDXR director comparison
+
+The tray adds **Legacy VDXR (restart game)**, enabled by default. ON retains
+the original native VDXR Framework transport. OFF opts VDXR into the same
+private delivery endpoint and live Framework / Director / Framework+director
+choices as SteamVR. AFW only remains a separate startup mode.
+
+Legacy benchmarks match the dedicated sheet columns: 7 optical, 13 complete,
+15 Luke. The new VDXR matrix uses 31 / 49 / 39 tests. Source runtime and Legacy
+state are recorded in the details CSV. Matching V627 tray/game required.
+[Scope, clocks and comparison](docs/V627_VDXR_COMPARISON.md). Local; Quest headset validation pending.
+
 ## V626: recover a blended marker preamble
 
 Outlaws' failing F8 retains exact CRC-valid source tokens, but one sync edge
