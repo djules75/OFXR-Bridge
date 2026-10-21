@@ -60,7 +60,7 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
     state->uevr_application=GetModuleHandleW(L"UEVRBackend.dll")!=nullptr;
     auto original=state->dispatch;
     xrfg::PrivateOpenXrRuntime::Options options;
-    options.director_enabled=xrfg::embedded::snapshot().desired.pacing_mode!=0;
+    options.director_enabled=state->menu_enabled && xrfg::embedded::snapshot().desired.pacing_mode!=0;
     options.real={original->instance,state->handle,original->wait_frame,original->begin_frame,original->end_frame,
         original->create_swapchain,original->destroy_swapchain,original->enumerate_swapchain_images,
         original->acquire_swapchain_image,original->wait_swapchain_image,original->release_swapchain_image,

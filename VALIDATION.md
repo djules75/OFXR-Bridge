@@ -1,3 +1,11 @@
+## V621: OFF always bypasses added SteamVR pacing
+
+The final director previously followed the pacing preference even with OFXR
+OFF. Gate startup/live/effective policy on the applied enable state, retain
+the selected preference for ON, and keep required native/GPU synchronization.
+12 checks pass; headset AFW-only comparison remains pending.
+[Scope](docs/V621_OFF_PACING_BYPASS.md), [checks](docs/V621_VALIDATION.json).
+
 ## V620: Horizon SteamVR same-eye native motion
 
 Captured native vectors refer to N-2 while the SL clip matrix advertises N-1.

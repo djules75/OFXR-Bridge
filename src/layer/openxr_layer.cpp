@@ -1548,7 +1548,8 @@ private:
 // Only the existing private SteamVR endpoint may own the sole presentation clock.
 // Requested state is atomic because a drained worker may already await its next job.
 [[nodiscard]] bool single_director_pacing(const SessionState& state) noexcept {
-    return state.single_director_requested.load(std::memory_order_relaxed) &&
+    return state.menu_enabled.load(std::memory_order_relaxed) &&
+        state.single_director_requested.load(std::memory_order_relaxed) &&
         state.private_runtime && state.dispatch->steamvr_runtime;
 }
 
@@ -14108,7 +14109,7 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
                 continuous_presenter_active(state) && XR_FAILED(wait_for_presenter_idle(state)))
                 return E_FAIL;
             if(state->private_runtime) {
-                const auto policy=state->private_runtime->set_director_enabled(control.desired.pacing_mode!=0);
+                const auto policy=state->private_runtime->set_director_enabled(state->menu_enabled && control.desired.pacing_mode!=0);
                 if(XR_FAILED(policy))return E_FAIL;
                 state->single_director_requested=control.desired.pacing_mode==1;
             }
@@ -14179,11 +14180,6 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     if (!ordinary_djules_route(*state)) state->presenter_restore_after_bypass=false;
     state->separate_synthesis = effective_separation;
     state->lower_vram = effective_reduction;
-    if(state->private_runtime) {
-        const auto policy=state->private_runtime->set_director_enabled(control.desired.pacing_mode!=0);
-        if(XR_FAILED(policy))return E_FAIL;
-        state->single_director_requested = control.desired.pacing_mode==1;
-    }
     state->dlss_motion_vectors = control.desired.motion_vectors == 1 ||
         generation_mode != xrfg::D3D12FrameGenerationMode::ofxr ||
         state->luke_afw_enabled;
@@ -14395,12 +14391,21 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         }
     }
     configure_session_guide_capture(*state);
+    // OFXR OFF is always the ordered native-runtime bypass, including AFW-only.
+    // Keep the selected preference for re-enable, but no director deadlines,
+    // held phase or sole-director framework policy may remain effective OFF.
+    state->menu_enabled = SUCCEEDED(result) && control.desired.enabled;
+    if(state->private_runtime) {
+        const auto policy=state->private_runtime->set_director_enabled(
+            state->menu_enabled && control.desired.pacing_mode!=0);
+        if(XR_FAILED(policy)) {result=E_FAIL;state->menu_enabled=false;}
+        state->single_director_requested=control.desired.pacing_mode==1;
+    }
     state->control_revision = control.revision;
     state->applied_generation_settings = control.desired;
     state->generation_outputs_needed=outputs_needed;
     state->control_reconfigure_required = FAILED(result);
     if (FAILED(result)) state->generation_initialization_result = result;
-    state->menu_enabled = SUCCEEDED(result) && control.desired.enabled;
     ++state->djules_configuration_epoch;
     { std::scoped_lock lock(state->presenter_mutex);
       state->three_slots.configure(djules_triple_director(*state)?3:2);

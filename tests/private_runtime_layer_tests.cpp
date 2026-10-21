@@ -13,6 +13,7 @@ int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
     const bool benchmark_sequence=route=="benchmark-sequence";
     if(benchmark_sequence)route="solo-djules3";
+    const bool off_session_probe=route=="off-pacing-session";if(off_session_probe)route="session";
     framework_session_probe=route=="framework-session";if(framework_session_probe)route="session";
     const bool measured=route.starts_with("metrics-");if(measured)route=route.substr(8);
     if(route.starts_with("no-origin-"))route=route.substr(10);
@@ -37,6 +38,11 @@ int main(int argc,char** argv) {
         WritePrivateProfileStringW(L"diagnostics",L"logging_enabled",L"1",(folder/L"ofxr_bridge.ini").c_str());
         xrfg::bridge_flight_logger().initialize(folder);
         std::fprintf(stderr,"TRACE=%s\n",xrfg::bridge_flight_logger().log_path().string().c_str());
+    }
+    if(off_session_probe) {
+        auto desired=xrfg::autonomous::snapshot().desired;desired.enabled=false;desired.pacing_mode=2;desired.afw_mode=3;
+        check(xrfg::autonomous::request(desired),"select AFW-only with combined pacing stored before session");
+        xrfg::autonomous::apply_runtime_settings();
     }
     if(framework_session_probe) {
         auto desired=xrfg::autonomous::snapshot().desired;desired.pacing_mode=0;
@@ -82,6 +88,45 @@ int main(int argc,char** argv) {
         XrSessionCreateInfo info{XR_TYPE_SESSION_CREATE_INFO};info.next=&binding;info.systemId=1;
         XrSession handle{};xr_ok(layer_create_session_impl(dispatch->instance,&info,&handle),"shipping session creates private delivery binding");
         auto created=find_session(handle);
+        if(off_session_probe) {
+            check(created && created->private_runtime && !created->menu_enabled,"OFXR-off startup installed the stable private endpoint");
+            auto transport=created->private_runtime;f.transport=transport;f.expected_views=1;
+            check(!transport->director_enabled() && !single_director_pacing(*created),"OFXR-off startup ignores stored combined pacing");
+            // Model the already-produced AFW pair at the delivery boundary.
+            // Actual AFW image math is covered by the pinned-provider fixtures.
+            created->luke_afw_enabled=true;
+            ok(apply_embedded_control(created),"qualify AFW-only output ownership");
+            created->luke_afw_last_evaluated_publication=77;
+            xr_ok(transport->start(),"start the actual bypass workers");auto chain=f.make_chain();unsigned serial{};
+            auto batch=[&](unsigned count) {
+                for(unsigned i=0;i<count;++i) {++serial;f.write(chain,serial*8);f.begin_virtual();xr_ok(f.submit(chain,float(serial)),"owned AFW pair delivered");}
+                f.wait_count(serial);xr_ok(transport->drain(),"retire each policy batch");
+            };
+            for(int mode:{0,1,2,1,0,2}) {
+                auto desired=xrfg::autonomous::snapshot().desired;desired.pacing_mode=mode;
+                check(xrfg::autonomous::request(desired),"store pacing preference while OFXR is OFF");xrfg::autonomous::apply_runtime_settings();
+                ok(apply_embedded_control(created),"apply OFF pacing choice");
+                check(created->private_runtime==transport && !transport->director_enabled() && !single_director_pacing(*created),"all OFF choices remain unpaced on the same binding");
+                check(created->luke_afw_last_evaluated_publication==77,"OFF pacing change reset AFW temporal history");
+                batch(3);
+            }
+            for(unsigned i=0;i<serial;++i)check(!f.director_policies[i] && f.positions[i]==float(i+1) && f.pixels[i]==(i+1)*8,"OFF delivery lost pixels, order or native bypass");
+            auto shortest=period;for(unsigned i=1;i<serial;++i)shortest=std::min(shortest,f.handoffs[i]-f.handoffs[i-1]);
+            check(shortest<period/2,"OFF path retains an artificial refresh floor");
+            for(int mode:{1,2,0,2}) {
+                auto desired=xrfg::autonomous::snapshot().desired;desired.enabled=true;desired.pacing_mode=mode;
+                check(xrfg::autonomous::request(desired),"enable OFXR with stored policy");xrfg::autonomous::apply_runtime_settings();ok(apply_embedded_control(created),"restore enabled policy");
+                check(transport->director_enabled()==(mode!=0) && single_director_pacing(*created)==(mode==1),"ON did not restore selected Framework/Director/combined policy");
+                batch(2);
+                desired.enabled=false;check(xrfg::autonomous::request(desired),"disable OFXR retaining AFW");xrfg::autonomous::apply_runtime_settings();ok(apply_embedded_control(created),"return to OFF bypass");
+                check(!transport->director_enabled() && !single_director_pacing(*created) && created->luke_afw_last_evaluated_publication==77,"disable left pacing active or reset AFW");
+                batch(3);
+            }
+            check(created->private_runtime==transport && f.chains.size()==1,"OFF/ON recreated session binding or allocated extra native swapchains");
+            xr_ok(transport->destroy_swapchain(chain),"release policy fixture chain");xr_ok(layer_destroy_session_impl(handle),"OFF session cleanup");
+            {std::scoped_lock lock(g_state_mutex);g_instances.clear();}
+            std::puts("OFXR OFF/AFW-only: every stored pacing bypasses, exact FIFO GPU pixels, no refresh floor; ON restores selection and AFW history survives PASS");return 0;
+        }
         if(framework_session_probe) {
             check(created && created->private_runtime && created->private_delivery_queue,"Framework keeps the stable private binding in bypass");
             auto transport=created->private_runtime;
