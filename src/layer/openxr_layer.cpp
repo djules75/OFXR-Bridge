@@ -10845,14 +10845,15 @@ void wait_for_presenter_pair(
                 : 0;
             target = real_sequence > depth ? real_sequence - depth : 0;
         }
-        // 3X: from a frame without synthetics until the cadence is back, each
-        // release is held to the 3X cadence by count whichever measure the
-        // target above uses, so one failed pair cannot speed the game up and
-        // feed the next failure. See release_serial_floor for the loop this
-        // closes.
+        // 3X by count: from a frame without synthetics until the cadence is
+        // back, each release is held to the 3X cadence, so one failed pair
+        // cannot speed the game up and feed the next failure. Not where the
+        // target above is a pop: there the floor pinned the phase (issue
+        // #43). See release_serial_floor for both.
         const bool floor_armed = state->release_floor_armed;
         const std::uint64_t serial_floor = xrfg::release_serial_floor(
             frames,
+            by_count,
             pairable,
             floor_armed,
             state->application_served_serial);
@@ -10903,7 +10904,7 @@ void wait_for_presenter_pair(
         // the surplus is what that step discards.
         state->application_served_serial = state->presenter_frame_serial;
         state->release_floor_armed = xrfg::release_floor_armed_after(
-            frames, pairable, floor_armed, floor_held_back);
+            frames, by_count, pairable, floor_armed, floor_held_back);
         const std::uint64_t frames_since_release =
             state->presenter_frame_serial - served_at_entry;
         const bool floor_still_armed = state->release_floor_armed;

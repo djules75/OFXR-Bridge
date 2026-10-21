@@ -93,28 +93,56 @@ int main() {
            "retained low-rate UEVR timing replay causes no cooldowns");
 
     // The 3X floor under the once-per-frame hold (release_serial_floor).
-    expect(xrfg::release_serial_floor(2, false, false, 10) == 0,
+    expect(xrfg::release_serial_floor(2, true, false, false, 10) == 0,
            "2X: a prime takes no floor");
-    expect(xrfg::release_serial_floor(2, true, true, 10) == 0,
+    expect(xrfg::release_serial_floor(2, true, true, true, 10) == 0,
            "2X: the pair after a prime takes no floor");
-    expect(xrfg::release_serial_floor(3, true, false, 10) == 0,
+    expect(xrfg::release_serial_floor(3, true, true, false, 10) == 0,
            "3X: a pair with the floor disarmed keeps its pop phase");
-    expect(xrfg::release_serial_floor(3, false, false, 10) == 13,
+    expect(xrfg::release_serial_floor(3, true, false, false, 10) == 13,
            "3X: a prime is held to the 3X cadence");
-    expect(xrfg::release_serial_floor(3, true, true, 13) == 16,
+    expect(xrfg::release_serial_floor(3, true, true, true, 13) == 16,
            "3X: a pair with the floor armed is held to the 3X cadence");
-    expect(xrfg::release_serial_floor(3, false, true, 13) == 16,
+    expect(xrfg::release_serial_floor(3, true, false, true, 13) == 16,
            "3X: a prime after a prime is held to the 3X cadence");
-    expect(!xrfg::release_floor_armed_after(2, false, false, false),
+    expect(!xrfg::release_floor_armed_after(2, true, false, false, false),
            "2X: a prime does not arm the floor");
-    expect(xrfg::release_floor_armed_after(3, false, false, false),
+    expect(xrfg::release_floor_armed_after(3, true, false, false, false),
            "3X: a prime arms the floor");
-    expect(xrfg::release_floor_armed_after(3, true, true, true),
+    expect(xrfg::release_floor_armed_after(3, true, true, true, true),
            "3X: a pair the floor held back keeps it armed");
-    expect(!xrfg::release_floor_armed_after(3, true, true, false),
+    expect(!xrfg::release_floor_armed_after(3, true, true, true, false),
            "3X: a pair whose own target met the floor disarms it");
-    expect(!xrfg::release_floor_armed_after(3, true, false, false),
+    expect(!xrfg::release_floor_armed_after(3, true, true, false, false),
            "3X: a pair never arms the floor");
+    // Where the hold waits for a pop there is no floor (issue #43).
+    expect(xrfg::release_serial_floor(3, false, false, false, 10) == 0,
+           "3X pop hold: a prime takes no floor");
+    expect(xrfg::release_serial_floor(3, false, true, true, 13) == 0,
+           "3X pop hold: a pair takes no floor even with it armed");
+    expect(!xrfg::release_floor_armed_after(3, false, false, false, false),
+           "3X pop hold: a prime does not arm the floor");
+    expect(!xrfg::release_floor_armed_after(3, false, true, true, true),
+           "3X pop hold: a pair the floor held back does not keep it armed");
+    // Issue #43: at depth 2 a pair's pop target is one pop after a prime's
+    // release and two before the floor; armed, the floor held every pair
+    // one pop late and re-armed itself for the rest of the session.
+    {
+        std::uint64_t served = 100;
+        bool armed = xrfg::release_floor_armed_after(3, false, false, false, false);
+        std::uint64_t held = 0;
+        for (int frame = 0; frame < 30; ++frame) {
+            const std::uint64_t floor =
+                xrfg::release_serial_floor(3, false, true, armed, served);
+            const std::uint64_t own = served + 1 + (frame == 0 ? 0 : 2);
+            const bool held_back = floor > own;
+            held += held_back ? 1 : 0;
+            armed = xrfg::release_floor_armed_after(3, false, true, armed, held_back);
+            served = held_back ? floor : own;
+        }
+        expect(held == 0 && !armed,
+               "3X pop hold: a prime never holds the pairs after it late");
+    }
     // Alternating failures: every frame costs three presenter frames.
     {
         std::uint64_t served = 0;
@@ -122,10 +150,10 @@ int main() {
         for (int frame = 0; frame < 12; ++frame) {
             const bool pairable = frame % 2 == 1;
             const std::uint64_t floor =
-                xrfg::release_serial_floor(3, pairable, armed, served);
+                xrfg::release_serial_floor(3, true, pairable, armed, served);
             // A pair's own count is three; a prime pops after one.
             const std::uint64_t own = served + (pairable ? 3 : 1);
-            armed = xrfg::release_floor_armed_after(3, pairable, armed, floor > own);
+            armed = xrfg::release_floor_armed_after(3, true, pairable, armed, floor > own);
             served = floor > own ? floor : own;
         }
         expect(served == 36,
@@ -144,7 +172,7 @@ int main() {
         for (std::size_t frame = 0; frame < std::size(own_spacing); ++frame) {
             const bool pairable = frame != 0;
             const std::uint64_t floor =
-                xrfg::release_serial_floor(3, pairable, armed, served);
+                xrfg::release_serial_floor(3, true, pairable, armed, served);
             const std::uint64_t own = served + own_spacing[frame];
             const std::uint64_t released = floor > own ? floor : own;
             if (released - served < 3) {
@@ -153,7 +181,7 @@ int main() {
             if (floor != 0) {
                 ++floored;
             }
-            armed = xrfg::release_floor_armed_after(3, pairable, armed, floor > own);
+            armed = xrfg::release_floor_armed_after(3, true, pairable, armed, floor > own);
             served = released;
         }
         expect(every_release_three_apart,
@@ -169,9 +197,9 @@ int main() {
         bool ever_floored = false;
         for (int frame = 0; frame < 30; ++frame) {
             const std::uint64_t floor =
-                xrfg::release_serial_floor(3, true, armed, served);
+                xrfg::release_serial_floor(3, true, true, armed, served);
             ever_floored = ever_floored || floor != 0;
-            armed = xrfg::release_floor_armed_after(3, true, armed, false);
+            armed = xrfg::release_floor_armed_after(3, true, true, armed, false);
             served += 3;
         }
         expect(!ever_floored, "3X: steady pairs never take the floor");

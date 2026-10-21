@@ -30,21 +30,31 @@ namespace xrfg {
 // on the first release whose own target already came at or after it: the
 // cadence is back and the hold's own phase rules again.
 //
-// It does not move the steady state: across six 3X logs of both reporters,
-// 4,884 releases away from any reset, none came closer than 2.5 presenter
-// frames to the previous one. Where the hold waits for a pop
-// (release_phase_depth) a floor in force on every frame would pin the
-// release to the real frame's pop, the phase that hands synthetics over
-// unwritten (issue #27); a floor that disarms itself does not.
+// Only where the hold counts presenter frames (presenter_holds_by_count:
+// SteamVR, or at admission). There a pair's own target is the same count the
+// floor asks for, so the floor can only ever hold a prime, and it disarms on
+// the first pair. Where the hold waits for a pop (release_phase_depth) the
+// pair's target is `depth` pops before its real frame, always earlier than
+// `frames` after a release made at a real frame's pop, so a floor armed by
+// one prime held every release after it one pop late, re-armed itself each
+// time, and pinned the release at the real frame's pop for the rest of the
+// session: the phase that hands every synthetic over unwritten, issue #27
+// again, on Pimax OpenXR and Virtual Desktop (issue #43, 0.2.14.1). On
+// those runtimes the floor is off, and the prime hold is the pop hold's
+// own (k = 0, see wait_for_presenter_pair). The steady-state check that
+// cleared V522 - no two releases closer than 2.5 presenter frames across
+// six 3X logs - could not see this, because the floor itself spaces them
+// at exactly three.
 //
 // 2X is left as it is: the deeper pipeline has a period of slack the
 // shallow 3X does not, and its prime hold (V438) was measured on its own.
 [[nodiscard]] constexpr std::uint64_t release_serial_floor(
     std::uint64_t frames,
+    bool by_count,
     bool pairable,
     bool floor_armed,
     std::uint64_t served_serial) noexcept {
-    if (frames <= 2 || (pairable && !floor_armed)) {
+    if (frames <= 2 || !by_count || (pairable && !floor_armed)) {
         return 0;
     }
     return served_serial + frames;
@@ -52,13 +62,14 @@ namespace xrfg {
 
 // Whether the floor is armed for the release after this one. A prime arms
 // it; a pair keeps it only when the floor held that pair back past its own
-// target.
+// target. Never where the hold waits for a pop.
 [[nodiscard]] constexpr bool release_floor_armed_after(
     std::uint64_t frames,
+    bool by_count,
     bool pairable,
     bool floor_armed,
     bool floor_held_back) noexcept {
-    if (frames <= 2) {
+    if (frames <= 2 || !by_count) {
         return false;
     }
     return !pairable || (floor_armed && floor_held_back);
