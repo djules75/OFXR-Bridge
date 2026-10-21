@@ -9,6 +9,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -522,9 +523,19 @@ struct Candidate {
 // Where an eye's DLSS inputs sit in their render targets. Both eyes often
 // share one double-wide target with the left eye on the left - UEVR's depth,
 // for one - so the eye further left is eye 0 whichever evaluates first.
-[[nodiscard]] std::pair<std::uint32_t, std::uint32_t> input_offset(
+//
+// V553: the depth's offset first, where the publication carries a depth, then
+// the vectors' and the output's. V497 read only the last two, and UEVR's
+// Bodycam ties on both - each eye's vectors in a texture of its own at 0,
+// each output at 0 - so two streams sorted by first seen; its depth is one
+// double-wide target, the right eye's rectangle at x = 1392 of 2784. After a
+// death or a level change the engine recreated both features with the right
+// eye's first, each eye took the other's vectors (record 860: eye 0 without
+// usable depth, eye 1 with it), and a Virtual Desktop restart, which starts
+// the order afresh, put them back. OFXR 0.3 orders by the depth's offset.
+[[nodiscard]] std::tuple<std::uint32_t, std::uint32_t, std::uint32_t> input_offset(
     const DlssMotionVectorFrame& frame) noexcept {
-    return {frame.motion_x, frame.output_x};
+    return {frame.depth ? frame.depth_x : 0U, frame.motion_x, frame.output_x};
 }
 
 // 828: the resolver's running totals, every 300 resolves. a matched << 32 |

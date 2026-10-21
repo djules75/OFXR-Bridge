@@ -3084,6 +3084,95 @@ void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
 // A swapchain per eye, each the size of a DLSS output (V497, from 0.3): with
 // its eye known, a one-slice image takes its own eye's evaluation, whether
 // the game runs two DLSS features or one for both eyes.
+// V553: two streams whose vectors and outputs both sit at 0, with a depth
+// that is one double-wide target (UEVR's Bodycam): the stream whose depth
+// rectangle is further left is eye 0, whichever the game evaluated first,
+// and whichever published first. Without the depth, first seen decides, as
+// before.
+void test_dlss_motion_vector_packed_depth_eye_order(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    constexpr UINT width = 64;
+    constexpr UINT height = 32;
+    const auto create_texture = [&](UINT texture_width, UINT texture_height, UINT16 slices) {
+        D3D12_RESOURCE_DESC description =
+            stereo_texture_description(texture_width, texture_height);
+        description.DepthOrArraySize = slices;
+        description.Flags = D3D12_RESOURCE_FLAG_NONE;
+        const D3D12_HEAP_PROPERTIES properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        ComPtr<ID3D12Resource> texture;
+        require_hresult(fixture.device()->CreateCommittedResource(
+            &properties, D3D12_HEAP_FLAG_NONE, &description,
+            D3D12_RESOURCE_STATE_COMMON, nullptr,
+            IID_PPV_ARGS(texture.GetAddressOf())),
+            "create DLSS packed depth texture");
+        return texture;
+    };
+    const auto left_output = create_texture(width, height, 1);
+    const auto right_output = create_texture(width, height, 1);
+    const auto left_motion = create_texture(width / 2, height / 2, 1);
+    const auto right_motion = create_texture(width / 2, height / 2, 1);
+    // One depth for both eyes, the right eye's half on the right.
+    const auto depth = create_texture(width, height / 2, 1);
+    const auto xr_output = create_texture(width, height, 2);
+    const auto publish = [&](ID3D12GraphicsCommandList* command_list, std::uint64_t stream,
+                             ID3D12Resource* output, ID3D12Resource* motion, UINT depth_x) {
+        xrfg::DlssMotionVectorPublication publication{
+            stream, output, motion, fixture.queue(), 0, 0, width, height,
+            0, 0, width / 2, height / 2, 1.0F, 1.0F, 0.0F, 0.0F,
+            D3D12_RESOURCE_STATE_COMMON, false, false, command_list};
+        publication.depth = depth.Get();
+        publication.depth_x = depth_x;
+        publication.depth_y = 0;
+        publication.depth_width = width / 2;
+        publication.depth_height = height / 2;
+        publication.depth_resource_state = D3D12_RESOURCE_STATE_COMMON;
+        xrfg::publish_dlss_motion_vectors(publication);
+    };
+
+    // The right eye's feature first, as Bodycam recreates them after a death.
+    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* command_list) {
+        publish(command_list, 301, right_output.Get(), right_motion.Get(), width / 2);
+        publish(command_list, 302, left_output.Get(), left_motion.Get(), 0);
+    });
+    const auto resolved = xrfg::resolve_dlss_motion_vectors(xr_output.Get(), fixture.queue());
+    require(resolved && resolved->eye_count == 2 && resolved->eyes[0] && resolved->eyes[1] &&
+            resolved->eyes[0]->depth && resolved->eyes[1]->depth,
+        "two DLSS streams with a packed depth were not paired to the XR stereo image");
+    require(resolved->eyes[0]->stream == 302 && resolved->eyes[1]->stream == 301 &&
+            resolved->eyes[0]->depth_x == 0 && resolved->eyes[1]->depth_x == width / 2,
+        "the stream seen first took eye 0 although its depth sits on the right");
+
+    // The same the other way round in the next frame.
+    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* command_list) {
+        publish(command_list, 302, left_output.Get(), left_motion.Get(), 0);
+        publish(command_list, 301, right_output.Get(), right_motion.Get(), width / 2);
+    });
+    const auto reordered = xrfg::resolve_dlss_motion_vectors(xr_output.Get(), fixture.queue());
+    require(reordered && reordered->eyes[0]->stream == 302 && reordered->eyes[1]->stream == 301 &&
+            reordered->eyes[0]->serial == 2 && reordered->eyes[1]->serial == 2,
+        "the packed depth's eye order changed with the evaluation order");
+
+    // Without a depth, nothing tells the streams apart: first seen stands.
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* command_list) {
+        xrfg::publish_dlss_motion_vectors({
+            401, right_output.Get(), right_motion.Get(), fixture.queue(), 0, 0, width, height,
+            0, 0, width / 2, height / 2, 1.0F, 1.0F, 0.0F, 0.0F,
+            D3D12_RESOURCE_STATE_COMMON, false, false, command_list});
+        xrfg::publish_dlss_motion_vectors({
+            402, left_output.Get(), left_motion.Get(), fixture.queue(), 0, 0, width, height,
+            0, 0, width / 2, height / 2, 1.0F, 1.0F, 0.0F, 0.0F,
+            D3D12_RESOURCE_STATE_COMMON, false, false, command_list});
+    });
+    const auto undepthed = xrfg::resolve_dlss_motion_vectors(xr_output.Get(), fixture.queue());
+    require(undepthed && undepthed->eye_count == 2 && undepthed->eyes[0]->stream == 401 &&
+            undepthed->eyes[1]->stream == 402,
+        "streams without a depth no longer pair by first seen");
+    xrfg::configure_dlss_motion_vector_tracking(false);
+}
+
 void test_dlss_motion_vector_per_eye_swapchains(D3D12WarpFixture& fixture) {
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::configure_dlss_motion_vector_tracking(true);
@@ -6228,6 +6317,7 @@ int main(int argc, char** argv) {
             fixture, xrfg::D3D12OpticalFlowBackend::fidelity_fx, true, false);
         test_stereo_motion_synthesis_beats_same_pixel_blend(fixture);
         test_dlss_motion_vector_stereo_stream_pairing(fixture);
+        test_dlss_motion_vector_packed_depth_eye_order(fixture);
         test_dlss_motion_vector_per_eye_swapchains(fixture);
         test_dlss_eye_order_measurement(fixture);
         test_eye_order_measurement_on_gpu(fixture);

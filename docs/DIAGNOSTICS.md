@@ -426,6 +426,18 @@ the surface sliding left won, leaving a ghost behind one sliding right.
   rows; `b` 1 when the game's depth decides the nearer surface, 0 the
   faster.
 
+### Two DLSS streams ordered by their depth's offset (V553)
+
+Two streams over one side-by-side eye image are sorted by where their inputs
+sit: since V553 the depth rectangle's x first, where the publication carries
+a depth, then the vectors' and the output's, then first seen. UEVR's Bodycam
+evaluates each eye's vectors in a texture of its own and both outputs at 0,
+so V497-V552 fell to first seen, and its depth is one double-wide target with
+the right eye's rectangle on the right. After a death or a level change the
+engine recreated both features with the right eye's first: each eye took the
+other's vectors (860 showed eye 0 without usable depth and eye 1 with it),
+and a Virtual Desktop restart, which starts the order afresh, put them back.
+
 ### Measured eye order of two DLSS streams (V546)
 
 A game that runs one DLSS feature per eye, with each eye in a swapchain of
