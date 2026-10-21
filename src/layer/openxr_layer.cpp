@@ -3006,9 +3006,18 @@ struct CreatedPrivateSwapchain {
     }
     const auto& dispatch = state->session->dispatch;
     XrSwapchain handle = XR_NULL_HANDLE;
+    // Outlaws must prepare before its first Wait, when projection roles are
+    // not known yet. Five native destinations per enumerated color source can
+    // exhaust SteamVR before the third source and retire the warmed eyes.
+    // Keep every private GPU output independent; only its final native sink is
+    // shared by compatible outputs of THIS source, through the existing FIFO.
+    const bool outlaws_publication=state->session->private_runtime && state->session->luke_outlaws_preframe &&
+        !create_info.next && !create_info.createFlags && create_info.arraySize==1 && create_info.faceCount==1 &&
+        (create_info.usageFlags&XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) &&
+        !(create_info.usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
     XrResult result = state->session->private_runtime
         ? state->session->private_runtime->create_swapchain(&create_info,&handle,image_state,1,
-            state->pooled_publication?state->handle:XR_NULL_HANDLE)
+            (state->pooled_publication || outlaws_publication)?state->handle:XR_NULL_HANDLE)
         : dispatch->create_swapchain(state->session->handle,&create_info,&handle);
     if (XR_FAILED(result) || handle == XR_NULL_HANDLE) {
         // Which error the runtime gave separates a budget it will not exceed

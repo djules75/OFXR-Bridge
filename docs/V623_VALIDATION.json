@@ -1,0 +1,62 @@
+{
+  "version": "V623",
+  "base": "160987f9a56bea6e706a946b85aad13108896e4e",
+  "status": "runtime-pending",
+  "scope": "Outlaws pre-frame private outputs share one exact-compatible native publication sink per original source. Retain independent work buffers, AFW contracts, startup seal and all pacing.",
+  "passed": 15,
+  "failed": 0,
+  "ctest_seconds": 16.04,
+  "tests": [
+    "xrfg_private_framework_bypass_gpu",
+    "xrfg_private_publication_pool_gpu",
+    "xrfg_steamvr_budget_recovery_gpu",
+    "xrfg_all_routes_resource_cleanup_gpu",
+    "xrfg_luke_post_afw_director_packet",
+    "xrfg_luke_gpu_pipeline",
+    "xrfg_private_runtime_outlaws-budget_gpu",
+    "xrfg_private_runtime_metrics-solo-luke-d11-ref_gpu",
+    "xrfg_private_runtime_metrics-solo-luke-d11-new_gpu",
+    "xrfg_private_runtime_metrics-solo-luke-d11-djules_gpu",
+    "xrfg_private_runtime_metrics-solo-luke-d11-fidelity_gpu",
+    "xrfg_private_runtime_solo-pooled-new_gpu",
+    "xrfg_private_runtime_pooled-switch_gpu",
+    "xrfg_afw_only_session_gpu",
+    "xrfg_outlaws_startup"
+  ],
+  "headset_validation": "Pending owner Outlaws restart with matching V623 tray/game and AFW only OFF; initial game allocation was before F9 and cannot be independently attributed to the reproduced ceiling from that log alone.",
+  "baseline_reproduction": {
+    "source_version": "V622",
+    "native_limit": 16,
+    "native_counts": [
+      6,
+      12,
+      3
+    ],
+    "warm_outputs_after_third_source": false,
+    "exhausted": true,
+    "expected_failure_log": "v623-before.log"
+  },
+  "fixed_reproduction": {
+    "native_counts": [
+      2,
+      4,
+      6
+    ],
+    "warm_outputs_after_third_source": true,
+    "independent_private_outputs_per_source": 5,
+    "stereo_native_pixel_order": "six outputs covering every current/synthetic work slot and return-to-first slot, both eyes exact",
+    "all_native_handles_retired": true
+  },
+  "preserved": [
+    "Outlaws no late cold setup rule and submitted native provider owner",
+    "AFW depth/camera subtraction, guide contracts, quality and V619/V620 image fixes",
+    "Existing private FIFO, backpressure, display cadence and metadata",
+    "Non-Outlaws and VDXR paths",
+    "V622 tray AFW-only/DLSS5/latency/benchmark switches"
+  ],
+  "new_waits": false,
+  "new_copies": false,
+  "new_swapchains": false,
+  "pushed": false,
+  "live_installation": false
+}

@@ -1,3 +1,12 @@
+## V623: Outlaws startup allocation budget
+
+Outlaws' pre-frame output buffers now share one compatible native publication
+sink per source through the existing private endpoint. Independent work images,
+AFW motion/quality, warm initialization guard and director timing are retained.
+The three-source GPU reproduction changes from exhausted16/retired eyes to six
+native handles with generation intact. Headset validation remains pending.
+[Evidence, scope and check](docs/V623_OUTLAWS_PUBLICATION_BUDGET.md).
+
 ## V622: AFW-only direct OpenXR and tray benchmark switch
 
 The tray adds **AFW only (Luke Ross, restart game)**: skip the private OFXR
