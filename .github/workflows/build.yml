@@ -1,11 +1,11 @@
 # Builds the layer, the tray and the tests on a clean Windows runner, runs the
 # suite on WARP, and uploads the same file set the release zips carry.
 #
-# The two dependencies docs/BUILDING.md keeps out of the repository are fetched
-# here at their pinned revisions and verified: the FidelityFX SDK by commit
-# hash (its Optical Flow + DX12 static libraries are cached across runs), and
-# openvr.h by SHA-256. A mismatch fails the job rather than building against
-# something unpinned.
+# The three dependencies docs/BUILDING.md keeps out of the repository are
+# fetched here at their pinned revisions and verified: the FidelityFX SDK by
+# commit hash (its Optical Flow + DX12 static libraries are cached across runs),
+# the NVIDIA DLSS SDK headers by commit hash, and openvr.h by SHA-256. A
+# mismatch fails the job rather than building against something unpinned.
 #
 # Code signing: once the SignPath Foundation application is approved, the
 # `sign` job submits the uploaded artifact to SignPath. It only runs when the
@@ -28,6 +28,8 @@ env:
   FFX_TAG: v1.1.4
   FFX_COMMIT: c6efa6bf7f2027b3ec94f28578bb5965eabb9e55
   FFX_ROOT: external/FidelityFX-SDK-v1.1.4
+  DLSS_TAG: v310.9.1
+  DLSS_COMMIT: 374959484e79a640feaba44c93ac8cfb0a03f5b5
   OPENVR_TAG: v2.5.1
   OPENVR_SHA256: 94E5545370159C85F87CD6E15DD3739F7C919FC7A6E869F5E4ED463533A07ED0
 
@@ -84,6 +86,22 @@ jobs:
           foreach ($lib in 'ffx_backend_dx12_x64.lib', 'ffx_opticalflow_x64.lib') {
             if (-not (Test-Path "$env:FFX_ROOT/sdk/bin/ffx_sdk/$lib")) { throw "FidelityFX build did not produce $lib" }
           }
+
+      # --- NVIDIA DLSS SDK headers at the pinned tag, verified ---------------
+
+      - name: Fetch the DLSS SDK headers
+        shell: pwsh
+        env:
+          GIT_LFS_SKIP_SMUDGE: '1'
+        run: |
+          git -c advice.detachedHead=false clone --branch $env:DLSS_TAG --depth 1 `
+            --filter=blob:none --sparse https://github.com/NVIDIA/DLSS.git external/DLSS
+          git -C external/DLSS sparse-checkout set include
+          $head = (git -C external/DLSS rev-parse HEAD).Trim()
+          if ($head -ne $env:DLSS_COMMIT) {
+            throw "DLSS $env:DLSS_TAG resolved to $head; docs/BUILDING.md pins $env:DLSS_COMMIT"
+          }
+          if (-not (Test-Path external/DLSS/include/nvsdk_ngx_params.h)) { throw 'DLSS checkout has no include/nvsdk_ngx_params.h' }
 
       # --- openvr.h at the pinned tag, verified ------------------------------
 

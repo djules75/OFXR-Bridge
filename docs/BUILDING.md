@@ -44,6 +44,8 @@ committed: copy the `include/` directory of
 `nvsdk_ngx.h`, `nvsdk_ngx_defs.h` and `nvsdk_ngx_params.h`) to
 `external/DLSS/include`, or point `XRFG_DLSS_SDK_INCLUDE_DIR` at it. Only
 headers are used: no NVIDIA library is linked and no NVIDIA binary ships.
+The release builds and CI use `v310.9.1`, commit
+`374959484e79a640feaba44c93ac8cfb0a03f5b5`.
 
 The exports are detoured with [safetyhook](https://github.com/cursey/safetyhook)
 (Boost Software License), which CMake fetches at configure time at the
