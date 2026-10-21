@@ -18,6 +18,7 @@
 #include "luke_depth_convert_shader.hpp"
 #include "luke_depth_calibrate_shader.hpp"
 #include "luke_compose_motion_shader.hpp"
+#include "luke_afw_color_scale.hpp"
 
 #include <Windows.h>
 
@@ -450,6 +451,10 @@ struct LukeAfwSynthesizer::Impl {
     D3D12RamTiming<4> gpu_timing;
     bool gpu_timing_initialized{};
     EyeFrameBuffers eye_buffers{};
+    AfwColorScale color_scale;
+    UINT work_width{},work_height{},quality_divisor{1};
+    DXGI_FORMAT checked_quality_format{DXGI_FORMAT_UNKNOWN};
+    bool quality_can_scale{};
     int active_shading_rate{-1}; // changes replace retired provider state, never mutate it
     std::array<CameraData, 2> previous_source_camera{};
     std::uint64_t last_evaluated_publication{};
@@ -1433,8 +1438,18 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             impl_->paired_unit_identity = paired_key;
             impl_->calibrated_units_per_metre = 0;
         }
-        if (settings.mode==3 && impl_->active_shading_rate>=0 &&
-            settings.shading_rate!=impl_->active_shading_rate) {
+        const auto quality_format=linear_color_format(color_desc.Format);
+        if(impl_->checked_quality_format!=quality_format) {
+            D3D12_FEATURE_DATA_FORMAT_SUPPORT support{};support.Format=quality_format;
+            impl_->quality_can_scale=SUCCEEDED(impl_->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,&support,sizeof(support))) &&
+                (support.Support2&D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)!=0;
+            impl_->checked_quality_format=quality_format;
+        }
+        // Formats without typed UAV stores retain their original provider route.
+        const UINT quality_divisor=settings.mode==3 && impl_->quality_can_scale ? (settings.shading_rate==4 ? 2u : settings.shading_rate==8 ? 4u : 1u) : 1u;
+        if ((settings.mode==3 && impl_->active_shading_rate>=0 &&
+            settings.shading_rate!=impl_->active_shading_rate) ||
+            (impl_->frame_buffers_ready && impl_->quality_divisor!=quality_divisor)) {
             // Previous provider submission is proven complete above. Create
             // isolated renderer state before replacing the active context;
             // a failed replacement leaves the old one intact for recovery.
@@ -1546,8 +1561,11 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         if (!impl_->frame_buffers_ready ||
             !compatible_color(impl_->color_description, color_desc)) {
             FrameWarpInitParams params{};
-            params.hmd_width = static_cast<int>(color_desc.Width);
-            params.hmd_height = static_cast<int>(color_desc.Height);
+            impl_->quality_divisor=quality_divisor;
+            impl_->work_width=static_cast<UINT>((color_desc.Width+quality_divisor-1)/quality_divisor);
+            impl_->work_height=(color_desc.Height+quality_divisor-1)/quality_divisor;
+            params.hmd_width = static_cast<int>(impl_->work_width);
+            params.hmd_height = static_cast<int>(impl_->work_height);
             // PureDark allocates typed UAV-capable internal eye textures.
             // Horizon exposes the backing resource as RGBA8 typeless (DXGI 27)
             // and its OpenXR view as sRGB. Use the copy-compatible typed linear
@@ -1564,6 +1582,10 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             if (impl_->eye_buffers.eye_frame_buffers[0].color.texture == nullptr ||
                 impl_->eye_buffers.eye_frame_buffers[1].color.texture == nullptr)
                 return E_FAIL;
+            if(quality_divisor>1) {
+                const auto prepared=impl_->color_scale.prepare(impl_->device.Get(),static_cast<UINT>(color_desc.Width),color_desc.Height,params.eye_format);
+                if(FAILED(prepared))return prepared;
+            }
             impl_->color_description = color_desc;
             impl_->frame_buffers_ready = true;
             impl_->previous_source_publication = {};
@@ -1727,7 +1749,10 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         color_source.initial_state = D3D12_RESOURCE_STATE_COMMON;
         D3D12_BOX color_box{0, 0, 0, static_cast<UINT>(color_desc.Width),
             color_desc.Height, 1};
-        copy(impl_->renderer, command_list, input.color, color_source,
+        if(quality_divisor>1)
+            impl_->color_scale.record(impl_->device.Get(),command_list,source_color,D3D12_RESOURCE_STATE_COMMON,
+                static_cast<UINT>(color_desc.Width),color_desc.Height,input.color.texture,input.color.initial_state,impl_->work_width,impl_->work_height,0);
+        else copy(impl_->renderer, command_list, input.color, color_source,
             color_box, 0, 0);
         report_stage(AfwStage::color_copied, S_OK, source_eye,
             guide.publication);
@@ -1934,8 +1959,13 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             source_eye, impl_->last_evaluated_eye);
         params.mode = static_cast<FrameWarpMode>(effective_mode);
         if(impl_->active_shading_rate<0)impl_->active_shading_rate=settings.shading_rate;
+        // Reduced qualities use an actual colour raster. Keep the provider
+        // resolve at 1x1 rather than its block-phase colour lookup. Native
+        // depth/Normal correction above remains in its accepted guide domain.
         params.shading_rate = embedded::afw_shading_rate(
-            effective_mode == 3 ? impl_->active_shading_rate : 0);
+            quality_divisor>1 ? 0 : (effective_mode == 3 ? impl_->active_shading_rate : 0));
+        params.motion_scale[0] *= float(impl_->work_width)/float(color_desc.Width);
+        params.motion_scale[1] *= float(impl_->work_height)/float(color_desc.Height);
         bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
             effective_mode, 952, guide.publication, impl_->last_evaluated_publication);
         const std::uint32_t interpreted_eye = source_eye;
@@ -2126,7 +2156,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             destination.initial_state = D3D12_RESOURCE_STATE_COMMON;
             TextureDesc generated = params.output_eye_frame_buffer->color;
             const auto generated_desc = generated.texture->GetDesc();
-            if (!copy_compatible_color(generated_desc, destination_desc)) {
+            const auto& expected_generated=quality_divisor>1 ? input.color.texture->GetDesc() : destination_desc;
+            if (!copy_compatible_color(generated_desc, expected_generated)) {
                 result = E_INVALIDARG;
             } else {
                 if (two_frame_capture_images_active()) {
@@ -2135,12 +2166,19 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                     returned.stream = guide.stream;
                     returned.capture_serial = guide.publication;
                     returned.eye = static_cast<std::int32_t>(1U - source_eye);
-                    returned.width = static_cast<std::uint32_t>(color_desc.Width);
-                    returned.height = color_desc.Height;
+                    returned.width = impl_->work_width;
+                    returned.height = impl_->work_height;
                     two_frame_capture_record_ng_x(returned, impl_->device.Get(),
                         command_list, generated.texture, generated.initial_state);
                 }
-                copy(impl_->renderer, command_list, destination, generated,
+                if(quality_divisor>1) {
+                    auto* expanded=impl_->color_scale.expanded();
+                    impl_->color_scale.record(impl_->device.Get(),command_list,generated.texture,generated.initial_state,
+                        impl_->work_width,impl_->work_height,expanded,D3D12_RESOURCE_STATE_COMMON,
+                        static_cast<UINT>(color_desc.Width),color_desc.Height,1);
+                    TextureDesc scaled{};scaled.texture=expanded;scaled.initial_state=D3D12_RESOURCE_STATE_COMMON;
+                    copy(impl_->renderer,command_list,destination,scaled,color_box,0,0);
+                } else copy(impl_->renderer, command_list, destination, generated,
                     color_box, 0, 0);
                 report_stage(AfwStage::output_copied, S_OK, source_eye,
                     guide.publication);

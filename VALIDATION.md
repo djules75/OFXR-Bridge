@@ -1,3 +1,11 @@
+## V619: reduced AFW colour raster candidate
+
+Horizon captures place the contour artifact before the final XR copy. Combined
+2x2/4x4 now use an actual reduced colour raster and 1x1 provider resolve, with
+full guide-domain depth/subtraction preserved. This trades generated detail for
+avoiding coarse colour lookup; headset/performance acceptance is pending.
+[Scope](docs/V619_AFW_REDUCED_COLOR.md), [checks](docs/V619_VALIDATION.json).
+
 ## V617: Luke queue bootstrap without a helper device
 
 31 focused checks pass. The same actual-GPU fixture fails with V615 ingress

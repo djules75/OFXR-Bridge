@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.617.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.619.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -216,6 +216,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     set(XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp")
     set(XRFG_LUKE_DEPTH_CONVERT_HEADER "${XRFG_GENERATED_SHADER_DIR}/luke_depth_convert_shader.hpp")
     set(XRFG_LUKE_DEPTH_CALIBRATE_HEADER "${XRFG_GENERATED_SHADER_DIR}/luke_depth_calibrate_shader.hpp")
+    set(XRFG_LUKE_AFW_COLOR_SCALE_HEADER "${XRFG_GENERATED_SHADER_DIR}/luke_afw_color_scale_shader.hpp")
     set(XRFG_LUKE_COMPOSE_MOTION_HEADER "${XRFG_GENERATED_SHADER_DIR}/luke_compose_motion_shader.hpp")
     set(XRFG_VULKAN_D24_DECODE_HEADER "${XRFG_GENERATED_SHADER_DIR}/vulkan_d24_decode_shader.hpp")
     add_custom_command(
@@ -241,6 +242,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_LUKE_DEPTH_CONVERT_HEADER}"
             "${XRFG_LUKE_DEPTH_CALIBRATE_HEADER}"
             "${XRFG_LUKE_COMPOSE_MOTION_HEADER}"
+            "${XRFG_LUKE_AFW_COLOR_SCALE_HEADER}"
             "${XRFG_VULKAN_D24_DECODE_HEADER}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeGameMotionMidpointPS
@@ -327,6 +329,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_VULKAN_D24_DECODE_HEADER}" /Vn g_xrfg_vulkan_d24_decode_shader
             "${CMAKE_CURRENT_SOURCE_DIR}/src/ingress/vulkan_d24_decode.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E ScaleColor
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_LUKE_AFW_COLOR_SCALE_HEADER}" /Vn g_xrfg_luke_afw_color_scale_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/luke_afw_color_scale.hlsl"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E ComposeLukeSameEyeMotion
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_LUKE_COMPOSE_MOTION_HEADER}" /Vn g_xrfg_luke_compose_motion_shader
@@ -375,6 +381,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_LUKE_DEPTH_CONVERT_HEADER}"
         "${XRFG_LUKE_DEPTH_CALIBRATE_HEADER}"
         "${XRFG_LUKE_COMPOSE_MOTION_HEADER}"
+        "${XRFG_LUKE_AFW_COLOR_SCALE_HEADER}"
         "${XRFG_VULKAN_D24_DECODE_HEADER}")
     foreach(stage decide compose)
         set(header "${XRFG_GENERATED_SHADER_DIR}/guide_composer_${stage}_shader.hpp")

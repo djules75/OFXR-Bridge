@@ -154,6 +154,7 @@ FARPROC WINAPI quality_get_proc_address(HMODULE module,LPCSTR name) {
 }
 
 #include "luke_capture_replay.inc"
+#include "luke_color_scale_checks.inc"
 
 int main(int argc,char** argv) {try {
     if(argc==4 && std::filesystem::is_directory(argv[2]))return replay::run(argv[1],argv[2],argv[3]);
@@ -191,6 +192,7 @@ int main(int argc,char** argv) {try {
     const auto wait=[&] {check(queue->Signal(fence.Get(),++tick),"queue receipt");
         check(fence->SetEventOnCompletion(tick,event),"receipt notification");
         require(WaitForSingleObject(event,10000)==WAIT_OBJECT_0,"hardware queue timeout");};
+    color_scale_checks(device.Get(),queue.Get());
     const auto texture=[&](DXGI_FORMAT format,D3D12_RESOURCE_STATES state,
         unsigned texture_width,unsigned texture_height) {
         D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
@@ -213,6 +215,7 @@ int main(int argc,char** argv) {try {
         std::vector<ComPtr<ID3D12Resource>> colors;
         xrfg::LukeCameraOrigin origin;require(origin.update(1,1,{0,0,0}).has_value(),"oracle camera origin");
         double error_sum{};std::uint64_t samples{},green{},pixels{};double basis_error{};bool basis_bits_match=true;
+        std::array<double,2> eye_error{};std::array<std::uint64_t,2> eye_samples{};
         for(unsigned n=1;n<=18;++n) {
             const auto& scene=geometry_transition && n>=10 ? scenes[1] : initial_scene;
             const auto current=camera(n,scene),previous=camera(n>=span?n-span:0,scene);
@@ -301,7 +304,8 @@ int main(int argc,char** argv) {try {
             for(unsigned i=0;i<16;++i)basis_error=std::max(basis_error,double(std::abs(sdk_camera.source_view_to_world.values[i]-current.inverse_view[i])));
             basis_bits_match&=!std::memcmp(sdk_camera.source_view_to_world.values,current.inverse_view.data(),sizeof(current.inverse_view));
             xrfg::embedded::AfwSettings settings{};settings.mode=mode;settings.depth_dilate_mode=0;settings.shading_rate=shading==9 ? (mode==3 ? std::array{0,4,8,0}[(n-3)/4%4] : 0) : shading;
-            provider.expected_shading_rate=upstream_rates[mode==3 ? settings.shading_rate : 0];
+            const unsigned divisor=mode==3 ? (settings.shading_rate==4?2u:settings.shading_rate==8?4u:1u):1u;
+            provider.expected_shading_rate=upstream_rates[divisor>1 ? 0 : (mode==3 ? settings.shading_rate : 0)];
             provider.calls=0;provider.valid=true;
             provider.expected_width=(scene.guide_width*scene.color_width+width-1)/width;
             provider.expected_height=(scene.guide_height*scene.color_height+height-1)/height;
@@ -309,6 +313,8 @@ int main(int argc,char** argv) {try {
             // raster units, not the padded integer crop or the new helper.
             provider.expected_gain_x=scene.scale_x*float(width)/float(scene.guide_width);
             provider.expected_gain_y=scene.scale_y*float(height)/float(scene.guide_height);
+            provider.expected_gain_x*=float((scene.color_width+divisor-1)/divisor)/float(scene.color_width);
+            provider.expected_gain_y*=float((scene.color_height+divisor-1)/divisor)/float(scene.color_height);
             check(synth.synthesize(source.Get(),destination.Get(),*frame,source_view,destination_view,eye,float(baseline),settings),"actual full rotated AFW synthesis");
             wait();
             require(xrfg::embedded::active_afw_shading_rate.load(std::memory_order_relaxed)==settings.shading_rate,
@@ -335,7 +341,10 @@ int main(int argc,char** argv) {try {
                 const auto expected=color(world(expected_camera,x,y,scene.color_width,scene.color_height,scene.span_x,scene.span_y));
                 const auto* pixel=static_cast<unsigned char*>(data)+footprint.Offset+y*footprint.Footprint.RowPitch+x*4;
                 if(consumer_probe) {++pixels;if(pixel[1]>pixel[0]+50 && pixel[1]>pixel[2]+50)++green;}
-                for(unsigned channel=0;channel<3;++channel){error_sum+=std::abs(int(pixel[channel])-int(expected[channel]));++samples;}
+                for(unsigned channel=0;channel<3;++channel){
+                    const auto error=std::abs(int(pixel[channel])-int(expected[channel]));
+                    error_sum+=error;++samples;eye_error[1-eye]+=error;++eye_samples[1-eye];
+                }
             }
             readback->Unmap(0,nullptr);
         }
@@ -346,9 +355,11 @@ int main(int argc,char** argv) {try {
             <<" actual_provider_gain="<<provider.gain_x<<','<<provider.gain_y
             <<" shading_rate="<<provider.expected_shading_rate
             <<" actual_motion_crop="<<provider.expected_width<<'x'<<provider.expected_height<<'\n';
+        std::cout<<"GENERATED_EYE_MAE left="<<eye_error[0]/double(eye_samples[0])
+            <<" right="<<eye_error[1]/double(eye_samples[1])<<'\n';
         all_camera_bits_match&=basis_bits_match&&basis_error<1e-6;
         if(consumer_probe)std::cout<<"CONSUMER_PROBE gain="<<consumer_probe_gain<<" green="<<double(green)/double(pixels)<<'\n';
-        all_mode_pixels_match&=consumer_probe || mae<6;
+        all_mode_pixels_match&=consumer_probe || (eye_error[0]/double(eye_samples[0])<6 && eye_error[1]/double(eye_samples[1])<6);
     }
     wait();ComPtr<ID3D12InfoQueue> info;
     if(SUCCEEDED(device.As(&info)))for(UINT64 i=0;i<info->GetNumStoredMessages();++i) {
