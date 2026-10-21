@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.555.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.556.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -514,6 +514,24 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     if(MSVC)
         target_compile_options(OFXR_vulkan_queue_layer PRIVATE
             /W4 /permissive- /EHsc)
+    endif()
+    if(XRFG_BUILD_TESTS)
+        add_executable(xrfg_vulkan_queue_layer_global_tests
+            tests/vulkan_queue_layer_global_tests.cpp)
+        target_include_directories(xrfg_vulkan_queue_layer_global_tests PRIVATE
+            "${XRFG_VULKAN_INCLUDE_DIR}")
+        target_compile_features(xrfg_vulkan_queue_layer_global_tests PRIVATE cxx_std_20)
+        if(MSVC)
+            target_compile_options(xrfg_vulkan_queue_layer_global_tests PRIVATE
+                /W4 /permissive- /EHsc)
+            target_compile_definitions(xrfg_vulkan_queue_layer_global_tests PRIVATE
+                NOMINMAX WIN32_LEAN_AND_MEAN)
+        endif()
+        add_dependencies(xrfg_vulkan_queue_layer_global_tests OFXR_vulkan_queue_layer)
+        add_test(
+            NAME xrfg_vulkan_queue_layer_global
+            COMMAND xrfg_vulkan_queue_layer_global_tests
+                $<TARGET_FILE:OFXR_vulkan_queue_layer>)
     endif()
 
     if(XRFG_BUILD_STANDALONE)

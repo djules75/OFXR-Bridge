@@ -23,6 +23,9 @@
 // copy and never for anything earlier, and marks the registration submitted.
 // Nothing happens while nothing is registered beyond one atomic load.
 //
+// Global commands (V556). Asked for the instance-less global commands, it
+// hands back the loader's exports rather than nullptr; see loader_global.
+//
 // What it does not do. It intercepts nothing else, holds the lock only
 // across the driver's own call, and behaves the same in every process it is
 // loaded into, since an implicit layer loads into every Vulkan process while
@@ -41,6 +44,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -405,6 +409,29 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL layer_get_instance_proc_addr(
     return nullptr;
 }
 
+// The global commands asked of this layer with no instance (V556). A layer
+// above may ask its next link for them: KHARVOX (DOOM 2016) asks for
+// vkEnumerateInstanceExtensionProperties from inside its vkCreateInstance and,
+// answered with nullptr, fails the instance, which DOOM takes to its fatal
+// error (0xC0000409). Before an instance exists there is no next link to
+// chain to, so they go to the loader's own exports, which answer for the
+// whole chain. A process whose loader has another name keeps nullptr.
+[[nodiscard]] PFN_vkVoidFunction loader_global(const char* name) noexcept {
+    static constexpr std::string_view kGlobals[] = {
+        "vkEnumerateInstanceExtensionProperties",
+        "vkEnumerateInstanceLayerProperties",
+        "vkEnumerateInstanceVersion",
+    };
+    if (std::find(std::begin(kGlobals), std::end(kGlobals), std::string_view(name)) ==
+        std::end(kGlobals)) {
+        return nullptr;
+    }
+    const HMODULE loader = GetModuleHandleW(L"vulkan-1.dll");
+    return loader != nullptr
+        ? reinterpret_cast<PFN_vkVoidFunction>(GetProcAddress(loader, name))
+        : nullptr;
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL layer_get_device_proc_addr(
     VkDevice device, const char* name) {
     if (name == nullptr) {
@@ -436,7 +463,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL layer_get_instance_proc_addr(
         return function;
     }
     if (instance == VK_NULL_HANDLE) {
-        return nullptr;
+        return loader_global(name);
     }
     const InstanceTable table = instance_table(dispatch_key(instance));
     return table.get_instance_proc_addr != nullptr
