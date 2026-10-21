@@ -96,6 +96,9 @@ The number in brackets says why. Leave **Hybrid** off in games where it
 cannot work; the [game compatibility guide](GAME_COMPATIBILITY.md) has the
 settings for the games we know.
 
+mbucchia's [Quad-Views-Foveated](https://github.com/mbucchia/Quad-Views-Foveated)
+layer breaks Hybrid: turn it off to use Hybrid.
+
 | Code | Meaning | What to do |
 |---|---|---|
 | 702 | The game's graphics API is not supported | Leave Hybrid off. |
@@ -103,7 +106,7 @@ settings for the games we know.
 | 821 | DLSS is installed but not running | Choose DLSS, not FSR or another upscaler. Some games turn DLSS off in VR (Assetto Corsa with CSP). |
 | 824 | DLSS runs, but OFXR could not read it | Send a flight log. |
 | 827 | OFXR read DLSS, but could not keep its data | Send a flight log. |
-| 828 | The DLSS image does not match the eye image | Usually an upscaler mod's foveated setting: see the compatibility guide. |
+| 828 | The DLSS image does not match the eye image | Usually Quad-Views-Foveated, or an upscaler mod's foveated setting: turn Quad-Views-Foveated off, or see the compatibility guide. |
 | 815 | Hybrid could not use DLSS's data | Send a flight log. |
 
 ## Optical flow settings

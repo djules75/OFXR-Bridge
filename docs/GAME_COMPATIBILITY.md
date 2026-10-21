@@ -4,6 +4,8 @@ What to know, and what to change, for OFXR to work well in specific games.
 Hybrid uses the game's own DLSS motion vectors, and some games need a
 setting changed before Hybrid can use them: with Hybrid on, the FPS overlay
 shows **HYBRID OK** when it works, or **HYBRID KO (code)** when it does not.
+mbucchia's [Quad-Views-Foveated](https://github.com/mbucchia/Quad-Views-Foveated)
+layer breaks Hybrid: turn it off to use Hybrid.
 
 ## Tested games
 
@@ -15,19 +17,20 @@ collects players' reports.
 |---|---|---|
 | Microsoft Flight Simulator 2024 | Native OpenXR | Yes, [settings below](#microsoft-flight-simulator-2024) |
 | Star Citizen | Native OpenXR | Yes, [settings below](#star-citizen) |
+| DCS World | Native OpenXR | Yes |
 | No Man's Sky | OpenComposite | Yes |
 | Hogwarts Legacy | UEVR | Yes |
 | Returnal | UEVR | Yes |
-| Atomic Heart | UEVR | Not tested |
-| Dead Island 2 | UEVR | Not tested |
+| Atomic Heart | UEVR | Yes |
+| Dead Island 2 | UEVR | Yes |
 | The Callisto Protocol | UEVR | No: the game has no DLSS |
-| Cyberpunk 2077 | R.E.A.L. VR | Yes, [2X only](#real-vr-games) |
-| Ghost of Tsushima | R.E.A.L. VR | Yes, [2X only](#real-vr-games) |
-| Kingdom Come: Deliverance | R.E.A.L. VR | Yes, [2X only](#real-vr-games) |
-| Avatar: Frontiers of Pandora | R.E.A.L. VR | Yes, [2X only](#real-vr-games) |
-| The Last of Us Part I | R.E.A.L. VR | Yes, [2X only](#real-vr-games) |
+| Cyberpunk 2077 | R.E.A.L. VR | Yes, [2X only with AERv2](#real-vr-games) |
+| Ghost of Tsushima | R.E.A.L. VR | Yes, [2X only with AERv2](#real-vr-games) |
+| Kingdom Come: Deliverance | R.E.A.L. VR | Yes, [2X only with AERv2](#real-vr-games) |
+| Avatar: Frontiers of Pandora | R.E.A.L. VR | Yes, [2X only with AERv2](#real-vr-games) |
+| The Last of Us Part I | R.E.A.L. VR | Yes, [2X only with AERv2](#real-vr-games) |
 | Skyrim VR | OpenComposite | With a DLSS mod, [settings below](#skyrim-vr) |
-| Elite Dangerous | OpenComposite | No: the game has no DLSS |
+| Elite Dangerous | OpenComposite | Yes, with the [EDVR mod](https://github.com/characterecho-sean/edvr-unofficial-patch), which adds DLSS |
 | Assetto Corsa (CSP) | Native OpenXR | No: CSP turns DLSS off in VR |
 
 ## Games
@@ -82,7 +85,15 @@ frames. In the tray:
 **Mod:** Luke Ross's R.E.A.L. VR, for example in Cyberpunk 2077, Ghost of
 Tsushima, Kingdom Come: Deliverance or Avatar: Frontiers of Pandora.
 
-**Hybrid:** works. No setting to change.
+**Hybrid:** works.
+
+**AERv2:** in the mod's settings, choose **AERv2** as the rendering mode,
+not AERv2 1/2 or AERv2 1/3. The setting is only shown in expert mode: close
+the game, add this line to `RealVR.ini`, then start the game again:
+
+```ini
+ExpertMode=1
+```
 
 **2X only:** the mod draws one eye per game frame and the other from an
 older head position, so 3X's two generated frames between game frames
