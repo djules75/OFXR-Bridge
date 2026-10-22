@@ -1,0 +1,89 @@
+{
+  "version": "V631",
+  "base_version": "V629",
+  "base": "3a75eabae788fccff4f8758f6fb46f26076671bb",
+  "scope": "Ghost of Tsushima native same-eye N-2 motion on VDXR as already observed on SteamVR. Correct native-span admission only; retain depth/camera subtraction, provider, shaders, capture pixels, crop, pacing and counters. V630 latency changes excluded.",
+  "owner_capture": "V629 PID2812, two AFW evaluations, Quest3/VDXR",
+  "capture_fits": [
+    {
+      "frame": 1,
+      "eye": "0",
+      "declared_span": "1",
+      "native_size": [
+        1672,
+        1672
+      ],
+      "fits": {
+        "native_clip_to_opposite": {
+          "median_px": 9.765809651716868,
+          "p90_px": 24.523964767692107,
+          "bias_px": [
+            9.528451037119588,
+            -0.5028899174179773
+          ]
+        },
+        "native_clip_to_same": {
+          "median_px": 0.2027007116245967,
+          "p90_px": 0.7363560158221476,
+          "bias_px": [
+            0.0408840850643184,
+            -0.05310862866701327
+          ]
+        }
+      },
+      "green_fraction_full": 0.7034539424868823
+    },
+    {
+      "frame": 2,
+      "eye": "1",
+      "declared_span": "1",
+      "native_size": [
+        1672,
+        1672
+      ],
+      "fits": {
+        "native_clip_to_opposite": {
+          "median_px": 9.727874250110853,
+          "p90_px": 24.96900947235934,
+          "bias_px": [
+            -9.720813463416413,
+            -0.2528153942861664
+          ]
+        },
+        "native_clip_to_same": {
+          "median_px": 0.17387536399455825,
+          "p90_px": 0.4989366297475473,
+          "bias_px": [
+            -0.05441636940395256,
+            0.04352179277650792
+          ]
+        }
+      },
+      "green_fraction_full": 0.6832502300181047
+    }
+  ],
+  "provider_replay": {
+    "baseline_frame2_green_fraction": 0.607006,
+    "baseline_frame2_captured_mae": 0.0137581,
+    "correct_contract_frame2_green_fraction": 0.0254491,
+    "first_frame_bootstrap_is_not_an_exact_control": true,
+    "crop_only_changed_plugin_mv_and_depth_payloads": true,
+    "original_capture_unmodified": true
+  },
+  "passed": 8,
+  "failed": 0,
+  "ctest_seconds": 6.88,
+  "tests": [
+    "xrfg_luke_ngx_actual_capture",
+    "xrfg_horizon_steamvr_capture",
+    "xrfg_horizon_vdxr_capture",
+    "xrfg_ghost_steamvr_capture",
+    "xrfg_ghost_vdxr_capture",
+    "xrfg_crimson_ngx_actual_capture",
+    "xrfg_kcd_scene_capture",
+    "xrfg_luke_kcd_quality_bundled"
+  ],
+  "headset_validation": "pending; provider replay and GPU ingress checks are not a live headset verdict",
+  "pushed": false,
+  "live_installation": false
+}

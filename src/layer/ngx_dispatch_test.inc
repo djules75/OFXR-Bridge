@@ -1034,7 +1034,8 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             require(set_constants(constants,n,0)&&evaluate_sl(reinterpret_cast<sl1::CommandBuffer*>(list.Get()),sl1::eFeatureDLSS,n,0),
                 "actual capture original Streamline results");
             if(context.frame && !scene_camera)require(
-                context.frame->raw_motion_native_span==(steamvr_same_eye_native_motion()?2u:1u),
+                context.frame->raw_motion_native_span==((test_ghost_native_motion ||
+                    (test_horizon_native_motion && capture_steamvr_runtime.load()))?2u:1u),
                 "actual title/runtime capture used the wrong native motion interval");
             const unsigned successful=n>=recycle_production?n-recycle_production+1:
                 n-(logical_family&&n>=12?1:0);
@@ -1474,12 +1475,15 @@ int run_actual_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline)
 int run_ghost_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline,bool steamvr) {
     test_ghost_native_motion=true;
     set_ngx_capture_steamvr_runtime(steamvr);
+    if(!same_eye_native_motion()) {
+        std::cerr<<"Ghost same-eye native interval depends on the XR runtime\n";return 1;
+    }
     return run_actual_ngx_capture_pipeline(realvr,streamline,false);
 }
 int run_horizon_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline,bool steamvr) {
     test_horizon_native_motion=true;
     set_ngx_capture_steamvr_runtime(steamvr);
-    if(steamvr_same_eye_native_motion()!=steamvr) {
+    if(same_eye_native_motion()!=steamvr) {
         std::cerr<<"Horizon native interval escaped its SteamVR scope\n";return 1;
     }
     return run_actual_ngx_capture_pipeline(realvr,streamline,false);

@@ -169,19 +169,22 @@ bool crimson_desert_process() {
 #endif
 }
 std::atomic_bool capture_steamvr_runtime{};
-bool steamvr_same_eye_native_motion() noexcept {
-    static const bool selected=[] {
+bool same_eye_native_motion() noexcept {
+    static const auto selected=[] {
         wchar_t process[MAX_PATH]{};GetModuleFileNameW(nullptr,process,MAX_PATH);
         const auto* basename=wcsrchr(process,L'\\');basename=basename?basename+1:process;
-        return !_wcsicmp(basename,L"GhostOfTsushima.exe") ||
-            !_wcsicmp(basename,L"HorizonForbiddenWest.exe");
+        return std::pair{!_wcsicmp(basename,L"GhostOfTsushima.exe"),
+                         !_wcsicmp(basename,L"HorizonForbiddenWest.exe")};
     }();
 #ifdef XRFG_NATIVE_INGRESS_TESTS
-    const bool same_eye=selected||test_ghost_native_motion||test_horizon_native_motion;
+    const bool ghost=selected.first||test_ghost_native_motion;
+    const bool horizon=selected.second||test_horizon_native_motion;
 #else
-    const bool same_eye=selected;
+    const bool ghost=selected.first, horizon=selected.second;
 #endif
-    return same_eye && capture_steamvr_runtime.load(std::memory_order_relaxed);
+    // V629 Quest/VDXR F8 also fits N-2 (.17-.20px), not N-1 (9.7px).
+    // Tsushima's native field interval is independent of the XR runtime.
+    return ghost || (horizon && capture_steamvr_runtime.load(std::memory_order_relaxed));
 }
 bool outlaws_public_process() {
     return outlaws_process()&&native_ingress::luke_detected();
@@ -816,8 +819,8 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     // opposite-eye N-1 misses by5.9px. Preserve the accepted VDXR contract.
     // V620 Horizon SteamVR F8: native N-2 residual .018/.023px; N-1
     // misses by3.74/4.54px. The advertised SL clip matrix is not the
-    // motion field's temporal endpoint. Keep the existing VDXR contract.
-    if(luke && !invocation_camera && (crimson_desert_process()||steamvr_same_eye_native_motion()))
+    // motion field's temporal endpoint. Horizon's VDXR contract is unchanged.
+    if(luke && !invocation_camera && (crimson_desert_process()||same_eye_native_motion()))
         g.raw_motion_native_span=2;
     if(observed_motion_span)g.raw_motion_native_span=observed_motion_span;
     // Scoped camera values replace apply_camera's camera read, while its Luke
