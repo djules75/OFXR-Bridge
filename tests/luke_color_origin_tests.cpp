@@ -34,6 +34,25 @@ void stamp(std::vector<float>& row, double start, double scale, std::uint32_t to
     }
 }
 void codec_tests() {
+    // V634 Horizon: every observed AFW publication gap follows a committed
+    // opposite-eye capture rejected because the cross-eye counter stayed equal.
+    // First gap: AFW 557 -> 559, lost color token 558, Luke render 5316.
+    const std::optional<xrfg::LukeRenderIdentity> hfw_source{{0x1234,5316}};
+    require(!xrfg::luke_hfw_source_is_duplicate(hfw_source,hfw_source,true,1),
+        "fresh opposite-eye AFW capture rejected by equal HFW counter");
+    require(!xrfg::luke_hfw_source_is_duplicate(hfw_source,hfw_source,true,0),
+        "fresh left-eye AFW capture rejected by equal HFW counter");
+    require(xrfg::luke_hfw_source_is_duplicate(hfw_source,hfw_source,false,1),
+        "raw HFW duplicate filter changed");
+    require(xrfg::luke_hfw_source_is_duplicate(hfw_source,hfw_source,true,{}),
+        "held AFW cycle treated as a new release");
+    require(xrfg::luke_hfw_source_is_duplicate(hfw_source,hfw_source,true,2),
+        "invalid captured eye admitted");
+    require(xrfg::luke_hfw_source_is_duplicate({},hfw_source,true,1),
+        "missing HFW identity dereferenced/admitted");
+    require(!xrfg::luke_hfw_source_is_duplicate(
+        xrfg::LukeRenderIdentity{0x1234,5317},hfw_source,false,{}),
+        "ordinary new raw source rejected");
     require(xrfg::kLukeOriginBits==64 && xrfg::kLukeOriginWidth==256 &&
         xrfg::kLukeOriginHeight==8, "compact copy dimensions");
     for (const auto token : {1u,17u,0x12345678u,0xfedcba98u,UINT32_MAX})
@@ -417,6 +436,9 @@ void gpu_tests() {
         }
         require(publications[0]==current&&publications[1]==prior,"stereo marker identity changed");
         require(publications[1]<=prior,"last-release-right counterfactual not reproduced");
+        const std::optional<xrfg::LukeRenderIdentity> equal_counter{{0x1234,5316}};
+        require(!xrfg::luke_hfw_source_is_duplicate(equal_counter,equal_counter,true,0),
+            "color-carried fresh AFW source rejected before token selection");
         require(xrfg::select_luke_afw_color_source(publications,prior)==0,"last release hid current left source");
         require(!xrfg::select_luke_afw_color_source(publications,current),"duplicate source reused");
         require(xrfg::select_luke_afw_color_source({prior,current},prior)==1,"right source selection drift");

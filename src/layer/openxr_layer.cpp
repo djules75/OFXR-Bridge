@@ -15125,7 +15125,8 @@ XrResult layer_end_frame_impl(
                 (afw_selected ? 1 : 0) | (state->menu_enabled ? 2 : 0));
         }
         if(projection && state->luke_source_filter_armed) {
-            const bool duplicate=!source || state->luke_last_source==source;
+            const bool duplicate=xrfg::luke_hfw_source_is_duplicate(
+                source,state->luke_last_source,afw_selected,luke_afw_released_eye);
             if(xrfg::diagnostic_ring_enabled)xrfg::diagnostic_ring_record("{\"kind\":\"source_admission\",\"qpc\":"+
                 std::to_string(xrfg::diagnostic_ring_qpc())+",\"render\":"+std::to_string(source?source->render:0)+
                 ",\"display_time\":"+std::to_string(end_info->displayTime)+",\"dropped\":"+(duplicate?"true":"false")+"}");

@@ -1,0 +1,39 @@
+{
+  "version": "V635",
+  "base_version": "V634",
+  "base": "892697e37ca063f5f9b1fccffed5f13f8bbd344f",
+  "scope": "Horizon only: a committed fresh AFW projection-eye capture bypasses the coarse cross-eye duplicate counter filter and reaches the unchanged exact CRC color-token admission. AFW Off and other games unchanged.",
+  "passed": 12,
+  "failed": 0,
+  "ctest_seconds": 6.02,
+  "tests": [
+    "xrfg_luke_color_origin",
+    "xrfg_horizon_motion_interval",
+    "xrfg_luke_depth_gpu",
+    "xrfg_luke_ngx_actual_capture",
+    "xrfg_horizon_steamvr_capture",
+    "xrfg_horizon_vdxr_capture",
+    "xrfg_ghost_steamvr_capture",
+    "xrfg_ghost_vdxr_capture",
+    "xrfg_crimson_ngx_actual_capture",
+    "xrfg_kcd_scene_capture",
+    "xrfg_luke_provider_continuity",
+    "xrfg_luke_kcd_quality_bundled"
+  ],
+  "owner_run": {
+    "log": "C:\\Users\\x4lch\\AppData\\Local\\ofxr-bridge\\RuntimeLayer\\v634\\ofxr-bridge-flight-20261023-001848-463-pid15568-0.log",
+    "sha256": "d04ac949081e5c41b969d0121b9195b62198bfb964ef4141098435fd49761d92",
+    "afw_evaluations": 1157,
+    "combined": 1110,
+    "alternate": 47,
+    "discontinuities": 26,
+    "missing_publications": 27,
+    "gaps_with_captured_release_dropped_as_duplicate": 26,
+    "all_green_f8_available": false
+  },
+  "headset_validation": "Pending owner Horizon test; flight proves admission loss, not exact pixel replay of sporadic flashes. No additional F8 requested.",
+  "provider_sha256": "5f3cfc38903ac438241a3c47cb4bc3ac329cb39b056e33a63c20045fe15336f9",
+  "first_bad_revision_established": false,
+  "live_installation": false,
+  "pushed": false
+}

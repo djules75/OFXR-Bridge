@@ -2,7 +2,18 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include "xrfg/luke_render_identity.hpp"
 namespace xrfg {
+// HFW's render counter can stay unchanged across a fresh capture of the other
+// eye. AFW resolves the actual color-carried CRC token downstream; do not discard
+// that capture using the coarser cross-eye counter. Raw OFXR keeps its old filter.
+inline bool luke_hfw_source_is_duplicate(
+    const std::optional<LukeRenderIdentity>& source,
+    const std::optional<LukeRenderIdentity>& previous,
+    bool afw_selected, std::optional<std::uint32_t> captured_eye) noexcept {
+    return !source || (source == previous &&
+        !(afw_selected && captured_eye && *captured_eye < 2));
+}
 // Publications must come from CRC-validated tokens in these exact two colors.
 // Release order and DLSS preset do not identify the new AER source. Equal fresh
 // publications in different eye colors are ambiguous and must not select an eye.
