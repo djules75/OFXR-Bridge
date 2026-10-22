@@ -20,12 +20,15 @@ inline std::vector<BenchmarkStep> legacy_benchmark_plan(bool full,bool luke=fals
         off.pacing=0;if(luke){off.afw=3;off.shading=quality;}steps.push_back(off);
         const auto route=[&](const char* name,int generation,int backend,bool triple,bool fast) {
             BenchmarkStep s{generation,backend,luke?0:int(fast),luke?0:int(fast),triple,triple,false,
-                std::string(name)+(luke?" 00":fast?" Lower VRAM":" Normal")};
+                std::string(name)+(luke?" 00":fast?" Fast":" Normal")};
             s.pacing=0;if(luke){s.afw=3;s.shading=quality;}steps.push_back(std::move(s));
         };
-        route("Fidelity",0,0,false,true);route("0.2.1",0,1,false,true);route("Djules 2X",0,3,false,true);
+        for(auto [name,backend]:{std::pair{"Fidelity",0},std::pair{"0.2.1",1},std::pair{"Djules 2X",3}}) {
+            route(name,0,backend,false,false);
+            if(!luke)route(name,0,backend,false,true);
+        }
         if(!luke){route("Djules 3X",0,3,true,false);route("Djules 3X",0,3,true,true);}
-        route("0.3.0",0,2,false,true);
+        route("0.3.0",0,2,false,false);if(!luke)route("0.3.0",0,2,false,true);
         if(full&&!luke)for(auto [name,mode]:{std::pair{"Hybrid",3},std::pair{"FSR",1},std::pair{"DLSS-G",2}}) {
             route(name,mode,0,false,false);route(name,mode,0,false,true);
         }

@@ -17,11 +17,24 @@ int main() {
         check(optical.size()==31 && full.size()==49,"SteamVR: three pacing modes, Normal/Fast, one Off reference");
         for(const bool luke:{false,true}) for(const bool complete:{false,true}) {
             const auto legacy=benchmark_plan(complete,luke,false);
-            check(legacy.size()==(luke ? 15 : complete ? 13 : 7),"Legacy VDXR fits the dedicated spreadsheet columns");
+            check(legacy.size()==(luke ? 15 : complete ? 17 : 11),"Legacy VDXR fits the dedicated spreadsheet columns");
+            std::set<std::tuple<bool,int,int,bool,int,int>> unique;
             for(const auto& step:legacy) {
                 Settings original;original.pacing_mode=2;
                 check(step.pacing==0 && benchmark_settings(original,step).pacing_mode==0,
                     "Legacy VDXR always tests its Framework path");
+                check(unique.emplace(step.disabled,step.generation,step.backend,step.triple,step.a,step.shading).second,
+                    "Legacy has no duplicated or mislabelled trials");
+                if(luke)check(!step.triple && !step.a && !step.b && step.afw==3 &&
+                    (step.shading==0 || step.shading==4 || step.shading==8),
+                    "Legacy Luke tests only three AFW qualities, no Fast or 3X");
+                else if(!step.disabled) {
+                    check(step.a==step.b,"Legacy Fast controls both memory flags");
+                    check(std::count_if(legacy.begin(),legacy.end(),[&](const auto& peer) {
+                        return !peer.disabled && peer.generation==step.generation &&
+                            peer.backend==step.backend && peer.triple==step.triple && peer.a!=step.a;
+                    })==1,"Every Legacy route has both Normal and Fast exactly once");
+                }
             }
         }
         RuntimeStatus vdxr{};vdxr.vdxr_runtime=true;
@@ -192,11 +205,23 @@ int main() {
         }
         runtime.steamvr_runtime=false;runtime.vdxr_runtime=true;runtime.vdxr_legacy=true;runtime.luke_detected=false;
         runtime.applied_revision=snapshot().revision;report_runtime(runtime);
-        check(start_benchmark(false) && snapshot().benchmark.count==7,"VDXR controller selects the legacy optical suite");
+        check(start_benchmark(false) && snapshot().benchmark.count==11,"VDXR controller selects the legacy optical suite");
         stop_benchmark();tick_benchmark();
-        runtime.luke_detected=true;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
-        check(start_benchmark(false,true) && snapshot().benchmark.count==15,"VDXR Luke suite remains unchanged");
-        stop_benchmark();tick_benchmark();
+        for(bool legacy_luke:{false,true}) {
+            runtime.luke_detected=legacy_luke;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
+            check(start_benchmark(true,legacy_luke) && snapshot().benchmark.count==(legacy_luke?15:17),
+                "Legacy controller selects complete Normal/Fast or three-quality Luke matrix");
+            clock=snapshot().benchmark.requested_ms+500;
+            for(unsigned i=0;i<(legacy_luke?15U:17U);++i) {
+                state=snapshot();runtime.applied_revision=state.revision;runtime.pacing_mode=0;
+                runtime.afw_shading_rate=state.desired.afw_shading_rate;report_runtime(runtime);
+                tick_benchmark(clock);check(snapshot().benchmark.phase==BenchmarkPhase::running,"Legacy settings applied before timing");
+                tick_benchmark(clock+4000);tick_benchmark(clock+10000);clock+=10200;
+            }
+            check(snapshot().benchmark.phase==BenchmarkPhase::complete,"Every Legacy trial completes");
+            std::cout<<(legacy_luke?"LEGACY_LUKE_CSV=":"LEGACY_FULL_CSV=")
+                <<std::filesystem::u8path(snapshot().benchmark.csv_path).string()<<'\n';
+        }
         runtime.vdxr_legacy=false;runtime.luke_detected=false;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
         check(start_benchmark(true) && snapshot().benchmark.count==49,"New VDXR controller selects full pacing matrix");
         stop_benchmark();tick_benchmark();

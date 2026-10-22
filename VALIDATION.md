@@ -1,3 +1,10 @@
+## V629: Legacy Normal/Fast benchmark pairs
+
+Legacy VDXR now tests Normal and Fast for every supported route: 11 optical
+or17 complete trials. Luke remains15 AFW1x1/2x2/4x4 trials without3X or Fast.
+Display and the private sheet adapter follow the actual G:AC layout.
+No renderer or pacing change. [Scope and verification](docs/V629_LEGACY_NORMAL_FAST.md).
+
 ## V628: stereo worker GPU backpressure
 
 A busy second eye during a Legacy VDXR Djules re-prime no longer immediately

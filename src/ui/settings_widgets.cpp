@@ -399,7 +399,7 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
         ImGui::TextWrapped("Framework, Director, Framework+director for every route. Normal and Fast mode: 31 optical or 49 complete tests including one OFXR Off reference.");
         ImGui::TextWrapped("Luke Ross: 39 tests through OFXR 0.3.0, no 3X. Three AFW quality passes: 1x1, 2x2, 4x4. AFW alone once per quality, then each route with all three pacing modes. Fast mode has no effect. CSV groups each route/pacing's three qualities.");
     } else {
-        ImGui::TextWrapped("Legacy VDXR: 7 optical or 13 complete tests. Fidelity, 0.2.1, Djules 2X and 0.3.0 use Fast; 3X and vector routes compare Normal/Fast. Luke: 15 tests, three AFW qualities through 0.3.0, no 3X.");
+        ImGui::TextWrapped("Legacy VDXR: 11 optical or 17 complete tests. Every route compares Normal/Fast. Luke: 15 tests, three AFW qualities through 0.3.0, no Fast or 3X.");
     }
     ImGui::TextWrapped("Close the menu and keep the same test scene. Original settings are restored after Stop or completion. Memory is sampled once near the end of each trial. Tests keep the startup DLSS-G preset and never change its NVIDIA profile. A is the initial preference; changing presets requires restarting the game.");
     if(ImGui::CollapsingHeader("Experimental features")) {
