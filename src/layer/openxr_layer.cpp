@@ -15,6 +15,7 @@
 #include <atomic>
 #include "xrfg/openxr_fps_overlay.hpp"
 #include "xrfg/steamvr_delivery.hpp"
+#include "xrfg/submit_margin.hpp"
 
 #include <windows.h>
 #include <psapi.h>
@@ -920,7 +921,8 @@ struct SessionState {
     std::uint32_t presenter_scanout_jump_cooldown{};
     bool presenter_scanout_jump_pending{};
     // How much of the compositor's frame to leave in hand when a submission
-    // lands. Fixed for the session and presenter thread only.
+    // lands. Presenter thread only; set from the compositor's running start
+    // since V557 (see below).
     //
     // This is clearance, not a deadline. The two halves of a pair go out one
     // scanout apart into compositor frames one scanout apart, so the margin is
@@ -936,8 +938,20 @@ struct SessionState {
     // past which a submission is taken for the frame already being assembled
     // and about half are never scanned out; that bound was measured between
     // 4.0 and 5.0 ms across three titles on one machine, so 3 ms buys
-    // clearance without approaching it.
+    // clearance without approaching it there.
+    //
+    // On a PSVR2 the running start sits 3.1 ms before vsync in a light scene
+    // (issue 44), so 3 ms is no clearance at all: every real frame was shown
+    // twice and the synthetic behind it dropped, 62 delivered from 90. The
+    // compositor reports where it started composing each frame, so since
+    // V557 the margin follows that reading, inside the running start by 1 ms
+    // wherever 3 ms would not be: submit_margin_for_running_start. 3 ms is
+    // the value until the first reading and wherever the reading leaves room.
     std::chrono::nanoseconds presenter_submit_margin{3'000'000};
+    // The compositor's render start measured from its vsync, smoothed over
+    // about sixteen presented frames; presenter thread only.
+    std::chrono::nanoseconds presenter_running_start{};
+    bool presenter_running_start_valid{};
     std::uint32_t presenter_vsync_tick{};
     // Serializes each generated synthetic/real frame pair atomically with
     // respect to application frame calls. A successful application wait owns
@@ -8915,8 +8929,8 @@ void pace_presenter_submission(
             // shown on a vsync other than the one it was predicted for. Which
             // is the whole of what a dip looks like in the records.
             //
-            // Fixed for the session, and the value and the reasoning are on
-            // presenter_submit_margin itself.
+            // Set from the compositor's running start beside the 905 record
+            // (V557); the reasoning is on presenter_submit_margin itself.
             const auto submit_target_remaining =
                 state->presenter_submit_margin;
             if (const auto left =
@@ -9640,6 +9654,34 @@ void continuous_presenter_main(
                     // it was aiming at a target the arithmetic had hidden
                     // from it. With the fold removed it converges and goes
                     // quiet.
+                    // The setpoint follows the compositor's running start,
+                    // read from its frame timing where the presented record
+                    // is written: submit_margin_for_running_start. 917: a the
+                    // smoothed start after vsync in ns, b the margin now, c
+                    // the margin before; written when it moves by more than
+                    // 100 us, so a converged session writes it once.
+                    if (measured_pace_active(state) &&
+                        state->presenter_running_start_valid) {
+                        const auto margin =
+                            xrfg::submit_margin_for_running_start(
+                                scanout, state->presenter_running_start);
+                        const auto moved =
+                            margin - state->presenter_submit_margin;
+                        constexpr auto kMarginStep =
+                            std::chrono::nanoseconds(100'000);
+                        if (moved > kMarginStep || moved < -kMarginStep) {
+                            xrfg::bridge_flight_logger().event(
+                                xrfg::BridgeFlightOperation::
+                                    presenter_vsync_lock,
+                                917,
+                                static_cast<std::uint64_t>(
+                                    state->presenter_running_start.count()),
+                                static_cast<std::uint64_t>(margin.count()),
+                                static_cast<std::uint64_t>(
+                                    state->presenter_submit_margin.count()));
+                            state->presenter_submit_margin = margin;
+                        }
+                    }
                     if (measured_pace_active(state) && !fresh_synthetic &&
                         remaining != 0) {
                         constexpr auto kAcquireDeadBand =
@@ -10358,6 +10400,29 @@ void continuous_presenter_main(
         if (state->steamvr_delivery) {
             if (const auto presented =
                     state->steamvr_delivery->last_presentation()) {
+                // Where the compositor started composing this frame, from its
+                // vsync. Smoothed over about sixteen frames: the reading sits
+                // within 0.1 ms of itself while the compositor is tight and
+                // within 0.6 ms otherwise, and the margin set from it beside
+                // the 905 record is meant to follow the compositor's state,
+                // not one frame. A value outside the scanout is not a start
+                // in this frame and is left out.
+                {
+                    const double start_ms = presented->compositor_render_start_ms;
+                    const auto period_ns = state->presenter_display_period;
+                    if (start_ms > 0.0 && period_ns > 0 &&
+                        start_ms * 1'000'000.0 < static_cast<double>(period_ns)) {
+                        const auto start = std::chrono::nanoseconds(
+                            static_cast<std::int64_t>(start_ms * 1'000'000.0));
+                        if (!state->presenter_running_start_valid) {
+                            state->presenter_running_start = start;
+                            state->presenter_running_start_valid = true;
+                        } else {
+                            state->presenter_running_start +=
+                                (start - state->presenter_running_start) / 16;
+                        }
+                    }
+                }
                 xrfg::bridge_flight_logger().event(
                     xrfg::BridgeFlightOperation::presenter_frame_presented,
                     presented->mispresented,

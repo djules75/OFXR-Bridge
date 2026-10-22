@@ -2,6 +2,7 @@
 #include "xrfg/generation_backpressure.hpp"
 #include "xrfg/pose.hpp"
 #include "xrfg/release_spacing.hpp"
+#include "xrfg/submit_margin.hpp"
 
 #include <array>
 #include <chrono>
@@ -203,6 +204,47 @@ int main() {
             served += 3;
         }
         expect(!ever_floored, "3X: steady pairs never take the floor");
+    }
+
+    {
+        using std::chrono::nanoseconds;
+        constexpr nanoseconds scanout{11'111'111};
+        constexpr nanoseconds fixed{3'000'000};
+        // Issue 44, the failing state: the compositor starts 7.97 ms after
+        // vsync, 3.14 ms before the next. 3 ms of margin lands on top of it;
+        // the margin moves inside it by the clearance.
+        expect(xrfg::submit_margin_for_running_start(scanout, nanoseconds{7'970'000}) ==
+                   nanoseconds{2'141'111},
+               "submit margin: a running start 3.14 ms before vsync gives 2.14 ms");
+        // Issue 44, the recovered state: 6.98 ms after vsync leaves 4.13 ms;
+        // 3 ms already clears it by more than the clearance and stands.
+        expect(xrfg::submit_margin_for_running_start(scanout, nanoseconds{6'980'000}) == fixed,
+               "submit margin: a running start 4.1 ms before vsync keeps 3 ms");
+        // The reference machine: 4.0 to 4.7 ms before vsync, 3 ms stands.
+        expect(xrfg::submit_margin_for_running_start(scanout, nanoseconds{6'400'000}) == fixed,
+               "submit margin: a running start 4.7 ms before vsync keeps 3 ms");
+        // A compositor that starts 2 ms before vsync cannot be cleared by a
+        // millisecond without reaching the vsync: the floor holds.
+        expect(xrfg::submit_margin_for_running_start(scanout, nanoseconds{9'111'111}) ==
+                   nanoseconds{1'500'000},
+               "submit margin: a running start 2 ms before vsync stops at the floor");
+        // Unknown or implausible readings leave the fixed margin alone.
+        expect(xrfg::submit_margin_for_running_start(scanout, nanoseconds{0}) == fixed,
+               "submit margin: no reading keeps 3 ms");
+        expect(xrfg::submit_margin_for_running_start(scanout, scanout) == fixed,
+               "submit margin: a start at the scanout keeps 3 ms");
+        expect(xrfg::submit_margin_for_running_start(scanout, nanoseconds{15'000'000}) == fixed,
+               "submit margin: a start past the scanout keeps 3 ms");
+        expect(xrfg::submit_margin_for_running_start(nanoseconds{0}, nanoseconds{7'000'000}) == fixed,
+               "submit margin: no scanout keeps 3 ms");
+        // 120 Hz: an 8.33 ms scanout with the compositor 3.1 ms before vsync.
+        expect(xrfg::submit_margin_for_running_start(nanoseconds{8'333'333}, nanoseconds{5'233'333}) ==
+                   nanoseconds{2'100'000},
+               "submit margin: 120 Hz scales by the scanout, not a constant");
+        // The margin can rise again when the compositor widens.
+        expect(xrfg::submit_margin_for_running_start(scanout, nanoseconds{7'970'000}) <
+                   xrfg::submit_margin_for_running_start(scanout, nanoseconds{6'980'000}),
+               "submit margin: widens as the compositor starts earlier");
     }
 
     if (failures != 0) {
