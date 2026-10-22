@@ -182,9 +182,10 @@ bool same_eye_native_motion() noexcept {
 #else
     const bool ghost=selected.first, horizon=selected.second;
 #endif
-    // V629 Quest/VDXR F8 also fits N-2 (.17-.20px), not N-1 (9.7px).
-    // Tsushima's native field interval is independent of the XR runtime.
-    return ghost || (horizon && capture_steamvr_runtime.load(std::memory_order_relaxed));
+    // Quest/VDXR captures establish the same N-2 endpoint on both titles:
+    // Tsushima V629 .17-.20px; Horizon V632 .011-.014px (N-1 1.88-3.03px).
+    // The native motion field interval does not depend on the XR runtime.
+    return ghost || horizon;
 }
 bool outlaws_public_process() {
     return outlaws_process()&&native_ingress::luke_detected();
@@ -817,9 +818,8 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     // Keep the measured field contract separate from camera receipt order.
     // V568 Ghost SteamVR F8: native motion matches same-eye N-2 at .1px,
     // opposite-eye N-1 misses by5.9px. Preserve the accepted VDXR contract.
-    // V620 Horizon SteamVR F8: native N-2 residual .018/.023px; N-1
-    // misses by3.74/4.54px. The advertised SL clip matrix is not the
-    // motion field's temporal endpoint. Horizon's VDXR contract is unchanged.
+    // Horizon SteamVR and VDXR F8s establish the same native N-2 field.
+    // The advertised SL clip matrix is not the field's temporal endpoint.
     if(luke && !invocation_camera && (crimson_desert_process()||same_eye_native_motion()))
         g.raw_motion_native_span=2;
     if(observed_motion_span)g.raw_motion_native_span=observed_motion_span;
