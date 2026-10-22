@@ -11382,11 +11382,13 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
     {std::scoped_lock lock(session->gpu_mutex);result=submit();}
     const bool inline_fidelity = !worker &&
         session->optical_flow_backend == xrfg::D3D12OpticalFlowBackend::fidelity_fx;
-    if((worker || inline_fidelity)&&session->luke_afw_enabled&&!session->djules_route&&
-        generation->d3d11_interop&&session->frame_generation_mode==xrfg::D3D12FrameGenerationMode::ofxr&&
+    const bool inline_luke = inline_fidelity&&session->luke_afw_enabled&&!session->djules_route&&
+        generation->d3d11_interop&&session->frame_generation_mode==xrfg::D3D12FrameGenerationMode::ofxr;
+    if((worker || inline_luke)&&
         classify_synthesis_failure(result)==GenerationPrepareReason::synthesis_busy) {
-        // Inline Luke/Fidelity shares completion-gated context resources too.
-        // Backpressure on one eye is not a failed stereo transaction. Wait
+        // All worker routes can re-prime while the prior copy is still on
+        // the GPU, including Legacy VDXR Djules without D3D11/AFW. Backpressure
+        // on one eye is not a failed stereo transaction. Wait
         // the synthesizer's existing completion before reusing its resources;
         // keep the same capture, acquired destinations and camera packet.
         // Neither the session GPU mutex nor a swapchain call lock is held.

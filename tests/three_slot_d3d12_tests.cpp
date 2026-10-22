@@ -370,6 +370,7 @@ void release(const std::shared_ptr<SwapchainState>& c, bool poison = true) {
 
 #include "native_counted_release_tests.inc"
 #include "fsr_phase_clock_tests.inc"
+#include "worker_backpressure_fixture.inc"
 
 int main(int argc,char** argv) {
     xrfg_fixture::ControlProfile autonomous_profile;
@@ -390,6 +391,11 @@ int main(int argc,char** argv) {
         s->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::nvidia;
         s->nvidia_new_route = true; s->djules_route=kTestDjules;
         const std::string_view mode = argc>1 ? argv[1] : "";
+        if(mode.starts_with("worker-busy-")) {
+            dispatch->virtual_desktop_runtime=true;
+            s->vdxr_legacy=true;s->djules_route=true;s->nvidia_new_route=false;
+            s->separate_synthesis=mode.ends_with("fast");s->lower_vram=s->separate_synthesis;
+        }
         if(mode=="benchmark-revisions") {
             const auto directory=xrfg::autonomous::configuration_path().parent_path();
             {std::ofstream ini(directory/L"ofxr_bridge.ini");ini<<"[diagnostics]\nlogging_enabled=1\n";}
@@ -724,6 +730,14 @@ int main(int argc,char** argv) {
         auto right=array?left:source(0x202,1,true);if(!array)chains.push_back(right);
         auto dynamic=source(0x203,2,false);auto fixed=source(0x204,2,false,true);
         chains.push_back(dynamic);chains.push_back(fixed);
+        if(mode.starts_with("worker-busy-")) {
+            worker_backpressure_probe(s,left,right,mode.find("timeout")!=std::string_view::npos);
+            for(auto& c:chains){drain_swapchain_gpu(c);destroy_frame_generation_swapchains(c);destroy_composition_capture(c);}
+            require(created==destroyed,"worker backpressure leaked XR resources");
+            {std::scoped_lock lock(g_state_mutex);g_swapchains.clear();g_sessions.clear();}
+            chains.clear();left.reset();right.reset();dynamic.reset();fixed.reset();session_state.reset();
+            return 0;
+        }
         if(mode=="resource-cleanup") {
             restore_route.previous=xrfg::embedded::snapshot().desired;
             // Three full-size UI histories reproduce UEVR's enumerated targets.

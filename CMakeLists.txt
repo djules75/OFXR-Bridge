@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.627.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.628.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1041,6 +1041,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 "$<TARGET_FILE_DIR:xrfg_three_slot_d3d12_tests>/provider-missing/$<TARGET_FILE_NAME:xrfg_three_slot_d3d12_tests>")
         add_test(NAME xrfg_three_slot_d3d12_split COMMAND xrfg_three_slot_d3d12_tests)
         add_test(NAME xrfg_three_slot_d3d12_capture_busy COMMAND xrfg_three_slot_d3d12_tests capture-busy)
+        foreach(shape normal fast timeout)
+            add_test(NAME xrfg_vdxr_worker_backpressure_${shape}_gpu COMMAND xrfg_three_slot_d3d12_tests worker-busy-${shape})
+            set_tests_properties(xrfg_vdxr_worker_backpressure_${shape}_gpu PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
+        endforeach()
         add_test(NAME xrfg_composition_failure_diagnostics COMMAND xrfg_three_slot_d3d12_tests composition-failures)
         add_test(NAME xrfg_djules_prefer_readiness_direct_gpu COMMAND xrfg_three_slot_d3d12_tests deep-readiness-direct-output)
         add_test(NAME xrfg_djules_prefer_switch_direct_gpu COMMAND xrfg_three_slot_d3d12_tests deep-switch-direct-output)

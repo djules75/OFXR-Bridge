@@ -1,3 +1,11 @@
+## V628: stereo worker GPU backpressure
+
+A busy second eye during a Legacy VDXR Djules re-prime no longer immediately
+poisons the OpenXR session. Retain the stereo transaction, wait for its existing
+submission outside producer locks, and retry once with a bounded timeout.
+V627 pacing and benchmark plans are unchanged. 54 focused checks pass.
+[Evidence and scope](docs/V628_VDXR_WORKER_BACKPRESSURE.md). Local; hardware confirmation pending.
+
 ## V627: optional VDXR director comparison
 
 The tray adds **Legacy VDXR (restart game)**, enabled by default. ON retains
