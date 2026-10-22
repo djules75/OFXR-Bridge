@@ -971,6 +971,7 @@ struct SessionState {
     std::uint64_t runtime_entry_wait_max_ns{}; // runtime_entry_mutex
     std::uint64_t runtime_entry_hold_max_ns{}; // runtime_entry_mutex
     Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device;
+    std::vector<std::shared_ptr<void>> gpu_crash_monitors;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> d3d12_queue;
     // Synthesis runs here rather than on the application's queue. The work
     // itself is short - the pack and composite command lists measure 249 us
@@ -3717,6 +3718,8 @@ void initialize_late_luke_context(const std::shared_ptr<SessionState>& session) 
         // challenge above proves the same owner; keep its queue/resources but
         // use the confirmed native allocation identity for strict AFW guides.
         session->d3d12_device=std::move(device);
+        if(auto monitor=xrfg::neural_rendering::observe_device_removal(session->d3d12_device.Get()))
+            session->gpu_crash_monitors.push_back(std::move(monitor));
         session->luke_afw=std::move(afw);
         session->graphics_binding_capabilities=(session->graphics_binding_capabilities&~4ULL)|8ULL;
         refresh_native_generation_capacity(*session);
@@ -5790,6 +5793,8 @@ XrResult layer_create_session_impl(
             }
         }
     }
+    if(auto monitor=xrfg::neural_rendering::observe_device_removal(state->d3d12_device.Get()))
+        state->gpu_crash_monitors.push_back(std::move(monitor));
     auto* application_d3d11_device = state->d3d11_bridge
         ? state->d3d11_bridge->device.Get() : state->d3d11_device.Get();
     if (application_d3d11_device && state->d3d12_device && state->d3d12_queue) {

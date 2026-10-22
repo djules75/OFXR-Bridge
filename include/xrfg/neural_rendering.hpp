@@ -29,6 +29,7 @@ struct Settings {
     float working_scale = 1.f;
     float white_point_scale = 1.f;
     bool diagnostic_logging = false;
+    bool crash_debug = false;
 };
 struct SubmissionReceipt {
     unsigned int handle = 0;
@@ -46,6 +47,9 @@ struct Status {
 // Configuration is serialized with evaluation; feature creation settings retain
 // the accepted debounce/rebuild behavior and one history per native SR handle.
 void configure(const Settings& settings);
+// Crash-debug session lifetime, independent of NR/OFXR being selected.
+// Empty without Crash debug; no rendering, GPU submission or polling.
+std::shared_ptr<void> observe_device_removal(IUnknown* owner) noexcept;
 // Only call for an exactly identified native SR/RR handle, never DLSS-G.
 // The caller's parameter table is read only; Color/Output are edited in place.
 void before_sr(unsigned int native_handle_id, ID3D12GraphicsCommandList* list,

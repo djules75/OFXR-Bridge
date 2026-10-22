@@ -1,0 +1,31 @@
+{
+  "version": "V636",
+  "base_version": "V635",
+  "base": "167efbad1baa1c0325215243eb8097c9536a8b44",
+  "scope": "Default-off tray Crash debug flag: independent bounded crash-only NR recorder and D3D12 removal observers; per-game startup DRED preparation and reversible owned-only cleanup. No Horizon/NR prevention or rendering/pacing change.",
+  "passed": 8,
+  "failed": 0,
+  "ctest_seconds": 3.12,
+  "tests": [
+    "xrfg_horizon_motion_interval",
+    "xrfg_crash_debug_config",
+    "xrfg_standalone_launcher_tests",
+    "xrfg_tray_lifecycle_tests",
+    "xrfg_luke_color_origin",
+    "xrfg_neural_device_removal_tests",
+    "xrfg_neural_contract_tests",
+    "xrfg_neural_codec_gpu_tests"
+  ],
+  "default_enabled": false,
+  "requires_game_restart": true,
+  "independent_of_F9": true,
+  "public_api_warp_removal_F9_off": true,
+  "physical_gpu_removed": false,
+  "real_D3DConfig_roundtrip": "PASS; original no-apps / all-system-controlled state restored",
+  "first_discovery": "A new already-running game needs one restart for full DRED; tray reports setup state. Unknown devices cannot be configured retroactively.",
+  "initial_failure": "New partial-failure mock recursively referenced itself under PowerShell dynamic scope; corrected fixture reference, added timeout. Initial 7/8 log retained; final8/8. No production workaround for this fixture error.",
+  "headset_validation": "Crash collection on an owner game remains pending. This is not a Horizon/DLSS5 crash prevention claim.",
+  "provider_sha256": "5f3cfc38903ac438241a3c47cb4bc3ac329cb39b056e33a63c20045fe15336f9",
+  "live_installation": false,
+  "pushed": false
+}

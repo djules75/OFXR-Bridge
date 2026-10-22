@@ -13,8 +13,11 @@
 namespace NrFlightTrace
 {
 inline std::atomic<bool> enabled {false};
+inline std::atomic<bool> crashEnabled {false};
 inline bool Enabled() noexcept { return enabled.load(std::memory_order_relaxed); }
+inline bool RecordingEnabled() noexcept { return Enabled() || crashEnabled.load(std::memory_order_relaxed); }
 inline void SetEnabled(bool value) noexcept { enabled.store(value, std::memory_order_relaxed); }
+inline void SetCrashEnabled(bool value) noexcept { crashEnabled.store(value,std::memory_order_relaxed); }
 struct Record
 {
     unsigned long long sequence = 0;
@@ -65,7 +68,7 @@ inline void Write(const char* kind, ID3D12GraphicsCommandList* commandList, cons
                   D3D12_RESOURCE_STATES before = D3D12_RESOURCE_STATE_COMMON,
                   D3D12_RESOURCE_STATES after = D3D12_RESOURCE_STATE_COMMON, long long result = 0)
 {
-    if (!Enabled()) return;
+    if (!RecordingEnabled()) return;
     State& state = GetState();
     Record record {};
     record.sequence = state.sequence.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -86,7 +89,7 @@ inline void Write(const char* kind, ID3D12GraphicsCommandList* commandList, cons
 template <typename Sink>
 inline void Dump(Sink&& sink)
 {
-    if (!Enabled()) return;
+    if (!RecordingEnabled()) return;
     State& state = GetState();
     std::lock_guard<std::mutex> lock(state.mutex);
     const unsigned long long end = state.sequence.load(std::memory_order_acquire);
@@ -119,14 +122,14 @@ inline void BarrierBefore(ID3D12GraphicsCommandList* commandList, const wchar_t*
                           ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
                           D3D12_RESOURCE_STATES after)
 {
-    Write("BARRIER_BEFORE", commandList, role, resource, before, after);
+    if(Enabled()) Write("BARRIER_BEFORE", commandList, role, resource, before, after);
 }
 
 inline void BarrierAfter(ID3D12GraphicsCommandList* commandList, const wchar_t* role,
                          ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
                          D3D12_RESOURCE_STATES after)
 {
-    Write("BARRIER_RECORDED", commandList, role, resource, before, after);
+    if(Enabled()) Write("BARRIER_RECORDED", commandList, role, resource, before, after);
 }
 
 inline void Result(ID3D12GraphicsCommandList* commandList, const wchar_t* label, long long result)

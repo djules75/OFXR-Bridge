@@ -288,7 +288,7 @@ void MarkNrRecorded(unsigned int sourceHandleId, ID3D12GraphicsCommandList* comm
     flight.recording = g_nrSubmissionLedger.Record(sourceHandleId, commandList,flight.retirement).recording;
     flight.retirement->handle=sourceHandleId;flight.retirement->list=commandList;
     flight.retirement->recording=flight.recording;
-    if (NrFlightTrace::Enabled()) {
+    if (NrFlightTrace::RecordingEnabled()) {
         wchar_t label[160] {};
         swprintf_s(label, L"NR_RECORD handle=%u recording=%llu", sourceHandleId, flight.recording);
         NrFlightTrace::Write("NR_RECORD", commandList, label);
@@ -387,7 +387,7 @@ bool RetirePreviousNrEvaluate(unsigned int sourceHandleId)
     }
 
     const auto completed = fence == nullptr ? 0 : fence->GetCompletedValue();
-    if (NrFlightTrace::Enabled()) {
+    if (NrFlightTrace::RecordingEnabled()) {
         wchar_t retirementLabel[200] {};
         swprintf_s(retirementLabel, L"NR_REUSE handle=%u fence=%p required=%llu completed=%llu",
                    sourceHandleId, fence.Get(), fenceValue, completed);
@@ -762,7 +762,7 @@ void BindNrDevice(NrPerHandle& nr,ID3D12Device* device)
 {
     if(nr.device.Get()==device) {
         // F9 may be enabled after this feature/device was first bound.
-        if(NrFlightTrace::Enabled() && !nr.removalMonitor)
+        if(NrFlightTrace::RecordingEnabled() && !nr.removalMonitor)
             nr.removalMonitor=DeviceRemovalDred::Monitor::Observe(device,Util::DllPath().parent_path());
         return;
     }
@@ -772,7 +772,7 @@ void BindNrDevice(NrPerHandle& nr,ID3D12Device* device)
     for(ID3D12Resource** resource:{&nr.output,&nr.colorCopy,&nr.hdrCopy,&nr.colorSmall,
         &nr.resolveCopy,&nr.depthClone,&nr.motionClone})ParkNrResource(*resource);
     const bool source_reset=nr.sourceReset;nr={};nr.device=device;nr.sourceReset=source_reset;
-    if(NrFlightTrace::Enabled())
+    if(NrFlightTrace::RecordingEnabled())
         nr.removalMonitor=DeviceRemovalDred::Monitor::Observe(device,Util::DllPath().parent_path());
 }
 
@@ -1036,7 +1036,7 @@ std::vector<NrSubmissionReceipt> TakeCommandListSubmissionReceipts(
     }
     for (const auto& receipt : receipts)
     {
-        if (!NrFlightTrace::Enabled()) break;
+        if (!NrFlightTrace::RecordingEnabled()) break;
         wchar_t label[160] {};
         swprintf_s(label, L"NR_DETACH handle=%u recording=%llu", receipt.handle, receipt.recording);
         NrFlightTrace::Write("NR_DETACH", static_cast<ID3D12GraphicsCommandList*>(receipt.list), label);
@@ -1102,7 +1102,7 @@ void CompleteCommandListSubmission(ID3D12CommandQueue* queue,
             found->second.retirement->fence = queueFence.fence;
             found->second.retirement->fenceValue = fenceValue;
         }
-        if (NrFlightTrace::Enabled()) {
+        if (NrFlightTrace::RecordingEnabled()) {
             wchar_t label[220] {};
             swprintf_s(label, L"NR_SUBMIT handle=%u recording=%llu queue=%p fence=%p value=%llu completed=%llu",
                        receipt.handle, receipt.recording, queue, queueFence.fence.Get(), fenceValue,
@@ -1576,7 +1576,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
 
     int result = 0;
     {
-        if (NrFlightTrace::Enabled()) {
+        if (NrFlightTrace::RecordingEnabled()) {
         wchar_t modelReceipt[256] {};
         swprintf_s(modelReceipt, L"NR_MODEL handle=%u feature=%p params=%p color=%p depth=%p motion=%p output=%p reset=%u source=%u",
                    sourceHandleId, nr.feature, evaluateParams, modelInput, depthIn, motionIn, nr.output,
@@ -2177,7 +2177,7 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
 
     int result = 0;
     {
-        if (NrFlightTrace::Enabled()) {
+        if (NrFlightTrace::RecordingEnabled()) {
         wchar_t modelReceipt[256] {};
         swprintf_s(modelReceipt, L"NR_MODEL handle=%u feature=%p params=%p color=%p depth=%p motion=%p output=%p reset=%u source=%u",
                    sourceHandleId, nr.feature, evaluateParams, modelInput, depthIn, motionIn, nr.output,
@@ -2496,11 +2496,18 @@ void configure(const Settings& settings) {
     c.DlssNrWhitePointScale=std::max(.001f,settings.white_point_scale);
     c.LogToFile=settings.diagnostic_logging;
     NrFlightTrace::SetEnabled(settings.diagnostic_logging);
+    NrFlightTrace::SetCrashEnabled(settings.crash_debug);
+    if(settings.crash_debug)static_cast<void>(NrFlightTrace::GetState()); // preallocate before a fault
     DeviceRemovalDred::EnableDiagnosticsOnce();
 }
 void before_sr(unsigned int handle,ID3D12GraphicsCommandList* list,
     const NVSDK_NGX_Parameter* parameters,ID3D12CommandQueue* queue) {
     DlssNr::EvaluateBeforeUpscale(handle,list,parameters,queue);
+}
+std::shared_ptr<void> observe_device_removal(IUnknown* owner) noexcept {
+    if(!NrFlightTrace::crashEnabled.load(std::memory_order_relaxed))return {};
+    try{return DeviceRemovalDred::Monitor::Observe(owner,Util::DllPath().parent_path());}
+    catch(...){return {};}
 }
 void after_sr(unsigned int handle,ID3D12GraphicsCommandList* list,
     const NVSDK_NGX_Parameter* parameters,ID3D12CommandQueue* queue) {

@@ -21,6 +21,13 @@ int main() {
     using namespace xrfg::standalone;
 
     const LauncherSettings release_defaults;
+    if(release_defaults.crash_debug)return 1;
+    for(bool enabled:{false,true}) {
+        auto choice=release_defaults;choice.crash_debug=enabled;
+        const auto key=enabled?"crash_debug=1":"crash_debug=0";
+        if(parse_settings(serialize_settings(choice)).crash_debug!=enabled ||
+            !contains(build_runtime_ini(choice),key))return 1;
+    }
     if (!release_defaults.steamvr_separate_queue || release_defaults.afw_only) return 1;
     if(!release_defaults.vdxr_legacy)return 1;
     for(bool legacy:{false,true}) {

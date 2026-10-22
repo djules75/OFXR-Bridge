@@ -58,6 +58,11 @@ inline void apply_runtime_settings() {
     n.transfer_strength=s.nr_transfer_strength; n.colour_strength=s.nr_colour_strength;
     n.max_ratio=s.nr_max_ratio; n.working_scale=s.nr_working_scale;
     n.white_point_scale=s.nr_white_point_scale; n.diagnostic_logging=s.diagnostics;
+    // Startup-only: DRED must precede the game's device creation. F9 controls
+    // verbose logging independently and must not turn this crash recorder off.
+    static const bool crash_debug=GetPrivateProfileIntW(L"tray",L"crash_debug",0,
+        configuration_path().c_str())!=0;
+    n.crash_debug=crash_debug;
     n.debug_view=s.nr_debug_view; n.compare=s.nr_compare;
     n.compare_split=s.nr_compare_split; n.compare_zoom=s.nr_compare_zoom;
     n.compare_swap=s.nr_compare_swap;

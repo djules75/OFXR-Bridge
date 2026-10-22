@@ -33,6 +33,7 @@ enum class NvidiaInputScale {
 };
 
 struct LauncherSettings {
+    bool crash_debug{}; // Opt-in crash recorder + per-game startup DRED.
     FrameGeneration frame_generation{FrameGeneration::ofxr};
     // Native DLSS Frame Generation's resolution, in percent of each eye's:
     // the layer's dlssg_resolution. 100 by default; below it the generated

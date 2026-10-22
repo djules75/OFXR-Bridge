@@ -1,3 +1,10 @@
+## V636: Crash debug
+
+The tray adds **Crash debug (restart game)**, disabled by default. When enabled,
+crash-only recording works with F9 off and the tray prepares startup DRED for
+known game executables. New games discovered while running need one restart.
+[Output paths, cleanup and limits](docs/V636_CRASH_DEBUG.md).
+
 ## V629: Legacy Normal/Fast benchmark pairs
 
 Legacy VDXR now tests Normal and Fast for every supported route: 11 optical

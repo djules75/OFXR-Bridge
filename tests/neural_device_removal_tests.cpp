@@ -1,5 +1,6 @@
 #define NOMINMAX
 #include "DeviceRemovalDred.h"
+#include "xrfg/neural_rendering.hpp"
 #include <dxgi1_6.h>
 #include <d3d12sdklayers.h>
 #include <fstream>
@@ -108,7 +109,7 @@ static void TestLifetime(const std::filesystem::path& root)
     auto b = Monitor::Observe(queue.Get(), root);
     Check(a && a == b, "one observer per device across device and queue owners");
     const auto firstPath = a->Path();
-    Check(Read(firstPath).find("armed version=V604") != std::string::npos, "armed receipt flushed");
+    Check(Read(firstPath).find("armed version=V636") != std::string::npos, "armed receipt flushed");
     Sleep(50);
     Check(Read(firstPath).find("device_removed utc=") == std::string::npos, "no healthy notification");
     a.reset();
@@ -124,7 +125,7 @@ static void TestLifetime(const std::filesystem::path& root)
     next.reset();
     const auto report = Read(nextPath);
     Check(report.find("device_removed utc=") != std::string::npos, "removed receipt");
-    Check(report.find("nr_flight_begin version=V604") != std::string::npos, "RAM flight ring persisted on removal");
+    Check(report.find("nr_flight_begin version=V636") != std::string::npos, "RAM flight ring persisted on removal");
     Check(report.find("nr_flight_end") != std::string::npos, "RAM flight ring completed before DRED query");
     Check(report.find("breadcrumb_query=") != std::string::npos, "actual DRED queried");
     Check(report.find("page_fault_query=") != std::string::npos, "actual page fault data queried");
@@ -188,6 +189,7 @@ int wmain(int argc, wchar_t** argv)
         const auto root = std::filesystem::absolute("build/dred-tests-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
         std::filesystem::create_directories(root / "lifetime");
         std::filesystem::create_directories(root / "child");
+        std::filesystem::create_directories(root / "crash-only");
         {
             auto device = Warp();
             NrFlightTrace::SetEnabled(false);
@@ -199,6 +201,38 @@ int wmain(int argc, wchar_t** argv)
             NrFlightTrace::SetEnabled(true);
             NrFlightTrace::Marker(nullptr, L"enabled");
             Check(NrFlightTrace::GetState().sequence.load() == sequence + 1, "logging on retains NR event");
+        }
+        {
+            auto device=Warp();
+            xrfg::neural_rendering::Settings settings{};
+            Check(!xrfg::neural_rendering::observe_device_removal(device.Get()),
+                "default-off public device observer disabled");
+            settings.crash_debug=true;
+            xrfg::neural_rendering::configure(settings);
+            auto owner=xrfg::neural_rendering::observe_device_removal(device.Get());
+            auto monitor=std::static_pointer_cast<Monitor>(owner);
+            Check(bool(monitor),"crash debug arms observer without F9");
+            auto sequence=NrFlightTrace::GetState().sequence.load();
+            NrFlightTrace::BarrierAfter(nullptr,L"verbose-only",nullptr,
+                D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE);
+            Check(NrFlightTrace::GetState().sequence.load()==sequence,
+                "crash-only mode does not collect verbose per-barrier records");
+            NrFlightTrace::Write("NR_SUBMIT",nullptr,L"crash-only receipt");
+            Check(NrFlightTrace::GetState().sequence.load()==sequence+1,
+                "crash debug retains submission receipt without F9");
+            device->RemoveDevice();
+            const auto deadline=GetTickCount64()+10000;
+            while(Read(monitor->Path()).find("report_complete")==std::string::npos && GetTickCount64()<deadline)
+                Sleep(10);
+            Check(Read(monitor->Path()).find("report_complete")!=std::string::npos,
+                "crash-only report persisted without F9");
+            const auto text=Read(monitor->Path());
+            Check(text.find("recorder_mode=crash-only")!=std::string::npos &&
+                text.find("label=crash-only receipt")!=std::string::npos,
+                "crash-only mode and retained receipt are present in actual report");
+            settings.crash_debug=false;
+            xrfg::neural_rendering::configure(settings);
+            NrFlightTrace::SetEnabled(true);
         }
         TestWriter(root);
         TestLifetime(root / "lifetime");

@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -28,7 +29,7 @@ using Microsoft::WRL::ComPtr;
 // This is diagnostic-only: no debug-layer/GPU validation or queue work.
 inline void EnableDiagnosticsOnce()
 {
-    if (!NrFlightTrace::Enabled()) return;
+    if (!NrFlightTrace::RecordingEnabled()) return;
     static std::once_flag once;
     std::call_once(once, [] {
         ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> settings;
@@ -190,7 +191,7 @@ class Monitor
     }
     void Report()
     {
-        if (!NrFlightTrace::Enabled()) return;
+        if (!NrFlightTrace::RecordingEnabled()) return;
         const HRESULT reason = device_->GetDeviceRemovedReason();
         SYSTEMTIME now {}; GetSystemTime(&now);
         file_.Line("device_removed utc=%02u:%02u:%02u.%03u tid=%lu reason=0x%08X fence=%llu",
@@ -207,7 +208,7 @@ class Monitor
         {
             if (!flightHeaderWritten)
             {
-                file_.Line("nr_flight_begin version=V604 first=%llu end=%llu capacity=%zu",
+                file_.Line("nr_flight_begin version=V636 first=%llu end=%llu capacity=%zu",
                            first, end, capacity);
                 flightHeaderWritten = true;
             }
@@ -264,7 +265,7 @@ class Monitor
 
     static std::shared_ptr<Monitor> Observe(IUnknown* owner, const std::filesystem::path& directory)
     {
-        if (!NrFlightTrace::Enabled()) return {};
+        if (!NrFlightTrace::RecordingEnabled()) return {};
         if (!owner) return {};
         ComPtr<ID3D12Device> device;
         if (FAILED(owner->QueryInterface(IID_PPV_ARGS(&device))))
@@ -290,7 +291,7 @@ class Monitor
         monitor->device_ = device;
         SYSTEMTIME now {}; GetSystemTime(&now);
         wchar_t name[180];
-        swprintf_s(name, L"ofxr-dred-V604-%04u%02u%02u-%02u%02u%02u-%lu-device%u.log",
+        swprintf_s(name, L"ofxr-dred-V636-%04u%02u%02u-%02u%02u%02u-%lu-device%u.log",
                    now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond,
                    GetCurrentProcessId(), ++registry->id);
         monitor->path_ = directory / name;
@@ -309,9 +310,27 @@ class Monitor
         if (FAILED(result))
         { monitor->file_.Line("arm_failed SetEventOnCompletion=0x%08X", static_cast<unsigned>(result)); monitor->file_.Flush(); return {}; }
         const auto luid = device->GetAdapterLuid();
-        monitor->file_.Line("armed version=V604 pid=%lu device=%p adapter=%08X:%08X trigger=fence_device_removal",
+        monitor->file_.Line("armed version=V636 pid=%lu device=%p adapter=%08X:%08X trigger=fence_device_removal",
                            GetCurrentProcessId(), static_cast<void*>(device.Get()),
                            static_cast<unsigned>(luid.HighPart), static_cast<unsigned>(luid.LowPart));
+        monitor->file_.Line("recorder_mode=%s verbose_logging=%u startup_dred=see_CrashDiagnostics_readiness",
+            NrFlightTrace::Enabled()?"verbose":"crash-only",NrFlightTrace::Enabled()?1u:0u);
+        wchar_t executable[32768]{};
+        GetModuleFileNameW(nullptr,executable,static_cast<DWORD>(std::size(executable)));
+        monitor->file_.Write("game="+Name(nullptr,executable)+"\n");
+        wchar_t local[32768]{};
+        const DWORD local_size=GetEnvironmentVariableW(L"LOCALAPPDATA",local,static_cast<DWORD>(std::size(local)));
+        if(local_size && local_size<std::size(local)) {
+            const auto receipt=std::filesystem::path(local)/L"ofxr-bridge/CrashDiagnostics/readiness.txt";
+            std::ifstream input(receipt,std::ios::binary);
+            if(input) {
+                monitor->file_.Write("startup_preparation_receipt_begin\n");
+                std::string line;unsigned count{};
+                while(count++<8 && std::getline(input,line))
+                    monitor->file_.Write(line.substr(0,2048)+"\n");
+                monitor->file_.Write("startup_preparation_receipt_end\n");
+            } else monitor->file_.Write("startup_preparation_receipt=unavailable; full DRED may require game restart\n");
+        }
         monitor->file_.Flush();
         if (!monitor->file_.Good()) return {};
         registry->entries[identity.Get()] = monitor;

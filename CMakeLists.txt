@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.635.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.636.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -657,6 +657,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             src/tray/standalone_launcher.cpp
             src/common/ram_timing.cpp
             include/xrfg/standalone_launcher.hpp)
+        if(XRFG_BUILD_TESTS)
+            add_test(NAME xrfg_crash_debug_config COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/crash_debug_config_tests.ps1"
+                -Helper "${CMAKE_CURRENT_SOURCE_DIR}/scripts/Set-CrashDebug.ps1")
+            set_tests_properties(xrfg_crash_debug_config PROPERTIES TIMEOUT 20)
+        endif()
         target_include_directories(xrfg_standalone_core PUBLIC include)
         target_compile_features(xrfg_standalone_core PUBLIC cxx_std_20)
         target_link_libraries(xrfg_standalone_core PUBLIC xrfg_implicit_layer xrfg_core)
@@ -674,6 +680,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_executable(OFXRBridgeTray WIN32
             src/tray/main.cpp
             src/tray/resources.rc)
+        add_custom_command(TARGET OFXRBridgeTray POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:OFXRBridgeTray>/scripts"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/Set-CrashDebug.ps1"
+                "$<TARGET_FILE_DIR:OFXRBridgeTray>/scripts/Set-CrashDebug.ps1")
         target_link_libraries(OFXRBridgeTray PRIVATE
             xrfg_standalone_core
             comctl32

@@ -60,6 +60,7 @@ enum MenuCommand : UINT {
     toggle_afw_only = 95,
     toggle_benchmark_mode = 96,
     toggle_vdxr_legacy = 97,
+    toggle_crash_debug = 98,
     show_settings = 100,
     open_logs = 130,
     donate_creator = 138,
@@ -94,6 +95,7 @@ struct AppState {
     HICON disarmed_icon{};
     UINT taskbar_created_message{};
     bool armed{};
+    std::wstring crash_debug_status;
 };
 
 [[nodiscard]] std::wstring last_error_message(std::wstring_view action) {
@@ -821,6 +823,10 @@ void show_context_menu(AppState& state) {
         toggle_vdxr_legacy,L"Legacy VDXR (restart game)");
     AppendMenuW(menu,MF_STRING | (state.settings.afw_only ? MF_CHECKED : MF_UNCHECKED),
         toggle_afw_only,L"AFW only (Luke Ross, restart game)");
+    AppendMenuW(menu,MF_STRING | (state.settings.crash_debug ? MF_CHECKED : MF_UNCHECKED),
+        toggle_crash_debug,L"Crash debug (restart game)");
+    if(!state.crash_debug_status.empty())
+        AppendMenuW(menu,MF_STRING | MF_GRAYED,0,state.crash_debug_status.c_str());
     AppendMenuW(menu,MF_STRING | (xrfg::autonomous::benchmark_enabled() ? MF_CHECKED : MF_UNCHECKED),
         toggle_benchmark_mode,L"Benchmark mode");
     HMENU queue_menu = CreatePopupMenu();
@@ -924,6 +930,43 @@ void show_context_menu(AppState& state) {
     return true;
 }
 
+// Desktop-only preparation. Never runs on a game/render thread. The helper
+// journals exact owned registrations/settings and restores them when disabled.
+void prepare_crash_debug(AppState& state,const std::filesystem::path& game={}) {
+    const auto journal=state.local_directory/L"CrashDiagnostics/dred-state.json";
+    if(!state.settings.crash_debug && !std::filesystem::exists(journal)) {
+        state.crash_debug_status.clear();return;
+    }
+    try {
+        const auto script=state.executable_directory/L"scripts/Set-CrashDebug.ps1";
+        if(!std::filesystem::is_regular_file(script))throw std::runtime_error("Missing crash debug helper");
+        std::array<wchar_t,32768> system{};
+        if(!GetSystemDirectoryW(system.data(),static_cast<UINT>(system.size())))throw std::runtime_error("System directory");
+        const auto powershell=std::filesystem::path(system.data())/L"WindowsPowerShell/v1.0/powershell.exe";
+        auto command=xrfg::standalone::quote_windows_argument(powershell.wstring())+
+            L" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "+
+            xrfg::standalone::quote_windows_argument(script.wstring())+
+            L" -StateDirectory "+xrfg::standalone::quote_windows_argument((state.local_directory/L"CrashDiagnostics").wstring());
+        if(state.settings.crash_debug)command+=L" -Enable";
+        if(!game.empty())command+=L" -GamePath "+xrfg::standalone::quote_windows_argument(game.wstring());
+        STARTUPINFOW startup{};startup.cb=sizeof(startup);startup.dwFlags=STARTF_USESHOWWINDOW;startup.wShowWindow=SW_HIDE;
+        PROCESS_INFORMATION process{};
+        if(!CreateProcessW(powershell.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,nullptr,&startup,&process))
+            throw std::runtime_error("Cannot start crash debug helper");
+        const auto waited=WaitForSingleObject(process.hProcess,10000);
+        DWORD result=1;
+        if(waited==WAIT_OBJECT_0)GetExitCodeProcess(process.hProcess,&result);
+        else TerminateProcess(process.hProcess,1);
+        CloseHandle(process.hThread);CloseHandle(process.hProcess);
+        state.crash_debug_status=result?L"DRED not ready - see CrashDiagnostics/readiness.txt":
+            state.settings.crash_debug?(game.empty()?L"DRED waiting for game discovery":L"DRED prepared - restart running game"):L"";
+        log_lifecycle(state.local_directory,L"crash-debug",state.crash_debug_status);
+    } catch (...) {
+        state.crash_debug_status=L"DRED not ready - crash debug setup failed";
+        log_lifecycle(state.local_directory,L"crash-debug",state.crash_debug_status);
+    }
+}
+
 void handle_command(AppState& state, UINT command) {
     switch (command) {
     case toggle_arm:
@@ -969,6 +1012,21 @@ void handle_command(AppState& state, UINT command) {
         std::wstring error;
         if(!set_benchmark_preference(state.settings_path,!xrfg::autonomous::benchmark_enabled(),&error))
             show_error(state.window,error);
+        return;
+    }
+    case toggle_crash_debug: {
+        const bool previous=state.settings.crash_debug;
+        state.settings.crash_debug=!state.settings.crash_debug;
+        if(!xrfg::autonomous::write_configuration_sections(state.settings_path,
+            xrfg::standalone::serialize_settings(state.settings))) {
+            state.settings.crash_debug=previous;
+            state.crash_debug_status=L"Could not save Crash debug preference";
+            log_lifecycle(state.local_directory,L"crash-debug",state.crash_debug_status);
+            return;
+        }
+        if(state.armed)WritePrivateProfileStringW(L"diagnostics",L"crash_debug",
+            state.settings.crash_debug?L"1":L"0",(runtime_directory(state.local_directory)/L"ofxr_bridge.ini").c_str());
+        prepare_crash_debug(state,xrfg::standalone::last_dlssg_game(state.settings_path));
         return;
     }
     case toggle_vdxr_legacy: {
@@ -1115,6 +1173,7 @@ LRESULT CALLBACK window_procedure(
                 if (!current.connected) remembered_game=0;
                 else if (current.runtime.process_id != remembered_game) {
                     const auto game = xrfg::standalone::game_executable(current.runtime.process_id);
+                    if(state->settings.crash_debug)prepare_crash_debug(*state,game);
                     if (xrfg::standalone::remember_dlssg_game(
                             xrfg::autonomous::configuration_path(), game)) {
                         std::wstring preset_error;
@@ -1341,6 +1400,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
         load_settings(state);
         save_settings(state);
         const auto preset_target=xrfg::standalone::last_dlssg_game(state.settings_path);
+        prepare_crash_debug(state,preset_target);
         if(!preset_target.empty()) {
             std::wstring preset_error;
             if(!xrfg::standalone::apply_preferred_dlssg_preset(state.settings_path,preset_target,preset_error))
