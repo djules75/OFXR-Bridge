@@ -148,9 +148,9 @@ void stage_partition_and_baseline() {
     window.snapshot(1'200'000'000,m);check(!m.stages_valid && !m.cycle_estimated_valid,"all four measurements expire");
 }
 void estimated_cycle() {
-    auto make=[](std::int64_t returned=125'000'000) {
+    auto make=[](std::int64_t returned=125'000'000,std::int64_t wait_ended=105'000'000) {
         auto c=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);
-        c->call(100'000'000,105'000'000);c->producer_returned(returned);return c;
+        c->call(100'000'000,wait_ended);c->producer_returned(returned);return c;
     };
     float ms{};
     auto c=make();
@@ -173,6 +173,22 @@ void estimated_cycle() {
     check(!c->read_estimated(119'000'000,ms),"real receipt earlier than generated is invalid");
     auto unfinished=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);unfinished->synthetic_accepted(120'000'000,10'000'000);
     check(!unfinished->read_estimated(121'000'000,ms),"estimate waits for producer completion");
+    // V631 Ghostwire/VDXR: CPU S acceptance +8.33ms read about10ms,
+    // discarding the later real runtime target and its outstanding GPU work.
+    auto predicted=make(106'500'000,100'500'000);
+    predicted->synthetic_accepted(101'666'667,8'333'333);
+    predicted->real_prediction(134'814'000);
+    check(predicted->read_estimated(102'000'000,ms) && std::abs(ms-34.814F)<.001F,
+        "VDXR generated estimate must retain the converted real target, not just CPU acceptance plus one slot");
+    auto predicted_triple=make(106'500'000,100'500'000);
+    predicted_triple->synthetic_accepted(101'666'667,8'333'333);
+    predicted_triple->synthetic_accepted(102'000'000,8'333'333);
+    predicted_triple->real_prediction(151'500'000);
+    check(predicted_triple->read_estimated(102'500'000,ms) && std::abs(ms-51.5F)<.001F,
+        "3X real target includes its slots; merge by max, never add those slots again");
+    predicted->real_prediction(101'000'000);
+    check(predicted->read_estimated(102'000'000,ms) && std::abs(ms-10.F)<.001F,
+        "an unpaced early runtime target cannot undercut the existing pair-slot bound");
     InterfaceTimingWindow window;
     check(window.submitted({50,120'000'000,0,c},120'050'000,true,true,false,true,0,120'100'000),"estimated cycle needs no XrTime conversion");
     InterfaceTelemetry m{};window.snapshot(130'000'000,m);

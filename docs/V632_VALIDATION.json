@@ -1,0 +1,179 @@
+{
+  "version": "V632",
+  "base": "052d181b228012f0ec6a6ed45a4f513e925ed882",
+  "base_version": "V631",
+  "scope": "Cycle Estimated observation only: nonprivate generated path retains its converted real predicted target as well as the CPU pair-slot lower bound. Merge by max without adding slots to a target that already includes them. Native-required SteamVR/private paths and render scheduling unchanged.",
+  "owner_run": {
+    "build": 631,
+    "game": "GWT.exe",
+    "run": "34804036623008",
+    "pid": 23200,
+    "runtime": "VDXR",
+    "LegacyVDXR": 1,
+    "Neural": 0,
+    "measured_routes": [
+      {
+        "Route": "Disabled",
+        "OutputFPSMedian": "82.468",
+        "CycleEstimatedMedianMs": "34.814",
+        "CycleEstimatedMinMs": "33.532",
+        "CycleEstimatedMaxMs": "35.676"
+      },
+      {
+        "Route": "Fidelity Normal",
+        "OutputFPSMedian": "119.880",
+        "CycleEstimatedMedianMs": "9.454",
+        "CycleEstimatedMinMs": "9.438",
+        "CycleEstimatedMaxMs": "9.491"
+      },
+      {
+        "Route": "Fidelity Fast",
+        "OutputFPSMedian": "118.891",
+        "CycleEstimatedMedianMs": "9.593",
+        "CycleEstimatedMinMs": "9.488",
+        "CycleEstimatedMaxMs": "9.727"
+      },
+      {
+        "Route": "0.2.1 Normal",
+        "OutputFPSMedian": "111.251",
+        "CycleEstimatedMedianMs": "17.822",
+        "CycleEstimatedMinMs": "17.802",
+        "CycleEstimatedMaxMs": "17.844"
+      },
+      {
+        "Route": "0.2.1 Fast",
+        "OutputFPSMedian": "108.312",
+        "CycleEstimatedMedianMs": "17.834",
+        "CycleEstimatedMinMs": "16.031",
+        "CycleEstimatedMaxMs": "17.878"
+      },
+      {
+        "Route": "Djules 2X Normal",
+        "OutputFPSMedian": "119.244",
+        "CycleEstimatedMedianMs": "33.056",
+        "CycleEstimatedMinMs": "32.418",
+        "CycleEstimatedMaxMs": "41.091"
+      },
+      {
+        "Route": "Djules 2X Fast",
+        "OutputFPSMedian": "116.646",
+        "CycleEstimatedMedianMs": "33.526",
+        "CycleEstimatedMinMs": "33.263",
+        "CycleEstimatedMaxMs": "34.187"
+      },
+      {
+        "Route": "Djules 3X Normal",
+        "OutputFPSMedian": "120.254",
+        "CycleEstimatedMedianMs": "57.598",
+        "CycleEstimatedMinMs": "50.110",
+        "CycleEstimatedMaxMs": "57.728"
+      },
+      {
+        "Route": "Djules 3X Fast",
+        "OutputFPSMedian": "119.372",
+        "CycleEstimatedMedianMs": "53.303",
+        "CycleEstimatedMinMs": "46.036",
+        "CycleEstimatedMaxMs": "57.720"
+      },
+      {
+        "Route": "0.3.0 Normal",
+        "OutputFPSMedian": "118.397",
+        "CycleEstimatedMedianMs": "40.449",
+        "CycleEstimatedMinMs": "33.682",
+        "CycleEstimatedMaxMs": "41.257"
+      },
+      {
+        "Route": "0.3.0 Fast",
+        "OutputFPSMedian": "116.046",
+        "CycleEstimatedMedianMs": "41.235",
+        "CycleEstimatedMinMs": "40.383",
+        "CycleEstimatedMaxMs": "41.779"
+      },
+      {
+        "Route": "Hybrid Normal",
+        "OutputFPSMedian": "112.719",
+        "CycleEstimatedMedianMs": "16.797",
+        "CycleEstimatedMinMs": "9.476",
+        "CycleEstimatedMaxMs": "17.564"
+      },
+      {
+        "Route": "Hybrid Fast",
+        "OutputFPSMedian": "111.240",
+        "CycleEstimatedMedianMs": "17.745",
+        "CycleEstimatedMinMs": "17.339",
+        "CycleEstimatedMaxMs": "18.177"
+      },
+      {
+        "Route": "FSR Normal",
+        "OutputFPSMedian": "103.779",
+        "CycleEstimatedMedianMs": "9.991",
+        "CycleEstimatedMinMs": "9.959",
+        "CycleEstimatedMaxMs": "10.015"
+      },
+      {
+        "Route": "FSR Fast",
+        "OutputFPSMedian": "102.104",
+        "CycleEstimatedMedianMs": "10.037",
+        "CycleEstimatedMinMs": "9.978",
+        "CycleEstimatedMaxMs": "10.065"
+      },
+      {
+        "Route": "DLSS-G Normal",
+        "OutputFPSMedian": "96.385",
+        "CycleEstimatedMedianMs": "20.161",
+        "CycleEstimatedMinMs": "18.928",
+        "CycleEstimatedMaxMs": "24.582"
+      },
+      {
+        "Route": "DLSS-G Fast",
+        "OutputFPSMedian": "97.806",
+        "CycleEstimatedMedianMs": "20.568",
+        "CycleEstimatedMinMs": "19.998",
+        "CycleEstimatedMaxMs": "21.046"
+      }
+    ],
+    "sources": [
+      {
+        "name": "OFXR-V631-34804036623008.csv",
+        "bytes": 1995,
+        "sha256": "217de373bc8217e59dda4c8548fc8b8dfb4b4957afd35965ae8673fe1297403a"
+      },
+      {
+        "name": "OFXR-V631-34804036623008-details.csv",
+        "bytes": 3756,
+        "sha256": "47535ce06ff9905f1b9498d502e4528b97f47a659fdfb2ff8d2b4f7c2389257a"
+      },
+      {
+        "name": "ofxr-benchmark-20261022-215830-680-pid23200-0.benchmark.log",
+        "bytes": 364316,
+        "sha256": "36b4bd092b3f82ca7cae96e2cafb497be1c86437a0596e545e8d79303ec5ea83"
+      }
+    ],
+    "cannot_recalculate_old_corrected_values_from_csv": true
+  },
+  "negative_control": "New real-target assertion fails the original V631 formula; v632-negative-control.log retained.",
+  "positive_controls": [
+    "Converted34.814ms real target overrides CPU-slot10ms estimate",
+    "3X uses51.5ms target without adding two slots again",
+    "Early runtime target preserves existing slot bound",
+    "Native private/SteamVR real targets remain unchanged; no extra refresh",
+    "Real D3D11 and D3D12 overlay publish exactly42ms instead of ~12ms or double-added52ms",
+    "Unknown clock fallback and zero-generation baseline remain independently tested"
+  ],
+  "passed": 4,
+  "failed": 0,
+  "ctest_seconds": 14.53,
+  "tests": [
+    "xrfg_interface_metrics_tests",
+    "xrfg_layer_call_chain",
+    "xrfg_openxr_fps_overlay_d3d12",
+    "xrfg_openxr_fps_overlay_d3d11"
+  ],
+  "test_history": "Initial unit-only negative is intentional. Initial D11/D12 new-case assertions failed because the extended fixture expired its1s desktop telemetry request before the added case; renewing that request fixes the test fixture. Latest all4distinct outcomes pass. Earlier logs retained.",
+  "headset_validation": "pending; corrected source-specific cycle values require a new run; no fabricated retroactive latency row",
+  "render_source_changed": false,
+  "gpu_queries_added": false,
+  "runtime_waits_added": false,
+  "live_installation": false,
+  "pushed": false
+}

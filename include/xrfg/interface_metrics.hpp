@@ -112,7 +112,9 @@ public:
         std::sort(synthetic_.begin(),synthetic_.begin()+synthetic_count_,
             [](const auto& a,const auto& b){return a.accepted<b.accepted;});
     }
-    bool read_estimated(std::int64_t accepted_ns, float& estimated_ms) const noexcept {
+    bool read_estimated(std::int64_t accepted_ns, float& estimated_ms,
+                        bool* prediction_used=nullptr) const noexcept {
+        if(prediction_used)*prediction_used=false;
         std::scoped_lock lock(mutex_);
         if(native_required_) {
             InterfaceNativeTiming real;
@@ -121,11 +123,13 @@ public:
             // The director already spaces outputs. Its actual real target
             // includes those slots: never add another refresh to the receipt.
             estimated_ms=float(std::max({real.display_ns,real.returned_ns,producer_returned_})-started_ns)*1e-6F;
+            if(prediction_used)*prediction_used=true;
             return std::isfinite(estimated_ms);
         }
         if(valid_ && !synthetic_count_ && started_ns && producer_returned_>=started_ns &&
             real_display_ns_>=started_ns && accepted_ns>=started_ns) {
             estimated_ms=float(std::max({real_display_ns_,producer_returned_,accepted_ns})-started_ns)*1e-6F;
+            if(prediction_used)*prediction_used=true;
             return std::isfinite(estimated_ms);
         }
         if(!valid_ || !estimate_valid_ || !synthetic_count_ || !started_ns ||
@@ -138,7 +142,12 @@ public:
         for(std::size_t i=1;i<synthetic_count_;++i)slot=std::max(slot+1,slots(synthetic_[i].accepted));
         slot=std::max(slot+1,slots(accepted_ns));
         const auto estimated_real=origin+slot*period;
-        estimated_ms=float(std::max(estimated_real,producer_returned_)-started_ns)*1e-6F;
+        // Native Legacy runtimes may accept S/B while the GPU is still queued.
+        // CPU acceptance plus one slot is then only a lower bound. Preserve
+        // the same real's converted prediction, including that runtime lead.
+        // Merge endpoints by max: its already scheduled slots are not added twice.
+        estimated_ms=float(std::max({estimated_real,real_display_ns_,producer_returned_,accepted_ns})-started_ns)*1e-6F;
+        if(prediction_used)*prediction_used=real_display_ns_>=estimated_real;
         return std::isfinite(estimated_ms);
     }
     bool read(std::int64_t accepted_ns, float& ofxr_ms, float& cycle_ms) const noexcept {
@@ -274,7 +283,7 @@ public:
         std::array<float,256> estimated{};
         std::array<float,256> game_stage{},generation_stage{},delivery_stage{};
         std::size_t nd{}, np{}, nc{}, nt{}, ne{},ns{},ng{};
-        bool native_cycle{},native_estimate{};
+        bool native_cycle{},native_estimate{},prediction_estimate{};
         for (const auto& s : samples_) {
             if (!s.at || now < s.at || now - s.at > 1'000'000'000) continue;
             bool native_required{};InterfaceNativeTiming native;
@@ -287,11 +296,12 @@ public:
             if (s.cpu_valid) cpu[nc++] = s.cpu;
             if(s.cycle && s.cycle->read(s.accepted_ns,ofxr[nt],cycle[nt])){++nt;native_cycle|=delivered;}
             float raw_estimate{};
-            if(s.cycle && s.cycle->read_estimated(s.accepted_ns,raw_estimate)) {
+            bool predicted{};
+            if(s.cycle && s.cycle->read_estimated(s.accepted_ns,raw_estimate,&predicted)) {
                 // Keep the established benchmark interval on every runtime:
                 // app Wait entry -> same real predicted display endpoint.
                 // Engine-origin availability must not alter the Excel metric.
-                estimated[ne++]=raw_estimate;native_estimate|=delivered;
+                estimated[ne++]=raw_estimate;native_estimate|=delivered;prediction_estimate|=predicted;
                 float unused_game{};
                 if(s.cycle->stages(s.source_entered_ns,s.accepted_ns,raw_estimate,
                     unused_game,generation_stage[ns],delivery_stage[ns]))++ns;
@@ -314,7 +324,8 @@ public:
         out.cycle_source=nt?(native_cycle?InterfaceSource::native_frame_cycle_qpc:InterfaceSource::frame_cycle_qpc):InterfaceSource::none;
         out.cycle_estimated_valid=ne!=0;
         if(ne)out.cycle_estimated_ms=median(estimated,ne);
-        out.cycle_estimated_source=ne?(native_estimate?InterfaceSource::native_predicted_display_qpc:InterfaceSource::frame_cycle_slot_estimate):InterfaceSource::none;
+        out.cycle_estimated_source=ne?(native_estimate?InterfaceSource::native_predicted_display_qpc:
+            prediction_estimate?InterfaceSource::predicted_display_qpc:InterfaceSource::frame_cycle_slot_estimate):InterfaceSource::none;
         out.stages_valid=ns!=0;
         out.game_time_valid=ng!=0;if(ng)out.game_time_ms=median(game_stage,ng);
         if(ns) {out.generation_time_ms=median(generation_stage,ns);

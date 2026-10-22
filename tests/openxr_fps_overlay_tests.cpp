@@ -47,9 +47,10 @@ unsigned acquired_index{}, last_released{}, width{}, height{};
 bool timeout_next = true, fail_end{}, unsupported{}, d3d11{};
 unsigned clock_conversions{};
 bool clock_available=true;
+std::int64_t fixed_display_clock{};
 bool display_clock(void*, XrTime, std::int64_t& out) {
     ++clock_conversions;
-    out=xrfg::interface_clock_ns()-5'000'000;
+    out=fixed_display_clock?fixed_display_clock:xrfg::interface_clock_ns()-5'000'000;
     return clock_available;
 }
 const XrCompositionLayerBaseHeader* expected_layer{};
@@ -408,6 +409,23 @@ int main(int argc, char** argv) {
             pending->mask.store(1);
             std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&info);
             check(snapshot().runtime.telemetry.cycle_estimated_valid,"native confirmation retains original acceptance receipt for slot estimate");
+            // V632: a VDXR-style accepted S/B pair must not throw away its
+            // real converted future target just because it has a synthetic.
+            overlay.reset_metrics();clock_available=true;
+            set_interface_visible(InterfaceSurface::desktop,true);
+            estimate_start=xrfg::interface_clock_ns()-2'000'000;
+            fixed_display_clock=estimate_start+42'000'000;
+            estimate_cycle=std::make_shared<xrfg::InterfaceCycle>(estimate_start);
+            stamp={406,estimate_start,0,estimate_cycle};
+            check(overlay.end_frame(&info,true,true,{},0,stamp)==XR_SUCCESS,"queued S acceptance");
+            check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS,"queued B acceptance with real clock");
+            estimate_cycle->producer_returned(xrfg::interface_clock_ns());
+            std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&info);
+            measured=snapshot().runtime.telemetry;
+            check(measured.cycle_estimated_valid && std::abs(measured.cycle_estimated_ms-42.F)<.001F &&
+                measured.cycle_estimated_source==xrfg::InterfaceSource::predicted_display_qpc,
+                "overlay/benchmark preserve real42ms target instead of ~12ms CPU-slot estimate or double-added52ms");
+            fixed_display_clock=0;overlay.reset_metrics();
             set_interface_visible(InterfaceSurface::desktop,false);conversions=clock_conversions;
             stamp={402,xrfg::interface_clock_ns(),0};
             check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS && clock_conversions==conversions,"hidden UI cannot read display clock");
