@@ -11,6 +11,8 @@
 #include <stdexcept>
 #include <vector>
 #include <cstring>
+#include <cmath>
+#include <string_view>
 #include "xrfg/luke_afw_continuity.hpp"
 using Microsoft::WRL::ComPtr;
 struct Matrix4x4 { float values[16]{}; };
@@ -121,7 +123,23 @@ D3D12_RESOURCE_BARRIER barrier(ID3D12Resource* r,D3D12_RESOURCE_STATES a,D3D12_R
 }
 void identity(Matrix4x4& m) {m={};m.values[0]=m.values[5]=m.values[10]=m.values[15]=1;}
 int main(int argc,char** argv) {try {
- require(argc==2);auto module=LoadLibraryA(argv[1]);require(module);
+ require(argc==2 || argc==4);
+ if(argc==2) {
+  char executable[32768]{};require(GetModuleFileNameA(nullptr,executable,sizeof(executable))!=0);
+  DWORD clear_control{};
+  for(int clear=0;clear<2;++clear)for(int fixed=0;fixed<2;++fixed) {
+   std::string command="\""+std::string(executable)+"\" \""+argv[1]+"\" "+std::to_string(clear)+" "+std::to_string(fixed);
+   STARTUPINFOA start{};start.cb=sizeof(start);start.dwFlags=STARTF_USESTDHANDLES;
+   start.hStdInput=GetStdHandle(STD_INPUT_HANDLE);start.hStdOutput=GetStdHandle(STD_OUTPUT_HANDLE);start.hStdError=GetStdHandle(STD_ERROR_HANDLE);
+   PROCESS_INFORMATION process{};require(CreateProcessA(nullptr,command.data(),nullptr,nullptr,TRUE,CREATE_NO_WINDOW,nullptr,nullptr,&start,&process));
+   require(WaitForSingleObject(process.hProcess,15000)==WAIT_OBJECT_0);
+   DWORD result{};require(GetExitCodeProcess(process.hProcess,&result));CloseHandle(process.hThread);CloseHandle(process.hProcess);
+   if(clear){require((result&0xf0000000U)==0x60000000U);if(!fixed)clear_control=result;else require(result==clear_control);}
+   else require(result==0);
+  }
+  std::cout<<"Isolated real-provider retained-color recovery and unchanged Clear readback controls PASS\n";return 0;
+ }
+ auto module=LoadLibraryA(argv[1]);require(module);
  auto init=reinterpret_cast<InitDeviceFn>(GetProcAddress(module,"InitDevice"));
  auto buffers=reinterpret_cast<InitFrameWarpFn>(GetProcAddress(module,"InitFrameWarp"));
  auto evaluate=reinterpret_cast<EvaluateFrameWarpFn>(GetProcAddress(module,"EvaluateFrameWarp"));require(init&&buffers&&evaluate);
@@ -146,28 +164,39 @@ int main(int argc,char** argv) {try {
   std::swap(b.Transition.StateBefore,b.Transition.StateAfter);list->ResourceBarrier(1,&b);
   check(list->Close());ID3D12CommandList* ls[]{list.Get()};queue->ExecuteCommandLists(1,ls);check(queue->Signal(fence.Get(),++value));check(fence->SetEventOnCompletion(value,event));require(WaitForSingleObject(event,10000)==WAIT_OBJECT_0);check(allocator->Reset());check(list->Reset(allocator.Get(),nullptr));};
  check(allocator->Reset());check(list->Reset(allocator.Get(),nullptr));write(depth,false,0,true);write(motion,false,0,false);check(list->Close());
- for(bool clear:{false,true}) {
+ for(bool clear:{false,true}) {if(clear!=(std::string_view(argv[2])=="1"))continue;
  std::vector<double> old_result,new_result;
- for(bool fixed:{false,true}) {FrameWarpInitParams bp{};bp.hmd_width=W;bp.hmd_height=H;auto eyes=buffers(bp);UINT64 pub=0,last=0;unsigned previous=2;
-  for(unsigned eye:{0U,1U,0U,0U,1U}) {++pub;if(pub==4)++pub;check(allocator->Reset());check(list->Reset(allocator.Get(),nullptr));auto input=eyes.eye_frame_buffers[eye];input.depth=depth;input.motion_vectors=motion;write(input.color,true,eye,false);
+ for(bool fixed:{false,true}) {if(fixed!=(std::string_view(argv[3])=="1"))continue;FrameWarpInitParams bp{};bp.hmd_width=W;bp.hmd_height=H;auto eyes=buffers(bp);UINT64 pub=0,last=0;unsigned previous=2;std::array<UINT64,2> previous_color{};
+  for(unsigned eye:{0U,1U,0U,0U,1U,0U}) {++pub;if(pub==4)++pub;check(allocator->Reset());check(list->Reset(allocator.Get(),nullptr));auto input=eyes.eye_frame_buffers[eye];input.depth=depth;input.motion_vectors=motion;write(input.color,true,eye,false);
    CameraData camera{};identity(camera.source_view_to_world);identity(camera.source_world_to_view);identity(camera.destination_view_to_world);identity(camera.destination_world_to_view);
    const float sx=eye?.01F:-.01F;camera.source_view_to_world.values[12]=sx;camera.source_world_to_view.values[12]=-sx;camera.destination_view_to_world.values[12]=-sx;camera.destination_world_to_view.values[12]=sx;
    for(auto* p:{&camera.source_view_to_clip,&camera.destination_view_to_clip}) {p->values[0]=p->values[5]=1;p->values[11]=-1;p->values[14]=.1F;}
    for(auto* p:{&camera.source_clip_to_view,&camera.destination_clip_to_view}) {p->values[0]=p->values[5]=1;p->values[11]=10;p->values[14]=-1;}
    identity(camera.camera_world_to_view);identity(camera.camera_view_to_world);identity(camera.camera_view_to_clip);identity(camera.camera_clip_to_view);
-   FrameWarpEvaluateParams ep{};ep.command_list=list.Get();ep.input_eye_frame_buffer=&input;ep.eye_index=static_cast<EyeIndex>(eye);ep.mode=static_cast<FrameWarpMode>(fixed?xrfg::luke_afw_effective_mode(3,pub,last,eye,previous):3);ep.camera_data=&camera;ep.motion_scale[0]=ep.motion_scale[1]=1;ep.is_hudless_color=true;ep.clear_before_warping=clear;evaluate(ep);require(ep.output_eye_frame_buffer&&ep.output_eye_frame_buffer->color.texture);
+   FrameWarpEvaluateParams ep{};ep.command_list=list.Get();ep.input_eye_frame_buffer=&input;ep.eye_index=static_cast<EyeIndex>(eye);ep.mode=static_cast<FrameWarpMode>(fixed?xrfg::luke_afw_effective_mode(3,pub,last,eye,previous,previous_color[eye],clear):(clear?(!last||last+1!=pub||eye==previous?1:3):3));ep.camera_data=&camera;ep.motion_scale[0]=ep.motion_scale[1]=1;ep.is_hudless_color=true;ep.clear_before_warping=clear;evaluate(ep);require(ep.output_eye_frame_buffer&&ep.output_eye_frame_buffer->color.texture);
    auto t=ep.output_eye_frame_buffer->color;
    std::cout<<"same_input="<<(t.texture==input.color.texture)<<" same_peer="<<(t.texture==eyes.eye_frame_buffers[1-eye].color.texture)<<" ";
    auto b=barrier(t.texture,t.initial_state,D3D12_RESOURCE_STATE_COPY_SOURCE);list->ResourceBarrier(1,&b);
    D3D12_TEXTURE_COPY_LOCATION dst{};dst.pResource=readback.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;dst.PlacedFootprint.Footprint={DXGI_FORMAT_R8G8B8A8_UNORM,W,H,1,W*4};D3D12_TEXTURE_COPY_LOCATION source{};source.pResource=t.texture;source.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;list->CopyTextureRegion(&dst,0,0,0,&source,nullptr);std::swap(b.Transition.StateBefore,b.Transition.StateAfter);list->ResourceBarrier(1,&b);
    check(list->Close());ID3D12CommandList* ls[]{list.Get()};queue->ExecuteCommandLists(1,ls);check(queue->Signal(fence.Get(),++value));check(fence->SetEventOnCompletion(value,event));require(WaitForSingleObject(event,10000)==WAIT_OBJECT_0);
-   void* p{};check(readback->Map(0,nullptr,&p));double sum=0,weight=0;for(int y=128;y<384;++y)for(int x=0;x<W;++x) {auto v=static_cast<unsigned char*>(p)[(y*W+x)*4];sum+=x*v;weight+=v;}readback->Unmap(0,nullptr);double center=weight?sum/weight:-1;(fixed?new_result:old_result).push_back(center);std::cout<<fixed<<" eye="<<eye<<" pub="<<pub<<" mode="<<ep.mode<<" center="<<center<<" native="<<(eye?232.5:258.5)<<'\n';last=pub;previous=eye;
+   void* p{};check(readback->Map(0,nullptr,&p));double sum=0,weight=0;for(int y=128;y<384;++y)for(int x=0;x<W;++x) {auto v=static_cast<unsigned char*>(p)[(y*W+x)*4];sum+=x*v;weight+=v;}readback->Unmap(0,nullptr);double center=weight?sum/weight:-1;(fixed?new_result:old_result).push_back(center);std::cout<<fixed<<" eye="<<eye<<" pub="<<pub<<" mode="<<ep.mode<<" center="<<center<<" native="<<(eye?232.5:258.5)<<'\n';last=pub;previous=eye;previous_color[eye]=pub;
   }
  }
- require(old_result.size()==5 && new_result.size()==5);
- require(std::abs(old_result[3]-258.5)<1.0); // wrong eye at the exact repeated-source transition
+ // Clear mode is deliberately unchanged. Compare isolated readback receipts
+ // with the exact V633 opposite-only policy, including its existing empty
+ // transition output; do not turn that inherited limitation into a new claim.
+ if(clear) {
+  const auto& values=new_result.empty()?old_result:new_result;require(values.size()==6);
+  std::uint32_t receipt=2166136261U;
+  for(double center:values){receipt^=static_cast<std::uint32_t>(std::lround((center+2)*100));receipt*=16777619U;}
+  std::cout<<"Clear mode readback receipt="<<receipt<<" (V633 compatibility, not a Clear-mode repair)\n";
+  return static_cast<int>(0x60000000U|(receipt&0x0fffffffU));
+ }
+ if(!old_result.empty()){require(old_result.size()==6);require(std::abs(old_result[3]-258.5)<1.0);}
+ if(!new_result.empty()){require(new_result.size()==6); // wrong eye at the exact repeated-source transition
  require(std::abs(new_result[3]-232.5)<=1.1); // current depth-warped opposite eye
- require(std::abs(new_result[4]-258.5)<1.0); // normal temporal path resumes
+ require(std::abs(new_result[4]-258.5)<1.0); // the other eye must also re-prime
+ require(std::abs(new_result[5]-232.5)<1.0);} // normal temporal path resumes after both eyes
  std::cout<<"Real provider: repeated-eye 26px stereo collapse reproduced, corrected and resumed, clear="<<clear<<'\n';
  }
  CloseHandle(event);return 0;

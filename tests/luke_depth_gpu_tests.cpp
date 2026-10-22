@@ -26,17 +26,28 @@ D3D12_RESOURCE_BARRIER barrier(ID3D12Resource* r, D3D12_RESOURCE_STATES a, D3D12
     x.Transition={r,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,a,b}; return x;
 }
 int main() { try {
-    expect(xrfg::luke_afw_effective_mode(3,785,783,0,0)==1);
-    expect(xrfg::luke_afw_effective_mode(3,804,802,1,1)==1);
-    expect(xrfg::luke_afw_effective_mode(3,815,813,0,0)==1);
-    expect(xrfg::luke_afw_effective_mode(3,1253,1251,0,0)==1);
-    expect(xrfg::luke_afw_effective_mode(3,1268,1266,1,1)==1);
-    expect(xrfg::luke_afw_effective_mode(3,1279,1277,0,0)==1);
-    expect(xrfg::luke_afw_effective_mode(3,1301,1299,0,0)==1);
-    expect(xrfg::luke_afw_effective_mode(3,786,785,1,0)==3);
-    expect(xrfg::luke_afw_effective_mode(3,10,9,0,0)==1);
-    expect(xrfg::luke_afw_effective_mode(2,10,8,0,1)==1);
-    expect(xrfg::luke_afw_effective_mode(1,10,8,0,0)==1);
+    expect(xrfg::luke_afw_effective_mode(3,785,783,0,0,783)==1);
+    expect(xrfg::luke_afw_effective_mode(3,804,802,1,1,802)==1);
+    expect(xrfg::luke_afw_effective_mode(3,815,813,0,0,813)==1);
+    expect(xrfg::luke_afw_effective_mode(3,1253,1251,0,0,1251)==1);
+    expect(xrfg::luke_afw_effective_mode(3,1268,1266,1,1,1266)==1);
+    expect(xrfg::luke_afw_effective_mode(3,1279,1277,0,0,1277)==1);
+    expect(xrfg::luke_afw_effective_mode(3,1301,1299,0,0,1299)==1);
+    expect(xrfg::luke_afw_effective_mode(3,786,785,1,0,784)==3);
+    expect(xrfg::luke_afw_effective_mode(3,10,9,0,0,8)==1);
+    expect(xrfg::luke_afw_effective_mode(2,10,8,0,1,8)==1);
+    expect(xrfg::luke_afw_effective_mode(1,10,8,0,0,8)==1);
+    // V633 Horizon F8: source 1839 was missed. Re-prime 1840/eye0,
+    // then 1841/eye1 still has only its old 1837 color, not required 1839.
+    expect(xrfg::luke_afw_effective_mode(3,1840,1838,0,0,1838)==1);
+    expect(xrfg::luke_afw_effective_mode(3,1841,1840,1,0,1837)==1);
+    expect(xrfg::luke_afw_effective_mode(3,1842,1841,0,1,1840)==3);
+    expect(xrfg::luke_afw_effective_mode(2,1841,1840,1,0,1837)==1);
+    expect(xrfg::luke_afw_effective_mode(3,2,1,1,0,0)==1);
+    expect(xrfg::luke_afw_effective_mode(3,3,2,0,1,1)==3);
+    expect(xrfg::luke_afw_previous_opposite(1841,1840,1,0));
+    expect(xrfg::luke_afw_effective_mode(3,1841,1840,1,0,1837,true)==3);
+    expect(xrfg::luke_afw_effective_mode(3,1840,1838,0,0,1838,true)==1);
     ComPtr<ID3D12Debug> debug; if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) debug->EnableDebugLayer();
     ComPtr<IDXGIFactory4> factory;check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));
     ComPtr<IDXGIAdapter> warp;check(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp)));

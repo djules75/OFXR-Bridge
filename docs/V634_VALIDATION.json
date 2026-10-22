@@ -1,0 +1,35 @@
+{
+  "version": "V634",
+  "base_version": "V633",
+  "base": "e0a9d26a65be2338563e68b69fea8d9e18c34f91",
+  "sealed_v633_source": "0366b3dea433ccc16ca3632b43715b3e57d40a4a",
+  "scope": "Require both retained eye histories before temporal AFW re-entry with Clear disabled; preserve V633 Clear-enabled protocol. Prioritize consumed AFW guides and both evaluations inside the unchanged F8 readback cap.",
+  "passed": 11,
+  "failed": 0,
+  "ctest_seconds": 5.69,
+  "tests": [
+    "xrfg_horizon_motion_interval",
+    "xrfg_luke_depth_gpu",
+    "xrfg_luke_ngx_actual_capture",
+    "xrfg_horizon_steamvr_capture",
+    "xrfg_horizon_vdxr_capture",
+    "xrfg_ghost_steamvr_capture",
+    "xrfg_ghost_vdxr_capture",
+    "xrfg_crimson_ngx_actual_capture",
+    "xrfg_kcd_scene_capture",
+    "xrfg_luke_provider_continuity",
+    "xrfg_luke_kcd_quality_bundled"
+  ],
+  "owner_captures": [
+    "ofxr-capture-v23286-12136-20261022-235843-306-1",
+    "ofxr-capture-v23286-12136-20261022-235850-066-2"
+  ],
+  "capture_limit": "No saved all-green output: first evaluation central green fractions 0.001375754 / 0.0000124927; second evaluation readbacks E_OUTOFMEMORY. Flight establishes stale same-eye re-entry at publication 1841 after missing 1839.",
+  "clear_enabled": "Exact V633 policy preserved and isolated provider receipts match; inherited empty transition output is not repaired.",
+  "initial_failures": "Strict two-eye priming for Clear enabled failed provider checks. Same-process provider reinitialization crashed; replaced with isolated child-process controls. Evidence retained.",
+  "headset_validation": "Pending owner Horizon Quest/VDXR check; no exact replay of missing green flash claimed.",
+  "provider_sha256": "5f3cfc38903ac438241a3c47cb4bc3ac329cb39b056e33a63c20045fe15336f9",
+  "first_bad_revision_established": false,
+  "live_installation": false,
+  "pushed": false
+}

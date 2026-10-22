@@ -1495,10 +1495,12 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         // changes to full-rate work there but retains its reduced lookup state;
         // re-entering Combined otherwise clears a shader-read lookup as an RTV.
         // Retire that warm state at the discontinuity, after the existing fence.
+        // Missing same-eye history during the second prime is not another
+        // discontinuity: recreating here would discard the first primed eye.
         const bool reduced_continuity_lost=settings.mode==3 &&
             impl_->active_shading_rate>0 && impl_->last_evaluated_publication &&
-            luke_afw_effective_mode(settings.mode,guide.publication,
-                impl_->last_evaluated_publication,source_eye,impl_->last_evaluated_eye)!=3;
+            !luke_afw_previous_opposite(guide.publication,
+                impl_->last_evaluated_publication,source_eye,impl_->last_evaluated_eye);
         if(impl_->frame_buffers_ready &&
             (*origin_changed || provider_geometry_changed || reduced_continuity_lost)) {
             const auto provider=impl_->provider_path;
@@ -1956,7 +1958,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             cropped_motion_height, motion_window->raster_y);
         const int effective_mode = luke_afw_effective_mode(settings.mode,
             guide.publication, impl_->last_evaluated_publication,
-            source_eye, impl_->last_evaluated_eye);
+            source_eye, impl_->last_evaluated_eye,
+            impl_->previous_source_publication[source_eye], settings.clear_before_warping);
         params.mode = static_cast<FrameWarpMode>(effective_mode);
         if(impl_->active_shading_rate<0)impl_->active_shading_rate=settings.shading_rate;
         // Reduced qualities use an actual colour raster. Keep the provider

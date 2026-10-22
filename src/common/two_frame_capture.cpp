@@ -1,4 +1,5 @@
 #include "xrfg/two_frame_capture.hpp"
+#include "xrfg/two_frame_capture_budget.hpp"
 #include "xrfg/diagnostic_hotkeys.hpp"
 #include "xrfg/diagnostic_ring_sink.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
@@ -70,6 +71,8 @@ struct Session {
     std::string settings;
     std::uint64_t allocated{};
     std::uint32_t dropped_images{};
+    std::uint32_t suppressed_upstream_images{};
+    TwoFrameCaptureStageBudget stage_budget;
     bool sealed{};
     std::atomic_bool write_finished{false};
     std::atomic_bool safe_to_release{true};
@@ -184,6 +187,14 @@ std::shared_ptr<Shot> prepare_shot(
     const TwoFrameImageInfo& info, ID3D12Device* device,
     ID3D12Resource* source) {
     if (!session || !device || !source || !info.stage) return {};
+    {
+        std::scoped_lock lock(session->mutex);
+        if (session->sealed) return {};
+        if (!session->stage_budget.accept(info.stage)) {
+            ++session->suppressed_upstream_images;
+            return {};
+        }
+    }
     auto shot = std::make_shared<Shot>();
     shot->info = info;
     shot->frame = frame;
@@ -516,6 +527,9 @@ void write_session(const std::shared_ptr<Session>& session) {
         << "Raw images include D3D12 row padding; see manifest.tsv.\n"
         << "Max images=48, max total readback=1.25 GiB. Dropped images="
         << session->dropped_images << "\n";
+    summary << "AFW capture focus: later upstream NGX images omitted="
+        << session->suppressed_upstream_images
+        << "; exact consumed guides remain in afw_ngx_*_before_crop.\n";
     summary << "V576 DLSS-G stages: aligned_previous / packed_current / packed_motion / packed_depth -> ngx_generated -> composed_output.\n"
         << "One pair per stream, at most two streams. Native stage swapchain is resource identity, not XR handle.\n"
         << "native_dlssg_pair: original A/B pose/projection. native_dlssg_output_camera: B -> output-to-B quaternion, mode = output index.\n";

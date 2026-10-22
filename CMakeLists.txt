@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.633.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.634.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -112,6 +112,7 @@ if(XRFG_BUILD_TESTS)
     target_compile_features(xrfg_midpoint_schedule_tests PRIVATE cxx_std_20)
     add_test(NAME xrfg_midpoint_schedule_tests COMMAND xrfg_midpoint_schedule_tests)
     add_executable(xrfg_horizon_motion_interval_tests tests/horizon_motion_interval_tests.cpp)
+    target_include_directories(xrfg_horizon_motion_interval_tests PRIVATE include)
     target_compile_features(xrfg_horizon_motion_interval_tests PRIVATE cxx_std_20)
     add_test(NAME xrfg_horizon_motion_interval COMMAND xrfg_horizon_motion_interval_tests)
     add_executable(xrfg_luke_color_token_tests tests/luke_color_token_tests.cpp)

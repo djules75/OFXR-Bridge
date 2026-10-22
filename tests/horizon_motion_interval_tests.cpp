@@ -1,5 +1,7 @@
 #include "fixtures/horizon_steamvr_motion.hpp"
 #include "fixtures/horizon_vdxr_motion.hpp"
+#include "fixtures/horizon_v633_capture_budget.hpp"
+#include "xrfg/two_frame_capture_budget.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -32,5 +34,21 @@ int main() {try {
     };
     check_receipt(horizon_receipt::frames,1704,2,"SteamVR");
     check_receipt(horizon_vdxr_receipt::frames,1672,1,"VDXR");
+    xrfg::TwoFrameCaptureStageBudget budget;
+    std::uint64_t requested{},admitted{};
+    unsigned accepted{};
+    for(const auto& shot:horizon_capture_budget::shots) {
+        requested+=shot.bytes;
+        const bool keep=budget.accept(shot.stage);
+        if(std::string_view(shot.stage).starts_with("afw_") && !keep)
+            throw std::runtime_error("AFW capture lost an exact consumed input/output");
+        if(keep){admitted+=shot.bytes;++accepted;}
+    }
+    if(requested<=1280ULL*1024*1024 || admitted>1280ULL*1024*1024 || accepted!=32)
+        throw std::runtime_error("original Horizon second evaluation no longer fits its unchanged capture budget");
+    xrfg::TwoFrameCaptureStageBudget ordinary;
+    for(const auto stage:{"ngx_native_motion","ngx_native_depth","ngx_input_color","ngx_completed_color"})
+        if(!ordinary.accept(stage))throw std::runtime_error("non-AFW capture was filtered");
+    std::cout<<"Horizon F8 complete AFW pair: "<<admitted/(1024*1024)<<" MiB, "<<accepted<<" images\n";
     return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
