@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.558.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.559.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -155,6 +155,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     # V539: the hybrid's coverage mask.
     set(XRFG_COVERAGE_MASK_CLEAR_HEADER "${XRFG_GENERATED_SHADER_DIR}/coverage_mask_clear_shader.hpp")
     set(XRFG_COVERAGE_MASK_BUILD_HEADER "${XRFG_GENERATED_SHADER_DIR}/coverage_mask_build_shader.hpp")
+    set(XRFG_STILL_MASK_BUILD_HEADER "${XRFG_GENERATED_SHADER_DIR}/still_mask_build_shader.hpp")
+    set(XRFG_STILL_MASK_DILATE_HEADER "${XRFG_GENERATED_SHADER_DIR}/still_mask_dilate_shader.hpp")
     # V546: the eye order of two DLSS streams nothing else tells apart.
     set(XRFG_EYE_ORDER_CLEAR_HEADER "${XRFG_GENERATED_SHADER_DIR}/eye_order_clear_shader.hpp")
     set(XRFG_EYE_ORDER_MEASURE_HEADER "${XRFG_GENERATED_SHADER_DIR}/eye_order_measure_shader.hpp")
@@ -187,7 +189,19 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_EYE_ORDER_MEASURE_HEADER}"
             "${XRFG_DEPTH_SPLAT_CLEAR_HEADER}"
             "${XRFG_DEPTH_SPLAT_BUILD_HEADER}"
+            "${XRFG_STILL_MASK_BUILD_HEADER}"
+            "${XRFG_STILL_MASK_DILATE_HEADER}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E BuildStillMask
+            /D XRFG_STILL_MASK=1
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_STILL_MASK_BUILD_HEADER}" /Vn g_xrfg_still_mask_build_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E DilateStillMask
+            /D XRFG_STILL_MASK=1
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_STILL_MASK_DILATE_HEADER}" /Vn g_xrfg_still_mask_dilate_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E ClearDepthSplat
             /D XRFG_HYBRID=1 /D XRFG_DEPTH_SPLAT=1
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
@@ -1324,6 +1338,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 WIN32_LEAN_AND_MEAN)
         endif()
         add_test(NAME xrfg_d3d12_history_tests COMMAND xrfg_d3d12_history_tests)
+        # V559: the synthesizer reads the tray's live tuning block; the harness
+        # judges the built-in values, whatever a running tray's window says.
+        set_tests_properties(xrfg_d3d12_history_tests PROPERTIES
+            ENVIRONMENT "XRFG_IGNORE_LIVE_TUNING=1")
         add_test(NAME xrfg_d3d12_hybrid_composition COMMAND xrfg_d3d12_history_tests hybrid)
 
         add_executable(xrfg_vertical_fov_tests tests/vertical_fov_tests.cpp)
@@ -1335,6 +1353,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             target_compile_definitions(xrfg_vertical_fov_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         endif()
         add_test(NAME xrfg_vertical_fov_tests COMMAND xrfg_vertical_fov_tests)
+        set_tests_properties(xrfg_vertical_fov_tests PROPERTIES
+            ENVIRONMENT "XRFG_IGNORE_LIVE_TUNING=1")
         add_executable(xrfg_synthetic_marker_tests tests/synthetic_marker_tests.cpp)
         target_include_directories(xrfg_synthetic_marker_tests PRIVATE include)
         target_link_libraries(xrfg_synthetic_marker_tests PRIVATE xrfg_d3d12_history d3d12 dxgi)
@@ -1344,6 +1364,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             target_compile_definitions(xrfg_synthetic_marker_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         endif()
         add_test(NAME xrfg_synthetic_marker_tests COMMAND xrfg_synthetic_marker_tests)
+        set_tests_properties(xrfg_synthetic_marker_tests PROPERTIES
+            ENVIRONMENT "XRFG_IGNORE_LIVE_TUNING=1")
 
         add_executable(xrfg_nvidia_optical_flow_probe
             tests/nvidia_optical_flow_probe.cpp)

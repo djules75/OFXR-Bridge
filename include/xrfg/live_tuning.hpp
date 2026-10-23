@@ -29,8 +29,9 @@ inline constexpr std::uint32_t kMagic = 0x4C565446U;  // "FTVL"
 // 9 (V543): mask_band_percent.
 // 10: a test build's switch between the probes and the splat, never
 // released. 11 (V555): the splat is the depth search; the probes' reach
-// and solve count left with them.
-inline constexpr std::uint32_t kVersion = 11U;
+// and solve count left with them. 12 (V559): still_edge_255ths, the still
+// mask's edge threshold. 13 (V559): the mask's match ratio, angle and age.
+inline constexpr std::uint32_t kVersion = 13U;
 
 // Each slider in the tray runs from cheaper on the GPU (left) to costlier
 // (right); the comments say which way that is for a value.
@@ -97,6 +98,20 @@ struct Block {
     // background beside it was taken for the surface's own and kept the
     // blend, the ghost at a fast edge.
     std::uint32_t mask_band_percent;              // 0-50 (0 V539's), default 0
+
+    // V559: the still mask for head-locked HUDs. An edge (on luma, or the
+    // strongest colour channel) needs this contrast to be matched between
+    // the frames and held; lower holds dimmer elements and costs a little
+    // more of the mask. Read by the mask's passes in every composition.
+    std::uint32_t still_edge_255ths;              // 1-40, default 10
+    // The two frames' edges match when the weaker is at least this share of
+    // the stronger, their orientations agree to at least this cosine, and
+    // the texel has matched this many pairs in a row (a step one more).
+    // Looser (lower) holds more; what it then holds wrongly is static world
+    // texture.
+    std::uint32_t still_match_percent;            // 10-100, default 40
+    std::uint32_t still_angle_percent;            // 50-100, default 85
+    std::uint32_t still_age_pairs;                // 1-5, default 2
 };
 
 // The composition's built-in values (frame_synthesis.hlsl), so the window
@@ -113,6 +128,8 @@ inline constexpr Block kDefaults{
     1U, 50U, 250U,
     0U,
     0U,
+    10U,
+    40U, 85U, 2U,
 };
 
 // The block's values within their ranges, as the shader expects them.
@@ -131,18 +148,22 @@ inline constexpr Block kDefaults{
     block.depth_agree_1000ths = std::min(block.depth_agree_1000ths, 250U);
     block.hybrid_tint = std::min(block.hybrid_tint, 2U);
     block.mask_band_percent = std::min(block.mask_band_percent, 50U);
+    block.still_edge_255ths = std::clamp(block.still_edge_255ths, 1U, 40U);
+    block.still_match_percent = std::clamp(block.still_match_percent, 10U, 100U);
+    block.still_angle_percent = std::clamp(block.still_angle_percent, 50U, 100U);
+    block.still_age_pairs = std::clamp(block.still_age_pairs, 1U, 5U);
     return block;
 }
 
 // The fields after the header, in order: what the shader indexes and what the
 // 813 record packs, 8 bits a value (every range fits; since V555 all of them
 // fit 813's sixteen).
-inline constexpr std::size_t kFieldCount = 14;
+inline constexpr std::size_t kFieldCount = 18;
 [[nodiscard]] inline const std::uint32_t* fields(const Block& block) noexcept {
     return &block.hybrid_agree_threshold_255ths;
 }
 static_assert(sizeof(Block) == sizeof(std::uint32_t) * (3 + kFieldCount));
 static_assert(offsetof(Block, hybrid_agree_threshold_255ths) == 12);
-static_assert(offsetof(Block, mask_band_percent) == 12 + 4 * (kFieldCount - 1));
+static_assert(offsetof(Block, still_age_pairs) == 12 + 4 * (kFieldCount - 1));
 
 }  // namespace xrfg::live_tuning

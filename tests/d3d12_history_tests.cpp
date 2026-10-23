@@ -5074,6 +5074,26 @@ void test_nvidia_serialized_eye_context_stress(
 // vectors in the current inset (reading B). The composition must find which.
 enum class HybridScene {
     occlusion, overlay, fade, occlusion_low_res, occlusion_periphery,
+    // V559: the overlay drawn translucent over the background (Star
+    // Citizen's HUD), so its pixels change while its edges stay. Judged at
+    // its edges: closer to the true frame than to the HUD dragged along
+    // with the background, which is what the vectors (and a flow) say.
+    overlay_translucent,
+    // V559: the same HUD swaying of its own, two pixels further right in B
+    // than in A, expected one pixel on. Not run: the mask matches a stroke
+    // at its own image place only (a head turn's shift is the pose's, and
+    // the composition places the HUD by it); kept for a HUD that does sway.
+    overlay_translucent_sway,
+    // V559: a translucent panel - a box, its borders steps, not strokes -
+    // over the moving background, judged after the pairs the mask needs to
+    // see a step stay in place.
+    overlay_panel,
+    // V559: the panel with the background four times as fast, so the
+    // warped samples reach well past the border's grown mask.
+    overlay_panel_fast,
+    // V559: the translucent strokes dark on the lighter background, as dark
+    // HUD text and icon lines are.
+    overlay_translucent_dark,
     occlusion_foveated, occlusion_foveated_moved, occlusion_foveated_moved_current,
     // V539: the object twice as fast over a flat background, the revealed
     // strip wider than the edge probes' reach.
@@ -5103,8 +5123,18 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
             GetEnvironmentVariableW(L"XRFG_DISABLE_COVERAGE_MASK", nullptr, 0) != 0);
     constexpr UINT width = 256, height = 128;
     constexpr int object_left = 72, object_width = 80, object_top = 32, object_bottom = 96;
-    constexpr int background_motion = 6;
-    const bool overlay = kind == HybridScene::overlay, fade = kind == HybridScene::fade;
+    const bool panel_fast = kind == HybridScene::overlay_panel_fast;
+    const int background_motion = panel_fast ? 24 : 6;
+    const bool sway = kind == HybridScene::overlay_translucent_sway;
+    const bool panel = kind == HybridScene::overlay_panel || panel_fast;
+    const bool dark_strokes = kind == HybridScene::overlay_translucent_dark;
+    const bool translucent =
+        kind == HybridScene::overlay_translucent || sway || panel || dark_strokes;
+    // The still mask counts pairs in a row: the overlays run these before
+    // the pair that is judged.
+    const int warm_up_pairs = translucent ? 4 : 0;
+    const bool overlay = kind == HybridScene::overlay || translucent;
+    const bool fade = kind == HybridScene::fade;
     const bool low_res = kind == HybridScene::occlusion_low_res;
     const bool foveated = kind == HybridScene::occlusion_foveated ||
         kind == HybridScene::occlusion_foveated_moved ||
@@ -5118,8 +5148,11 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
     const bool far_depth = kind == HybridScene::occlusion_fast_far;
     const bool fast = kind == HybridScene::occlusion_fast || dark || far_depth;
     const bool occluding = kind == HybridScene::occlusion || low_res || periphery || fast;
-    const int object_motion = overlay ? 0 : fade ? background_motion : fast ? 40 : 20;
-    const char* const name = fade ? "fade" : overlay ? "overlay"
+    const int object_motion = overlay ? (sway ? 2 : 0) : fade ? background_motion : fast ? 40 : 20;
+    const char* const name = fade ? "fade" : sway ? "overlay translucent sway"
+        : panel_fast ? "overlay panel fast" : panel ? "overlay panel"
+        : dark_strokes ? "overlay translucent dark"
+        : translucent ? "overlay translucent" : overlay ? "overlay"
         : dark ? "occlusion fast, dark low contrast"
         : far_depth ? "occlusion fast, far inverted depth"
         : fast ? "occlusion fast, flat background"
@@ -5144,18 +5177,38 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
             for (UINT y = 0; y < height; ++y) {
                 for (UINT x = 0; x < width; ++x) {
                     const int ox = static_cast<int>(x) - object_shift;
+                    // V559: the translucent HUD is strokes, two pixels every
+                    // eight, as HUD text is; the rest of its rectangle shows
+                    // the background.
                     const bool object = static_cast<int>(y) >= object_top &&
                         static_cast<int>(y) < object_bottom && ox >= object_left &&
-                        ox < object_left + object_width;
+                        ox < object_left + object_width &&
+                        (!translucent || panel || (ox - object_left) % 8 < 2);
                     const int bx = static_cast<int>(x) - background_shift + 64;
-                    const RgbaBytes color = object
-                        ? (dark ? ((ox / 5) % 2 ? RgbaBytes{40, 40, 42, 255} : RgbaBytes{17, 17, 19, 255})
-                                : (ox / 5) % 2 ? RgbaBytes{240, 210, 40, 255} : RgbaBytes{30, 60, 200, 255})
-                        : dark ? RgbaBytes{28, 28, 30, 255}
-                        : fast ? RgbaBytes{70, 90, 110, 255}
+                    // V559: the translucent HUD over the flat background: the
+                    // vectors drag it there as anywhere, and its strokes keep
+                    // one contrast, as a HUD's do over most of a scene.
+                    const RgbaBytes background = dark ? RgbaBytes{28, 28, 30, 255}
+                        : fast || translucent ? RgbaBytes{70, 90, 110, 255}
                         : RgbaBytes{static_cast<std::uint8_t>(40 + (bx * 13 + static_cast<int>(y) * 5) % 160),
                                     static_cast<std::uint8_t>(60 + ((bx / 3) % 7) * 20 + eye * 9),
                                     static_cast<std::uint8_t>(90 + (bx * 7) % 120), 255};
+                    // V559: the translucent HUD's strokes are all the bright
+                    // colour, as HUD text is; a dark stroke at 65% over this
+                    // background is under the edge threshold and not a HUD.
+                    const RgbaBytes object_color =
+                        dark ? ((ox / 5) % 2 ? RgbaBytes{40, 40, 42, 255} : RgbaBytes{17, 17, 19, 255})
+                             : panel || dark_strokes ? RgbaBytes{20, 40, 70, 255}
+                             : (ox / 5) % 2 || translucent ? RgbaBytes{240, 210, 40, 255}
+                                                           : RgbaBytes{30, 60, 200, 255};
+                    RgbaBytes color = object ? object_color : background;
+                    if (object && translucent) {
+                        // V559: 65% HUD over the background.
+                        for (UINT c = 0; c < 3; ++c) {
+                            color[c] = static_cast<std::uint8_t>(std::lround(
+                                0.65 * object_color[c] + 0.35 * background[c]));
+                        }
+                    }
                     const RgbaBytes lit{static_cast<std::uint8_t>(std::lround(color[0] * brightness)),
                                         static_cast<std::uint8_t>(std::lround(color[1] * brightness)),
                                         static_cast<std::uint8_t>(std::lround(color[2] * brightness)), 255};
@@ -5166,10 +5219,15 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
         }
         return pattern;
     };
-    const StereoPattern previous = make_scene(0, 0);
-    const StereoPattern current = make_scene(background_motion, object_motion, fade ? 0.6F : 1.0F);
-    const StereoPattern expected =
-        make_scene(background_motion / 2, object_motion / 2, fade ? 0.8F : 1.0F);
+    // The judged pair's frames come after the warm-up pairs, the background
+    // a step further each pair, the overlay where it is.
+    const StereoPattern previous =
+        make_scene(background_motion * warm_up_pairs, object_motion * warm_up_pairs);
+    const StereoPattern current = make_scene(background_motion * (warm_up_pairs + 1),
+        object_motion * (warm_up_pairs + 1), fade ? 0.6F : 1.0F);
+    const StereoPattern expected = make_scene(
+        background_motion * warm_up_pairs + background_motion / 2,
+        object_motion * warm_up_pairs + object_motion / 2, fade ? 0.8F : 1.0F);
     // The game's B-to-A vectors, in render pixels: the background's motion
     // everywhere, the object's where the object is in B. The overlay scene's
     // vectors claim the object moved with the background.
@@ -5227,8 +5285,10 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
         create_source_texture(fixture, width, height)};
     std::array<ComPtr<ID3D12Resource>, 1> synthetic_destinations{
         create_source_texture(fixture, width, height)};
-    upload_pattern(fixture, sources[0].Get(), previous);
-    upload_pattern(fixture, sources[1].Get(), current);
+    // The warm-up pairs' frames go in first, the judged pair's last.
+    upload_pattern(fixture, sources[0].Get(), make_scene(0, 0));
+    upload_pattern(fixture, sources[1].Get(),
+        make_scene(background_motion, object_motion, fade ? 0.6F : 1.0F));
     std::array<ID3D12Resource*, 2> source_pointers{sources[0].Get(), sources[1].Get()};
     std::array<ID3D12Resource*, 2> current_pointers{
         current_destinations[0].Get(), current_destinations[1].Get()};
@@ -5326,12 +5386,35 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
     require(operation_succeeded(synthesizer.submit_prime(capture_a, views, 0, &prime, guides(1))),
         "hybrid prime failed");
     require_frame_start_gate(synthesizer, "hybrid frame-start gate");
-    require(operation_succeeded(history->capture(1, &capture_b)) &&
+    // The warm-up pairs (V559): each a frame further on, captured into the
+    // source the pair before it left free, composed and run so the still
+    // mask's age advances.
+    for (int warm = 1; warm <= warm_up_pairs; ++warm) {
+        const UINT source = static_cast<UINT>(warm % 2);
+        if (warm > 1) {
+            upload_pattern(fixture, sources[source].Get(),
+                make_scene(background_motion * warm, object_motion * warm));
+        }
+        xrfg::D3D12HistoryCaptureTicket capture{};
+        require(operation_succeeded(history->capture(source, &capture)) &&
+                operation_succeeded(history->commit(capture)),
+            "hybrid warm-up capture failed");
+        xrfg::D3D12FrameSynthesisTicket warm_pair{};
+        require(operation_succeeded(synthesizer.submit_pair(capture, views, views, 0, 1, &warm_pair,
+                    std::nullopt, guides(static_cast<std::uint64_t>(warm) + 1U))),
+            "hybrid warm-up pair failed");
+        fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+    }
+    const UINT judged_source = static_cast<UINT>((warm_up_pairs + 1) % 2);
+    if (warm_up_pairs > 0) {
+        upload_pattern(fixture, sources[judged_source].Get(), current);
+    }
+    require(operation_succeeded(history->capture(judged_source, &capture_b)) &&
             operation_succeeded(history->commit(capture_b)),
         "hybrid capture B failed");
     const auto statistics_before = xrfg::dlss_motion_vector_statistics();
     require(operation_succeeded(synthesizer.submit_pair(capture_b, views, views, 0, 1, &pair,
-                std::nullopt, guides(2))),
+                std::nullopt, guides(static_cast<std::uint64_t>(warm_up_pairs) + 2U))),
         "hybrid pair failed");
     fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
     const auto statistics_after = xrfg::dlss_motion_vector_statistics();
@@ -5366,6 +5449,45 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
         const double blend_error = blend_total / static_cast<double>(count);
         std::cout << "hybrid " << name << " eye=" << eye << " edge_mae=" << edge_error
                   << " blend_mae=" << blend_error << '\n';
+        if (translucent) {
+            // V559: the three columns either side of each edge of the HUD,
+            // against the true frame and against the HUD dragged with the
+            // background (the vectors' claim).
+            const StereoPattern dragged = make_scene(
+                background_motion * warm_up_pairs + background_motion / 2,
+                background_motion * warm_up_pairs + background_motion / 2);
+            // And held where A had it (V559 sway).
+            const StereoPattern held = make_scene(
+                background_motion * warm_up_pairs + background_motion / 2,
+                object_motion * warm_up_pairs);
+            double true_total = 0, dragged_total = 0, held_total = 0;
+            std::size_t band_count = 0;
+            for (int y = object_top + 2; y < object_bottom - 2; ++y) {
+                for (const int edge : {left, right}) {
+                    for (int x = edge - 3; x < edge + 3; ++x) {
+                        const std::size_t offset =
+                            (static_cast<std::size_t>(y) * width + static_cast<UINT>(x)) * kBytesPerPixel;
+                        for (UINT c = 0; c < 3; ++c, ++band_count) {
+                            true_total += std::abs(static_cast<int>(actual[eye][offset + c]) -
+                                                   static_cast<int>(expected[eye][offset + c]));
+                            dragged_total += std::abs(static_cast<int>(actual[eye][offset + c]) -
+                                                      static_cast<int>(dragged[eye][offset + c]));
+                            held_total += std::abs(static_cast<int>(actual[eye][offset + c]) -
+                                                   static_cast<int>(held[eye][offset + c]));
+                        }
+                    }
+                }
+            }
+            const double true_error = true_total / static_cast<double>(band_count);
+            const double dragged_error = dragged_total / static_cast<double>(band_count);
+            const double held_error = held_total / static_cast<double>(band_count);
+            std::cout << "  HUD edges: vs true " << true_error << " vs dragged " << dragged_error
+                      << " vs held " << held_error << '\n';
+            require(measure_only || true_error < dragged_error,
+                "the translucent HUD's edges followed the background");
+            require(measure_only || !sway || true_error < held_error,
+                "the swaying HUD's strokes were held at A's place");
+        }
         if (occluding) {
             // Each edge alone: the object moves right, so its left edge
             // reveals background and its right edge covers it.
@@ -5393,7 +5515,7 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
         }
         // The overlay's blend is exact (nothing moved), so it is held to an
         // absolute bound; the moving scenes must beat the blend.
-        require(measure_only || (overlay ? edge_error <= 12.0 : edge_error < blend_error),
+        require(measure_only || translucent || (overlay ? edge_error <= 12.0 : edge_error < blend_error),
             std::string("hybrid ") + name + " did not beat the same-pixel blend for eye " +
                 std::to_string(eye) + ": " + std::to_string(edge_error) + " vs " +
                 std::to_string(blend_error));
@@ -6189,7 +6311,10 @@ int main(int argc, char** argv) {
             std::string_view(argv[2]) == "nvidia") {
             SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
             D3D12WarpFixture nvidia_fixture(true);
-            for (const auto scene : {HybridScene::occlusion, HybridScene::overlay, HybridScene::fade,
+            for (const auto scene : {HybridScene::occlusion, HybridScene::overlay,
+                                     HybridScene::overlay_translucent, HybridScene::overlay_panel,
+                                     HybridScene::overlay_panel_fast,
+                                     HybridScene::overlay_translucent_dark, HybridScene::fade,
                                      HybridScene::occlusion_low_res, HybridScene::occlusion_periphery,
                                      HybridScene::occlusion_foveated,
                                      HybridScene::occlusion_foveated_moved,
@@ -6223,7 +6348,10 @@ int main(int argc, char** argv) {
             // The built-in values, not a tray window's (V507).
             SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
             D3D12WarpFixture hybrid_fixture;
-            for (const auto scene : {HybridScene::occlusion, HybridScene::overlay, HybridScene::fade,
+            for (const auto scene : {HybridScene::occlusion, HybridScene::overlay,
+                                     HybridScene::overlay_translucent, HybridScene::overlay_panel,
+                                     HybridScene::overlay_panel_fast,
+                                     HybridScene::overlay_translucent_dark, HybridScene::fade,
                                      HybridScene::occlusion_low_res, HybridScene::occlusion_periphery,
                                      HybridScene::occlusion_foveated,
                                      HybridScene::occlusion_foveated_moved,

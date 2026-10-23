@@ -124,7 +124,7 @@ struct AppState {
     // values set once hold for every game started after them.
     HWND tuning_window{};
     std::array<HWND, 2> tuning_switches{};
-    std::array<HWND, 12> tuning_sliders{};
+    std::array<HWND, 16> tuning_sliders{};
     std::array<HWND, 15> tuning_labels{};
     HANDLE tuning_mapping{};
     xrfg::live_tuning::Block* tuning_block{};
@@ -1142,7 +1142,7 @@ struct TuningSlider {
     bool reversed;
 };
 
-constexpr std::array<TuningSlider, 12> kTuningSliders{{
+constexpr std::array<TuningSlider, 16> kTuningSliders{{
     {L"Agree threshold", 0, 62,
      &xrfg::live_tuning::Block::hybrid_agree_threshold_255ths, 1U, 1.0, L"/255",
      L"the flow is asked only where the vectors' two frames disagree by more",
@@ -1188,6 +1188,22 @@ constexpr std::array<TuningSlider, 12> kTuningSliders{{
     {L"Depth agreement", 0, 250,
      &xrfg::live_tuning::Block::depth_agree_1000ths, 1U, 0.001, L"",
      L"a nearer surface's two frames must agree within this (no cost)", nullptr, false},
+    {L"Still edge", 1, 40,
+     &xrfg::live_tuning::Block::still_edge_255ths, 1U, 1.0, L"/255",
+     L"a head-locked HUD edge needs this contrast to be held still; lower holds dimmer elements",
+     L"Still mask for head-locked HUDs (V559), every composition", true},
+    {L"Still match", 10, 100,
+     &xrfg::live_tuning::Block::still_match_percent, 1U, 1.0, L"%",
+     L"the weaker frame's edge must be this share of the stronger's; lower holds more",
+     nullptr, true},
+    {L"Still angle", 50, 100,
+     &xrfg::live_tuning::Block::still_angle_percent, 1U, 1.0, L"%",
+     L"the two frames' edge orientations must agree to this cosine; lower holds more",
+     nullptr, true},
+    {L"Still age", 1, 5,
+     &xrfg::live_tuning::Block::still_age_pairs, 1U, 1.0, L" pairs",
+     L"pairs in a row an edge must stay put before it is held (a step one more); lower holds sooner",
+     nullptr, true},
 }};
 
 // The depth search's on/off is the menu's "Hybrid: depth search" (V532);

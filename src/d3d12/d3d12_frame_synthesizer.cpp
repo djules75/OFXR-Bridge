@@ -13,6 +13,8 @@
 #include "coverage_mask_clear_shader.hpp"
 #include "depth_splat_build_shader.hpp"
 #include "depth_splat_clear_shader.hpp"
+#include "still_mask_build_shader.hpp"
+#include "still_mask_dilate_shader.hpp"
 #include "eye_order_clear_shader.hpp"
 #include "eye_order_measure_shader.hpp"
 #include "fullscreen_vertex_shader.hpp"
@@ -91,7 +93,8 @@ constexpr UINT kMaxReprojectionViews = 2;
 // t7: the game's depth for the hybrid (V505); t8: the live tuning block
 // for the hybrid (V507); t9: the depth search's dilated tiles (V530); t10:
 // the coverage mask (V539); t11: the depth search's midpoint splat (V554).
-constexpr UINT kSrvDescriptorCount = 12;
+// t12: the still mask (V559), every image slice's, at half resolution.
+constexpr UINT kSrvDescriptorCount = 13;
 // A pair's synthetic outputs: one, two at 3X, three at 4X (V558).
 constexpr UINT kMaxSyntheticOutputs = 1U + kMaxExtraSynthetics;
 static_assert(kMaxSyntheticOutputs <= 4U, "bits 27-28 carry the output index");
@@ -118,8 +121,11 @@ constexpr UINT kEyeOrderDescriptorBase =
 // V554: a block per eye after that for the depth splat's passes, whose u0
 // is the splat.
 constexpr UINT kSplatDescriptorBase = kEyeOrderDescriptorBase + kDescriptorBlockSize;
-constexpr UINT kSlotDescriptorCount =
+// V559: one block after those for the still mask's passes, whose u0 is the
+// mask, every slice.
+constexpr UINT kStillMaskDescriptorBase =
     kSplatDescriptorBase + kDescriptorBlockSize * kMaxReprojectionViews;
+constexpr UINT kSlotDescriptorCount = kStillMaskDescriptorBase + kDescriptorBlockSize;
 // V539: synthesis_flags bit 4 says the eye's coverage mask is bound.
 constexpr UINT kCoverageMaskFlag = 16U;
 // V554: bit 5 says the eye's depth splat is bound, a slice per synthetic
@@ -127,6 +133,11 @@ constexpr UINT kCoverageMaskFlag = 16U;
 constexpr UINT kDepthSplatFlag = 32U;
 constexpr UINT kDepthSplatOutputShift = 27U;
 constexpr UINT kDepthSplatOutputMask = 3U << kDepthSplatOutputShift;
+// V559: bit 6 says the still mask is bound at t12.
+constexpr UINT kStillMaskFlag = 64U;
+// Per image slice: the mask as built, grown by a texel, and the texel's age
+// in pairs (how many in a row its edge stayed in place).
+constexpr UINT kStillMaskSlicesPerImageSlice = 3;
 // (Bit 3 and bits 24-26 were the depth search's tiles, V530-V554.)
 // The composition's per-eye verdict words (guide_compose.hlsl): four each.
 constexpr UINT kComposeVerdictBytes = 256;
@@ -480,9 +491,12 @@ xrfg::live_tuning::Block apply_live_composition_tuning(
     CompositionLayout layout) noexcept {
     static std::atomic<std::uint64_t> recorded{~0ULL};
     record_composition_switches();
-    if (layout != CompositionLayout::hybrid || tuning_mapped == nullptr) {
+    // V559: uploaded for every layout, not the hybrid's alone: the still
+    // mask's passes read the edge threshold from it whatever composes.
+    if (tuning_mapped == nullptr) {
         return xrfg::live_tuning::kDefaults;
     }
+    static_cast<void>(layout);
     xrfg::live_tuning::Block values = xrfg::live_tuning::kDefaults;
     xrfg::live_tuning::Block live{};
     if (read_live_tuning(&live)) {
@@ -1008,6 +1022,22 @@ struct D3D12FrameSynthesizer::Impl {
     ComPtr<ID3D12PipelineState> depth_splat_clear_pipeline;
     ComPtr<ID3D12PipelineState> depth_splat_build_pipeline;
     std::array<std::atomic<std::uint64_t>, kMaxReprojectionViews> depth_splat_recorded{};
+    // V559: the still mask's passes (frame_synthesis.hlsl, XRFG_STILL_MASK),
+    // and whether the device loads R8_UINT through a typed UAV, which the
+    // dilation needs; -1 not yet asked.
+    ComPtr<ID3D12PipelineState> still_mask_build_pipeline;
+    ComPtr<ID3D12PipelineState> still_mask_dilate_pipeline;
+    int still_mask_supported{-1};
+    std::atomic<std::uint64_t> still_mask_recorded{};
+    // V559: the still mask itself, one for the synthesizer rather than per
+    // work slot: its age slice carries over from pair to pair, and the
+    // pairs run in order on the one queue, so a pair's passes wait for the
+    // previous pair's draws through the barriers as a slot's own would.
+    ComPtr<ID3D12Resource> still_mask;
+    UINT still_mask_width{};
+    UINT still_mask_height{};
+    UINT still_mask_slices{};
+    D3D12_RESOURCE_STATES still_mask_state{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
     // V546: the eye-order measurement (frame_synthesis.hlsl, XRFG_EYE_ORDER)
     // and its verdict, copied into the slot's eye_order_readback.
     ComPtr<ID3D12PipelineState> eye_order_clear_pipeline;
@@ -1304,6 +1334,22 @@ struct D3D12FrameSynthesizer::Impl {
             IID_PPV_ARGS(nvidia_luma_pack_pipeline.GetAddressOf()));
         if (FAILED(result)) {
             return result;
+        }
+
+        // V559: the still mask's passes, in every mode.
+        for (const auto& [bytecode, pipeline] :
+             std::array<std::pair<D3D12_SHADER_BYTECODE, ComPtr<ID3D12PipelineState>*>, 2>{{
+                 {{g_xrfg_still_mask_build_shader, sizeof(g_xrfg_still_mask_build_shader)},
+                     &still_mask_build_pipeline},
+                 {{g_xrfg_still_mask_dilate_shader, sizeof(g_xrfg_still_mask_dilate_shader)},
+                     &still_mask_dilate_pipeline},
+             }}) {
+            compute_description.CS = bytecode;
+            result = device->CreateComputePipelineState(
+                &compute_description, IID_PPV_ARGS(pipeline->GetAddressOf()));
+            if (FAILED(result)) {
+                return result;
+            }
         }
 
         if (nvidia_options.hybrid) {
@@ -2354,6 +2400,15 @@ struct D3D12FrameSynthesizer::Impl {
                     offset_cpu_handle(cpu_start,
                         block * kDescriptorBlockSize + 10U,
                         descriptor_increment));
+                // V559: the still mask at t12, two slices per image slice.
+                D3D12_SHADER_RESOURCE_VIEW_DESC null_still = null_mask;
+                null_still.Format = DXGI_FORMAT_R8_UINT;
+                null_still.Texture2DArray.ArraySize =
+                    kStillMaskSlicesPerImageSlice * kMaxReprojectionViews;
+                device->CreateShaderResourceView(nullptr, &null_still,
+                    offset_cpu_handle(cpu_start,
+                        block * kDescriptorBlockSize + 12U,
+                        descriptor_increment));
                 // V554: the depth splat at t11, two slices.
                 D3D12_SHADER_RESOURCE_VIEW_DESC null_splat = null_mask;
                 null_splat.Texture2DArray.ArraySize = kMaxSyntheticOutputs;
@@ -2739,10 +2794,11 @@ struct D3D12FrameSynthesizer::Impl {
                 DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT,
                 DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R32G32_FLOAT,
                 DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT,
+                DXGI_FORMAT_R8_UINT,
             };
             for (UINT index = 0; index < kSrvDescriptorCount; ++index) {
                 const bool array = index == 0 || index == 1 || index == 6 || index == 7 ||
-                    index == 9 || index == 10 || index == 11;
+                    index == 9 || index == 10 || index == 11 || index == 12;
                 D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
                 srv.Format = kSrvFormats[index];
                 srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -3751,6 +3807,164 @@ struct D3D12FrameSynthesizer::Impl {
         return flags;
     }
 
+    // V559: the still mask (frame_synthesis.hlsl, BuildStillMask and
+    // DilateStillMask) for every view of the pair, recorded on `list` before
+    // the pair's draws, which find it at t12 of every block. The flag the
+    // draws carry, 0 where there is none: a view sharing its image slice
+    // with another (double-wide stereo) gets none, since the mask is kept
+    // per image slice. draw_parameters holds the pair's camera mappings.
+    [[nodiscard]] UINT record_still_mask(
+        WorkSlot& slot,
+        ID3D12GraphicsCommandList* list,
+        const SynthesisParameters& draw_parameters,
+        std::span<const D3D12ReprojectionView> target_views,
+        // The pair's guides, where it has them: the pass reads the game's
+        // vectors for the content's motion then, the flow otherwise, which
+        // the NVIDIA backend packs scaled (flag bit 24).
+        const DlssMotionVectorSet* guides,
+        bool nvidia_flow) noexcept {
+        // The harness compares the composition with and without it.
+        if (GetEnvironmentVariableW(L"XRFG_DISABLE_STILL_MASK", nullptr, 0) != 0 ||
+            !still_mask_build_pipeline || !still_mask_dilate_pipeline ||
+            target_views.empty() || target_views.size() > image_description.DepthOrArraySize ||
+            image_description.DepthOrArraySize > kMaxReprojectionViews) {
+            return 0U;
+        }
+        if (still_mask_supported < 0) {
+            D3D12_FEATURE_DATA_FORMAT_SUPPORT support{};
+            support.Format = DXGI_FORMAT_R8_UINT;
+            still_mask_supported =
+                SUCCEEDED(device->CheckFeatureSupport(
+                    D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) &&
+                (support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) != 0 &&
+                (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) != 0 &&
+                (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) != 0
+                    ? 1 : 0;
+        }
+        if (still_mask_supported == 0) {
+            return 0U;
+        }
+        const UINT width = (static_cast<UINT>(image_description.Width) + 1U) / 2U;
+        const UINT height = (image_description.Height + 1U) / 2U;
+        const UINT slices = kStillMaskSlicesPerImageSlice * image_description.DepthOrArraySize;
+        if (width == 0 || height == 0) return 0U;
+        if (!still_mask || still_mask_width < width ||
+            still_mask_height < height || still_mask_slices < slices) {
+            D3D12_HEAP_PROPERTIES heap{};
+            heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+            heap.CreationNodeMask = 1;
+            heap.VisibleNodeMask = 1;
+            D3D12_RESOURCE_DESC texture{};
+            texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            texture.Width = std::max(width, still_mask_width);
+            texture.Height = std::max(height, still_mask_height);
+            texture.DepthOrArraySize = static_cast<UINT16>(std::max(slices, still_mask_slices));
+            texture.MipLevels = 1;
+            texture.Format = DXGI_FORMAT_R8_UINT;
+            texture.SampleDesc.Count = 1;
+            texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            ComPtr<ID3D12Resource> mask;
+            if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texture,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                    IID_PPV_ARGS(mask.GetAddressOf())))) {
+                return 0U;
+            }
+            mask->SetName(L"OFXR Still Mask");
+            // A fresh texture is all zero: every age starts over.
+            still_mask = std::move(mask);
+            still_mask_width = static_cast<UINT>(texture.Width);
+            still_mask_height = texture.Height;
+            still_mask_slices = texture.DepthOrArraySize;
+            still_mask_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+
+        const D3D12_CPU_DESCRIPTOR_HANDLE cpu_start =
+            slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+        const D3D12_GPU_DESCRIPTOR_HANDLE gpu_start =
+            slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+        // The whole array in every block: the draw addresses the slice.
+        D3D12_SHADER_RESOURCE_VIEW_DESC array_view{};
+        array_view.Format = DXGI_FORMAT_R8_UINT;
+        array_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        array_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        array_view.Texture2DArray.MipLevels = 1;
+        array_view.Texture2DArray.ArraySize = still_mask_slices;
+        for (UINT block = 0; block < kMaxReprojectionViews; ++block) {
+            device->CreateShaderResourceView(still_mask.Get(), &array_view,
+                offset_cpu_handle(cpu_start, block * kDescriptorBlockSize + 12U,
+                    descriptor_increment));
+        }
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R8_UINT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+        uav.Texture2DArray.ArraySize = still_mask_slices;
+        device->CreateUnorderedAccessView(still_mask.Get(), nullptr, &uav,
+            offset_cpu_handle(cpu_start,
+                kStillMaskDescriptorBase + kSrvDescriptorCount, descriptor_increment));
+
+        dred_marker(list, "OFXR still mask begin");
+        if (still_mask_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+            const D3D12_RESOURCE_BARRIER barrier = transition_barrier(still_mask.Get(),
+                still_mask_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            list->ResourceBarrier(1, &barrier);
+        }
+        ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
+        list->SetDescriptorHeaps(1, heaps);
+        list->SetComputeRootSignature(root_signature.Get());
+        // Per view: its image slice and mapping; the frames are at t0/t1 of
+        // every block.
+        const auto bind = [&](UINT view_index) {
+            SynthesisParameters parameters = draw_parameters;
+            parameters.slice = resolved_array_slice(target_views[view_index], view_index,
+                target_views.size(), image_description.DepthOrArraySize);
+            parameters.view_index = view_index;
+            parameters.game_motion_rect = {};
+            if (guides != nullptr) {
+                const UINT eye = guide_eye(*guides, view_index, parameters.slice);
+                if (eye < guides->eye_count && guides->eyes[eye] &&
+                    guides->eyes[eye]->motion_vectors) {
+                    apply_hybrid_guide_constants(parameters, *guides->eyes[eye]);
+                }
+            }
+            if (nvidia_flow) {
+                parameters.synthesis_flags |= 1U << 24U;
+            }
+            list->SetComputeRootDescriptorTable(0, gpu_start);
+            list->SetComputeRootDescriptorTable(1, offset_gpu_handle(gpu_start,
+                kStillMaskDescriptorBase + kSrvDescriptorCount, descriptor_increment));
+            list->SetComputeRoot32BitConstants(2, kSynthesisConstantCount, &parameters, 0);
+        };
+        list->SetPipelineState(still_mask_build_pipeline.Get());
+        for (UINT view_index = 0; view_index < static_cast<UINT>(target_views.size()); ++view_index) {
+            bind(view_index);
+            list->Dispatch((width + 7U) / 8U, (height + 7U) / 8U, 1);
+        }
+        D3D12_RESOURCE_BARRIER built{};
+        built.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        built.UAV.pResource = still_mask.Get();
+        list->ResourceBarrier(1, &built);
+        list->SetPipelineState(still_mask_dilate_pipeline.Get());
+        for (UINT view_index = 0; view_index < static_cast<UINT>(target_views.size()); ++view_index) {
+            bind(view_index);
+            list->Dispatch((width + 7U) / 8U, (height + 7U) / 8U, 1);
+        }
+        const D3D12_RESOURCE_BARRIER readable = transition_barrier(still_mask.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kShaderReadState);
+        list->ResourceBarrier(1, &readable);
+        still_mask_state = kShaderReadState;
+        dred_marker(list, "OFXR still mask complete");
+        // 861, once per synthesizer and whenever the mask's shape changes: a
+        // width << 32 | height of the mask, b its slices.
+        const std::uint64_t key =
+            ((static_cast<std::uint64_t>(width) << 32U) | height) * 8U + slices;
+        if (still_mask_recorded.exchange(key + 1U, std::memory_order_relaxed) != key + 1U) {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::embedded_configuration, 861,
+                (static_cast<std::uint64_t>(width) << 32U) | height, slices);
+        }
+        return kStillMaskFlag;
+    }
+
     // V539: the coverage mask (frame_synthesis.hlsl, BuildCoverageMask) for
     // each view's eye, recorded on `list` before the pair's draws, which find
     // it at t10 of the eye's block. Per eye the synthesis_flags bit its draws
@@ -4231,6 +4445,11 @@ struct D3D12FrameSynthesizer::Impl {
                 previous_source.views[view_index], target_views[view_index],
                 static_cast<UINT>(image_description.Width), image_description.Height);
         }
+        // V559: the still mask, every pair's. Its passes bind their own
+        // pipeline, so the draw's is bound again after them.
+        parameters.synthesis_flags |=
+            record_still_mask(slot, slot.command_list.Get(), parameters, target_views, guides.get(), false);
+        slot.command_list->SetPipelineState(game_motion_graphics_pipeline.Get());
 
         const auto rtv_start = rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
@@ -4785,6 +5004,9 @@ struct D3D12FrameSynthesizer::Impl {
         const std::array<UINT, kMaxReprojectionViews> coverage_mask = guides != nullptr
             ? record_coverage_mask(slot, synthesis, *guides, parameters, target_views)
             : std::array<UINT, kMaxReprojectionViews>{};
+        // V559: the still mask, every pair's; bit 6 survives the per-output
+        // recomposition below.
+        parameters.synthesis_flags |= record_still_mask(slot, synthesis, parameters, target_views, guides, true);
         // V546: the eye order of two streams nothing else tells apart.
         if (guides != nullptr) {
             record_eye_order(slot, synthesis, *guides, parameters, previous_resource,
@@ -5652,6 +5874,10 @@ struct D3D12FrameSynthesizer::Impl {
         const std::array<UINT, kMaxReprojectionViews> coverage_mask = guides != nullptr
             ? record_coverage_mask(slot, slot.command_list.Get(), *guides, parameters, target_views)
             : std::array<UINT, kMaxReprojectionViews>{};
+        // V559: the still mask, every pair's; bit 6 survives the per-output
+        // recomposition below.
+        parameters.synthesis_flags |=
+            record_still_mask(slot, slot.command_list.Get(), parameters, target_views, guides, false);
         // V546: the eye order of two streams nothing else tells apart.
         if (guides != nullptr) {
             record_eye_order(slot, slot.command_list.Get(), *guides, parameters,

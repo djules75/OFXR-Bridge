@@ -41,6 +41,18 @@ RWTexture2D<float> NvidiaCurrentColor : register(u2);
 RWTexture2D<float4> NvidiaPreviousColor : register(u1);
 RWTexture2D<float4> NvidiaCurrentColor : register(u2);
 #endif
+// V559: the still mask (BuildStillMask below), at half the output's
+// resolution over the whole image, three slices per image slice: 3s the
+// texels whose edge has stayed in place for enough pairs in a row (a
+// head-locked HUD's strokes and panel borders), 3s + 1 those grown by a
+// texel, 3s + 2 the texel's age in pairs, kept from pair to pair. The
+// composition keeps a masked pixel still (placed by the pose shift) and
+// refuses a warped sample that lands on the mask, which would paint a copy
+// of the HUD beside its place.
+Texture2DArray<uint> StillMask : register(t12);
+#ifdef XRFG_STILL_MASK
+RWTexture2DArray<uint> StillMaskOut : register(u0);
+#endif
 #ifdef XRFG_COVERAGE_MASK
 // The pass that writes the coverage mask (V539), on the pack's register,
 // which that pass does not use.
@@ -108,6 +120,49 @@ bool coverage_mask_available() {
     return (SynthesisFlags & 16u) != 0u;
 }
 
+// V559: bit 6, the still mask is at t12 (every image slice's).
+bool still_mask_available() {
+    return (SynthesisFlags & 64u) != 0u;
+}
+
+// The still mask's byte at a target coordinate, from the slice grown by a
+// texel or the one as built: bit 7 a stroke of B is here, bits 0-2 and 3-5
+// where its match in A sits, -3..3 pixels each way, biased by 3. Zero: none.
+uint still_mask_word(float2 coordinate, bool grown) {
+    uint2 limit = (uint2(Width, Height) - uint2(1u, 1u)) >> 1u;
+    int2 texel = clamp(int2(floor(coordinate * 0.5)), int2(0, 0), int2(limit));
+    return StillMask.Load(int4(texel, int(3u * Slice + (grown ? 1u : 0u)), 0));
+}
+
+uint still_mask_pack(int2 offset) {
+    uint2 biased = uint2(clamp(offset, int2(-3, -3), int2(3, 3)) + int2(3, 3));
+    return 128u | biased.x | (biased.y << 3u);
+}
+
+// The stroke's place in A relative to its place in B, in pixels.
+float2 still_mask_offset(uint word) {
+    return float2(int2(int(word & 7u), int((word >> 3u) & 7u)) - int2(3, 3));
+}
+
+bool still_mask_at(float2 coordinate, bool grown) {
+    return (still_mask_word(coordinate, grown) & 128u) != 0u;
+}
+
+// Whether the path from a pixel to its warped sample crosses the mask: a
+// translucent panel is a tint over the background, and a sample pulled from
+// the other side of its border carries the wrong tint - a band of the panel
+// beside itself, N - 1 copies deep. A tap every three pixels along the
+// path (a stroke's grown band is six or so wide; four fixed taps let a
+// fast turn's samples step over it), the last the landing test, 24 at most.
+bool still_mask_crossed(float2 from, float2 to) {
+    bool crossed = false;
+    uint taps = clamp(uint(ceil(length(to - from) / 3.0)), 1u, 24u);
+    for (uint tap = 1u; tap <= taps; ++tap) {
+        crossed = crossed || still_mask_at(lerp(from, to, float(tap) / float(taps)), true);
+    }
+    return crossed;
+}
+
 // V554: bit 5, this eye's depth splat is at t11, a slice per synthetic
 // output; bits 27-28 which output this draw (or splat pass) is. (Bit 3 and
 // bits 24-26 were the depth tiles' until V555.)
@@ -137,7 +192,7 @@ uint depth_splat_output() {
 ByteAddressBuffer HybridTuning : register(t8);
 
 static const uint kTuningMagic = 0x4C565446u;
-static const uint kTuningVersion = 11u;
+static const uint kTuningVersion = 13u;
 // Field indices: xrfg::live_tuning::Block's order after its header.
 static const uint kTuningAgree = 0u;
 static const uint kTuningChoiceSlope = 1u;
@@ -153,6 +208,10 @@ static const uint kTuningDepthNearer = 10u;
 static const uint kTuningDepthAgree = 11u;
 static const uint kTuningTint = 12u;
 static const uint kTuningMaskBand = 13u;
+static const uint kTuningStillEdge = 14u;
+static const uint kTuningStillMatch = 15u;
+static const uint kTuningStillAngle = 16u;
+static const uint kTuningStillAge = 17u;
 
 bool tuning_present() {
     return HybridTuning.Load(0u) == kTuningMagic && HybridTuning.Load(4u) == kTuningVersion;
@@ -441,6 +500,30 @@ struct CameraSample {
     float valid;
     float3 padding;
 };
+
+// V559: the previous frame at one of its own image pixels, with no pose
+// mapping: where a head-locked HUD is, whatever the head did between the
+// frames. The world moves across the image on a head turn; the HUD does not.
+CameraSample sample_previous_image(
+    float2 image_coordinate,
+    uint slice,
+    uint view_index) {
+    CameraSample output;
+    output.color = float4(0.0, 0.0, 0.0, 1.0);
+    output.valid = 0.0;
+    output.padding = float3(0.0, 0.0, 0.0);
+    float2 source_minimum = PreviousMappings[view_index].SourceRect.xy;
+    float2 source_maximum = source_minimum + PreviousMappings[view_index].SourceRect.zw;
+    bool valid = image_coordinate.x >= source_minimum.x - 0.5 &&
+        image_coordinate.y >= source_minimum.y - 0.5 &&
+        image_coordinate.x <= source_maximum.x - 0.5 &&
+        image_coordinate.y <= source_maximum.y - 0.5;
+    if (valid) {
+        output.color = bilinear_previous_source(image_coordinate, slice);
+        output.valid = 1.0;
+    }
+    return output;
+}
 
 CameraSample sample_previous_target(
     float2 target_coordinate,
@@ -897,6 +980,194 @@ bool fast_stationary_patch(float2 pixel, uint slice, float4 current) {
         }
     }
     return stationary;
+}
+
+// V559: a translucent head-locked HUD over a moving background (Star
+// Citizen's on a stick turn). Its pixels change with what is behind them, so
+// the patch test above fails, and the flow there follows the background: each
+// synthetic then shows the HUD displaced along the turn, a copy either side
+// of its place, N-1 copies a side at NX. Its edges do not move: a strong luma
+// edge at the same place, with the same orientation and a similar strength,
+// in A and in B is content that stayed whatever the flow says, and is kept
+// where it is. A moving world edge coincides with another like it only by
+// chance; a repeating pattern moving by its period does, and there the still
+// reading shows the same picture. Four current loads for any pixel the patch
+// test refused, four more only where the current frame has a strong edge.
+// The value a stroke is measured on: luma, or the strongest colour channel
+// where that says more - a dark blue HUD stroke on black has almost no luma
+// (blue weighs 7% of it) and all of its contrast in colour.
+float edge_luma(float4 color) {
+    float3 rgb = saturate(color).rgb;
+    return max(dot(rgb, float3(0.2126, 0.7152, 0.0722)), 0.6 * max(rgb.r, max(rgb.g, rgb.b)));
+}
+
+// A stroke probe at a target coordinate in one frame: the luma gradient a
+// pixel either side, its strength, and whether it is a stroke rather than a
+// step - the luma that rose across the pixel falls at least half of that
+// again within three pixels along the gradient, or had fallen so just
+// before. HUD text and lines are strokes; a surface's outline, and a
+// repeating texture's steps (which coincide with themselves when the texture
+// moves by its period), are steps and stay the flow's.
+struct StrokeProbe {
+    float2 gradient;
+    float strength;
+    float2 axis;
+    // The stroke's own colour: the brighter side of the edge.
+    float4 color;
+    // A strong edge, of either kind; a stroke is one the luma comes back
+    // from within three pixels.
+    bool edge;
+    bool stroke;
+};
+
+// The still mask's edge threshold: low, since a dim HUD element has little
+// contrast and the age the mask asks for keeps chance matches out (24/255
+// before it). The tray's tuning window moves it (live_tuning
+// still_edge_255ths) for the mask's passes; the per-pixel fallback in the
+// other compositions keeps the built-in value.
+#if defined(XRFG_STILL_MASK) && !defined(XRFG_HYBRID)
+ByteAddressBuffer HybridTuning : register(t8);
+#endif
+// The still mask's tunables (live_tuning still_*), the built-in values
+// where the block is absent or the composition has no view of it.
+uint still_tuning(uint index, uint built_in, uint minimum, uint maximum) {
+#if defined(XRFG_HYBRID) || defined(XRFG_STILL_MASK)
+    bool present = HybridTuning.Load(0u) == 0x4C565446u && HybridTuning.Load(4u) == 13u;
+    return present ? clamp(HybridTuning.Load(12u + 4u * index), minimum, maximum) : built_in;
+#else
+    return built_in;
+#endif
+}
+float strong_edge() { return float(still_tuning(14u, 10u, 1u, 40u)) / 255.0; }
+float still_match_ratio() { return float(still_tuning(15u, 40u, 10u, 100u)) / 100.0; }
+float still_angle_cosine() { return float(still_tuning(16u, 85u, 50u, 100u)) / 100.0; }
+uint still_age_pairs() { return still_tuning(17u, 2u, 1u, 5u); }
+
+StrokeProbe probe_stroke(float2 pixel, uint slice, bool previous_frame) {
+    StrokeProbe probe;
+    probe.gradient = float2(0.0, 0.0);
+    probe.strength = 0.0;
+    probe.axis = float2(1.0, 0.0);
+    probe.color = float4(0.0, 0.0, 0.0, 1.0);
+    probe.edge = false;
+    probe.stroke = false;
+    // The edge between this pixel and the next, right and down: a
+    // difference across adjacent pixels sees a pattern two pixels wide (a
+    // HUD panel's scanlines), which one taken either side of the pixel
+    // cannot - its two taps are always the same phase of it. A is read at
+    // its own image pixels (sample_previous_image): a HUD sits at the same
+    // screen place in both frames however the head moved.
+    CameraSample c, r, d;
+    if (previous_frame) {
+        c = sample_previous_image(pixel, slice, ViewIndex);
+        r = sample_previous_image(pixel + float2(1.0, 0.0), slice, ViewIndex);
+        d = sample_previous_image(pixel + float2(0.0, 1.0), slice, ViewIndex);
+    } else {
+        c = sample_current_target(pixel, slice, ViewIndex);
+        r = sample_current_target(pixel + float2(1.0, 0.0), slice, ViewIndex);
+        d = sample_current_target(pixel + float2(0.0, 1.0), slice, ViewIndex);
+    }
+    float luma_c = edge_luma(c.color);
+    float luma_r = edge_luma(r.color), luma_d = edge_luma(d.color);
+    probe.gradient = float2(luma_r - luma_c, luma_d - luma_c);
+    probe.strength = length(probe.gradient);
+    bool edge = min(c.valid, min(r.valid, d.valid)) >= 0.5 &&
+        probe.strength >= min(strong_edge(), 10.0 / 255.0);
+    probe.edge = edge;
+    [branch] if (edge) {
+        probe.axis = abs(probe.gradient.x) >= abs(probe.gradient.y)
+            ? float2(sign(probe.gradient.x), 0.0)
+            : float2(0.0, sign(probe.gradient.y));
+        // The luma rises from this pixel to the next along the axis (the
+        // axis points the way it rises): the pixel is the minus side, the
+        // next the plus side. Where the axis points left or up, the "next"
+        // is the pixel itself and this one is the plus side.
+        bool forward = probe.axis.x > 0.0 || probe.axis.y > 0.0;
+        float luma_next = abs(probe.axis.x) > 0.0 ? luma_r : luma_d;
+        float near_plus = forward ? luma_next : luma_c;
+        float near_minus = forward ? luma_c : luma_next;
+        float2 plus_at = forward ? abs(probe.axis) : float2(0.0, 0.0);
+        float2 minus_at = forward ? float2(0.0, 0.0) : abs(probe.axis);
+        CameraSample far_plus, far_minus;
+        if (previous_frame) {
+            far_plus = sample_previous_image(pixel + plus_at + 2.0 * probe.axis, slice, ViewIndex);
+            far_minus = sample_previous_image(pixel + minus_at - 2.0 * probe.axis, slice, ViewIndex);
+        } else {
+            far_plus = sample_current_target(pixel + plus_at + 2.0 * probe.axis, slice, ViewIndex);
+            far_minus = sample_current_target(pixel + minus_at - 2.0 * probe.axis, slice, ViewIndex);
+        }
+        // The luma rises along the axis across this pixel. A bright stroke
+        // on the plus side falls again beyond it; a dark stroke on the
+        // minus side rises again beyond it. (Until V559's tenth rebuild the
+        // second case read the wrong way round, and dark text, dark icon
+        // lines and dark borders on a lighter ground were never strokes.)
+        float bright_stroke = near_plus - edge_luma(far_plus.color);
+        float dark_stroke = edge_luma(far_minus.color) - near_minus;
+        probe.stroke = far_plus.valid >= 0.5 && far_minus.valid >= 0.5 &&
+            max(bright_stroke, dark_stroke) >= 0.5 * probe.strength;
+        // The brighter side (the luma rises along the axis).
+        probe.color = forward ? (abs(probe.axis.x) > 0.0 ? r.color : d.color) : c.color;
+    }
+    return probe;
+}
+
+// The same edge in both frames: the same orientation, a similar strength.
+// (Not its colour: a translucent stroke's follows what is behind it, which
+// a stick turn changes between the frames.)
+bool edges_match_within(StrokeProbe previous, StrokeProbe current,
+    float threshold, float ratio, float cosine) {
+    float along = dot(previous.gradient, current.gradient) /
+        max(previous.strength * current.strength, 1.0e-6);
+    return previous.edge && current.edge &&
+        min(previous.strength, current.strength) >= threshold && along >= cosine &&
+        min(previous.strength, current.strength) >= ratio * max(previous.strength, current.strength);
+}
+
+// The built-in tolerances: what holds a HUD's bright text without more
+// evidence. (The tuning window's looser values are the confirmed tier's,
+// see BuildStillMask.)
+bool edges_match(StrokeProbe previous, StrokeProbe current) {
+    return edges_match_within(previous, current, 10.0 / 255.0, 0.4, 0.85);
+}
+
+bool strokes_match(StrokeProbe previous, StrokeProbe current) {
+    return previous.stroke && current.stroke && edges_match(previous, current);
+}
+
+// V559: a translucent head-locked HUD over a moving background (Star
+// Citizen's on a stick turn). Its pixels change with what is behind them, so
+// the patch test above fails, and the flow there follows the background: each
+// synthetic then shows the HUD displaced along the turn, a copy either side
+// of its place, N-1 copies a side at NX. Its strokes do not move: one at the
+// same place in A and in B is content that stayed whatever the flow says.
+// The per-pixel form, for a pair without the still mask.
+bool edge_stationary_patch(float2 pixel, uint slice, float4 current) {
+    StrokeProbe now = probe_stroke(pixel, slice, false);
+    bool stationary = false;
+    [branch] if (now.stroke) {
+        stationary = strokes_match(probe_stroke(pixel, slice, true), now);
+    }
+    return stationary;
+}
+
+// A masked pixel's own colour at this synthetic: the stroke moved by its
+// own offset, scaled by the fraction, the two frames blended there. A stroke
+// at X in B sat at X + offset in A, so at the fraction it is at
+// X + (1 - f) * offset: this pixel reads A at p + f * offset and B at
+// p - (1 - f) * offset.
+float4 still_mask_color(float2 pixel, uint word, float4 fallback) {
+    float2 offset = still_mask_offset(word);
+    float f = synthesis_fraction();
+    CameraSample a = sample_previous_image(pixel + f * offset, Slice, ViewIndex);
+    CameraSample b = sample_current_target(pixel - (1.0 - f) * offset, Slice, ViewIndex);
+    float4 color = fallback;
+    if (a.valid >= 0.5 && b.valid >= 0.5) {
+        color = lerp(a.color, b.color, f);
+    } else if (b.valid >= 0.5) {
+        color = b.color;
+    }
+
+    return saturate(color);
 }
 
 // The flow cell a full-resolution pixel of this view reads, and the pixel at a
@@ -1460,6 +1731,10 @@ float4 synthesize_midpoint(
     // flow still carries the pose term and it is subtracted here.
     bool input_pose_compensated) {
     float4 output_color = float4(0.0, 0.0, 0.0, 1.0);
+    // V559: a warped sample refused for landing on the still mask; the
+    // colour that stands in, applied last so nothing below reads the copy.
+    bool hud_exclude = false;
+    float4 hud_color = float4(0.0, 0.0, 0.0, 1.0);
 #ifdef XRFG_HYBRID
     last_disagreement = 1.0;
     last_vectors_case = 0u;
@@ -1483,9 +1758,34 @@ float4 synthesize_midpoint(
             !use_nvidia_cost &&
             (FlowAuxiliary.Load(int3(1, 0, 0)) & 0x0fU) != 0;
         if (previous_coverage.valid >= 0.5 && !scene_changed) {
-            bool preserve_stationary = validate_fast && repeated_capture_flag() == 0 &&
-                current_fallback.valid >= 0.5 &&
+            // V559: or its edge stayed (a translucent HUD): the still mask
+            // where the pair built one, the per-pixel test otherwise.
+            // V559: where a head-locked HUD belongs in this synthetic. The
+            // frame goes out with B's pose and the compositor warps it to the
+            // head at its own display time, so the HUD is placed between
+            // A's reprojected place and B's by the fraction - the pose
+            // shift of this pixel, scaled - and reads as steady against the
+            // head. On a stick turn the shift is zero.
+            float2 hud_source = pixel;
+            uint still_word = 0u;
+            [branch] if (still_mask_available()) {
+                MappedCoordinate shifted = map_source_to_target(pixel, PreviousMappings[ViewIndex]);
+                float2 pose_shift = shifted.valid >= 0.5 ? shifted.coordinate - pixel : float2(0.0, 0.0);
+                hud_source = pixel - (1.0 - synthesis_fraction()) * pose_shift;
+                still_word = still_mask_word(hud_source, true);
+            }
+            // The mask first: a HUD element over uniform space passes the
+            // unchanged-pixel test too, and that would hold it at B's place
+            // without the placement above.
+            bool pixel_stationary = (still_word & 128u) == 0u && repeated_capture_flag() == 0 &&
+                current_fallback.valid >= 0.5 && validate_fast &&
                 fast_stationary_patch(pixel, Slice, current_fallback.color);
+            bool edge_stationary = !pixel_stationary && repeated_capture_flag() == 0 &&
+                current_fallback.valid >= 0.5 &&
+                (still_mask_available()
+                    ? (still_word & 128u) != 0u
+                    : edge_stationary_patch(pixel, Slice, current_fallback.color));
+            bool preserve_stationary = pixel_stationary || edge_stationary;
             // Content the game's vectors do not describe, kept where it is.
             bool static_overlay = !preserve_stationary && use_game_motion_pipeline &&
                 repeated_capture_flag() == 0 && current_fallback.valid >= 0.5 &&
@@ -1502,6 +1802,21 @@ float4 synthesize_midpoint(
                     stationary_previous,
                     current_fallback.color,
                     synthesis_fraction()));
+                // V559: a stroke that stayed is read from A at the same image
+                // pixel, not through the pose (a head turn moves the world
+                // across the image, not a HUD), moved by its own small offset
+                // where the mask found one.
+                if (edge_stationary) {
+                    if (still_mask_available()) {
+                        output_color = still_mask_color(hud_source, still_word, output_color);
+                    } else {
+                        CameraSample image_previous = sample_previous_image(pixel, Slice, ViewIndex);
+                        if (image_previous.valid >= 0.5) {
+                            output_color = saturate(lerp(
+                                image_previous.color, current_fallback.color, synthesis_fraction()));
+                        }
+                    }
+                }
 #ifdef XRFG_HYBRID
                 last_disagreement = rgb_error(stationary_previous, current_fallback.color);
 #endif
@@ -1598,6 +1913,42 @@ float4 synthesize_midpoint(
                     current_coordinate = pixel - motion.residual * (1.0 - synthesis_fraction());
                     if (input_pose_compensated) {
                         raw_backward = motion.residual;
+                    }
+                }
+                // V559: a warped sample that lands on the still mask - a HUD
+                // stroke read from beside its place - would paint a copy of
+                // it here. Take the other frame's sample alone; with both on
+                // the mask, this pixel's own two.
+                [branch] if (still_mask_available() && endpoints_valid) {
+                    // The A sample's own image pixel, where a HUD would be,
+                    // and the path to it from this pixel's own image place;
+                    // a sample is refused for crossing the grown mask, not
+                    // only for landing on it (the one as built misses half
+                    // a stroke's pixels, and a "safe" sample taken there
+                    // was the HUD again).
+                    MappedCoordinate previous_source = map_target_to_source(
+                        previous_coordinate, PreviousMappings[ViewIndex]);
+                    MappedCoordinate pixel_source = map_target_to_source(
+                        pixel, PreviousMappings[ViewIndex]);
+                    bool previous_on_mask = previous_source.valid >= 0.5 &&
+                        still_mask_crossed(
+                            pixel_source.valid >= 0.5 ? pixel_source.coordinate : pixel,
+                            previous_source.coordinate);
+                    bool current_on_mask = still_mask_crossed(pixel, current_coordinate);
+                    uint current_word = still_mask_word(current_coordinate, true);
+                    if (previous_on_mask && current_on_mask) {
+                        hud_exclude = true;
+                        hud_color = still_mask_color(pixel, current_word, saturate(lerp(
+                            previous_at_pixel.valid >= 0.5 ? previous_at_pixel.color
+                                                           : current_fallback.color,
+                            current_fallback.color,
+                            synthesis_fraction())));
+                    } else if (previous_on_mask && current_sample.valid >= 0.5) {
+                        hud_exclude = true;
+                        hud_color = saturate(current_sample.color);
+                    } else if (current_on_mask && previous_sample.valid >= 0.5) {
+                        hud_exclude = true;
+                        hud_color = saturate(previous_sample.color);
                     }
                 }
                 if (endpoints_valid) {
@@ -1929,6 +2280,9 @@ float4 synthesize_midpoint(
             }
         }
     }
+    if (hud_exclude) {
+        output_color = hud_color;
+    }
     return output_color;
 }
 
@@ -2077,6 +2431,159 @@ float4 SynthesizeNvidiaFastBidirectionalMidpointPS(
     FullscreenVertex input) : SV_Target {
     return synthesize_midpoint(input, 1.0 / 32.0, true, true, true, false, true);
 }
+
+#ifdef XRFG_STILL_MASK
+// V559: the still mask, at half the output's resolution over the whole
+// image. BuildStillMask writes, per texel, whether the stroke at its even
+// pixel stayed in place between the frames; DilateStillMask grows that by a
+// texel into the slice a pixel's own stillness reads.
+[numthreads(8, 8, 1)]
+void BuildStillMask(uint3 id : SV_DispatchThreadID) {
+    uint2 size = (uint2(Width, Height) + 1u) / 2u;
+    if (id.x >= size.x || id.y >= size.y) return;
+    // The texel's even pixel, on a pixel centre: between two the samples
+    // blur a two-pixel stroke away. The odd one is the dilation's.
+    float2 pixel = float2(id.xy) * 2.0;
+    uint word = 0u;
+    uint age = 0u;
+    // Both parities: the edge between adjacent pixels sits on one of the
+    // texel's two columns and one of its two rows, so the even pixel and
+    // the odd one diagonally next to it are both probed.
+    StrokeProbe now = probe_stroke(pixel, Slice, false);
+    StrokeProbe now_odd = probe_stroke(pixel + float2(1.0, 1.0), Slice, false);
+    // Two tiers. Strict: the built-in tolerances, held after the age below
+    // - a HUD's bright text. Loose: the tuning window's tolerances, which
+    // may be as loose as the dim elements need, held only once CONFIRMED:
+    // matched at the same image place in a pair whose head motion moved
+    // every world pixel by two pixels or more (the pose shift) - nothing
+    // of the world, however far, stays put through that; a head-locked HUD
+    // does. Confirmed, a texel is held for as long as it keeps matching
+    // loosely, through stick turns and still views, and dropped when it
+    // stops. The age byte: bits 0-6 the age, bit 7 confirmed.
+    bool matched = false, stroke = false, loose = false;
+    float edge_slider = strong_edge();
+    float ratio_slider = still_match_ratio();
+    float cosine_slider = still_angle_cosine();
+    [branch] if (now.edge) {
+        StrokeProbe before = probe_stroke(pixel, Slice, true);
+        matched = edges_match(before, now);
+        stroke = matched && now.stroke;
+        loose = edges_match_within(before, now, edge_slider, ratio_slider, cosine_slider);
+    }
+    [branch] if (now_odd.edge) {
+        StrokeProbe before_odd = probe_stroke(pixel + float2(1.0, 1.0), Slice, true);
+        bool matched_odd = edges_match(before_odd, now_odd);
+        stroke = stroke || (matched_odd && now_odd.stroke);
+        matched = matched || matched_odd;
+        loose = loose || edges_match_within(before_odd, now_odd, edge_slider, ratio_slider, cosine_slider);
+    }
+    MappedCoordinate shifted = map_source_to_target(pixel, PreviousMappings[ViewIndex]);
+    float pose_shift = shifted.valid >= 0.5 ? length(shifted.coordinate - pixel) : 0.0;
+    // The edge at its own image place in A: a head-locked HUD is there
+    // whatever the head did (the composition moves it by the pose shift).
+    // No search around it: a world edge moving a few pixels a pair would
+    // match at its offset, and be moved by the pose shift on top of it, and
+    // in text a neighbouring stroke of the same glyph matches as well as
+    // this one. (The word's offset bits stay for a HUD that sways of its
+    // own, should one turn up; none is written now.)
+    //
+    // And there for pairs in a row: a HUD is, a world edge that happens to
+    // sit still on the screen for one pair (a light, a strut) seldom is
+    // once the view moves. A stroke counts from its second pair, a step
+    // (a panel's border, which a surface's outline resembles) from its
+    // third.
+    // Held only where holding explains the two frames better than moving:
+    // A at this pixel's own image place against B, and A where the flow (or
+    // the game's vectors, where the pair has them) says this content came
+    // from against B, over the three pixels the probe read. A HUD stays
+    // still while the world moves past; world content, however its edges
+    // match by chance, is where the motion put it. Where nothing moved the
+    // two readings are alike and the age is left as it is: a HUD that has
+    // earned its age keeps it through a still view, and nothing ghosts
+    // there anyway.
+    uint age_byte = StillMaskOut[uint3(id.xy, 3u * Slice + 2u)];
+    uint previous_age = age_byte & 127u;
+    bool confirmed = (age_byte & 128u) != 0u;
+    bool still_wins = false;
+    // Whether this pair could judge still against moved: content moved,
+    // and every sample could be fetched.
+    bool judged = false;
+    [branch] if (matched || loose) {
+        bool vectors = GameMotionRect.z >= 1.0 && GameMotionRect.w >= 1.0;
+        float2 residual;
+        if (vectors) {
+            MappedCoordinate came_from = map_source_to_target(
+                pixel + game_motion_for_pixel(pixel, Slice, ViewIndex), PreviousMappings[ViewIndex]);
+            residual = came_from.valid >= 0.5 ? came_from.coordinate - pixel : float2(0.0, 0.0);
+        } else {
+            bool nvidia = (SynthesisFlags & (1u << 24u)) != 0u;
+            float2 raw = flow_for_pixel(pixel, Slice, ViewIndex, nvidia ? 1.0 / 32.0 : 1.0, nvidia);
+            MappedCoordinate coverage = map_target_to_source(pixel, PreviousMappings[ViewIndex]);
+            residual = nvidia ? raw : raw - (coverage.coordinate - pixel);
+        }
+        if (length(residual) < 1.0) {
+            age = previous_age;
+        } else {
+            float still_error = 0.0, moved_error = 0.0;
+            judged = true;
+            float2 taps[3] = {float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0)};
+            [unroll] for (uint tap = 0u; tap < 3u; ++tap) {
+                float2 at = pixel + taps[tap];
+                CameraSample b = sample_current_target(at, Slice, ViewIndex);
+                CameraSample a_still = sample_previous_image(at, Slice, ViewIndex);
+                CameraSample a_moved = sample_previous_target(at + residual, Slice, ViewIndex);
+                // A sample that cannot be fetched (off the frame, off a
+                // cropped viewport) is no evidence either way.
+                judged = judged && b.valid >= 0.5 && a_still.valid >= 0.5 && a_moved.valid >= 0.5;
+                still_error += rgb_error(a_still.color, b.color);
+                moved_error += rgb_error(a_moved.color, b.color);
+            }
+            // Still must beat moved by a margin, and moved must have
+            // something to lose: a repeating pattern moved by its period
+            // reads 0 either way, and that is not a HUD.
+            still_wins = judged && still_error + 3.0 * 2.0 / 255.0 <= 0.75 * moved_error;
+            age = still_wins ? min(previous_age + 1u, 127u) : 0u;
+        }
+    }
+    if (!matched) {
+        age = 0u;
+    }
+    // Confirmation is earned on a head turn and re-earned on every pair
+    // that can judge: a texel that once held a HUD element keeps nothing
+    // once the world moves through it and moved beats still there.
+    if (!loose) {
+        confirmed = false;
+    } else if (judged) {
+        if (!still_wins) {
+            confirmed = false;
+        } else if (pose_shift >= 2.0) {
+            confirmed = true;
+        }
+    }
+    if ((matched && age >= still_age_pairs() + (stroke ? 0u : 1u)) || (loose && confirmed)) {
+        word = still_mask_pack(int2(0, 0));
+    }
+    StillMaskOut[uint3(id.xy, 3u * Slice)] = word;
+    StillMaskOut[uint3(id.xy, 3u * Slice + 2u)] = age | (confirmed ? 128u : 0u);
+}
+
+[numthreads(8, 8, 1)]
+void DilateStillMask(uint3 id : SV_DispatchThreadID) {
+    uint2 size = (uint2(Width, Height) + 1u) / 2u;
+    if (id.x >= size.x || id.y >= size.y) return;
+    int2 limit = int2(size) - int2(1, 1);
+    // Its own word, else a neighbour's (they share a stroke's offset).
+    uint grown = StillMaskOut[uint3(id.xy, 3u * Slice)];
+    [unroll] for (int dy = -1; dy <= 1; ++dy) {
+        [unroll] for (int dx = -1; dx <= 1; ++dx) {
+            int2 texel = clamp(int2(id.xy) + int2(dx, dy), int2(0, 0), limit);
+            uint neighbour = StillMaskOut[uint3(texel, 3u * Slice)];
+            grown = grown != 0u ? grown : neighbour;
+        }
+    }
+    StillMaskOut[uint3(id.xy, 3u * Slice + 1u)] = grown;
+}
+#endif
 
 #ifdef XRFG_COVERAGE_MASK
 // V539: the coverage mask, at the vectors' resolution over the output
