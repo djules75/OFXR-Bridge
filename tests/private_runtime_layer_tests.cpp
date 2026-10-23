@@ -507,6 +507,8 @@ int main(int argc,char** argv) {
             xr_ok(producer.get(),"shipping End while native End is withheld");
             check(independent,"bridge acceptance returns to game before blocked native End with spare credits");
         } else xr_ok(layer_end_frame_impl(state->handle,&end),"shipping OFXR End handoff");
+        check(xrfg::autonomous::snapshot().runtime.eye_long_side==256,
+            "shipping runtime publishes the actual per-eye projection extent for benchmark quality limits");
         if(sole && !benchmark_sequence && !blocked && !toggling && n==2 && state->three_slot_director) {
             xr_ok(wait_for_synthesis_handoff(state),"second real generated without a future source");
             f.wait_count(2);

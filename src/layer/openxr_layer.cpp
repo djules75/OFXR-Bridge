@@ -19,6 +19,7 @@
 #include "xrfg/d3d11_color_identity.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/benchmark_log.hpp"
+#include "xrfg/benchmark_view_extent.hpp"
 #include "xrfg/dlssg_profile.hpp"
 #include "xrfg/fsr_cadence_probe.hpp"
 #include "xrfg/luke_render_identity.hpp"
@@ -14903,6 +14904,7 @@ XrResult layer_end_frame_impl(
     xrfg::autonomous::apply_runtime_settings();
     struct RuntimeReportScope {
         const std::shared_ptr<SessionState>& state;
+        const XrFrameEndInfo* frame;
         xrfg::autonomous::SwapchainBudgetStatus budget{};
         ~RuntimeReportScope() {
             sample_benchmark_memory(*state);
@@ -14915,8 +14917,8 @@ XrResult layer_end_frame_impl(
             state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only,
         state->private_runtime && state->luke_afw_enabled && (state->luke_shared_swapchains || state->luke_outlaws_preframe),
         state->private_runtime && state->luke_outlaws_preframe,
-        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy); }
-    } runtime_report_scope{state};
+        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,xrfg::benchmark_eye_long_side(frame)); }
+    } runtime_report_scope{state,end_info};
     configure_session_guide_capture(*state);
     const std::uint32_t diagnostic_capture_frame =
         xrfg::two_frame_capture_begin_end_frame();

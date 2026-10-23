@@ -78,7 +78,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465852;
-constexpr std::uint32_t kAbi = 63901;
+constexpr std::uint32_t kAbi = 64001;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -192,7 +192,7 @@ class Discovery {
     DiscoveryState* data{};
 public:
     Discovery() {
-        const auto prefix=L"Local\\OFXRBridgeV639-discovery-"+std::to_wstring(path_identity(global_configuration_path()));
+        const auto prefix=L"Local\\OFXRBridgeV640-discovery-"+std::to_wstring(path_identity(global_configuration_path()));
         mutex=CreateMutexW(nullptr,FALSE,(prefix+L"-mutex").c_str());
         mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(DiscoveryState),(prefix+L"-data").c_str());
         if(mapping)data=static_cast<DiscoveryState*>(MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(DiscoveryState)));
@@ -241,7 +241,7 @@ public:
         // Profile identity is part of the mapping name, so fixture profiles
         // and future concurrent candidates cannot modify the user's settings.
         const auto identity=path_identity(file);
-        const auto prefix = L"Local\\OFXRBridgeV639-" + std::to_wstring(identity);
+        const auto prefix = L"Local\\OFXRBridgeV640-" + std::to_wstring(identity);
         mutex = CreateMutexW(nullptr, FALSE, (prefix + L"-mutex").c_str());
         if (!mutex) return;
         const DWORD waited = WaitForSingleObject(mutex, 2000);
@@ -529,7 +529,7 @@ bool initialize_game_configuration(const std::filesystem::path& executable) noex
         // A dedicated creation mutex prevents two simultaneous first launches
         // overwriting one another's freshly created profile.
 #ifdef _WIN32
-        const auto name=L"Local\\OFXRBridgeV639-create-"+std::to_wstring(path_identity(file));
+        const auto name=L"Local\\OFXRBridgeV640-create-"+std::to_wstring(path_identity(file));
         HANDLE mutex=CreateMutexW(nullptr,FALSE,name.c_str());if(!mutex)return false;
         struct CreationGuard {HANDLE handle;bool locked{};~CreationGuard(){if(locked)ReleaseMutex(handle);CloseHandle(handle);}} guard{mutex};
         const auto waited=WaitForSingleObject(mutex,2000);
@@ -685,6 +685,8 @@ struct SuiteResult {
     Settings settings;BenchmarkSamples samples;BenchmarkMemory memory;
     std::string label;
     bool complete{};
+    std::uint32_t eye_long_side{};
+    bool vectors{};
 };
 struct SuiteRecorder {
     Channel* controller{};
@@ -698,6 +700,8 @@ struct SuiteRecorder {
     std::filesystem::path layout_path;
     std::vector<SuiteResult> results;
     bool afw_success{};
+    bool vector_success{};
+    std::uint32_t eye_long_side{};
     bool memory_requested{};
     bool steamvr{}; // pacing matrix; may also be opt-in VDXR
     bool legacy_vdxr{};
@@ -808,10 +812,12 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
         csv_mib(rec.stream,rec.memory.vram_valid,rec.memory.vram_bytes);rec.stream<<',';
         csv_mib(rec.stream,rec.memory.shared_gpu_valid,rec.memory.shared_gpu_bytes);rec.stream<<',';
         csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_working_set_bytes);rec.stream<<',';
-        csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_private_commit_bytes);rec.stream<<','<<quoted(verdict)<<','<<s.pacing_mode<<','<<rec.runtime<<','<<rec.legacy_vdxr<<'\n';
+        csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_private_commit_bytes);rec.stream<<','<<quoted(verdict)<<','<<s.pacing_mode<<','<<rec.runtime<<','<<rec.legacy_vdxr<<','<<rec.eye_long_side<<',';
+        if(rec.samples.refresh_hz.empty())rec.stream<<"N/A";else rec.stream<<benchmark_median(rec.samples.refresh_hz);
+        rec.stream<<','<<rec.vector_success<<'\n';
         rec.stream.flush();
         if(!rec.stream)throw std::runtime_error("CSV write failed");
-        rec.results.push_back({rec.settings,rec.samples,rec.memory,rec.label,std::string_view(verdict)=="complete"});csv_layout(rec,b);
+        rec.results.push_back({rec.settings,rec.samples,rec.memory,rec.label,std::string_view(verdict)=="complete",rec.eye_long_side,rec.vector_success});csv_layout(rec,b);
     }
     rec.revision=0;rec.samples={};
 }
@@ -831,7 +837,7 @@ void csv_open(SuiteRecorder& rec,BenchmarkStatus& b,unsigned preset,const Runtim
     rec.stream.open(path,std::ios::out|std::ios::trunc);
     rec.stream.imbue(std::locale::classic());rec.stream<<std::fixed<<std::setprecision(3);
     if(!rec.stream)throw std::runtime_error("Cannot create benchmark CSV");
-    rec.stream<<"Build,Run,GamePID,Game,Step,Route,SeparateA,ReduceB,Multiplier,PreferFPS,Neural,AFWMode,AFWShadingRate,DLSSGPreset,SettleSeconds,UsefulSeconds,OutputFPSMin,OutputFPSMedian,OutputFPSMax,FPSSamples,CycleEstimatedMinMs,CycleEstimatedMedianMs,CycleEstimatedMaxMs,CycleSamples,MemorySnapshotMs,VRAMEndMiB,SharedGPUEndMiB,RAMWorkingSetEndMiB,RAMPrivateCommitEndMiB,Status,PacingMode,Runtime,LegacyVDXR\n";
+    rec.stream<<"Build,Run,GamePID,Game,Step,Route,SeparateA,ReduceB,Multiplier,PreferFPS,Neural,AFWMode,AFWShadingRate,DLSSGPreset,SettleSeconds,UsefulSeconds,OutputFPSMin,OutputFPSMedian,OutputFPSMax,FPSSamples,CycleEstimatedMinMs,CycleEstimatedMedianMs,CycleEstimatedMaxMs,CycleSamples,MemorySnapshotMs,VRAMEndMiB,SharedGPUEndMiB,RAMWorkingSetEndMiB,RAMPrivateCommitEndMiB,Status,PacingMode,Runtime,LegacyVDXR,EyeLongSide,DisplayHz,NativeVectors\n";
     rec.stream.flush();if(!rec.stream)throw std::runtime_error("Cannot write benchmark CSV header");
     std::snprintf(b.csv_path,sizeof(b.csv_path),"%s",utf8_path(rec.layout_path).c_str());
 }
@@ -846,9 +852,12 @@ void suite_complete(Shared& shared,const SuiteRecorder& rec,std::uint64_t now) {
         // The owner excludes the standalone FidelityFX route for image quality.
         // Hybrid has its own native-guide contract; Off/AFW-only are references.
         const bool fidelity=settings.enabled && settings.frame_generation==0 && settings.backend==0;
-        scores.push_back(benchmark_score(result.samples,result.complete && !fidelity));
+        auto score=benchmark_score(result.samples,result.complete && !fidelity);
+        score.vectors=result.vectors;score.afw_only=b.luke && !settings.enabled && settings.afw_mode!=0;
+        score.shading=settings.afw_shading_rate;score.eye_long_side=result.eye_long_side;
+        score.display_hz=benchmark_median(result.samples.refresh_hz);scores.push_back(score);
     }
-    const auto best=benchmark_best(scores);
+    const auto best=benchmark_best(scores,b.luke);
     if(!best) {
         suite_restore(shared,BenchmarkPhase::complete,"Complete. No valid automatic choice; original settings restored.",now);return;
     }
@@ -951,14 +960,21 @@ void tick_benchmark(std::uint64_t now) noexcept {
                 b.phase=BenchmarkPhase::running;b.started_ms=now;
                 rec.revision=b.revision;rec.index=b.index;rec.started=now;
                 rec.settings=s.desired;rec.label=b.label;rec.samples={};
-                rec.afw_success=false;
+                rec.afw_success=false;rec.vector_success=false;rec.eye_long_side=0;
                 rec.memory_requested=false;rec.memory={};
                 rec.next_sample=now;
             }
             if(now>=rec.next_sample) {
                 rec.next_sample=now+250;
-                if(s.runtime.applied_revision==b.revision && s.runtime.telemetry.updated_ms<=GetTickCount64())
+                if(s.runtime.applied_revision==b.revision && s.runtime.telemetry.updated_ms<=GetTickCount64()) {
+                    const auto previous=rec.samples.last_ms;
                     rec.samples.observe(s.runtime.telemetry,b.started_ms,now+1);
+                    if(rec.samples.last_ms!=previous) {
+                        if(const auto side=s.runtime.eye_long_side)rec.eye_long_side=rec.eye_long_side?std::min(rec.eye_long_side,side):side;
+                        rec.vector_success |= s.desired.enabled && s.runtime.telemetry.generating && s.runtime.motion_source==1 &&
+                            (s.runtime.generation_state==GenerationState::ready || s.runtime.generation_state==GenerationState::multi_frame_unsupported);
+                    }
+                }
                 rec.afw_success |= s.runtime.afw_running;
             }
             if(!rec.memory_requested && now>=b.started_ms+9500) {
@@ -1090,6 +1106,7 @@ std::string_view interface_vectors_text(const Snapshot& s, std::uint64_t now) no
 std::string_view interface_state_text(const Snapshot& s) noexcept {
     if (!s.connected) return "Waiting";
     const auto& r = s.runtime;
+    if(interface_afw_only_active(s,GetTickCount64()))return s.desired.nr_enabled && r.nr_running ? "AFW + Neural" : "AFW";
     if (r.generation_state == GenerationState::paused) return "Paused";
     if (r.pending || r.applied_revision != s.revision) return "Applying settings";
     const bool active = r.telemetry.updated_ms && GetTickCount64() - r.telemetry.updated_ms < 2000 && r.telemetry.generating;
@@ -1119,6 +1136,12 @@ bool interface_generation_active(const Snapshot& s) noexcept {
     const auto text=interface_state_text(s);
     return s.desired.enabled && (text.starts_with("FidelityFX") || text.starts_with("OFXR ") ||
         text.starts_with("Hybrid") || text.starts_with("FSR") || text.starts_with("DLSS-G"));
+}
+bool interface_afw_only_active(const Snapshot& s,std::uint64_t now) noexcept {
+    const auto& r=s.runtime;
+    return s.connected && r.heartbeat_ms && now>=r.heartbeat_ms && now-r.heartbeat_ms<2000 &&
+        r.luke_detected && s.desired.afw_mode!=0 && r.afw_running &&
+        (!s.desired.enabled || r.pacing_mode==kAfwOnlyPacingMode) && !r.pending && r.applied_revision==s.revision;
 }
 std::string_view swapchain_budget_warning(const SwapchainBudgetStatus& value) noexcept {
     if (value.fallback) return "Swapchain fallback: auxiliary allocation refused; synchronous Luke delivery is active until the game restarts.";

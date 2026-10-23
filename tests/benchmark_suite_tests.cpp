@@ -1,4 +1,5 @@
 #include "xrfg/benchmark_suite.hpp"
+#include "xrfg/benchmark_view_extent.hpp"
 #include <windows.h>
 #include <filesystem>
 #include <fstream>
@@ -40,17 +41,60 @@ void automatic_choice_rules() {
         std::rotate(reordered.begin(),reordered.begin()+1,reordered.end());
     }
 }
+void quality_choice_rules() {
+    const auto score=[](double fps,double latency,int shading=0,unsigned side=4100,double hz=90,bool afw=false,bool vectors=false) {
+        BenchmarkScore s{fps,latency,2,2,true};s.shading=shading;s.eye_long_side=side;s.display_hz=hz;s.afw_only=afw;s.vectors=vectors;return s;
+    };
+    check(benchmark_best({score(70,40),score(90,40,4,2999)},true)==0,"2x2 excluded below 3000 pixels");
+    check(benchmark_best({score(70,40),score(90,40,4,3000)},true)==1,"2x2 allowed at exactly 3000 pixels");
+    check(benchmark_best({score(70,40),score(95,40,8,3999)},true)==0,"4x4 excluded below 4000 pixels");
+    check(benchmark_best({score(70,40),score(95,40,8,4000)},true)==1,"4x4 allowed at exactly 4000 pixels");
+    check(benchmark_best({score(70,40),score(95,40,8,0)},true)==0,"unknown resolution never permits coarse AFW");
+    check(benchmark_best({score(81,90),score(90,20,4)},true)==0,"1x1 at 90 percent Hz wins despite lower FPS and higher latency");
+    check(benchmark_best({score(80.99,90),score(90,20,4)},true)==1,"1x1 below 90 percent does not override performance");
+    check(benchmark_best({score(108,90,0,4100,120),score(120,20,4,4100,120)},true)==0,"quality preference follows actual refresh, not a fixed FPS cap");
+    check(benchmark_best({score(81,90,0,4100,0),score(90,20,4,4100,0)},true)==1,"unknown refresh cannot trigger a relative preference");
+    check(benchmark_best({score(72,90,0,4100,90,true),score(90,20)},true)==0,"AFW alone at exactly 80 percent Hz takes priority");
+    check(benchmark_best({score(71.99,90,0,4100,90,true),score(90,20)},true)==1,"AFW alone below 80 percent uses ordinary comparison");
+    check(benchmark_best({score(72,90,4,3100,90,true),score(81,20)},true)==0,"AFW-only priority precedes OFXR full-quality preference");
+    check(benchmark_best({score(81,90,0,4100,90,true),score(90,20,4,4100,90,true)},true)==0,"within AFW-only group prefer full quality near refresh");
+    check(benchmark_best({score(90,40),score(89.5,52,0,4100,90,false,true)})==1,"vectors may cost twelve ms at equivalent FPS");
+    check(benchmark_best({score(90,40),score(89.5,52.01,0,4100,90,false,true)})==0,"vector preference cannot exceed twelve ms");
+    check(benchmark_best({score(90,40),score(88.99,40,0,4100,90,false,true)})==0,"vector preference cannot exceed one FPS loss");
+    check(benchmark_best({score(90,40),score(89.5,52)})==0,"unconfirmed optical fallback does not gain native-vector preference");
+
+    XrCompositionLayerProjectionView eyes[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+    for(auto& eye:eyes)eye.subImage.imageRect.extent={2048,2800};
+    eyes[1].subImage.imageRect.offset.x=2048; // 4096-wide packed allocation
+    XrCompositionLayerProjection scene{XR_TYPE_COMPOSITION_LAYER_PROJECTION};scene.viewCount=2;scene.views=eyes;
+    XrCompositionLayerQuad hud{XR_TYPE_COMPOSITION_LAYER_QUAD};hud.subImage.imageRect.extent={8000,8000};
+    const XrCompositionLayerBaseHeader* layers[]{reinterpret_cast<const XrCompositionLayerBaseHeader*>(&hud),reinterpret_cast<const XrCompositionLayerBaseHeader*>(&scene)};
+    XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO};frame.layerCount=2;frame.layers=layers;
+    check(xrfg::benchmark_eye_long_side(&frame)==2800,"packed stereo width and large HUD never count as eye resolution");
+    for(auto& eye:eyes)eye.subImage.imageRect.extent={2500,4000};
+    check(xrfg::benchmark_eye_long_side(&frame)==4000,"portrait height counts as the qualifying eye side");
+    eyes[1].subImage.imageRect.extent={2900,2900};
+    check(xrfg::benchmark_eye_long_side(&frame)==2900,"both eyes must meet quality threshold");
+    eyes[1].subImage.imageRect.extent={0,4000};check(xrfg::benchmark_eye_long_side(&frame)==0,"invalid stereo extent is unknown");
+    frame.layerCount=1;check(xrfg::benchmark_eye_long_side(&frame)==0,"HUD-only frames cannot supply scene resolution");
+}
 void automatic_choice_controller() {
     RuntimeStatus runtime{};runtime.sessions=1;runtime.dlssg_preset_request=1;
     // Original VDXR, private basic, private full and Luke all use the same chooser.
-    for(unsigned scenario=0;scenario<4;++scenario) {
-        const bool modern=scenario!=0,luke=scenario==3,full=scenario==2;
+    for(unsigned scenario=0;scenario<8;++scenario) {
+        const bool modern=scenario!=0,luke=scenario>=3 && scenario<=6,full=scenario==2 || scenario==7;
         auto saved=snapshot().desired;saved.advanced_mode=false;saved.pacing_mode=1;
         saved.benchmark_auto_pick=true;saved.nr_enabled=true;saved.afw_mode=3;saved.afw_shading_rate=0;
         check(request(saved),"save auto-pick game preference");saved=snapshot().desired;
         runtime.vdxr_runtime=!modern;runtime.steamvr_runtime=modern;runtime.vdxr_legacy=!modern;runtime.luke_detected=luke;
         runtime.pacing_mode=modern?1:0;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
-        const auto plan=benchmark_plan(full,luke,modern,false);const auto winner=plan.size()-1;
+        runtime.eye_long_side=scenario==4?2800:4100;
+        const auto plan=benchmark_plan(full,luke,modern,false);auto winner=plan.size()-1;
+        if(scenario==4 || scenario==6) {
+            winner=0;while(winner<plan.size() && (plan[winner].disabled || plan[winner].backend!=2 || plan[winner].shading!=0 || plan[winner].pacing!=1))++winner;
+            check(winner<plan.size(),"full-quality OFXR candidate exists");
+        }
+        if(scenario==5)winner=0;
         check(start_benchmark(full,luke) && snapshot().benchmark.auto_pick,"freeze auto-pick at suite start");
         for(std::size_t i=0;i<plan.size();++i) {
             // Telemetry is timestamped by the real reporter. Start this trial's
@@ -58,6 +102,7 @@ void automatic_choice_controller() {
             const auto clock=GetTickCount64()-4000;
             const auto current=snapshot();runtime.applied_revision=current.revision;
             runtime.pacing_mode=current.desired.pacing_mode;runtime.afw_shading_rate=current.desired.afw_shading_rate;
+            runtime.motion_source=current.desired.frame_generation?1:0;runtime.generation_state=GenerationState::ready;
             runtime.afw_running=luke;runtime.telemetry={};report_runtime(runtime);report_interface_telemetry({});tick_benchmark(clock);
             check(snapshot().benchmark.phase==BenchmarkPhase::running,"auto-pick trial settings applied");
             for(unsigned sample=0;sample<3;++sample) {
@@ -70,6 +115,17 @@ void automatic_choice_controller() {
                 t.generating=current.desired.enabled && i!=1;
                 t.output_fps=(i==1 || fidelity?120.F:i==0?70.F:i==winner?89.5F:90.F)+(float(sample)-1)*.5F;
                 t.cycle_estimated_valid=true;t.cycle_estimated_ms=(i==1 || fidelity?1.F:i==winner?40.F:60.F)+float(sample);
+                t.display_hz=120;
+                if(scenario==4 && current.desired.afw_shading_rate!=0)t.output_fps=120+float(sample)-1;
+                if(scenario==5)t.output_fps=(i==winner?96.F:current.desired.enabled?120.F:70.F)+(float(sample)-1)*.5F;
+                if(scenario==6) {
+                    t.output_fps=(i==winner?108.F:current.desired.enabled && current.desired.afw_shading_rate!=0?120.F:70.F)+(float(sample)-1)*.5F;
+                    t.cycle_estimated_ms=(i==winner?80.F:40.F)+float(sample);
+                }
+                if(scenario==7) {
+                    t.output_fps=(i==winner?89.5F:current.desired.frame_generation?70.F:fidelity?120.F:current.desired.enabled?90.F:70.F)+(float(sample)-1)*.5F;
+                    t.cycle_estimated_ms=(i==winner?52.F:current.desired.frame_generation?70.F:40.F)+float(sample);
+                }
                 report_runtime(runtime);report_interface_telemetry(t);tick_benchmark(GetTickCount64()+sample*300);
             }
             tick_benchmark(clock+10000);
@@ -79,7 +135,7 @@ void automatic_choice_controller() {
             "completion saves exact route, Fast, multiplier, pacing and AFW quality of the valid winner");
         check(std::string(result.benchmark.message).find("Selected "+plan[winner].label)!=std::string::npos,
             "result identifies the selected route with measured FPS and ms");
-        if(luke)check(std::string(result.benchmark.message).find("4x4")!=std::string::npos,"Luke result names selected AFW quality");
+        if(luke)check(std::string(result.benchmark.message).find(plan[winner].shading==8?"4x4":"1x1")!=std::string::npos,"Luke result names selected AFW quality");
         check(parse_settings(serialize_settings(result.desired))==expected,"automatic choice persists with route preferences");
         std::ifstream file(configuration_path());std::stringstream contents;contents<<file.rdbuf();
         check(parse_settings(contents.str())==expected,"on-disk game configuration contains the selected settings");
@@ -110,6 +166,7 @@ int main() {
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",folder.c_str());
     try {
         automatic_choice_rules();
+        quality_choice_rules();
         const auto optical=benchmark_plan(false,false,true,true),full=benchmark_plan(true,false,true,true);
         check(optical.size()==31 && full.size()==49,"SteamVR: three pacing modes, Normal/Fast, one Off reference");
         for(const bool luke:{false,true}) for(const bool complete:{false,true}) {
@@ -243,7 +300,7 @@ int main() {
         const auto details_path=std::filesystem::u8path(state.benchmark.csv_path);
         std::ifstream details(details_path.parent_path()/(details_path.stem().wstring()+L"-details.csv"));
         std::stringstream details_text;details_text<<details.rdbuf();
-        check(details_text.str().find("Status,PacingMode,Runtime,LegacyVDXR\n")!=std::string::npos,
+        check(details_text.str().find("Status,PacingMode,Runtime,LegacyVDXR,EyeLongSide,DisplayHz,NativeVectors\n")!=std::string::npos,
             "details CSV identifies the requested pacing of every trial");
         check(details_text.str().find(",A startup request,")!=std::string::npos &&
             details_text.str().find("C startup request")==std::string::npos,"CSV records A receipt instead of inventing C");

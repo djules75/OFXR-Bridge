@@ -142,6 +142,7 @@ struct RuntimeStatus {
     VideoMemoryStatus video_memory{};
     bool luke_shared_swapchains{}, luke_shared_swapchains_forced{}; // active session, not requested next launch
     bool vdxr_runtime{}, vdxr_legacy{true}; // active startup transport, not next-launch preference
+    std::uint32_t eye_long_side{}; // minimum per-eye longest side of the submitted stereo scene
 };
 inline bool pacing_comparison_runtime(const RuntimeStatus& r) noexcept {
     return !r.vdxr_legacy;
@@ -189,6 +190,7 @@ void report_runtime(RuntimeStatus status) noexcept;
 void report_video_memory(VideoMemoryStatus value) noexcept;
 std::string interface_vram_text(const Snapshot& value);
 bool interface_generation_active(const Snapshot& value) noexcept;
+bool interface_afw_only_active(const Snapshot& value,std::uint64_t now_ms) noexcept;
 enum class OverlaySwapchain : unsigned { fps=1, meter=2, menu=4 };
 void report_overlay_limit(OverlaySwapchain surface, bool refused) noexcept;
 std::string_view overlay_limit_text(std::uint32_t mask) noexcept;

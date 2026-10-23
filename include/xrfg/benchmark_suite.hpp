@@ -99,7 +99,7 @@ inline double benchmark_median(std::vector<double> values) {
     return values.size()%2 ? values[middle] : (values[middle-1]+values[middle])/2;
 }
 struct BenchmarkSamples {
-    std::vector<double> fps,latency;
+    std::vector<double> fps,latency,refresh_hz;
     std::uint64_t last_ms{};
     bool generated{};
     void observe(const InterfaceTelemetry& m,std::uint64_t started,std::uint64_t end) {
@@ -113,11 +113,16 @@ struct BenchmarkSamples {
         if(m.cycle_estimated_valid && std::isfinite(m.cycle_estimated_ms) && m.cycle_estimated_ms>=0)
             latency.push_back(m.cycle_estimated_ms);
         generated |= m.generating;
+        if(std::isfinite(m.display_hz) && m.display_hz>0)refresh_hz.push_back(m.display_hz);
     }
 };
 struct BenchmarkScore {
     double fps{}, latency{}, fps_range{}, latency_range{};
     bool valid{};
+    bool vectors{}, afw_only{};
+    int shading{};
+    std::uint32_t eye_long_side{};
+    double display_hz{};
 };
 inline BenchmarkScore benchmark_score(const BenchmarkSamples& samples,bool complete) {
     // A partial/failed trial, unknown timing or a single sample cannot establish
@@ -133,19 +138,40 @@ inline BenchmarkScore benchmark_score(const BenchmarkSamples& samples,bool compl
     return {benchmark_median(samples.fps),benchmark_median(samples.latency),
         *fps.second-*fps.first,*latency.second-*latency.first,true};
 }
-inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScore>& scores) {
+inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScore>& scores,bool luke=false) {
     // Anchor tolerances to the global maxima/minima, not pairwise comparisons:
     // a chain of near-ties must not select a materially slower configuration.
     constexpr double epsilon=1e-6;
-    double highest=0;
-    for(const auto& score:scores)if(score.valid)highest=std::max(highest,score.fps);
-    double lowest=std::numeric_limits<double>::infinity();
-    for(const auto& score:scores)if(score.valid && highest-score.fps<=1+epsilon)
-        lowest=std::min(lowest,score.latency);
-    std::optional<std::size_t> best;
+    std::vector<std::size_t> pool;
     for(std::size_t i=0;i<scores.size();++i) {
+        const auto& s=scores[i];if(!s.valid)continue;
+        if(luke && ((s.shading==8 && s.eye_long_side<4000) || (s.shading==4 && s.eye_long_side<3000)))continue;
+        pool.push_back(i);
+    }
+    if(luke) {
+        std::vector<std::size_t> afw;
+        for(const auto i:pool)if(scores[i].afw_only && scores[i].display_hz>0 &&
+            scores[i].fps+1e-3>=scores[i].display_hz*.8)afw.push_back(i);
+        if(!afw.empty())pool=std::move(afw);
+        const bool full_quality=std::any_of(pool.begin(),pool.end(),[&](auto i) {
+            return scores[i].shading==0 && scores[i].display_hz>0 && scores[i].fps+1e-3>=scores[i].display_hz*.9;
+        });
+        if(full_quality)std::erase_if(pool,[&](auto i){return scores[i].shading!=0;});
+    }
+    double highest=0;
+    for(const auto i:pool)highest=std::max(highest,scores[i].fps);
+    std::erase_if(pool,[&](auto i){return highest-scores[i].fps>1+epsilon;});
+    double optical_latency=std::numeric_limits<double>::infinity();
+    for(const auto i:pool)if(!scores[i].vectors)optical_latency=std::min(optical_latency,scores[i].latency);
+    std::vector<std::size_t> vectors;
+    for(const auto i:pool)if(scores[i].vectors && scores[i].latency<=optical_latency+12+epsilon)vectors.push_back(i);
+    if(!vectors.empty())pool=std::move(vectors);
+    double lowest=std::numeric_limits<double>::infinity();
+    for(const auto i:pool)lowest=std::min(lowest,scores[i].latency);
+    std::optional<std::size_t> best;
+    for(const auto i:pool) {
         const auto& score=scores[i];
-        if(!score.valid || highest-score.fps>1+epsilon || score.latency-lowest>2+epsilon)continue;
+        if(score.latency-lowest>2+epsilon)continue;
         const auto order=[](const auto& s) {return std::tuple{s.fps_range,s.latency_range,s.latency,-s.fps};};
         if(!best || order(score)<order(scores[*best]))best=i;
     }

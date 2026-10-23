@@ -73,7 +73,7 @@ void status(const Snapshot& state) {
             ImGui::EndTable();
         }
         const auto text = interface_state_text(state);
-        const auto color = interface_generation_active(state) ? ImVec4(.36F,.88F,.56F,1) :
+        const auto color = interface_generation_active(state) || interface_afw_only_active(state,now) ? ImVec4(.36F,.88F,.56F,1) :
             text == "Fallback" || text == "Applying settings" ? ImVec4(1,.75F,.28F,1) : ImVec4(.75F,.8F,.88F,1);
         ImGui::PushStyleColor(ImGuiCol_Text, color);
         ImGui::PushTextWrapPos();
@@ -371,6 +371,7 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     changed |= ImGui::Checkbox("Auto pick best one", &draft.benchmark_auto_pick);
     ImGui::EndDisabled();
     ImGui::TextWrapped("On completion: within 1 FPS of the highest median, then within 2 ms of the lowest median latency; prefer the narrowest FPS range, then latency range. FidelityFX and failed or incomplete measurements are excluded. The selected settings are saved for this game.");
+    ImGui::TextWrapped("Native vectors take priority at equivalent FPS with at most 12 ms extra latency. Luke: 2x2 requires a 3000px eye side, 4x4 requires 4000px. Prefer AFW alone from 80% of display Hz; within the remaining choices prefer 1x1 from 90%.");
     ImGui::BeginDisabled(active || !permitted || !state.connected);
     const bool optical=ImGui::Button("Tests without vectors");
     ImGui::SameLine();

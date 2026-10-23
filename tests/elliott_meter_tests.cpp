@@ -65,6 +65,19 @@ int main(int argc,char** argv){try{
     check(count(rasterize_elliott_meter(luke,now,false,false),red)>100,"requested Luke AFW idle red");
     luke.runtime.afw_running=1;
     check(count(rasterize_elliott_meter(luke,now,false,false),red)==0,"active Luke AFW green");
+    auto afw_only=luke;afw_only.desired.enabled=false;
+    afw_only.runtime.telemetry.generating=false;afw_only.runtime.generation_state=autonomous::GenerationState::paused;
+    afw_only.runtime.provider_error=5; // a disabled OFXR failure is irrelevant to AFW
+    check(autonomous::interface_state_text(afw_only)=="AFW" &&
+        !autonomous::interface_generation_active(afw_only),"AFW-only label identifies actual work without claiming OFXR generation");
+    check(count(rasterize_elliott_meter(afw_only,now,false,false),green)>100 &&
+        count(rasterize_elliott_meter(afw_only,now,false,false),red)==0,"AFW alone is green even when OFXR is disabled/paused");
+    afw_only.desired.enabled=true;afw_only.runtime.pacing_mode=autonomous::kAfwOnlyPacingMode;
+    check(count(rasterize_elliott_meter(afw_only,now,false,false),red)==0,"startup AFW-only bypass is also green");
+    afw_only.runtime.afw_running=false;
+    check(count(rasterize_elliott_meter(afw_only,now,false,false),green)==0,"idle AFW-only never falsely reports green");
+    afw_only.runtime.afw_running=true;
+    check(count(rasterize_elliott_meter(afw_only,now+2100,false,false),green)==0,"stale AFW-only receipt never reports green");
     luke.desired.afw_mode=0;luke.runtime.afw_running=0;
     check(count(rasterize_elliott_meter(luke,now,false,false),red)==0,"AFW off neutral");
     check(count(rasterize_elliott_meter(active,now+2100,false,false),green)==0,"stale meter not green");

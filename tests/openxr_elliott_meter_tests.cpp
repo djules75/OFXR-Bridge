@@ -318,7 +318,10 @@ int main(int argc, char** argv) {
             check(overlay.end_frame(&info,false)==XR_SUCCESS&&observed_count==1,"suspend removes meter");
         }
         check(created==destroyed&&space_created==space_destroyed,"meter resource lifetime");
-        std::filesystem::remove(xrfg::autonomous::configuration_path());std::filesystem::remove(profile);
+        std::filesystem::remove(xrfg::autonomous::configuration_path());
+        std::filesystem::remove(profile/L"Profiles");
+        std::filesystem::remove(profile/L"ofxr-bridge.ini");
+        std::filesystem::remove(profile);
         std::cout<<"Elliott meter GPU upload, live switching, controller tracking, ownership and original counters passed\n";return 0;
     } catch (const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

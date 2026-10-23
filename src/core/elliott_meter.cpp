@@ -319,8 +319,8 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     const bool fresh=r.heartbeat_ms && now_ms>=r.heartbeat_ms && now_ms-r.heartbeat_ms<2000;
     const bool optional_ready=(!state.desired.nr_enabled || (fresh && r.nr_running)) &&
         (!r.luke_detected || state.desired.afw_mode==0 || (fresh && r.afw_running));
-    const bool healthy=current && m.generating && state.desired.enabled &&
-        autonomous::interface_generation_active(state) && !r.provider_error && optional_ready;
+    const bool ofxr_active=m.generating && state.desired.enabled && autonomous::interface_generation_active(state) && !r.provider_error;
+    const bool healthy=current && (ofxr_active || autonomous::interface_afw_only_active(state,now_ms)) && optional_ready;
     const auto tone=healthy ? PanelTone::good : PanelTone::bad;
     const auto metric_tone=[&](bool valid){return healthy && valid ? PanelTone::good : PanelTone::bad;};
     const auto value=[](float v,bool valid,bool rate){
