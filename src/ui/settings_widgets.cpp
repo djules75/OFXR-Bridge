@@ -367,6 +367,10 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     if (!permitted) ImGui::TextWrapped("Benchmarks disabled. Enable benchmarks in the tray to enable sampling and these buttons.");
     const bool active=benchmark_active(state.benchmark);
     ImGui::TextWrapped("10 seconds per configuration; discard only the first 3 seconds. CSV: min / median / max Output FPS and Cycle estimated. Works with diagnostic logging off. Neural and AFW choices are kept.");
+    ImGui::BeginDisabled(active);
+    changed |= ImGui::Checkbox("Auto pick best one", &draft.benchmark_auto_pick);
+    ImGui::EndDisabled();
+    ImGui::TextWrapped("On completion: within 1 FPS of the highest median, then within 2 ms of the lowest median latency; prefer the narrowest FPS range, then latency range. FidelityFX and failed or incomplete measurements are excluded. The selected settings are saved for this game.");
     ImGui::BeginDisabled(active || !permitted || !state.connected);
     const bool optical=ImGui::Button("Tests without vectors");
     ImGui::SameLine();
@@ -408,7 +412,7 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     } else {
         ImGui::TextWrapped("Legacy VDXR: 11 optical or 17 complete tests. Every route compares Normal/Fast. Luke: 15 tests, three AFW qualities through 0.3.0, no Fast or 3X.");
     }
-    ImGui::TextWrapped("Close the menu and keep the same test scene. Original settings are restored after Stop or completion. Memory is sampled once near the end of each trial. Tests keep the startup DLSS-G preset and never change its NVIDIA profile. A is the initial preference; changing presets requires restarting the game.");
+    ImGui::TextWrapped("Close the menu and keep the same test scene. Stop restores original settings. Completion restores them unless Auto pick best one selects a valid result. Memory is sampled once near the end of each trial. Tests keep the startup DLSS-G preset and never change its NVIDIA profile. A is the initial preference; changing presets requires restarting the game.");
     if(draft.advanced_mode && ImGui::CollapsingHeader("Experimental features")) {
         changed |= ImGui::Checkbox("Reduce black bars during headset rotation###R19 synthetic camera (experimental)", &draft.r19_camera);
     }

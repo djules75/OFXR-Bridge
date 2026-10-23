@@ -4,6 +4,9 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <limits>
+#include <optional>
+#include <tuple>
 
 namespace xrfg::autonomous {
 struct BenchmarkStep {
@@ -112,6 +115,42 @@ struct BenchmarkSamples {
         generated |= m.generating;
     }
 };
+struct BenchmarkScore {
+    double fps{}, latency{}, fps_range{}, latency_range{};
+    bool valid{};
+};
+inline BenchmarkScore benchmark_score(const BenchmarkSamples& samples,bool complete) {
+    // A partial/failed trial, unknown timing or a single sample cannot establish
+    // both performance and stability. Never turn missing measurements into zero.
+    const auto measured=[](const auto& values) {
+        return values.size()>=2 && std::all_of(values.begin(),values.end(),[](double x) {
+            return std::isfinite(x) && x>0;
+        });
+    };
+    if(!complete || !measured(samples.fps) || !measured(samples.latency))return {};
+    const auto fps=std::minmax_element(samples.fps.begin(),samples.fps.end());
+    const auto latency=std::minmax_element(samples.latency.begin(),samples.latency.end());
+    return {benchmark_median(samples.fps),benchmark_median(samples.latency),
+        *fps.second-*fps.first,*latency.second-*latency.first,true};
+}
+inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScore>& scores) {
+    // Anchor tolerances to the global maxima/minima, not pairwise comparisons:
+    // a chain of near-ties must not select a materially slower configuration.
+    constexpr double epsilon=1e-6;
+    double highest=0;
+    for(const auto& score:scores)if(score.valid)highest=std::max(highest,score.fps);
+    double lowest=std::numeric_limits<double>::infinity();
+    for(const auto& score:scores)if(score.valid && highest-score.fps<=1+epsilon)
+        lowest=std::min(lowest,score.latency);
+    std::optional<std::size_t> best;
+    for(std::size_t i=0;i<scores.size();++i) {
+        const auto& score=scores[i];
+        if(!score.valid || highest-score.fps>1+epsilon || score.latency-lowest>2+epsilon)continue;
+        const auto order=[](const auto& s) {return std::tuple{s.fps_range,s.latency_range,s.latency,-s.fps};};
+        if(!best || order(score)<order(scores[*best]))best=i;
+    }
+    return best;
+}
 // UI commands; the tray/desktop timer drives the suite while menus are hidden.
 bool start_benchmark(bool full,bool luke=false) noexcept;
 void stop_benchmark() noexcept;

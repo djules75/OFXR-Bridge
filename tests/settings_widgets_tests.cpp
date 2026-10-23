@@ -465,6 +465,13 @@ void automatic_buttons() {
     tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
     require(snapshot().benchmark.count==21 && !snapshot().benchmark.advanced,"basic Display starts reduced matrix");
     tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
+    require(tray.rendered_text.find("Auto pick best one")!=std::string::npos,"auto-pick checkbox is in Display");
+    tray.activate("/Display_","Auto pick best one");tray.draw();tray.draw();
+    require(snapshot().desired.benchmark_auto_pick,"actual checkbox saves the per-profile automatic preference");
+    tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
+    require(snapshot().benchmark.auto_pick,"UI-started suite captures the auto-pick preference");
+    tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
+    require(snapshot().desired.benchmark_auto_pick && snapshot().benchmark.phase==BenchmarkPhase::stopped,"Stop restores settings without clearing the auto-pick preference");
 }
 } // namespace
 

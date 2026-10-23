@@ -72,6 +72,7 @@ struct Settings {
     bool r19_camera{}; // opt-in own camera for every FG route; live pair snapshot
     bool diagnostics{};
     bool benchmark_csv{true}; // automatic suite CSV; independent of the flight log
+    bool benchmark_auto_pick{}; // per-profile, apply a measured winner only on completion
     int overlay_position{2}; // 0 off, 1 upper-left, 2 upper-right, 3 lower-left, 4 lower-right, 5 Elliott controller, 6 Elliott bottom
     float menu_scale{1.F}; // physical headset interface multiplier, 0.5 to 1.25
     float menu_offset_x{}; // common-FOV centre offset, normalized -1 to 1
@@ -150,6 +151,7 @@ enum class BenchmarkPhase : unsigned { idle, applying, running, complete, stoppe
 struct BenchmarkStatus {
     BenchmarkPhase phase{};
     bool full{}, csv{}, luke{}, advanced{}; // frozen suite scope
+    bool auto_pick{}; // frozen at start, never applies on Stop/error
     unsigned index{}, count{}, game_pid{}, controller_pid{};
     std::uint64_t run_id{}, revision{}, requested_ms{}, started_ms{};
     char label[80]{}, message[192]{}, csv_path[1024]{};

@@ -7,12 +7,109 @@
 #include <stdexcept>
 #include <set>
 #include <tuple>
+#include <limits>
 using namespace xrfg::autonomous;
 void check(bool condition,const char* text) {if(!condition)throw std::runtime_error(text);}
+void automatic_choice_rules() {
+    const auto s=[](double fps,double latency,double fps_range=2,double latency_range=2) {
+        return BenchmarkScore{fps,latency,fps_range,latency_range,true};
+    };
+    check(!benchmark_best({}),"empty results never invent a winner");
+    check(benchmark_best({s(90,60),s(88.99,20)})==0,"more than one FPS loss is not hidden by low latency");
+    check(benchmark_best({s(90,60),s(89,40)})==1,"one FPS is equivalent, so choose lower latency");
+    check(benchmark_best({s(90,40,8),s(89.5,42,1)})==1,"within two ms prefer stable FPS range");
+    check(benchmark_best({s(90,40,8),s(89.5,42.01,1)})==0,"stability cannot hide more than two ms latency");
+    check(benchmark_best({s(90,40,2,8),s(90,41,2,1)})==1,"equal FPS ranges use latency range");
+    check(benchmark_best({s(90,40),s(90,39)})==1,"identical stability chooses exact lower latency");
+    check(benchmark_best({s(90,40),s(89.5,40)})==0,"remaining tie chooses exact higher FPS");
+    check(benchmark_best({s(90,40),s(89.1,35),s(88.2,30)})==1,"near-tie chains cannot drift below global FPS tolerance");
+    check(benchmark_best({s(90,40,5),s(90,41.5,4),s(90,43,1)})==1,"latency tolerance stays anchored to the global minimum");
+    BenchmarkSamples data;data.fps={89,90,91};data.latency={39,40,41};
+    const auto score=benchmark_score(data,true);
+    check(score.valid && score.fps==90 && score.latency==40 && score.fps_range==2 && score.latency_range==2,
+        "ranking uses the measured medians and complete min-max ranges");
+    check(!benchmark_score(data,false).valid,"failed and partial measurements cannot win");
+    data.fps={90};check(!benchmark_score(data,true).valid,"single sample does not establish stability");
+    data.fps={89,90};data.latency.clear();check(!benchmark_score(data,true).valid,"missing estimated latency cannot win");
+    data.latency={39,40};data.fps[1]=std::numeric_limits<double>::quiet_NaN();
+    check(!benchmark_score(data,true).valid,"nonfinite metrics cannot win");
+    data.fps={0,0};check(!benchmark_score(data,true).valid,"zero delivered FPS cannot win");
+    std::vector<BenchmarkScore> reordered{s(90,60),s(89.5,40),s(89.8,41,1)};
+    for(unsigned i=0;i<reordered.size();++i) {
+        const auto best=benchmark_best(reordered);check(best && reordered[*best].latency==41,"ranking does not depend on trial ordering");
+        std::rotate(reordered.begin(),reordered.begin()+1,reordered.end());
+    }
+}
+void automatic_choice_controller() {
+    RuntimeStatus runtime{};runtime.sessions=1;runtime.dlssg_preset_request=1;
+    // Original VDXR, private basic, private full and Luke all use the same chooser.
+    for(unsigned scenario=0;scenario<4;++scenario) {
+        const bool modern=scenario!=0,luke=scenario==3,full=scenario==2;
+        auto saved=snapshot().desired;saved.advanced_mode=false;saved.pacing_mode=1;
+        saved.benchmark_auto_pick=true;saved.nr_enabled=true;saved.afw_mode=3;saved.afw_shading_rate=0;
+        check(request(saved),"save auto-pick game preference");saved=snapshot().desired;
+        runtime.vdxr_runtime=!modern;runtime.steamvr_runtime=modern;runtime.vdxr_legacy=!modern;runtime.luke_detected=luke;
+        runtime.pacing_mode=modern?1:0;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
+        const auto plan=benchmark_plan(full,luke,modern,false);const auto winner=plan.size()-1;
+        check(start_benchmark(full,luke) && snapshot().benchmark.auto_pick,"freeze auto-pick at suite start");
+        for(std::size_t i=0;i<plan.size();++i) {
+            // Telemetry is timestamped by the real reporter. Start this trial's
+            // simulated clock in the past, then sample that public interface.
+            const auto clock=GetTickCount64()-4000;
+            const auto current=snapshot();runtime.applied_revision=current.revision;
+            runtime.pacing_mode=current.desired.pacing_mode;runtime.afw_shading_rate=current.desired.afw_shading_rate;
+            runtime.afw_running=luke;runtime.telemetry={};report_runtime(runtime);report_interface_telemetry({});tick_benchmark(clock);
+            check(snapshot().benchmark.phase==BenchmarkPhase::running,"auto-pick trial settings applied");
+            for(unsigned sample=0;sample<3;++sample) {
+                Sleep(2); // distinct actual telemetry timestamps, not duplicate samples
+                auto& t=runtime.telemetry;t.updated_ms=clock+4000+sample*1000;
+                t.rates_valid=true;t.output_source=modern?xrfg::InterfaceSource::steamvr_delivery:xrfg::InterfaceSource::runtime_accepted_delivery;
+                // Step1 never generates. The remaining FidelityFX steps generate
+                // at an impressive rate but are explicitly excluded for quality.
+                const bool fidelity=current.desired.enabled && current.desired.frame_generation==0 && current.desired.backend==0;
+                t.generating=current.desired.enabled && i!=1;
+                t.output_fps=(i==1 || fidelity?120.F:i==0?70.F:i==winner?89.5F:90.F)+(float(sample)-1)*.5F;
+                t.cycle_estimated_valid=true;t.cycle_estimated_ms=(i==1 || fidelity?1.F:i==winner?40.F:60.F)+float(sample);
+                report_runtime(runtime);report_interface_telemetry(t);tick_benchmark(GetTickCount64()+sample*300);
+            }
+            tick_benchmark(clock+10000);
+        }
+        const auto result=snapshot();const auto expected=benchmark_settings(saved,plan[winner]);
+        check(result.benchmark.phase==BenchmarkPhase::complete && result.desired==expected,
+            "completion saves exact route, Fast, multiplier, pacing and AFW quality of the valid winner");
+        check(std::string(result.benchmark.message).find("Selected "+plan[winner].label)!=std::string::npos,
+            "result identifies the selected route with measured FPS and ms");
+        if(luke)check(std::string(result.benchmark.message).find("4x4")!=std::string::npos,"Luke result names selected AFW quality");
+        check(parse_settings(serialize_settings(result.desired))==expected,"automatic choice persists with route preferences");
+        std::ifstream file(configuration_path());std::stringstream contents;contents<<file.rdbuf();
+        check(parse_settings(contents.str())==expected,"on-disk game configuration contains the selected settings");
+        file.close(); // release Windows rename lock before starting another suite
+        runtime.applied_revision=result.revision;report_runtime(runtime);
+        check(start_benchmark(full,luke),"start cancellable automatic suite");stop_benchmark();tick_benchmark();
+        check(snapshot().benchmark.phase==BenchmarkPhase::stopped && snapshot().desired==expected,"Stop never applies a partial automatic choice");
+        runtime.applied_revision=snapshot().revision;report_runtime(runtime);check(start_benchmark(full,luke),"start manually cancelled automatic suite");
+        const auto original=snapshot().desired;auto edit=original;edit.nr_enabled=false;
+        check(request_changes(original,edit),"manual edit while auto-pick is armed");tick_benchmark();
+        check(snapshot().benchmark.phase==BenchmarkPhase::stopped && !snapshot().desired.nr_enabled,"manual edits win over automatic selection");
+    }
+    // A fully completed suite with no measurable results restores the original.
+    auto saved=snapshot().desired;saved.benchmark_auto_pick=true;check(request(saved),"save no-data fixture");saved=snapshot().desired;
+    runtime.luke_detected=false;runtime.applied_revision=snapshot().revision;runtime.telemetry={};report_runtime(runtime);
+    check(start_benchmark(false),"start no-data automatic suite");auto clock=GetTickCount64()-400000;
+    const auto count=snapshot().benchmark.count;
+    for(unsigned i=0;i<count;++i) {
+        const auto current=snapshot();runtime.applied_revision=current.revision;runtime.pacing_mode=current.desired.pacing_mode;
+        runtime.telemetry={};report_runtime(runtime);report_interface_telemetry({});tick_benchmark(clock);tick_benchmark(clock+10000);clock+=12000;
+    }
+    check(snapshot().benchmark.phase==BenchmarkPhase::complete && snapshot().desired==saved &&
+        std::string(snapshot().benchmark.message).find("No valid automatic choice")!=std::string::npos,
+        "no-data completion restores settings and reports why no result was applied");
+}
 int main() {
     const auto folder=std::filesystem::temp_directory_path()/(L"ofxr-suite-"+std::to_wstring(GetCurrentProcessId()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",folder.c_str());
     try {
+        automatic_choice_rules();
         const auto optical=benchmark_plan(false,false,true,true),full=benchmark_plan(true,false,true,true);
         check(optical.size()==31 && full.size()==49,"SteamVR: three pacing modes, Normal/Fast, one Off reference");
         for(const bool luke:{false,true}) for(const bool complete:{false,true}) {
@@ -251,6 +348,7 @@ int main() {
         runtime.vdxr_legacy=false;runtime.luke_detected=false;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
         check(start_benchmark(true) && snapshot().benchmark.count==33,"Forced private VDXR respects the current basic scope");
         stop_benchmark();tick_benchmark();
+        automatic_choice_controller();
         std::cout<<"Automatic suite: full/optical with A/C/default, no preset enforcement, truthful A CSV, hidden sampling without F9, timing, median, restore/manual cancellation PASS\n";
         return 0;
     } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}

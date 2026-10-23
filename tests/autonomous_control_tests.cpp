@@ -36,6 +36,13 @@ void codec() {
         passive.motion && !passive.depth && passive.last_seen_ms!=0,
         "passive observation distinguishes motion from depth without activating guide capture");
     xrfg::autonomous::Settings desired;
+    require(!desired.benchmark_auto_pick,"automatic benchmark choice defaults off");
+    auto automatic=desired;automatic.benchmark_auto_pick=true;
+    require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(automatic)).benchmark_auto_pick,
+        "automatic benchmark preference roundtrips in the existing game INI");
+    auto concurrent_automatic=desired;concurrent_automatic.nr_enabled=true;
+    const auto merged_automatic=xrfg::autonomous::merge_changes(concurrent_automatic,desired,automatic);
+    require(merged_automatic.benchmark_auto_pick && merged_automatic.nr_enabled,"automatic choice edit preserves concurrent render preferences");
     require(!desired.luke_shared_swapchains,"Luke shared publication is opt-in");
     auto shared=desired;shared.luke_shared_swapchains=true;
     auto shared_saved=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(shared));
