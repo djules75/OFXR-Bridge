@@ -20,7 +20,7 @@ This build includes work from both the Djules and Elliottate forks, together wit
 - FSR 3.1 Frame Generation.
 - DLSS Frame Generation.
 - AFW support for selected Luke Ross games.
-- Optional Neural Rendering with a separately supplied model DLL.
+- Optional DLSS 5 Neural Rendering, applied **before Super Resolution (pre-SR)**, with a separately supplied model DLL.
 - Per-game settings and automated benchmarks.
 - An optional in-headset FPS counter with four corner positions.
 - An optional information overlay that can be attached to a motion controller or placed at the bottom of the view.
@@ -54,7 +54,7 @@ Other configurations may work, but have not received the same testing.
 
 1. Download the latest pre-release archive from GitHub Releases.
 2. Extract the complete archive to a writable folder.
-3. **Optional, for Neural Rendering only:** place your own `nvngx_dlssnr.dll` model in the extracted `ofxr` folder. The model is not included and is not required for ordinary frame generation or AFW. Do not confuse it with the included `nvngx.dll_dlssnr.dll` forwarder.
+3. **Optional, for DLSS 5 Neural Rendering only:** place your own `nvngx_dlssnr.dll` model in the extracted `ofxr` folder. The model is not included and is not required for ordinary frame generation or AFW. Do not confuse it with the included `nvngx.dll_dlssnr.dll` forwarder.
 4. Run `OFXRBridgeTray.exe` and select **Enable**.
 5. Open **Settings...** from the tray, or press **F10** in-game.
 6. Start the game normally. For injectors such as UEVR, enable OFXR-BRIDGE before starting the game and leave it enabled while the VR mod is injected.
@@ -118,11 +118,11 @@ These are observations from tested builds, not guarantees for every configuratio
 
 ### AFW Only
 
-**AFW Only (restart game)** is in the **Luke Ross** tab. It bypasses the OFXR generation route and uses direct AFW delivery. Enabling it reduces overhead for higher FPS and lower latency when using AFW without additional frame generation. Neural Rendering remains available. Restart the game after changing this option.
+**AFW Only (restart game)** is in the **Luke Ross** tab. It bypasses the OFXR generation route and uses direct AFW delivery. Enabling it reduces overhead for higher FPS and lower latency when using AFW without additional frame generation. DLSS 5 Neural Rendering remains available. Restart the game after changing this option.
 
 ## Assetto Corsa
 
-An optional modified OptiScaler add-on provides DLSS upscaling, OFXR and optional Neural Rendering for Assetto Corsa in VR. It is distributed separately from the standalone bridge.
+An optional modified OptiScaler add-on provides DLSS upscaling, OFXR and optional DLSS 5 Neural Rendering for Assetto Corsa in VR. It is distributed separately from the standalone bridge.
 
 1. Install an appropriate CSP version. Testing used **0.3.0-preview675**.
 2. Disable MSAA under **Assetto Corsa / Video / Quality**.
@@ -130,9 +130,9 @@ An optional modified OptiScaler add-on provides DLSS upscaling, OFXR and optiona
 4. Under CSP's upscaling settings, select the **OptiScaler** method and use **DLSS** as the base upscaler to intercept. Choose the desired DLSS quality.
 5. Run the game once so CSP installs its OptiScaler integration, then close the game.
 6. Extract the add-on archive and run its **`Install-Assetto.ps1`** installer, pointing it at the game folder containing **`acs.exe`**. Follow the add-on README. The installer backs up affected files and installs the modified DLL in the active CSP OptiScaler cache.
-7. **Optional:** for Neural Rendering, supply your own **`nvngx_dlssnr.dll`** beside `acs.exe`. Keep the OFXR tray enabled when launching the game.
+7. **Optional:** for DLSS 5 Neural Rendering, supply your own **`nvngx_dlssnr.dll`** beside `acs.exe`. Keep the OFXR tray enabled when launching the game.
 
-Keep CSP's method set to **OptiScaler**. The add-on includes the required DLSS SR/FG runtime files; the Neural Rendering model is not included. Do not place the modified `version.dll` beside `acs.exe`: it belongs in the CSP OptiScaler cache selected by the installer.
+Keep CSP's method set to **OptiScaler**. The add-on includes the required DLSS SR/FG runtime files; the DLSS 5 Neural Rendering model is not included. Do not place the modified `version.dll` beside `acs.exe`: it belongs in the CSP OptiScaler cache selected by the installer.
 
 ## Finding the best settings for each game
 
@@ -238,7 +238,7 @@ Selecting a DLSS-G preset can update the game's NVIDIA driver profile. **Crash d
 
 - OFXR 0.2.13 3X is not supported with Luke Ross AFW.
 - Many Luke Ross games have HUD doubling during movement with AFW.
-- Neural Rendering can cause instability or device-hung crashes in some games.
+- DLSS 5 Neural Rendering can cause instability or device-hung crashes in some games.
 - Extra OpenXR layers or overlays can exhaust the available swapchain budget.
 - Some UEVR Synced Sequential configurations can show misplaced ghosting with vector-based routes.
 - Vulkan support remains experimental.
