@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.563.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.564.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -1185,6 +1185,25 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             xrfg_layer_quad_flight-simulator
             xrfg_layer_quad_flight-destroy-swapchain
             PROPERTIES LABELS needs_gpu_timing)
+        # V564: 3X and 4X on SteamVR hold an unwritten synthetic back like the
+        # deeper pipeline: every third pair's synthetics read as unwritten for
+        # a period and a half (XRFG_TEST_LATE_SYNTHETICS), and the presenter
+        # must repeat on time and still hand them over in order.
+        foreach(multiplier triple quad)
+            add_test(
+                NAME xrfg_layer_${multiplier}_steamvr-late-synthetics
+                COMMAND "${CMAKE_COMMAND}"
+                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                    "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_${multiplier}_frame_gen.ini"
+                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/${multiplier}-frame-gen-steamvr-late-synthetics"
+                    "-DMODE=steamvr-presenter"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
+            set_tests_properties(xrfg_layer_${multiplier}_steamvr-late-synthetics PROPERTIES
+                TIMEOUT 60
+                ENVIRONMENT "XRFG_TEST_LATE_SYNTHETICS=1"
+                LABELS needs_gpu_timing)
+        endforeach()
         # The Vulkan scenarios need vulkan_bridge on, which their inis say
         # explicitly, and run with the queue layer in the chain, at both
         # depths. A machine without any Vulkan implementation (a GPU-less

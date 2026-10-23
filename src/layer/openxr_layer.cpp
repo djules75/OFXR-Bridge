@@ -7982,13 +7982,27 @@ struct GeneratedFrameEndInfo {
     // As on PresenterSubmission, kept here as well so a repeat of this frame
     // can make the same join.
     std::uint64_t app_release_value{};
+    // Test hook (V564, XRFG_TEST_LATE_SYNTHETICS): read as unwritten until
+    // then, whatever its fences say. Zero outside the harness.
+    std::chrono::steady_clock::time_point test_unwritten_until{};
 };
+
+// V564: the harness's late synthetics (see test_unwritten_until).
+[[nodiscard]] bool test_late_synthetics() noexcept {
+    static const bool enabled =
+        GetEnvironmentVariableW(L"XRFG_TEST_LATE_SYNTHETICS", nullptr, 0) != 0;
+    return enabled;
+}
 
 // Whether every output a synthetic names has been written. A fence that
 // reports the device lost reads as ready: holding cannot make it signal, and
 // the frame should go down and fail where the runtime can see it.
 [[nodiscard]] bool synthetic_output_ready(
     const GeneratedFrameEndInfo& frame) noexcept {
+    if (frame.test_unwritten_until != std::chrono::steady_clock::time_point{} &&
+        std::chrono::steady_clock::now() < frame.test_unwritten_until) {
+        return false;
+    }
     for (const auto& ready : frame.synthetic_ready) {
         if (ready.fence == nullptr || ready.value == 0) {
             continue;
@@ -9431,11 +9445,32 @@ void continuous_presenter_main(
                     const auto period = std::chrono::nanoseconds(
                         static_cast<std::int64_t>(
                             state->presenter_display_period));
-                    const bool holdable_synthetic = state->deep_pipeline &&
+                    const bool synthetic_front =
                         period > std::chrono::nanoseconds::zero() &&
                         front->owned_frame && front->owned_frame->synthetic;
+                    const bool holdable_synthetic =
+                        state->deep_pipeline && synthetic_front;
+                    // V564: 3X and 4X take the readiness hold too, not the age
+                    // hold. Their real frame already goes out two or three
+                    // slots after its pair is ready - the depth the deeper
+                    // pipeline buys 2X - so they need no period added; but an
+                    // unwritten synthetic handed over made the runtime wait
+                    // for synthesis past its own deadline: Star Citizen at 3X,
+                    // the game at 26 fps against 30, went 80 submissions a
+                    // second and 21-41% mispresented, against 2X's 88 and 5%
+                    // with the hold. Held, the slot repeats the previous frame
+                    // on time and the synthetic goes out a slot later. Only
+                    // where the application is released by a count of
+                    // presenter frames (SteamVR): where it is released at a
+                    // pop, a held pop holds the application too, which is
+                    // what halved Skyrim VR's frame rate (presenter_holds_by_
+                    // count), and the pop is that session's hold already.
+                    const bool readiness_holdable = synthetic_front &&
+                        (state->deep_pipeline ||
+                         (state->frames_per_application_frame > 2 &&
+                          !hold_waits_for_pop));
                     const bool too_young = holdable_synthetic && age < period;
-                    const bool not_written = holdable_synthetic &&
+                    const bool not_written = readiness_holdable &&
                         !too_young &&
                         age < period * kReadinessHoldPeriods &&
                         !synthetic_output_ready(*front->owned_frame);
@@ -9467,8 +9502,10 @@ void continuous_presenter_main(
                         repeated_frame = state->presenter_last_frame;
                         // A first synthetic kept back for its output is as
                         // late as one handed over unwritten: the slot shows a
-                        // repeat either way.
-                        if (not_written) {
+                        // repeat either way. (V564: the first alone - at 3X
+                        // and 4X the later ones are held too, and are not what
+                        // the release delay is judged on.)
+                        if (not_written && front->owned_frame->leads_frame) {
                             judge_leader_readiness(*state, *front->owned_frame);
                         }
                     } else {
@@ -10859,7 +10896,9 @@ void stop_continuous_presenter(
 // release_phase_depth. MSFS 2024 in 3X on a Pimax Crystal Super handed over
 // 99.6% of its synthetics unwritten with the count and 7.6% with the pop.
 // SteamVR's 3X steers the same thing with the release delay instead, and
-// SteamVR has never been released at a measured phase.
+// SteamVR has never been released at a measured phase. (V564: and on SteamVR,
+// which counts, 3X and 4X also hold an unwritten synthetic back like the
+// deeper pipeline, without its period of age.)
 //
 // Except that in the shallow pipeline, with an application that is not
 // pipelined, a session whose synthetics stay unwritten at the deepest depth
@@ -15044,6 +15083,20 @@ XrResult layer_end_frame_impl(
     bool extra_ready = extra_count != 0;
     for (std::uint32_t extra = 0; extra < extra_count; ++extra) {
         extra_generated[extra].synthetic = true;
+    }
+    // Test hook (V564): every third pair's synthetics read as unwritten for
+    // a display period and a half, so the presenter's readiness hold runs.
+    if (pair_ready && test_late_synthetics() && state->presenter_display_period > 0) {
+        static std::atomic<std::uint32_t> late_pairs{0};
+        if (late_pairs.fetch_add(1, std::memory_order_relaxed) % 3U == 0U) {
+            const auto until = std::chrono::steady_clock::now() +
+                std::chrono::nanoseconds(static_cast<std::int64_t>(
+                    1.5 * static_cast<double>(state->presenter_display_period)));
+            first_generated.test_unwritten_until = until;
+            for (std::uint32_t extra = 0; extra < extra_count; ++extra) {
+                extra_generated[extra].test_unwritten_until = until;
+            }
+        }
     }
     std::array<std::shared_ptr<GeneratedFrameEndInfo>, xrfg::kMaxExtraSynthetics>
         presenter_extra_frames{};
