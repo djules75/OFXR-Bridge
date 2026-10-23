@@ -72,6 +72,7 @@ enum MenuCommand : UINT {
     toggle_lower_vram = 126,
     toggle_hybrid = 141,
     toggle_hybrid_depth_search = 142,
+    toggle_hud_fix = 143,
     reset_defaults = 127,
     toggle_diagnostics = 120,
     overlay_off = 121,
@@ -1688,6 +1689,12 @@ void show_context_menu(AppState& state) {
             (state.settings.hybrid ? MF_ENABLED : MF_GRAYED),
         toggle_hybrid_depth_search,
         L"Hybrid: depth search");
+    // V563: every composition, Hybrid or not.
+    AppendMenuW(
+        menu,
+        MF_STRING | (state.settings.hud_fix ? MF_CHECKED : MF_UNCHECKED),
+        toggle_hud_fix,
+        L"HUD fix");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(
         menu,
@@ -1884,6 +1891,17 @@ void handle_command(AppState& state, UINT command) {
             L"they stay whole on sideways moves. It costs GPU time, a lot at "
             L"high headset resolutions; leave it off if your frame rate drops "
             L"with Hybrid. A running game switches within a second.");
+        break;
+    case toggle_hud_fix:
+        state.settings.hud_fix = !state.settings.hud_fix;
+        update_runtime_options(state);
+        show_balloon(
+            state,
+            state.settings.hud_fix ? L"HUD fix: on" : L"HUD fix: off",
+            L"Keeps a HUD that moves with your head - Star Citizen's - still in "
+            L"generated frames, instead of ghosting along with the scene on "
+            L"stick turns. It costs some GPU time, more at 3X and 4X. A running "
+            L"game switches within a second.");
         break;
     case toggle_deep_pipeline:
         if (state.settings.frame_multiplier >= 3) {

@@ -551,6 +551,12 @@ by a head-motion confirmation alone, and recorded the tuning fields past the
 sixteenth as 866; V562 removed that tier, and 813 carries every field again:
 still age and still vs moved are its last two.)
 
+V563: the still mask runs only with the tray's **HUD fix** on (off by
+default, `[ofxr] hud_fix`, followed live); off, the composition does
+nothing for head-locked HUDs, as before V559, and costs nothing for it.
+`embedded_configuration` 871 at each change: `a` 1 on, 0 off. 861 (the
+mask's size) appears once the switch is on and a pair builds a mask.
+
 The second-surface search (Edge surface solves) accepts a surface only
 where the coverage mask does not give its previous-frame spot to another
 surface (V539): white bands in the mask tint were the search painting the

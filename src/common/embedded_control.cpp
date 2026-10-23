@@ -35,6 +35,10 @@ Settings read_settings() {
 bool read_hybrid_depth_search() {
     return ini_file::read_int(ini(), L"ofxr", L"hybrid_depth_search", 0) != 0;
 }
+// V563: the tray's "HUD fix", the still mask for head-locked HUDs.
+bool read_hud_fix() {
+    return ini_file::read_int(ini(), L"ofxr", L"hud_fix", 0) != 0;
+}
 std::uint64_t ini_stamp() {
     WIN32_FILE_ATTRIBUTE_DATA data{};
     if (!GetFileAttributesExW(ini().c_str(), GetFileExInfoStandard, &data)) return 0;
@@ -46,6 +50,7 @@ struct Control {
     std::uint64_t stamp{ini_stamp()};
     Settings settings{read_settings()};
     bool hybrid_depth_search{read_hybrid_depth_search()};
+    bool hud_fix{read_hud_fix()};
     std::uint64_t revision{1}, next_id{1};
     std::map<std::uint64_t, Receipt> sessions;
     std::atomic<std::uint64_t> next_check{};
@@ -60,6 +65,7 @@ Snapshot snapshot() {
     auto& c = control(); std::scoped_lock lock(c.mutex);
     Snapshot s; s.desired = c.settings; s.revision = c.revision;
     s.hybrid_depth_search = c.hybrid_depth_search;
+    s.hud_fix = c.hud_fix;
     s.sessions = static_cast<unsigned>(c.sessions.size());
     for (auto& [id, r] : c.sessions) {
         if (r.revision != c.revision) ++s.pending;
@@ -86,12 +92,14 @@ void follow_ini(bool force) noexcept {
         }
         const auto settings = read_settings();
         const bool hybrid_depth_search = read_hybrid_depth_search();
+        const bool hud_fix = read_hud_fix();
         // Written while being read: a half-written file is not a setting.
         // The next look reads it whole.
         if (ini_stamp() != stamp) return;
         std::scoped_lock lock(c.mutex);
         c.stamp = stamp;
         c.hybrid_depth_search = hybrid_depth_search;
+        c.hud_fix = hud_fix;
         if (settings != c.settings) { c.settings = settings; ++c.revision; }
     } catch (...) {
     }

@@ -103,6 +103,8 @@ int main() {
         !contains(default_runtime_ini, "hybrid=0") ||
         release_defaults.hybrid_depth_search ||
         !contains(default_runtime_ini, "hybrid_depth_search=0") ||
+        release_defaults.hud_fix ||
+        !contains(default_runtime_ini, "hud_fix=0") ||
         release_defaults.excluded_processes != "PimaxHome-Win64-Shipping.exe" ||
         !contains(default_runtime_ini, "excluded_processes=PimaxHome-Win64-Shipping.exe") ||
         !release_defaults.single_swapchain_rings ||
@@ -153,6 +155,7 @@ int main() {
     settings.frame_multiplier = 4;
     settings.hybrid = true;
     settings.hybrid_depth_search = true;
+    settings.hud_fix = true;
     settings.excluded_processes = "Home.exe; Other-Shipping.exe";
     settings.single_swapchain_rings = false;
     settings.vulkan_session_bridge = false;
@@ -172,6 +175,7 @@ int main() {
         parsed.nvidia_input_scale != NvidiaInputScale::quarter ||
         !parsed.nvidia_bidirectional || parsed.deep_pipeline ||
         parsed.frame_multiplier != 4 || !parsed.hybrid || !parsed.hybrid_depth_search ||
+        !parsed.hud_fix ||
         parsed.excluded_processes != "Home.exe; Other-Shipping.exe" ||
         parsed.single_swapchain_rings || parsed.vulkan_session_bridge ||
         parsed.vulkan_support || parsed.d3d11_bridge ||
@@ -267,6 +271,7 @@ int main() {
         !contains(runtime_ini, "triple_frame_gen=1") ||
         !contains(runtime_ini, "hybrid=1") ||
         !contains(runtime_ini, "hybrid_depth_search=1") ||
+        !contains(runtime_ini, "hud_fix=1") ||
         !contains(runtime_ini, "excluded_processes=Home.exe; Other-Shipping.exe") ||
         !contains(runtime_ini, "single_swapchain_rings=0") ||
         !contains(runtime_ini, "vulkan_session_bridge=0") ||

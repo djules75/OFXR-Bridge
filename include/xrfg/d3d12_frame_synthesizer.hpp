@@ -324,4 +324,10 @@ void set_composition_switches(bool edge_ghosting_reduction) noexcept;
 // tuning window no longer switches it.
 void set_hybrid_depth_search(bool enabled) noexcept;
 
+// V563: the still mask for head-locked HUDs (V559-V562), for every
+// synthesizer in the process, from the tray's "HUD fix": its passes and
+// everything the composition does with it, and the per-pixel stroke test
+// that stands in without it. Off until set.
+void set_hud_fix(bool enabled) noexcept;
+
 }  // namespace xrfg

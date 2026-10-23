@@ -5538,7 +5538,11 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
                 "the translucent HUD's edges followed the background");
             require(measure_only || !sway || true_error < held_error,
                 "the swaying HUD's strokes were held at A's place");
-            if (still_tint_check != 0) {
+            // V563: 4, the tray's HUD fix off: the HUD follows the background
+            // again, as before V559.
+            require(still_tint_check != 4 || dragged_error < true_error,
+                "the HUD fix off still held the translucent HUD");
+            if (still_tint_check != 0 && still_tint_check != 4) {
                 // Magenta: the first and third channels well above the
                 // second, whichever of RGBA or BGRA the pattern is. The
                 // scene has none of its own (yellow strokes over grey).
@@ -6368,8 +6372,9 @@ void test_flat_panel_marker_synthesis(
 // GPU ("stillbench <width> <height> [pairs]"): a Hybrid FidelityFX 4X pair
 // (three synthetics) over a textured background moving 12 px a pair, a
 // translucent HUD of strokes held still, timed from submit_pair to the
-// pair's completion, in rounds that alternate the mask on and off
-// (XRFG_DISABLE_STILL_MASK, read at every pair). Measurement only.
+// pair's completion, in rounds that alternate the HUD fix on and off (V563:
+// the tray's switch, read at every pair; off, nothing of it runs, as in
+// V558). Measurement only.
 void run_still_mask_benchmark(UINT width, UINT height, int pairs_per_round) {
     D3D12WarpFixture fixture(true);
     SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
@@ -6502,20 +6507,20 @@ void run_still_mask_benchmark(UINT width, UINT height, int pairs_per_round) {
         return values.empty() ? 0.0 : values[values.size() / 2];
     };
     // Warm-up: clocks up, the mask's ages built.
+    xrfg::set_hud_fix(true);
     run(40, nullptr);
     std::vector<double> on, off;
     for (int round = 0; round < 6; ++round) {
-        SetEnvironmentVariableW(L"XRFG_DISABLE_STILL_MASK", nullptr);
+        xrfg::set_hud_fix(true);
         run(5, nullptr);
         run(pairs_per_round, &on);
-        SetEnvironmentVariableW(L"XRFG_DISABLE_STILL_MASK", L"1");
+        xrfg::set_hud_fix(false);
         run(5, nullptr);
         run(pairs_per_round, &off);
     }
-    SetEnvironmentVariableW(L"XRFG_DISABLE_STILL_MASK", nullptr);
     require(operation_succeeded(synthesizer.wait_for_idle()), "benchmark final idle");
     std::cout << "stillbench " << width << "x" << height << " x2 eyes, 4X hybrid FidelityFX: "
-              << "mask on median " << median(on) << " ms, off " << median(off) << " ms, "
+              << "HUD fix on median " << median(on) << " ms, off " << median(off) << " ms, "
               << "difference " << (median(on) - median(off)) << " ms per pair ("
               << on.size() << " + " << off.size() << " pairs)\n";
 }
@@ -6534,6 +6539,8 @@ int main(int argc, char** argv) {
     }
     // V532: off by default in the product; the harness checks it on.
     xrfg::set_hybrid_depth_search(true);
+    // V563: likewise the HUD fix.
+    xrfg::set_hud_fix(true);
     const bool trace_test = std::getenv("XRFG_TEST_GPU_TRACE") != nullptr;
     const auto trace_dir = std::filesystem::temp_directory_path() /
         ("xrfg-v073-gpu-" + std::to_string(GetCurrentProcessId()));
@@ -6604,6 +6611,14 @@ int main(int argc, char** argv) {
                                      HybridScene::occlusion_fast_far}) {
                 test_hybrid_composition(hybrid_fixture, scene);
             }
+            // V563: the tray's HUD fix off reaches the composition. The dim
+            // strokes: the vectors explain them within the agree threshold,
+            // so the vectors drag them; the bright ones the hybrid hands to
+            // the flow, which finds no motion on WARP and leaves them.
+            xrfg::set_hud_fix(false);
+            test_hybrid_composition(hybrid_fixture, HybridScene::overlay_translucent_dim,
+                xrfg::D3D12OpticalFlowBackend::fidelity_fx, 4);
+            xrfg::set_hud_fix(true);
             test_hybrid_side_by_side(hybrid_fixture);
             test_hybrid_side_by_side(hybrid_fixture, true);
             // Without depth the bars are missing (V543: with the mask's band

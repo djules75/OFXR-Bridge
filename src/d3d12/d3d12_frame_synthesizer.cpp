@@ -135,6 +135,9 @@ constexpr UINT kDepthSplatOutputShift = 27U;
 constexpr UINT kDepthSplatOutputMask = 3U << kDepthSplatOutputShift;
 // V559: bit 6 says the still mask is bound at t12.
 constexpr UINT kStillMaskFlag = 64U;
+// V563: bit 7, the tray's "HUD fix" on: the composition holds head-locked
+// HUD strokes (by the still mask where kStillMaskFlag, else per pixel).
+constexpr UINT kHudFixFlag = 128U;
 // Per image slice: the mask as built, grown by a texel, and the texel's age
 // in pairs (how many in a row its edge stayed in place).
 constexpr UINT kStillMaskSlicesPerImageSlice = 3;
@@ -410,6 +413,8 @@ constexpr UINT kFlatPanelFlag = 4U;
 std::atomic<std::uint32_t> g_composition_switches{0U};
 // set_hybrid_depth_search (V532).
 std::atomic<bool> g_hybrid_depth_search{false};
+// set_hud_fix (V563): the still mask for head-locked HUDs, off until set.
+std::atomic<bool> g_hud_fix{false};
 
 // Which composition a draw's constants are laid out for. The vectors-only
 // composition carries the guide rectangle in the game-motion constants, and
@@ -3834,12 +3839,17 @@ struct D3D12FrameSynthesizer::Impl {
         // the NVIDIA backend packs scaled (flag bit 24).
         const DlssMotionVectorSet* guides,
         bool nvidia_flow) noexcept {
+        // V563: nothing of it while the tray's "HUD fix" is off; with it on,
+        // the draws carry kHudFixFlag whether or not a mask could be built
+        // (without one, the composition's per-pixel stroke test stands in).
+        const UINT hud = g_hud_fix.load(std::memory_order_relaxed) ? kHudFixFlag : 0U;
+        if (hud == 0U) return 0U;
         // The harness compares the composition with and without it.
         if (GetEnvironmentVariableW(L"XRFG_DISABLE_STILL_MASK", nullptr, 0) != 0 ||
             !still_mask_build_pipeline || !still_mask_dilate_pipeline ||
             target_views.empty() || target_views.size() > image_description.DepthOrArraySize ||
             image_description.DepthOrArraySize > kMaxReprojectionViews) {
-            return 0U;
+            return hud;
         }
         if (still_mask_supported < 0) {
             D3D12_FEATURE_DATA_FORMAT_SUPPORT support{};
@@ -3853,12 +3863,12 @@ struct D3D12FrameSynthesizer::Impl {
                     ? 1 : 0;
         }
         if (still_mask_supported == 0) {
-            return 0U;
+            return hud;
         }
         const UINT width = (static_cast<UINT>(image_description.Width) + 1U) / 2U;
         const UINT height = (image_description.Height + 1U) / 2U;
         const UINT slices = kStillMaskSlicesPerImageSlice * image_description.DepthOrArraySize;
-        if (width == 0 || height == 0) return 0U;
+        if (width == 0 || height == 0) return hud;
         if (!still_mask || still_mask_width < width ||
             still_mask_height < height || still_mask_slices < slices) {
             D3D12_HEAP_PROPERTIES heap{};
@@ -3878,7 +3888,7 @@ struct D3D12FrameSynthesizer::Impl {
             if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texture,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
                     IID_PPV_ARGS(mask.GetAddressOf())))) {
-                return 0U;
+                return hud;
             }
             mask->SetName(L"OFXR Still Mask");
             // A fresh texture is all zero: every age starts over.
@@ -3973,7 +3983,7 @@ struct D3D12FrameSynthesizer::Impl {
                 xrfg::BridgeFlightOperation::embedded_configuration, 861,
                 (static_cast<std::uint64_t>(width) << 32U) | height, slices);
         }
-        return kStillMaskFlag;
+        return hud | kStillMaskFlag;
     }
 
     // V539: the coverage mask (frame_synthesis.hlsl, BuildCoverageMask) for
@@ -7396,6 +7406,14 @@ void set_hybrid_depth_search(bool enabled) noexcept {
     if (g_hybrid_depth_search.exchange(enabled, std::memory_order_relaxed) != enabled) {
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::embedded_configuration, 857, enabled ? 1U : 0U);
+    }
+}
+
+// 871 at each change: a 1 on, 0 off.
+void set_hud_fix(bool enabled) noexcept {
+    if (g_hud_fix.exchange(enabled, std::memory_order_relaxed) != enabled) {
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::embedded_configuration, 871, enabled ? 1U : 0U);
     }
 }
 

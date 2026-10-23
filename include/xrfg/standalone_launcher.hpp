@@ -55,6 +55,11 @@ struct LauncherSettings {
     // resolutions it is the hybrid's costliest part. Greyed in the menu
     // while Hybrid is off; followed live in a running game.
     bool hybrid_depth_search{};
+    // "HUD fix" (V563): the still mask, which holds a head-locked
+    // translucent HUD (Star Citizen's) still where the flow would drag it
+    // with the background on a stick turn, in every composition. Off by
+    // default; followed live in a running game.
+    bool hud_fix{};
     // Executables the layer declines to load in, ';'-separated; written to
     // the layer's ini as excluded_processes. Pimax Home by default (see
     // implicit_layer.hpp). No menu entry; edit tray.ini.

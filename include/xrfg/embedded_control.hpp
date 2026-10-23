@@ -21,6 +21,9 @@ struct Snapshot {
     // `[ofxr] hybrid_depth_search` (V532). Not part of `desired`: changing it
     // reconfigures nothing, the composition reads it at its next pair.
     bool hybrid_depth_search{};
+    // `[ofxr] hud_fix` (V563): the still mask for head-locked HUDs, likewise
+    // read by the composition at its next pair. Off by default.
+    bool hud_fix{};
     std::uint64_t revision{1};
     unsigned sessions{}, pending{}, bypass{}, ready{}, errors{};
     long last_error{};

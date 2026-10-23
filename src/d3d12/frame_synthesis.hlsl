@@ -125,6 +125,12 @@ bool still_mask_available() {
     return (SynthesisFlags & 64u) != 0u;
 }
 
+// V563: bit 7, the tray's "HUD fix" on. Off, the composition does nothing
+// for head-locked HUD strokes (V558's), and the still mask is not built.
+bool hud_fix_enabled() {
+    return (SynthesisFlags & 128u) != 0u;
+}
+
 // The still mask's byte at a target coordinate, from the slice grown by a
 // texel or the one as built: bit 7 a stroke of B is here, bits 0-2 and 3-5
 // where its match in A sits, -3..3 pixels each way, biased by 3. Zero:
@@ -1795,14 +1801,20 @@ float4 synthesize_midpoint(
             bool pixel_stationary = (still_word & 128u) == 0u && repeated_capture_flag() == 0 &&
                 current_fallback.valid >= 0.5 && validate_fast &&
                 fast_stationary_patch(pixel, Slice, current_fallback.color);
-            // (V560: branches, not a ternary - fxc evaluates both arms of
-            // one, and V559 ran the per-pixel stroke probes at every pixel
-            // with the mask bound.)
-            bool edge_stationary = !pixel_stationary && repeated_capture_flag() == 0 &&
-                current_fallback.valid >= 0.5 &&
-                (still_mask_available()
-                    ? (still_word & 128u) != 0u
-                    : edge_stationary_patch(pixel, Slice, current_fallback.color));
+            // (fxc evaluates both arms of the ternary, so the per-pixel
+            // stroke probes run at every pixel even with the mask bound; a
+            // V560 test build's if/else changed the hybrid bars-with-block
+            // check for a reason not found, and was reverted.) V563: none of
+            // it with the HUD fix off - a branch on a uniform flag, so off
+            // costs nothing.
+            bool edge_stationary = false;
+            [branch] if (hud_fix_enabled()) {
+                edge_stationary = !pixel_stationary && repeated_capture_flag() == 0 &&
+                    current_fallback.valid >= 0.5 &&
+                    (still_mask_available()
+                        ? (still_word & 128u) != 0u
+                        : edge_stationary_patch(pixel, Slice, current_fallback.color));
+            }
             bool preserve_stationary = pixel_stationary || edge_stationary;
             // Content the game's vectors do not describe, kept where it is.
             bool static_overlay = !preserve_stationary && use_game_motion_pipeline &&
