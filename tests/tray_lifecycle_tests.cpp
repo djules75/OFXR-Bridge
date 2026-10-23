@@ -95,7 +95,13 @@ void ownership() {
     const std::filesystem::path root = L"C:\\Users\\Test\\OFXR Bridge";
     const auto valid = root / L"RuntimeLayer\\v065\\XR_APILAYER_XRFrameBridge_manual-32292-11205031.json";
     require(xrfg::implicit_layer::owned_registration_path(valid, root), "reported v065 value accepted");
+    require(xrfg::implicit_layer::owned_registration_path(
+                root / L"RuntimeLayer\\v557fix1\\XR_APILAYER_XRFrameBridge_manual-1-2.json", root),
+        "fix build's v557fix1 value accepted");
     for (const auto& bad : {
+        root / L"RuntimeLayer\\v557fix\\XR_APILAYER_XRFrameBridge_manual-1-2.json",
+        root / L"RuntimeLayer\\v557fox1\\XR_APILAYER_XRFrameBridge_manual-1-2.json",
+        root / L"RuntimeLayer\\v55fix1\\XR_APILAYER_XRFrameBridge_manual-1-2.json",
         root / L"RuntimeLayer\\v065\\XR_APILAYER_XRFrameBridge_manual-abc.json",
         root / L"RuntimeLayer\\v065\\XR_APILAYER_XRFrameBridge_manual-1-2-3.json",
         root / L"RuntimeLayer\\v065\\XR_APILAYER_XRFrameBridge_manual--2.json",

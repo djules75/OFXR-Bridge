@@ -707,11 +707,24 @@ bool owned_registration_path(
         if (!equal_case_insensitive(parent.wstring(), root.wstring())) {
             if (!equal_case_insensitive(parent.parent_path().wstring(), root.wstring()))
                 return false;
+            // vNNN, or vNNNfixP for a test build made on a release. Without
+            // the suffix a fix build's registration was never retired: V464fix2
+            // stayed registered after its tray quit and loaded beside every
+            // later version.
             const auto version = parent.filename().wstring();
             if (version.size() < 4 || (version.front() != L'v' && version.front() != L'V'))
                 return false;
-            for (std::size_t i = 1; i < version.size(); ++i)
-                if (version[i] < L'0' || version[i] > L'9') return false;
+            const auto is_digit = [](wchar_t c) { return c >= L'0' && c <= L'9'; };
+            std::size_t i = 1;
+            while (i < version.size() && is_digit(version[i])) ++i;
+            if (i < 4) return false;
+            if (i < version.size()) {
+                if (version.size() < i + 4 ||
+                    !equal_case_insensitive(std::wstring_view(version).substr(i, 3), L"fix"))
+                    return false;
+                for (i += 3; i < version.size(); ++i)
+                    if (!is_digit(version[i])) return false;
+            }
         }
         if (!owned_manifest_path(manifest, parent, prefix)) return false;
         const auto name = manifest.filename().wstring();

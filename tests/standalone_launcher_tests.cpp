@@ -404,6 +404,11 @@ int main() {
         std::cerr << "runtime version directory failed\n";
         return 1;
     }
+    if (runtime_version_directory(L"C:\\Users\\Test\\OFXR Bridge", 464, 1)
+            .filename() != L"v464fix1") {
+        std::cerr << "fix build version directory failed\n";
+        return 1;
+    }
 
     const auto replacement_directory =
         std::filesystem::temp_directory_path() /

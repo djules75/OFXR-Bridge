@@ -625,10 +625,14 @@ std::string build_runtime_ini(
 
 std::filesystem::path runtime_version_directory(
     const std::filesystem::path& local_directory,
-    std::uint32_t implementation_version) {
+    std::uint32_t implementation_version,
+    std::uint32_t implementation_patch) {
     std::wstring version = std::to_wstring(implementation_version);
     if (version.size() < 3) {
         version.insert(version.begin(), 3 - version.size(), L'0');
+    }
+    if (implementation_patch != 0) {
+        version += L"fix" + std::to_wstring(implementation_patch);
     }
     return local_directory / L"RuntimeLayer" / (L"v" + version);
 }

@@ -2557,11 +2557,19 @@ void stop_continuous_presenter(
 // Star Citizen on SteamVR, 32 ms a frame, showed all three: 35 of 62
 // submitted frames a second shown at 2X, and at 3X a one-refresh jump in the
 // pose's prediction every eight frames or so, where the handed times stepped
-// 44.4 or 22.2 ms instead of 33.3. SteamVR only, where this was measured.
+// 44.4 or 22.2 ms instead of 33.3. SteamVR only at first, where this was
+// measured.
+//
+// Every runtime since V557fix1. On Virtual Desktop a pipelined game that was
+// late for one frame (48 ms instead of 25, Firmament) left the presenter with
+// nothing to show: it waited for the late pair past its slot, the runtime
+// skipped the slot, the grid moved a whole period and the application's
+// timeline re-anchored on it, so the late frame showed as a freeze, a jump
+// and two refreshes of half-speed motion. Kept, the slot repeats the last
+// frame on time and the pipeline keeps its depth.
 [[nodiscard]] bool presenter_keeps_pipelined_frames(
     const SessionState& state) noexcept {
-    return state.dispatch && state.dispatch->steamvr_runtime &&
-        state.pipelined_presenter_mode;
+    return state.pipelined_presenter_mode;
 }
 // Prevent new enqueues, finish queued/in-flight submissions, then retire any
 // autonomous repeat before invalidating an application-owned handle.
@@ -9475,12 +9483,10 @@ void continuous_presenter_main(
                         age < period * kReadinessHoldPeriods &&
                         !synthetic_output_ready(*front->owned_frame);
                     // A hold shows the previous frame for a slot, so it needs a
-                    // previous frame to show. A pipelined application gets
-                    // none - its frames may name handles it destroys as soon
-                    // as its xrEndFrame returns, so the presenter never keeps
-                    // one, except on SteamVR (presenter_keeps_pipelined_frames)
-                    // - and neither does a presenter that has not
-                    // submitted yet. Held there, the slot went down with no
+                    // previous frame to show. A pipelined application had
+                    // none until presenter_keeps_pipelined_frames covered it
+                    // (SteamVR from V469, every runtime from V557fix1), and a
+                    // presenter that has not submitted yet still has none. Held there, the slot went down with no
                     // layers, and SteamVR shows black for that: measured on
                     // MSFS 2024, 31 of 32 empty submissions in one run were
                     // holds, and each was a black flash in the headset.
@@ -10660,6 +10666,12 @@ void continuous_presenter_main(
                          << 56));
             }
         }
+        // A repeat names the handles of a frame the application has moved on
+        // from. A pipelined one may have replaced them by now; a runtime that
+        // refuses the repeat for it costs this slot only, as it did before
+        // pipelined frames were kept, not the session.
+        const bool refused_repeat =
+            !request && repeated_frame && XR_FAILED(end_result);
         {
             std::scoped_lock lock(state->presenter_mutex);
             if (request) {
@@ -10683,7 +10695,7 @@ void continuous_presenter_main(
                     state->presenter_last_frame.reset();
                 }
             }
-            if (frame_content_refused(end_result)) {
+            if (frame_content_refused(end_result) || refused_repeat) {
                 // Whatever was retained may name the handle that was refused.
                 state->presenter_last_frame.reset();
             } else if (XR_FAILED(end_result)) {
@@ -10691,7 +10703,16 @@ void continuous_presenter_main(
             }
         }
         state->presenter_condition.notify_all();
-        if (XR_FAILED(end_result) && !frame_content_refused(end_result)) {
+        if (refused_repeat) {
+            // 406: a repeat the runtime refused, a its XrResult. The kept
+            // frame was dropped and the presenter carries on.
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::presenter_transition,
+                406,
+                static_cast<std::uint64_t>(static_cast<std::int64_t>(end_result)));
+        }
+        if (XR_FAILED(end_result) && !frame_content_refused(end_result) &&
+            !refused_repeat) {
             break;
         }
     }

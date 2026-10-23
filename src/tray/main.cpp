@@ -43,6 +43,11 @@ constexpr UINT kArmPollMilliseconds = 250;
 constexpr UINT_PTR kStatusTimerId = 2;
 constexpr UINT kStatusMilliseconds = 1000;
 constexpr std::uint32_t kImplementationVersion = XRFG_IMPLEMENTATION_VERSION;
+#ifndef XRFG_IMPLEMENTATION_PATCH
+#define XRFG_IMPLEMENTATION_PATCH 0
+#endif
+// Non-zero on a test build made on a release: V464fix1.
+constexpr std::uint32_t kImplementationPatch = XRFG_IMPLEMENTATION_PATCH;
 // One Donate entry each, creator first, as in the About box and the README.
 constexpr wchar_t kDonateCreatorUrl[] = L"https://ko-fi.com/tig3rmast3r";
 constexpr wchar_t kDonateMaintainerUrl[] = L"https://ko-fi.com/djules";
@@ -182,7 +187,8 @@ constexpr wchar_t kTuningWindowClass[] = L"OFXRBridgeLiveTuning";
     const std::filesystem::path& local_directory) {
     return xrfg::standalone::runtime_version_directory(
         local_directory,
-        kImplementationVersion);
+        kImplementationVersion,
+        kImplementationPatch);
 }
 
 [[nodiscard]] bool write_text_atomic(
@@ -351,6 +357,7 @@ void log_lifecycle(const std::filesystem::path& local_directory,
         stream << time.wYear << L'-' << time.wMonth << L'-' << time.wDay << L' '
                << time.wHour << L':' << time.wMinute << L':' << time.wSecond
                << L" pid=" << GetCurrentProcessId() << L" V" << kImplementationVersion
+               << (kImplementationPatch != 0 ? L"fix" + std::to_wstring(kImplementationPatch) : L"")
                << L' ' << action << (error.empty() ? L" OK" : L" FAILED: ") << error << L'\n';
     } catch (...) { /* Cleanup must not depend on diagnostic I/O. */ }
 }
@@ -2093,7 +2100,10 @@ void handle_command(AppState& state, UINT command) {
         break;
     case show_about: {
         wchar_t version_label[64]{};
-        swprintf_s(version_label, L"OFXR Bridge V%03u", kImplementationVersion);
+        if constexpr (kImplementationPatch != 0)
+            swprintf_s(version_label, L"OFXR Bridge V%03ufix%u", kImplementationVersion, kImplementationPatch);
+        else
+            swprintf_s(version_label, L"OFXR Bridge V%03u", kImplementationVersion);
         TASKDIALOGCONFIG dialog{};
         dialog.cbSize = sizeof(dialog);
         dialog.hwndParent = state.window;

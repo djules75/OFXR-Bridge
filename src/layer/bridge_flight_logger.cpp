@@ -21,6 +21,9 @@ namespace {
 #ifndef XRFG_IMPLEMENTATION_VERSION
 #define XRFG_IMPLEMENTATION_VERSION 0
 #endif
+#ifndef XRFG_IMPLEMENTATION_PATCH
+#define XRFG_IMPLEMENTATION_PATCH 0
+#endif
 
 constexpr wchar_t kConfigurationFileName[] = L"ofxr_bridge.ini";
 constexpr wchar_t kConfigurationSection[] = L"diagnostics";
@@ -644,12 +647,14 @@ void BridgeFlightLogger::initialize(
         impl_ = std::move(implementation);
         // The first record of every file, kept like the other session
         // records, so a file opened later still says which build and which
-        // process it is from.
+        // process it is from. b carries the fix number of a test build made
+        // on a release (V464fix1: 464, b 1<<8) above the flush bit.
         event(
             BridgeFlightOperation::logger,
             XRFG_IMPLEMENTATION_VERSION,
             maximum_mb,
-            flush ? 1u : 0u,
+            (flush ? 1u : 0u) |
+                (static_cast<std::uint64_t>(XRFG_IMPLEMENTATION_PATCH) << 8),
             GetCurrentProcessId());
         if (wanted) {
             std::scoped_lock lock(impl_->control_mutex);

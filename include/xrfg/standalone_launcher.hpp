@@ -204,9 +204,12 @@ constexpr unsigned kDefaultMaxFileMb = 32;
     unsigned max_file_mb = kDefaultMaxFileMb,
     bool flush_each_event = false);
 
+// vNNN, or vNNNfixP for a test build made on a release (patch P > 0), so
+// its cache and flight logs never mix with the release's.
 [[nodiscard]] std::filesystem::path runtime_version_directory(
     const std::filesystem::path& local_directory,
-    std::uint32_t implementation_version);
+    std::uint32_t implementation_version,
+    std::uint32_t implementation_patch = 0);
 
 // Replaces an existing cached layer instead of silently retaining it, unless
 // it is already the same file. The cache folder is per version, so normally it

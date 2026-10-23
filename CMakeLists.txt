@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.564.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.567.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -382,7 +382,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     target_compile_definitions(xrfg_bridge_flight_logger PRIVATE
         NOMINMAX
         WIN32_LEAN_AND_MEAN
-        XRFG_IMPLEMENTATION_VERSION=${PROJECT_VERSION_MINOR})
+        XRFG_IMPLEMENTATION_VERSION=${PROJECT_VERSION_MINOR}
+        XRFG_IMPLEMENTATION_PATCH=${PROJECT_VERSION_PATCH})
     if(MSVC)
         target_compile_options(xrfg_bridge_flight_logger PRIVATE
             /W4 /permissive- /EHsc)
@@ -579,6 +580,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_compile_features(OFXRBridgeTray PRIVATE cxx_std_20)
         target_compile_definitions(OFXRBridgeTray PRIVATE
             XRFG_IMPLEMENTATION_VERSION=${PROJECT_VERSION_MINOR}
+            XRFG_IMPLEMENTATION_PATCH=${PROJECT_VERSION_PATCH}
             NOMINMAX
             WIN32_LEAN_AND_MEAN
             UNICODE
@@ -626,6 +628,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 xrfg_standalone_core comctl32 gdi32 ole32 shell32 user32)
             target_compile_definitions(xrfg_tray_lifecycle_tests PRIVATE
                 XRFG_IMPLEMENTATION_VERSION=${PROJECT_VERSION_MINOR}
+                XRFG_IMPLEMENTATION_PATCH=${PROJECT_VERSION_PATCH}
                 NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
             if(MSVC)
                 target_compile_options(xrfg_tray_lifecycle_tests PRIVATE /W4 /permissive- /EHsc)
