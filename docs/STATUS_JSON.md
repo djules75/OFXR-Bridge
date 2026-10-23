@@ -73,7 +73,7 @@ should read those and ignore everything else.
 | `schema` | number | Format version, currently `1`. Fields may be added within a version; a key will not change meaning or disappear without a new number. |
 | `armed` | bool | The tray has OFXR armed: games started now load it. |
 | `paused` | bool | Frame generation is paused from the tray (menu or pause key). |
-| `multiplier` | number | Frames shown per game frame: `2`, or `3` in 3X. With a game running, the mode **actually running** in it (3X can be switched while it runs); otherwise the configured mode. |
+| `multiplier` | number | Frames shown per game frame: `2`, `3` in 3X or `4` in 4X. With a game running, the mode **actually running** in it (the multiplier can be switched while it runs, as far as the ring the game started with allows: a game started in 2X or 3X cannot take 4X until it restarts); otherwise the configured mode. |
 | `generating` | bool or null | Frames were generated in the last second. `false` while paused, and during focus loss, loading or a brief quarantine after the game rebuilds its swapchains. `null` without a game. |
 | `app_fps` | number or null | The game's own frames per second, one-second average. |
 | `output_fps` | number or null | The frames per second the headset gets: the same one-second figure the in-headset FPS overlay shows, computed even with the overlay off. On SteamVR it comes from the compositor's own count, less repeats. |

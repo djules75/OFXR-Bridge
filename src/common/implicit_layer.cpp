@@ -295,6 +295,24 @@ bool read_triple_frame_gen(
     }
 }
 
+std::uint32_t read_frame_multiplier(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (module_directory.empty()) {
+            return 2U;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        const int multiplier =
+            ini_file::read_int(ini_path, L"ofxr", L"frame_multiplier", 0);
+        if (multiplier >= 2 && multiplier <= 4) {
+            return static_cast<std::uint32_t>(multiplier);
+        }
+        return read_triple_frame_gen(module_directory) ? 3U : 2U;
+    } catch (...) {
+        return 2U;
+    }
+}
+
 bool read_edge_ghosting_reduction(
     const std::filesystem::path& module_directory) noexcept {
     try {

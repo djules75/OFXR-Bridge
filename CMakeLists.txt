@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.557.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.558.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -1098,6 +1098,79 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         set_tests_properties(xrfg_layer_triple_frame_gen_vulkan PROPERTIES
             TIMEOUT 60
             SKIP_REGULAR_EXPRESSION "SKIP: no Vulkan implementation on this machine")
+        # "4X" (V558): three synthetics per application frame, through the
+        # same script with MULTIPLIER=4 and inis that ask frame_multiplier=4.
+        add_test(
+            NAME xrfg_layer_quad_frame_gen_inline
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DTRIPLE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_quad_frame_gen.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/quad-frame-gen-inline"
+                "-DMODE=d3d11-bridge"
+                "-DMULTIPLIER=4"
+                "-DREQUIRE_SCENARIO_PASS=ON"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_triple_frame_gen.cmake")
+        add_test(
+            NAME xrfg_layer_quad_frame_gen_presenter
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DTRIPLE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_quad_frame_gen.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/quad-frame-gen-presenter"
+                "-DMODE=steamvr-presenter"
+                "-DMULTIPLIER=4"
+                "-DEXPECT_PRESENTER=ON"
+                "-DREQUIRE_SCENARIO_PASS=ON"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_triple_frame_gen.cmake")
+        add_test(
+            NAME xrfg_layer_quad_swapchain-budget
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_rings_quad.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/rings-quad-swapchain-budget"
+                "-DMODE=swapchain-budget"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
+        foreach(mode steamvr-presenter flight-simulator
+                flight-destroy-swapchain steamvr-destroy-space)
+            add_test(
+                NAME xrfg_layer_quad_${mode}
+                COMMAND "${CMAKE_COMMAND}"
+                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                    "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_quad_frame_gen.ini"
+                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/quad-frame-gen-${mode}"
+                    "-DMODE=${mode}"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
+            set_tests_properties(xrfg_layer_quad_${mode} PROPERTIES TIMEOUT 60)
+        endforeach()
+        add_test(
+            NAME xrfg_layer_quad_frame_gen_vulkan
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DQUEUE_LAYER_DLL=$<TARGET_FILE:OFXR_vulkan_queue_layer>"
+                "-DTRIPLE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_vulkan_quad.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/quad-frame-gen-vulkan"
+                "-DMODE=vulkan"
+                "-DMULTIPLIER=4"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_triple_frame_gen.cmake")
+        set_tests_properties(
+            xrfg_layer_quad_frame_gen_inline
+            xrfg_layer_quad_frame_gen_presenter
+            xrfg_layer_quad_swapchain-budget
+            PROPERTIES TIMEOUT 60)
+        set_tests_properties(xrfg_layer_quad_frame_gen_vulkan PROPERTIES
+            TIMEOUT 60
+            SKIP_REGULAR_EXPRESSION "SKIP: no Vulkan implementation on this machine")
+        set_tests_properties(
+            xrfg_layer_quad_frame_gen_presenter
+            xrfg_layer_quad_steamvr-presenter
+            xrfg_layer_quad_steamvr-destroy-space
+            xrfg_layer_quad_flight-simulator
+            xrfg_layer_quad_flight-destroy-swapchain
+            PROPERTIES LABELS needs_gpu_timing)
         # The Vulkan scenarios need vulkan_bridge on, which their inis say
         # explicitly, and run with the queue layer in the chain, at both
         # depths. A machine without any Vulkan implementation (a GPU-less

@@ -11,6 +11,13 @@ foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN TRIPLE_INI WORK_DIR MODE
         message(FATAL_ERROR "${required_variable} was not provided")
     endif()
 endforeach()
+# MULTIPLIER (V558): the frames per application frame the ini asks for, 3
+# unless given; 4 is "4X", three synthetics.
+if(NOT DEFINED MULTIPLIER)
+    set(MULTIPLIER 3)
+endif()
+math(EXPR synthetics_per_frame "${MULTIPLIER} - 1")
+string(REPEAT "2" ${synthetics_per_frame} synthetic_run)
 
 file(REMOVE_RECURSE "${WORK_DIR}")
 file(MAKE_DIRECTORY "${WORK_DIR}")
@@ -84,9 +91,9 @@ file(READ "${flight_log}" contents)
 
 # presenter_transition 700: a is the frames per application frame.
 string(FIND "${contents}"
-    "op=presenter_transition result=700 dur_us=0 a=3 b=0 c=1" found)
+    "op=presenter_transition result=700 dur_us=0 a=${MULTIPLIER} b=0 c=1" found)
 if(found EQUAL -1)
-    message(FATAL_ERROR "The session did not take three frames per application frame")
+    message(FATAL_ERROR "The session did not take ${MULTIPLIER} frames per application frame")
 endif()
 
 # One pair's synthesis per application frame, never two.
@@ -106,16 +113,17 @@ if(EXPECT_PRESENTER)
         string(REGEX REPLACE ".* c=([0-9])$" "\\1" half "${submission}")
         string(APPEND order "${half}")
     endforeach()
-    string(FIND "${order}" "221221" found)
+    string(FIND "${order}" "${synthetic_run}1${synthetic_run}1" found)
     if(found EQUAL -1)
         message(FATAL_ERROR
-            "The presenter did not hand over synthetic, synthetic, real: ${order}")
+            "The presenter did not hand over ${synthetics_per_frame} synthetics then the real frame: ${order}")
     endif()
 else()
-    # Inline: two internal cycles follow each pair's first hand-over.
+    # Inline: one internal cycle per further synthetic and one for the real
+    # frame follow each pair's first hand-over.
     string(REGEX MATCHALL "phase=E op=internal_end_frame result=0" cycles "${contents}")
     list(LENGTH cycles cycle_count)
-    math(EXPR expected_cycles "${pair_count} * 2")
+    math(EXPR expected_cycles "${pair_count} * ${synthetics_per_frame}")
     if(cycle_count LESS expected_cycles)
         message(FATAL_ERROR
             "Expected ${expected_cycles} inline cycles for ${pair_count} pairs, found ${cycle_count}")

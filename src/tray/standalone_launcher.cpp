@@ -214,8 +214,19 @@ LauncherSettings parse_settings(std::string_view text) {
                     settings.deep_pipeline = value == "1" ||
                         lower_ascii(value) == "true";
                 } else if (key == "triple_frame_gen") {
-                    settings.triple_frame_gen = value == "1" ||
-                        lower_ascii(value) == "true";
+                    // The pre-V558 switch: 3X on. frame_multiplier, written
+                    // after it, overrides it when present.
+                    const bool triple = value == "1" || lower_ascii(value) == "true";
+                    if (triple && settings.frame_multiplier < 3) {
+                        settings.frame_multiplier = 3;
+                    } else if (!triple && settings.frame_multiplier == 3) {
+                        settings.frame_multiplier = 2;
+                    }
+                } else if (key == "frame_multiplier") {
+                    if (value == "2" || value == "3" || value == "4") {
+                        settings.frame_multiplier =
+                            static_cast<std::uint32_t>(value[0] - '0');
+                    }
                 } else if (key == "hybrid") {
                     settings.hybrid = value == "1" ||
                         lower_ascii(value) == "true";
@@ -297,7 +308,7 @@ namespace {
 }  // namespace
 
 std::string build_status_json(const StatusInputs& inputs) {
-    const std::uint32_t configured = inputs.settings.triple_frame_gen ? 3U : 2U;
+    const std::uint32_t configured = inputs.settings.frame_multiplier;
     const bool session = inputs.session_present;
     const StatusSession& running = inputs.session;
     std::string json = "{\n";
@@ -338,7 +349,8 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\nnvidia_bidirectional=" +
            (settings.nvidia_bidirectional ? "1" : "0") +
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
-           "\r\ntriple_frame_gen=" + (settings.triple_frame_gen ? "1" : "0") +
+           "\r\ntriple_frame_gen=" + (settings.frame_multiplier >= 3 ? "1" : "0") +
+           "\r\nframe_multiplier=" + std::to_string(settings.frame_multiplier) +
            "\r\nhybrid=" + (settings.hybrid ? "1" : "0") +
            "\r\nhybrid_depth_search=" + (settings.hybrid_depth_search ? "1" : "0") +
            "\r\nexcluded_processes=" + settings.excluded_processes +
@@ -583,7 +595,8 @@ std::string build_runtime_ini(
            "\r\nnvidia_bidirectional=" +
            (settings.nvidia_bidirectional ? "1" : "0") +
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
-           "\r\ntriple_frame_gen=" + (settings.triple_frame_gen ? "1" : "0") +
+           "\r\ntriple_frame_gen=" + (settings.frame_multiplier >= 3 ? "1" : "0") +
+           "\r\nframe_multiplier=" + std::to_string(settings.frame_multiplier) +
            "\r\nhybrid=" + (settings.hybrid ? "1" : "0") +
            "\r\nhybrid_depth_search=" + (settings.hybrid_depth_search ? "1" : "0") +
            "\r\nexcluded_processes=" + settings.excluded_processes +

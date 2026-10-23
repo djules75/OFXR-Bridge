@@ -126,6 +126,16 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_triple_frame_gen(
     const std::filesystem::path& module_directory) noexcept;
 
+// `[ofxr] frame_multiplier` (V558): frames shown per application frame, 2,
+// 3 or 4 - 4 is three synthetics per application frame ("4X"). Absent or
+// out of range it is what triple_frame_gen says: 3 when set, 2 otherwise.
+// Read at xrCreateSession and followed while the session runs, as far as
+// the synthetic ring the session was made with allows (a ring of n slots
+// fits every multiplier up to n + 1). The tray calls it "Frame Gen
+// multiplier".
+[[nodiscard]] std::uint32_t read_frame_multiplier(
+    const std::filesystem::path& module_directory) noexcept;
+
 // `[ofxr] edge_ghosting_reduction`: the composition's refinement, off unless
 // set to 1; followed while the session runs. (`repeating_pattern_lock` left
 // with V507.)

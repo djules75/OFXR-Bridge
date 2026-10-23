@@ -5953,9 +5953,11 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
     require(operation_succeeded(history->capture(1, &capture_b)) &&
             operation_succeeded(history->commit(capture_b)),
         "bars capture B failed");
+    const std::array<xrfg::D3D12ExtraSynthetic, 1> extra_synthetics{{{1U, 0.5F}}};
     require(operation_succeeded(synthesizer.submit_pair(capture_b, views, views, 0, 1, &pair,
                 std::nullopt, guides(2), false, 0.5F,
-                three_x ? std::make_optional(xrfg::D3D12ExtraSynthetic{1U, 0.5F}) : std::nullopt)),
+                three_x ? std::span<const xrfg::D3D12ExtraSynthetic>(extra_synthetics)
+                        : std::span<const xrfg::D3D12ExtraSynthetic>())),
         "bars pair failed");
     fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
     const UINT outputs = three_x ? 2U : 1U;

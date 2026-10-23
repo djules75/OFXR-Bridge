@@ -123,16 +123,20 @@ struct D3D12NvidiaOpticalFlowOptions {
     bool hybrid{};
 };
 
-// A second synthetic produced from the same pair, for a session that hands
-// the runtime three frames per application frame. The optical flow is the
-// pair's and is computed once; this costs one more composition pass, into
-// its own destination image and at its own instant between the two captures.
+// A further synthetic produced from the same pair, for a session that hands
+// the runtime three (3X) or four (4X) frames per application frame. The
+// optical flow is the pair's and is computed once; each costs one more
+// composition pass, into its own destination image and at its own instant
+// between the two captures. submit_pair takes up to kMaxExtraSynthetics.
 struct D3D12ExtraSynthetic {
     std::uint32_t destination_index{};
     // As submit_pair's interpolation_fraction: 0 at the previous capture, 1
     // at the current one.
     float interpolation_fraction{0.5F};
 };
+// 4X (V558): three synthetics per pair at most, the first through
+// submit_pair's own destination and two more through extra_synthetics.
+inline constexpr std::uint32_t kMaxExtraSynthetics = 2;
 
 // Owns a rolling exclusive history lease. Each resource supports at most two
 // bounded projection views. They ordinarily map one-to-one to at most two
@@ -199,11 +203,12 @@ public:
         // and the synthetic shown one period before the current frame.
         // Clamped internally; out-of-range values fall back to half.
         float interpolation_fraction = 0.5F,
-        // A second synthetic from the same pair, written in the same
-        // submission and complete at the same fence value. Its destination
-        // is another image of the synthetic set and must differ from
-        // synthetic_destination_index.
-        std::optional<D3D12ExtraSynthetic> extra_synthetic = std::nullopt) noexcept;
+        // Further synthetics from the same pair (none, one at 3X, two at
+        // 4X), written in the same submission and complete at the same fence
+        // value, in the order they are shown. Each destination is another
+        // image of the synthetic set and all must differ from each other and
+        // from synthetic_destination_index. At most kMaxExtraSynthetics.
+        std::span<const D3D12ExtraSynthetic> extra_synthetics = {}) noexcept;
 
     // Executes the current output's copy, which submit_pair records but
     // deliberately leaves unsubmitted. The synthetic frame is handed to the

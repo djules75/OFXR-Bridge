@@ -1091,11 +1091,15 @@ struct SessionState {
     // The depth the ini asked for, which is what a session goes back to
     // when 3X is switched off.
     bool deep_pipeline_configured{};
-    // The synthetic ring has two slots - the session started in the deeper
-    // pipeline or in 3X - which both of those need and which is what lets
-    // the session move between them without making a swapchain. Cleared
+    // The synthetic ring's slots: one in the shallow pipeline, two where the
+    // session started in the deeper pipeline or in 3X, three in 4X (V558).
+    // A ring of n slots fits every multiplier up to n + 1, which is what
+    // lets the session move between them without making a swapchain. Reset
     // with the ring by fall_back_to_shallow_pipeline.
-    bool two_slot_synthetic_ring{};
+    std::size_t synthetic_ring_slots{1};
+    // The largest multiplier the ring fits while the session runs; a higher
+    // one asked for live is clamped to it and the fixed marker held.
+    std::uint32_t live_multiplier_ceiling{2};
     // One private swapchain per output with staging textures, where the
     // synthesizer writes D3D12 images directly; see kStagingSlotCount.
     // Read at xrCreateSession from `[ofxr] single_swapchain_rings`.
@@ -2062,7 +2066,9 @@ struct PrivateSwapchainState {
 constexpr std::size_t kCurrentSlotCount = 2;
 constexpr std::size_t kSyntheticSlotCountShallow = 1;
 constexpr std::size_t kSyntheticSlotCountDeep = 2;
-constexpr std::size_t kPrivateRingSlotMax = 2;
+// 4X (V558): three synthetics per application frame, a slot each.
+constexpr std::size_t kSyntheticSlotCountQuad = 3;
+constexpr std::size_t kPrivateRingSlotMax = 3;
 // Single-swapchain rings (SessionState::single_swapchain_rings, the default
 // where the synthesizer writes D3D12 images directly): one private swapchain
 // per output, and the synthesizer writes layer-owned staging textures
@@ -2076,6 +2082,9 @@ constexpr std::size_t kPrivateRingSlotMax = 2;
 // is handed, as Pimax's does. The interops (Vulkan, the legacy D3D11 path)
 // mirror private images by index and keep the rings.
 constexpr std::size_t kStagingSlotCount = 2;
+// 4X keeps a synthetic staging texture per synthetic, three; every other
+// shape the two above (V558).
+constexpr std::size_t kSyntheticStagingSlotMax = 3;
 
 struct FrameGenerationSwapchainState {
     std::array<PrivateSwapchainState, kCurrentSlotCount> current{};
@@ -2100,7 +2109,7 @@ struct FrameGenerationSwapchainState {
     // hand-over copies into, by acquired index.
     bool single_swapchain_rings{};
     std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kStagingSlotCount> current_staging{};
-    std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kStagingSlotCount> synthetic_staging{};
+    std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kSyntheticStagingSlotMax> synthetic_staging{};
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> current_runtime_images;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> synthetic_runtime_images;
     std::shared_ptr<HandoverCopier> copier;
@@ -3050,8 +3059,8 @@ template <typename Initialize>
 
 [[nodiscard]] std::size_t synthetic_slot_count_for(
     const SessionState& session) noexcept {
-    return session.two_slot_synthetic_ring ? kSyntheticSlotCountDeep
-                                           : kSyntheticSlotCountShallow;
+    return std::clamp(session.synthetic_ring_slots,
+        kSyntheticSlotCountShallow, kPrivateRingSlotMax);
 }
 
 [[nodiscard]] std::shared_ptr<FrameGenerationSwapchainState>
@@ -3154,7 +3163,11 @@ create_d3d12_frame_generation_swapchains(
         // textures described like the runtime's images, so a hand-over copy
         // is a whole-resource copy.
         std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kStagingSlotCount> current_staging{};
-        std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kStagingSlotCount> synthetic_staging{};
+        std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kSyntheticStagingSlotMax> synthetic_staging{};
+        // 4X: a synthetic staging texture per synthetic (V558).
+        const std::size_t synthetic_staging_count = std::min(
+            kSyntheticStagingSlotMax,
+            std::max(kStagingSlotCount, synthetic_slot_count_for(*state->session)));
         std::vector<ID3D12Resource*> current_destinations_raw;
         std::vector<ID3D12Resource*> synthetic_destinations_raw;
         std::shared_ptr<HandoverCopier> copier;
@@ -3167,8 +3180,8 @@ create_d3d12_frame_generation_swapchains(
             heap_properties.CreationNodeMask = 1;
             heap_properties.VisibleNodeMask = 1;
             HRESULT staging_result = S_OK;
-            for (auto* staging : {&current_staging, &synthetic_staging}) {
-                for (auto& texture : *staging) {
+            const auto make_staging = [&](auto& staging, std::size_t count) {
+                for (std::size_t slot = 0; slot < count && slot < staging.size(); ++slot) {
                     if (FAILED(staging_result)) {
                         break;
                     }
@@ -3178,9 +3191,11 @@ create_d3d12_frame_generation_swapchains(
                         &staging_description,
                         D3D12_RESOURCE_STATE_COMMON,
                         nullptr,
-                        IID_PPV_ARGS(texture.ReleaseAndGetAddressOf()));
+                        IID_PPV_ARGS(staging[slot].ReleaseAndGetAddressOf()));
                 }
-            }
+            };
+            make_staging(current_staging, kStagingSlotCount);
+            make_staging(synthetic_staging, synthetic_staging_count);
             copier = std::make_shared<HandoverCopier>();
             if (SUCCEEDED(staging_result)) {
                 staging_result = copier->initialize(state->session->d3d12_device.Get());
@@ -3201,7 +3216,9 @@ create_d3d12_frame_generation_swapchains(
                 current_destinations_raw.push_back(texture.Get());
             }
             for (const auto& texture : synthetic_staging) {
-                synthetic_destinations_raw.push_back(texture.Get());
+                if (texture) {
+                    synthetic_destinations_raw.push_back(texture.Get());
+                }
             }
             log_video_memory(*state->session, VideoMemoryStage::staging,
                 handle_value(state->handle));
@@ -3292,7 +3309,7 @@ create_d3d12_frame_generation_swapchains(
             // Destination indices are staging slots.
             generation->current_images_per_slot = 1;
             generation->synthetic_images_per_slot = 1;
-            generation->synthetic_slot_count = kStagingSlotCount;
+            generation->synthetic_slot_count = synthetic_staging_count;
         }
         // 703: the rings' shape. a 1 for single-swapchain rings, b the
         // runtime images per output, c the swapchain.
@@ -3988,7 +4005,8 @@ create_vulkan_frame_generation_swapchains(
         }
         session->deep_pipeline = false;
         session->frames_per_application_frame = 2;
-        session->two_slot_synthetic_ring = false;
+        session->synthetic_ring_slots = kSyntheticSlotCountShallow;
+        session->live_multiplier_ceiling = 2;
         if (session->triple_switchable) {
             session->fixed_frame_multiplier.hold();
         }
@@ -5059,8 +5077,10 @@ XrResult layer_create_session_impl(
     // the private swapchain rings and the admission bounds.
     state->deep_pipeline =
         xrfg::implicit_layer::read_deep_pipeline(current_layer_directory());
-    const bool triple_requested =
-        xrfg::implicit_layer::read_triple_frame_gen(current_layer_directory());
+    // 2, 3 or 4 (V558): frames shown per application frame.
+    const std::uint32_t multiplier_requested =
+        xrfg::implicit_layer::read_frame_multiplier(current_layer_directory());
+    const bool triple_requested = multiplier_requested > 2;
     state->single_swapchain_rings =
         xrfg::implicit_layer::read_single_swapchain_rings(current_layer_directory());
     state->capture_at_end_frame =
@@ -5308,13 +5328,24 @@ XrResult layer_create_session_impl(
     // from the status block (flags bit 0) and shows and saves 2X.
     state->panel_corrections_off = realvr_loaded();
     if (triple_requested && triple_binding && !state->panel_corrections_off) {
-        state->frames_per_application_frame = 3;
+        state->frames_per_application_frame = multiplier_requested;
         state->deep_pipeline = false;
     }
-    state->two_slot_synthetic_ring =
-        state->deep_pipeline || state->frames_per_application_frame > 2;
-    state->triple_switchable = triple_binding && state->two_slot_synthetic_ring &&
+    // The ring: a slot per synthetic the shape needs, two for the deeper
+    // pipeline; what it fits is what the session can be switched to live.
+    const std::uint32_t frames_at_start =
+        state->frames_per_application_frame.load();
+    state->synthetic_ring_slots = frames_at_start > 3
+        ? kSyntheticSlotCountQuad
+        : (state->deep_pipeline || frames_at_start > 2)
+            ? kSyntheticSlotCountDeep
+            : kSyntheticSlotCountShallow;
+    state->triple_switchable = triple_binding &&
+        state->synthetic_ring_slots >= kSyntheticSlotCountDeep &&
         !state->panel_corrections_off;
+    state->live_multiplier_ceiling = state->triple_switchable
+        ? static_cast<std::uint32_t>(state->synthetic_ring_slots) + 1U
+        : frames_at_start;
     if (triple_binding && !state->triple_switchable) {
         state->fixed_frame_multiplier.hold();
     }
@@ -5336,6 +5367,14 @@ XrResult layer_create_session_impl(
         state->panel_corrections_off ? 1u : 0u,
         state->panel_corrections_off && triple_requested ? 1u : 0u,
         0);
+    // 765 (V558): the multiplier asked for, the synthetic ring's slots and
+    // the largest multiplier the session can be switched to live.
+    xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::presenter_transition,
+        765,
+        multiplier_requested,
+        static_cast<std::uint64_t>(state->synthetic_ring_slots),
+        state->live_multiplier_ceiling);
     // And its one DLSS stream rendered for both eyes in turn: the eyes by
     // serial parity, once the pictures have said which parity is the left
     // (configure_dlss_alternating_eyes, anchor_ngx_alternating_eyes).
@@ -8500,8 +8539,11 @@ void observe_triple_release(
     state.triple_release_window_unwritten = 0;
     auto& delay = state.triple_release_delay;
     auto& ceiling = state.triple_release_ceiling;
+    // At most the synthetics' periods: two at 3X, three at 4X.
+    const auto ceiling_limit = period * static_cast<std::int64_t>(
+        std::max(2U, state.frames_per_application_frame.load()) - 1U);
     if (ceiling < std::chrono::nanoseconds::zero()) {
-        ceiling = period * 2;
+        ceiling = ceiling_limit;
     }
     if (late >= 2) {
         // Only a delay can be blamed. Frames that are late with none
@@ -8519,7 +8561,7 @@ void observe_triple_release(
         } else if (state.triple_release_ceiling_hold > 0) {
             --state.triple_release_ceiling_hold;
         } else {
-            ceiling = std::min(period * 2, ceiling + 2 * kMillisecond);
+            ceiling = std::min(ceiling_limit, ceiling + 2 * kMillisecond);
             delay = ceiling;
         }
     }
@@ -11147,12 +11189,12 @@ enqueue_presenter_submission(
 }
 
 // One application frame's submissions, in the order they are shown: the
-// synthetic, the second synthetic where the session makes one (null
-// otherwise), then the real frame.
+// synthetic, the further synthetics where the session makes them (one at
+// 3X, two at 4X; none otherwise), then the real frame.
 [[nodiscard]] XrResult enqueue_presenter_pair(
     const std::shared_ptr<SessionState>& state,
     std::shared_ptr<GeneratedFrameEndInfo> synthetic,
-    std::shared_ptr<GeneratedFrameEndInfo> extra_synthetic,
+    std::span<const std::shared_ptr<GeneratedFrameEndInfo>> extra_synthetics,
     std::shared_ptr<GeneratedFrameEndInfo> current,
     std::chrono::steady_clock::time_point application_end_at) noexcept {
     try {
@@ -11176,10 +11218,14 @@ enqueue_presenter_submission(
         }
         state->presenter_submissions.push_back(std::move(first));
         ++state->outstanding_presenter_submissions;
-        if (extra_synthetic) {
+        for (const std::shared_ptr<GeneratedFrameEndInfo>& extra_synthetic :
+             extra_synthetics) {
+            if (!extra_synthetic) {
+                continue;
+            }
             auto middle = std::make_shared<PresenterSubmission>();
             middle->sequence = state->next_presenter_sequence++;
-            middle->owned_frame = std::move(extra_synthetic);
+            middle->owned_frame = extra_synthetic;
             middle->queued_at = queued_at;
             middle->app_release_value = app_release_value;
             middle->owned_frame->app_release_value = app_release_value;
@@ -12152,8 +12198,9 @@ struct PreparedGeneration {
     GenerationPrepareReason reason{GenerationPrepareReason::exception};
     XrSwapchain current_handle{XR_NULL_HANDLE};
     XrSwapchain synthetic_handle{XR_NULL_HANDLE};
-    // The pair's second synthetic, where one was made: null otherwise.
-    XrSwapchain extra_synthetic_handle{XR_NULL_HANDLE};
+    // The pair's further synthetics (one at 3X, two at 4X), where they were
+    // made, in the order they are shown after the first: null otherwise.
+    std::array<XrSwapchain, xrfg::kMaxExtraSynthetics> extra_synthetic_handles{};
     // The synthesizer holding this pair's deferred current copy, so the
     // presenter can submit it once the synthetic frame has gone, and the
     // value that copy signals - which the flush needs by hand, because the
@@ -12165,12 +12212,12 @@ struct PreparedGeneration {
     // frame over; the images stay acquired until then.
     std::shared_ptr<FrameGenerationSwapchainState> deferred_generation;
     PrivateSwapchainState* deferred_synthetic{};
-    PrivateSwapchainState* deferred_extra_synthetic{};
+    std::array<PrivateSwapchainState*, xrfg::kMaxExtraSynthetics> deferred_extra_synthetic{};
     PrivateSwapchainState* deferred_current{};
     xrfg::D3D12FrameSynthesisTicket deferred_ticket{};
     // Single-swapchain rings: the staging each output was written to.
     ID3D12Resource* deferred_synthetic_staging{};
-    ID3D12Resource* deferred_extra_staging{};
+    std::array<ID3D12Resource*, xrfg::kMaxExtraSynthetics> deferred_extra_staging{};
     ID3D12Resource* deferred_current_staging{};
     // Where the pair's output becomes readable by the runtime, for the
     // presenter's readiness hold in the deeper pipeline and for the release
@@ -12200,8 +12247,9 @@ struct PreparedProjectionFrame {
     bool request_pair,
     std::span<const xrfg::D3D12ReprojectionView> current_source_views,
     float interpolation_fraction,
-    // Where a second synthetic belongs, for a session that makes one.
-    std::optional<float> extra_interpolation_fraction,
+    // Where the further synthetics belong, for a session that makes them:
+    // none, one at 3X, two at 4X, in the order they are shown.
+    std::span<const float> extra_interpolation_fractions,
     bool release_at_handover_requested,
     // A flat panel's image (V509): the overlay's diagnostic square belongs
     // in the eye images only.
@@ -12249,16 +12297,32 @@ struct PreparedProjectionFrame {
             output.reason = GenerationPrepareReason::invalid_private_swapchain;
             return output;
         }
-        // The second synthetic takes the ring's other slot. Without one to
-        // take, the pair is an ordinary pair.
-        const std::size_t extra_slot =
-            (synthetic_slot + 1) % generation->synthetic_slot_count;
-        PrivateSwapchainState& extra_image =
-            generation->synthetic[single_rings ? 0 : extra_slot];
-        const bool request_extra = request_pair &&
-            extra_interpolation_fraction.has_value() &&
-            extra_slot != synthetic_slot &&
-            extra_image.handle != XR_NULL_HANDLE;
+        // The further synthetics take the ring's other slots, in order.
+        // Without slots to take, the pair is an ordinary pair; a ring too
+        // short for all of them makes as many as fit.
+        std::array<std::size_t, xrfg::kMaxExtraSynthetics> extra_slots{};
+        std::array<PrivateSwapchainState*, xrfg::kMaxExtraSynthetics> extra_images{};
+        std::uint32_t extra_count = 0;
+        if (request_pair) {
+            const std::uint32_t wanted = static_cast<std::uint32_t>(std::min(
+                extra_interpolation_fractions.size(),
+                static_cast<std::size_t>(xrfg::kMaxExtraSynthetics)));
+            for (std::uint32_t extra = 0; extra < wanted; ++extra) {
+                const std::size_t slot = (synthetic_slot + 1 + extra) %
+                    generation->synthetic_slot_count;
+                PrivateSwapchainState& image =
+                    generation->synthetic[single_rings ? 0 : slot];
+                if (slot == synthetic_slot ||
+                    (extra != 0 && slot == extra_slots[0]) ||
+                    image.handle == XR_NULL_HANDLE) {
+                    break;
+                }
+                extra_slots[extra] = slot;
+                extra_images[extra] = &image;
+                ++extra_count;
+            }
+        }
+        const bool request_extra = extra_count != 0;
 
         if (!request_pair) {
             std::scoped_lock gpu_lock(state->session->gpu_mutex);
@@ -12298,24 +12362,36 @@ struct PreparedProjectionFrame {
             return output;
         }
 
-        if (request_extra && !single_rings &&
-            !acquire_and_wait_private_image(
-                state->session.get(),
-                state->session->dispatch,
-                extra_image)) {
-            output.reason =
-                GenerationPrepareReason::synthetic_private_acquire_failed;
-            static_cast<void>(release_private_image(
-                state->session.get(),
-                state->session->dispatch,
-                synthetic_image));
-            static_cast<void>(release_private_image(
-                state->session.get(),
-                state->session->dispatch,
-                current_image));
-            std::scoped_lock gpu_lock(state->session->gpu_mutex);
-            static_cast<void>(generation->synthesizer->retire_previous());
-            return output;
+        if (request_extra && !single_rings) {
+            std::uint32_t acquired = 0;
+            while (acquired < extra_count &&
+                   acquire_and_wait_private_image(
+                       state->session.get(),
+                       state->session->dispatch,
+                       *extra_images[acquired])) {
+                ++acquired;
+            }
+            if (acquired < extra_count) {
+                output.reason =
+                    GenerationPrepareReason::synthetic_private_acquire_failed;
+                for (std::uint32_t extra = 0; extra < acquired; ++extra) {
+                    static_cast<void>(release_private_image(
+                        state->session.get(),
+                        state->session->dispatch,
+                        *extra_images[extra]));
+                }
+                static_cast<void>(release_private_image(
+                    state->session.get(),
+                    state->session->dispatch,
+                    synthetic_image));
+                static_cast<void>(release_private_image(
+                    state->session.get(),
+                    state->session->dispatch,
+                    current_image));
+                std::scoped_lock gpu_lock(state->session->gpu_mutex);
+                static_cast<void>(generation->synthesizer->retire_previous());
+                return output;
+            }
         }
 
         // Both private images are acquired. The runtime made them safe to
@@ -12339,16 +12415,20 @@ struct PreparedProjectionFrame {
             : static_cast<std::uint32_t>(synthetic_slot) *
                     generation->synthetic_images_per_slot +
                 synthetic_image.acquired_index;
-        std::optional<xrfg::D3D12ExtraSynthetic> extra_synthetic;
-        if (request_extra) {
-            extra_synthetic = xrfg::D3D12ExtraSynthetic{
-                single_rings
-                    ? static_cast<std::uint32_t>(extra_slot)
-                    : static_cast<std::uint32_t>(extra_slot) *
-                            generation->synthetic_images_per_slot +
-                        extra_image.acquired_index,
-                *extra_interpolation_fraction};
+        std::array<xrfg::D3D12ExtraSynthetic, xrfg::kMaxExtraSynthetics> extra_synthetics{};
+        std::array<std::uint32_t, xrfg::kMaxExtraSynthetics> extra_destination_indices{};
+        for (std::uint32_t extra = 0; extra < extra_count; ++extra) {
+            extra_destination_indices[extra] = single_rings
+                ? static_cast<std::uint32_t>(extra_slots[extra])
+                : static_cast<std::uint32_t>(extra_slots[extra]) *
+                        generation->synthetic_images_per_slot +
+                    extra_images[extra]->acquired_index;
+            extra_synthetics[extra] = xrfg::D3D12ExtraSynthetic{
+                extra_destination_indices[extra],
+                extra_interpolation_fractions[extra]};
         }
+        const std::span<const xrfg::D3D12ExtraSynthetic> extra_synthetic_span(
+            extra_synthetics.data(), extra_count);
 
         // Deferring the current copy keeps a full-resolution copy the
         // synthetic never reads off its critical path, but it only works where
@@ -12409,7 +12489,7 @@ struct PreparedProjectionFrame {
                                           motion_vectors,
                                           defer_current_copy,
                                           interpolation_fraction,
-                                          extra_synthetic)
+                                          extra_synthetic_span)
                                     : generation->synthesizer->submit_prime(
                                           *capture,
                                           current_source_views,
@@ -12431,10 +12511,8 @@ struct PreparedProjectionFrame {
                             ? std::optional<std::uint32_t>(
                                   synthetic_destination_index)
                             : std::nullopt,
-                        extra_synthetic
-                            ? std::optional<std::uint32_t>(
-                                  extra_synthetic->destination_index)
-                            : std::nullopt);
+                        std::span<const std::uint32_t>(
+                            extra_destination_indices.data(), extra_count));
                 xrfg::bridge_flight_logger().end(
                     publish_token,
                     xrfg::BridgeFlightOperation::d3d11_publish,
@@ -12505,11 +12583,11 @@ struct PreparedProjectionFrame {
                     state->session->dispatch,
                     synthetic_image);
             }
-            if (request_extra) {
+            for (std::uint32_t extra = 0; extra < extra_count; ++extra) {
                 synthetic_released = release_private_image(
                     state->session.get(),
                     state->session->dispatch,
-                    extra_image) && synthetic_released;
+                    *extra_images[extra]) && synthetic_released;
             }
             current_released = release_private_image(
                 state->session.get(),
@@ -12540,8 +12618,8 @@ struct PreparedProjectionFrame {
         output.anchor_is_current = true;
         output.current_handle = current_image.handle;
         output.synthetic_handle = synthetic_image.handle;
-        if (request_extra) {
-            output.extra_synthetic_handle = extra_image.handle;
+        for (std::uint32_t extra = 0; extra < extra_count; ++extra) {
+            output.extra_synthetic_handles[extra] = extra_images[extra]->handle;
         }
         if (current_released && synthetic_released) {
             // Hand the next frame the other slot, so it can release its output
@@ -12553,7 +12631,7 @@ struct PreparedProjectionFrame {
             // which is correct at the shallow admission bound.
             if (request_pair) {
                 generation->synthetic_slot =
-                    (synthetic_slot + (request_extra ? 2 : 1)) %
+                    (synthetic_slot + 1 + extra_count) %
                     generation->synthetic_slot_count;
             }
             // Only a deferred copy leaves anything to do after the
@@ -12595,8 +12673,9 @@ struct PreparedProjectionFrame {
                 output.deferred_current = &current_image;
                 output.deferred_synthetic =
                     request_pair ? &synthetic_image : nullptr;
-                output.deferred_extra_synthetic =
-                    request_extra ? &extra_image : nullptr;
+                for (std::uint32_t extra = 0; extra < extra_count; ++extra) {
+                    output.deferred_extra_synthetic[extra] = extra_images[extra];
+                }
                 output.deferred_ticket = ticket;
                 if (single_rings) {
                     output.deferred_current_staging =
@@ -12604,9 +12683,10 @@ struct PreparedProjectionFrame {
                     output.deferred_synthetic_staging = request_pair
                         ? generation->synthetic_staging[synthetic_slot].Get()
                         : nullptr;
-                    output.deferred_extra_staging = request_extra
-                        ? generation->synthetic_staging[extra_slot].Get()
-                        : nullptr;
+                    for (std::uint32_t extra = 0; extra < extra_count; ++extra) {
+                        output.deferred_extra_staging[extra] =
+                            generation->synthetic_staging[extra_slots[extra]].Get();
+                    }
                 }
             }
             output.kind = request_pair ? PreparedGenerationKind::pair
@@ -12686,7 +12766,7 @@ struct PreparedProjectionFrame {
     std::span<const ProjectionResourceMapping> mappings,
     bool request_pair,
     float interpolation_fraction,
-    std::optional<float> extra_interpolation_fraction,
+    std::span<const float> extra_interpolation_fractions,
     bool release_at_handover) noexcept {
     PreparedProjectionFrame output{};
     try {
@@ -12715,7 +12795,7 @@ struct PreparedProjectionFrame {
                     reprojection_views->data(),
                     reprojection_views->size()),
                 interpolation_fraction,
-                extra_interpolation_fraction,
+                extra_interpolation_fractions,
                 release_at_handover);
             all_expected_kind =
                 all_expected_kind && generation.kind == expected_kind;
@@ -12956,7 +13036,7 @@ void prepare_panel_generation(
     std::span<const PanelSource> sources,
     PreparedProjectionFrame* prepared,
     float interpolation_fraction,
-    std::optional<float> extra_interpolation_fraction,
+    std::span<const float> extra_interpolation_fractions,
     bool release_at_handover) {
     const std::uint64_t serial = state.panel_frame_serial;
     std::vector<std::pair<XrSwapchain, std::uint64_t>> generated;
@@ -12998,7 +13078,7 @@ void prepare_panel_generation(
             request_pair,
             std::span<const xrfg::D3D12ReprojectionView>(&view, 1),
             interpolation_fraction,
-            extra_interpolation_fraction,
+            extra_interpolation_fractions,
             release_at_handover,
             true);
         if (generation.kind == PreparedGenerationKind::none) continue;
@@ -14067,10 +14147,18 @@ void apply_live_frame_multiplier(
             return;
         }
         state->triple_poll_at = now + std::chrono::milliseconds(250);
+        const std::uint32_t requested =
+            xrfg::implicit_layer::read_frame_multiplier(current_layer_directory());
+        // What the ring fits (V558): a session made with two synthetic slots
+        // takes 3X but not 4X. Clamped, and the fixed marker held while the
+        // clamp is in force, so the tray can say a restart is needed.
         const std::uint32_t target =
-            xrfg::implicit_layer::read_triple_frame_gen(current_layer_directory())
-                ? 3U
-                : 2U;
+            std::min(requested, state->live_multiplier_ceiling);
+        if (target != requested) {
+            state->fixed_frame_multiplier.hold();
+        } else {
+            state->fixed_frame_multiplier.release();
+        }
         if (target == state->frames_per_application_frame) {
             return;
         }
@@ -14695,17 +14783,22 @@ XrResult layer_end_frame_impl(
         current_snapshot,
         frames_per_frame,
         0);
-    // 3X: the second synthetic, a period after the first and a period before
-    // the real frame.
-    const std::optional<float> extra_interpolation_fraction =
-        frames_per_frame > 2
-            ? std::optional<float>(synthetic_interpolation_fraction(
-                  state,
-                  previous_snapshot,
-                  current_snapshot,
-                  frames_per_frame,
-                  1))
-            : std::nullopt;
+    // 3X and 4X: the further synthetics, a period apart after the first,
+    // the last a period before the real frame.
+    std::array<float, xrfg::kMaxExtraSynthetics> extra_fractions{};
+    const std::uint32_t extra_fraction_count = std::min(
+        frames_per_frame > 2 ? frames_per_frame - 2U : 0U,
+        xrfg::kMaxExtraSynthetics);
+    for (std::uint32_t extra = 0; extra < extra_fraction_count; ++extra) {
+        extra_fractions[extra] = synthetic_interpolation_fraction(
+            state,
+            previous_snapshot,
+            current_snapshot,
+            frames_per_frame,
+            extra + 1U);
+    }
+    const std::span<const float> extra_interpolation_fractions(
+        extra_fractions.data(), extra_fraction_count);
     PreparedProjectionFrame prepared = prepare_projection_frame(
         current_snapshot,
         std::span<const ProjectionResourceMapping>(
@@ -14713,7 +14806,7 @@ XrResult layer_end_frame_impl(
             resource_mappings.mappings.size()),
         metadata_pairable,
         interpolation_fraction,
-        extra_interpolation_fraction,
+        extra_interpolation_fractions,
         // Released at the hand-over where the runtime has the layer's own
         // queue, in either pipeline: see the note on the release in
         // prepare_frame_generation. The shallow pipeline admits the next
@@ -14729,16 +14822,18 @@ XrResult layer_end_frame_impl(
             panels,
             &prepared,
             interpolation_fraction,
-            extra_interpolation_fraction,
+            extra_interpolation_fractions,
             use_continuous_presenter && state->binding_queue != nullptr);
     }
     // Collected before anything below can reset `prepared`, so every image
     // left acquired is accounted for on every path out of this call.
     PrivateReleaseBatch synthetic_releases;
-    PrivateReleaseBatch extra_releases;
+    std::array<PrivateReleaseBatch, xrfg::kMaxExtraSynthetics> extra_releases;
     PrivateReleaseBatch current_releases;
     synthetic_releases.session = state.get();
-    extra_releases.session = state.get();
+    for (PrivateReleaseBatch& releases : extra_releases) {
+        releases.session = state.get();
+    }
     current_releases.session = state.get();
     for (const PreparedProjectionResource& resource : prepared.resources) {
         const PreparedGeneration& deferred = resource.generation;
@@ -14754,12 +14849,15 @@ XrResult layer_end_frame_impl(
                 &deferred.deferred_generation->synthetic_runtime_images,
             });
         }
-        if (deferred.deferred_extra_synthetic != nullptr) {
-            extra_releases.releases.push_back({
+        for (std::uint32_t extra = 0; extra < xrfg::kMaxExtraSynthetics; ++extra) {
+            if (deferred.deferred_extra_synthetic[extra] == nullptr) {
+                continue;
+            }
+            extra_releases[extra].releases.push_back({
                 deferred.deferred_generation,
-                deferred.deferred_extra_synthetic,
+                deferred.deferred_extra_synthetic[extra],
                 deferred.deferred_ticket,
-                deferred.deferred_extra_staging,
+                deferred.deferred_extra_staging[extra],
                 &deferred.deferred_generation->synthetic_runtime_images,
             });
         }
@@ -14801,28 +14899,37 @@ XrResult layer_end_frame_impl(
     }
 
     GeneratedFrameEndInfo first_generated{};
-    GeneratedFrameEndInfo extra_generated{};
+    std::array<GeneratedFrameEndInfo, xrfg::kMaxExtraSynthetics> extra_generated{};
     GeneratedFrameEndInfo current_generated{};
     const XrFrameEndInfo* submitted_end_info = end_info;
     bool pair_ready = false;
-    // The frame has a second synthetic: every resource made one.
-    bool extra_ready = !prepared.resources.empty();
+    // The frame's further synthetics: as many as every eye resource made. A
+    // panel without one shows the application's image in that frame; the
+    // eye images decide how many there are.
+    std::uint32_t extra_count =
+        prepared.resources.empty() ? 0U : extra_fraction_count;
     std::vector<ProjectionResourceDestination> current_destinations;
     std::vector<ProjectionResourceDestination> synthetic_destinations;
-    std::vector<ProjectionResourceDestination> extra_destinations;
+    std::array<std::vector<ProjectionResourceDestination>, xrfg::kMaxExtraSynthetics>
+        extra_destinations;
     current_destinations.reserve(prepared.resources.size());
     synthetic_destinations.reserve(prepared.resources.size());
-    extra_destinations.reserve(prepared.resources.size());
+    for (auto& destinations : extra_destinations) {
+        destinations.reserve(prepared.resources.size());
+    }
     for (const PreparedProjectionResource& resource : prepared.resources) {
-        // A panel without a second synthetic shows the application's image
-        // in that frame; the eye images decide whether there is one.
-        extra_ready = extra_ready && (resource.panel ||
-            resource.generation.extra_synthetic_handle != XR_NULL_HANDLE);
-        extra_destinations.push_back({
-            resource.application_swapchain,
-            resource.generation.extra_synthetic_handle,
-            resource.panel,
-        });
+        for (std::uint32_t extra = 0; extra < xrfg::kMaxExtraSynthetics; ++extra) {
+            const XrSwapchain handle =
+                resource.generation.extra_synthetic_handles[extra];
+            if (!resource.panel && handle == XR_NULL_HANDLE) {
+                extra_count = std::min(extra_count, extra);
+            }
+            extra_destinations[extra].push_back({
+                resource.application_swapchain,
+                handle,
+                resource.panel,
+            });
+        }
         current_destinations.push_back({
             resource.application_swapchain,
             resource.generation.current_handle,
@@ -14865,13 +14972,19 @@ XrResult layer_end_frame_impl(
             std::span<const ProjectionResourceDestination>(
                 current_destinations.data(), current_destinations.size()),
             &current_generated);
-        extra_ready = extra_ready && build_generated_frame_end_info(
-            end_info,
-            current_snapshot,
-            true,
-            std::span<const ProjectionResourceDestination>(
-                extra_destinations.data(), extra_destinations.size()),
-            &extra_generated);
+        for (std::uint32_t extra = 0; extra < extra_count; ++extra) {
+            if (!build_generated_frame_end_info(
+                    end_info,
+                    current_snapshot,
+                    true,
+                    std::span<const ProjectionResourceDestination>(
+                        extra_destinations[extra].data(),
+                        extra_destinations[extra].size()),
+                    &extra_generated[extra])) {
+                extra_count = extra;
+                break;
+            }
+        }
         if (synthetic_built && current_built) {
             // The synthetics' flat panels between the two frames (V508), at
             // the moments their images show; the synthesizer's own guard on
@@ -14884,12 +14997,13 @@ XrResult layer_end_frame_impl(
                 std::span<const ProjectionResourceDestination>(
                     synthetic_destinations.data(), synthetic_destinations.size()),
                 &first_generated);
-            if (extra_ready && extra_interpolation_fraction) {
+            for (std::uint32_t extra = 0; extra < extra_count; ++extra) {
                 place_panels_between(*state, state->panel_poses_previous,
-                    usable_fraction(*extra_interpolation_fraction),
+                    usable_fraction(extra_fractions[extra]),
                     std::span<const ProjectionResourceDestination>(
-                        extra_destinations.data(), extra_destinations.size()),
-                    &extra_generated);
+                        extra_destinations[extra].data(),
+                        extra_destinations[extra].size()),
+                    &extra_generated[extra]);
             }
             // The synthetic frame owns the deferred copies: they must reach
             // the queue after it has been handed to the runtime.
@@ -14922,9 +15036,15 @@ XrResult layer_end_frame_impl(
     std::shared_ptr<GeneratedFrameEndInfo> presenter_first_frame;
     first_generated.synthetic = pair_ready;
     first_generated.leads_frame = pair_ready;
-    extra_ready = extra_ready && pair_ready;
-    extra_generated.synthetic = extra_ready;
-    std::shared_ptr<GeneratedFrameEndInfo> presenter_extra_frame;
+    if (!pair_ready) {
+        extra_count = 0;
+    }
+    bool extra_ready = extra_count != 0;
+    for (std::uint32_t extra = 0; extra < extra_count; ++extra) {
+        extra_generated[extra].synthetic = true;
+    }
+    std::array<std::shared_ptr<GeneratedFrameEndInfo>, xrfg::kMaxExtraSynthetics>
+        presenter_extra_frames{};
     std::shared_ptr<GeneratedFrameEndInfo> presenter_current_frame;
     if (use_continuous_presenter &&
         (prepared.kind == PreparedGenerationKind::prime || pair_ready)) {
@@ -14934,17 +15054,22 @@ XrResult layer_end_frame_impl(
             presenter_current_frame =
                 make_presenter_owned_frame(std::move(current_generated));
         }
-        if (extra_ready) {
-            presenter_extra_frame =
-                make_presenter_owned_frame(std::move(extra_generated));
+        bool extras_owned = true;
+        for (std::uint32_t extra = 0; extra < extra_count; ++extra) {
+            presenter_extra_frames[extra] =
+                make_presenter_owned_frame(std::move(extra_generated[extra]));
+            extras_owned = extras_owned && presenter_extra_frames[extra] != nullptr;
         }
         if (!presenter_first_frame ||
             (pair_ready && !presenter_current_frame) ||
-            (extra_ready && !presenter_extra_frame)) {
+            !extras_owned) {
             presenter_first_frame.reset();
-            presenter_extra_frame.reset();
+            for (auto& frame : presenter_extra_frames) {
+                frame.reset();
+            }
             presenter_current_frame.reset();
             extra_ready = false;
+            extra_count = 0;
             submitted_end_info = end_info;
             pair_ready = false;
             prepare_reason =
@@ -14961,9 +15086,9 @@ XrResult layer_end_frame_impl(
             if (pair_ready) {
                 presenter_first_frame->pending_releases =
                     synthetic_releases.take();
-                if (presenter_extra_frame) {
-                    presenter_extra_frame->pending_releases =
-                        extra_releases.take();
+                for (std::uint32_t extra = 0; extra < extra_count; ++extra) {
+                    presenter_extra_frames[extra]->pending_releases =
+                        extra_releases[extra].take();
                 }
                 presenter_current_frame->pending_releases =
                     current_releases.take();
@@ -14978,8 +15103,9 @@ XrResult layer_end_frame_impl(
         // downstream calls below.
         if (pair_ready) {
             first_generated.pending_releases = synthetic_releases.take();
-            if (extra_ready) {
-                extra_generated.pending_releases = extra_releases.take();
+            for (std::uint32_t extra = 0; extra < extra_count; ++extra) {
+                extra_generated[extra].pending_releases =
+                    extra_releases[extra].take();
             }
             current_generated.pending_releases = current_releases.take();
         } else {
@@ -15009,7 +15135,8 @@ XrResult layer_end_frame_impl(
             result = enqueue_presenter_pair(
                 state,
                 presenter_first_frame,
-                presenter_extra_frame,
+                std::span<const std::shared_ptr<GeneratedFrameEndInfo>>(
+                    presenter_extra_frames.data(), extra_count),
                 presenter_current_frame,
                 application_end_now);
             if (XR_FAILED(result)) {
@@ -15017,9 +15144,9 @@ XrResult layer_end_frame_impl(
                 // ever release these.
                 discard_private_releases(
                     state.get(), presenter_first_frame->pending_releases);
-                if (presenter_extra_frame) {
+                for (std::uint32_t extra = 0; extra < extra_count; ++extra) {
                     discard_private_releases(
-                        state.get(), presenter_extra_frame->pending_releases);
+                        state.get(), presenter_extra_frames[extra]->pending_releases);
                 }
                 discard_private_releases(
                     state.get(), presenter_current_frame->pending_releases);
@@ -15095,7 +15222,9 @@ XrResult layer_end_frame_impl(
             // deferred copies are still flushed so the synthesizer's state
             // stays in step. The ring path meets the same refusal at prepare
             // (private_release_failed) and passes through the same way.
-            discard_private_releases(state.get(), extra_generated.pending_releases);
+            for (GeneratedFrameEndInfo& extra : extra_generated) {
+                discard_private_releases(state.get(), extra.pending_releases);
+            }
             discard_private_releases(state.get(), current_generated.pending_releases);
             for (const auto& pending : first_generated.pending_current_copies) {
                 if (pending.synthesizer) {
@@ -15303,18 +15432,18 @@ XrResult layer_end_frame_impl(
         !adopt_outstanding_wait && state->last_inline_frame_state_valid
             ? state->last_inline_frame_state.predictedDisplayTime
             : first_generated.info.displayTime;
-    // 3X: the second synthetic takes a cycle of its own first, and the
-    // runtime's held wait with it where there is one.
+    // 3X and 4X: each further synthetic takes a cycle of its own first, the
+    // first of them the runtime's held wait where there is one.
     bool extra_cycle_completed = true;
-    if (extra_ready) {
-        run_private_releases(state.get(), extra_generated.pending_releases);
+    for (std::uint32_t extra = 0; extra < extra_count; ++extra) {
+        run_private_releases(state.get(), extra_generated[extra].pending_releases);
         extra_cycle_completed = submit_current_cycle(
             state,
-            extra_generated.info,
-            adopt_outstanding_wait
+            extra_generated[extra].info,
+            adopt_outstanding_wait && extra == 0
                 ? std::optional<XrFrameState>(state->last_inline_frame_state)
                 : std::nullopt,
-            true).completed;
+            true).completed && extra_cycle_completed;
     }
     const auto current_cycle_started = std::chrono::steady_clock::now();
     run_private_releases(state.get(), current_generated.pending_releases);

@@ -57,6 +57,7 @@ enum MenuCommand : UINT {
     change_pause_key = 92,
     frame_gen_2x = 100,
     frame_gen_3x = 101,
+    frame_gen_4x = 102,
     backend_fidelity_fx = 110,
     backend_nvidia_slow = 111,
     backend_nvidia_medium = 112,
@@ -654,7 +655,9 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     } else {
         tooltip += L"FidelityFX";
     }
-    if (state.settings.triple_frame_gen) {
+    if (state.settings.frame_multiplier >= 4) {
+        tooltip += L" - 4X";
+    } else if (state.settings.frame_multiplier == 3) {
         tooltip += L" - 3X";
     } else if (state.settings.deep_pipeline) {
         tooltip += L" - prefer FPS";
@@ -1479,14 +1482,19 @@ void show_context_menu(AppState& state) {
     if (multiplier_menu) {
         AppendMenuW(
             multiplier_menu,
-            MF_STRING | (state.settings.triple_frame_gen ? MF_UNCHECKED : MF_CHECKED),
+            MF_STRING | (state.settings.frame_multiplier <= 2 ? MF_CHECKED : MF_UNCHECKED),
             frame_gen_2x,
             L"2X");
         AppendMenuW(
             multiplier_menu,
-            MF_STRING | (state.settings.triple_frame_gen ? MF_CHECKED : MF_UNCHECKED),
+            MF_STRING | (state.settings.frame_multiplier == 3 ? MF_CHECKED : MF_UNCHECKED),
             frame_gen_3x,
             L"3X");
+        AppendMenuW(
+            multiplier_menu,
+            MF_STRING | (state.settings.frame_multiplier >= 4 ? MF_CHECKED : MF_UNCHECKED),
+            frame_gen_4x,
+            L"4X");
         AppendMenuW(
             menu,
             MF_POPUP,
@@ -1617,18 +1625,21 @@ void show_context_menu(AppState& state) {
         MF_POPUP,
         reinterpret_cast<UINT_PTR>(nvidia_scale_menu),
         L"Optical flow resolution");
-    // 3X needs what "Prefer FPS over latency" sets up, so it holds that on.
+    // 3X and 4X need what "Prefer FPS over latency" sets up, so they hold
+    // that on.
     AppendMenuW(
         menu,
         MF_STRING |
-            (state.settings.deep_pipeline || state.settings.triple_frame_gen
+            (state.settings.deep_pipeline || state.settings.frame_multiplier >= 3
                  ? MF_CHECKED
                  : MF_UNCHECKED) |
-            (state.settings.triple_frame_gen ? MF_GRAYED : MF_ENABLED),
+            (state.settings.frame_multiplier >= 3 ? MF_GRAYED : MF_ENABLED),
         toggle_deep_pipeline,
-        state.settings.triple_frame_gen
-            ? L"Prefer FPS over latency (on with 3X)"
-            : L"Prefer FPS over latency");
+        state.settings.frame_multiplier >= 4
+            ? L"Prefer FPS over latency (on with 4X)"
+            : state.settings.frame_multiplier == 3
+                ? L"Prefer FPS over latency (on with 3X)"
+                : L"Prefer FPS over latency");
     AppendMenuW(
         menu,
         MF_STRING | (state.settings.single_swapchain_rings ? MF_CHECKED : MF_UNCHECKED),
@@ -1717,13 +1728,13 @@ void show_context_menu(AppState& state) {
 // for (its layer says so in the status block); the menu and the saved
 // setting follow, once, with a notice why.
 void follow_realvr_session(AppState& state) {
-    if (!state.settings.triple_frame_gen || !realvr_session_running()) return;
-    state.settings.triple_frame_gen = false;
+    if (state.settings.frame_multiplier <= 2 || !realvr_session_running()) return;
+    state.settings.frame_multiplier = 2;
     update_runtime_options(state);
     show_balloon(state, L"Frame Gen multiplier: 2X",
         L"The running game uses Luke Ross's R.E.A.L. VR mod, which does not "
-        L"work with 3X, so OFXR runs it at 2X. The multiplier is now 2X; choose "
-        L"3X again for other games.");
+        L"work with 3X or 4X, so OFXR runs it at 2X. The multiplier is now 2X; "
+        L"choose 3X or 4X again for other games.");
 }
 
 void handle_command(AppState& state, UINT command) {
@@ -1844,7 +1855,7 @@ void handle_command(AppState& state, UINT command) {
             L"with Hybrid. A running game switches within a second.");
         break;
     case toggle_deep_pipeline:
-        if (state.settings.triple_frame_gen) {
+        if (state.settings.frame_multiplier >= 3) {
             break;
         }
         state.settings.deep_pipeline = !state.settings.deep_pipeline;
@@ -1904,20 +1915,25 @@ void handle_command(AppState& state, UINT command) {
         break;
     case frame_gen_2x:
     case frame_gen_3x:
-        if (state.settings.triple_frame_gen == (command == frame_gen_3x)) {
+    case frame_gen_4x: {
+        const std::uint32_t multiplier = command == frame_gen_4x
+            ? 4U
+            : command == frame_gen_3x ? 3U : 2U;
+        if (state.settings.frame_multiplier == multiplier) {
             break;
         }
-        // V529: a game with R.E.A.L. VR runs at 2X; 3X is refused while it runs.
-        if (command == frame_gen_3x && realvr_session_running()) {
+        // V529: a game with R.E.A.L. VR runs at 2X; 3X and 4X are refused
+        // while it runs.
+        if (multiplier > 2 && realvr_session_running()) {
             show_balloon(state, L"Frame Gen multiplier: 2X",
                 L"The running game uses Luke Ross's R.E.A.L. VR mod, which does "
-                L"not work with 3X: it stays at 2X. 3X can be chosen again for "
-                L"other games.");
+                L"not work with 3X or 4X: it stays at 2X. They can be chosen "
+                L"again for other games.");
             break;
         }
-        state.settings.triple_frame_gen = command == frame_gen_3x;
-        if (state.settings.triple_frame_gen) {
-            // 3X runs on what this sets up; it stays on afterwards.
+        state.settings.frame_multiplier = multiplier;
+        if (multiplier > 2) {
+            // 3X and 4X run on what this sets up; it stays on afterwards.
             state.settings.deep_pipeline = true;
         }
         update_runtime_options(state);
@@ -1929,25 +1945,33 @@ void handle_command(AppState& state, UINT command) {
                 state.window,
                 L"Restart your game to apply this change.\n\n"
                 L"The game that is running was started with \"Prefer FPS over "
-                L"latency\" off, so the Frame Gen multiplier cannot be changed "
-                L"while it runs. The setting is saved: the game will use it the next "
+                L"latency\" off, or with a lower multiplier than 4X asks for, so "
+                L"the Frame Gen multiplier cannot be changed to this while it "
+                L"runs. The setting is saved: the game will use it the next "
                 L"time it starts.",
                 L"OFXR Bridge - game restart needed",
                 MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
         } else {
             show_balloon(
                 state,
-                state.settings.triple_frame_gen
-                    ? L"Frame Gen multiplier: 3X"
-                    : L"Frame Gen multiplier: 2X",
-                state.settings.triple_frame_gen
-                    ? L"Two generated frames for every frame the game "
-                      L"renders: the game runs at a third of your headset's "
-                      L"refresh rate (30 FPS at 90 Hz). Switches in a running "
-                      L"game within a moment."
-                    : L"Back to one generated frame per game frame. Switches "
-                      L"in a running game within a moment.");
+                multiplier == 4 ? L"Frame Gen multiplier: 4X"
+                    : multiplier == 3 ? L"Frame Gen multiplier: 3X"
+                                      : L"Frame Gen multiplier: 2X",
+                multiplier == 4
+                    ? L"Three generated frames for every frame the game "
+                      L"renders: the game runs at a quarter of your headset's "
+                      L"refresh rate (30 FPS at 120 Hz). Switches in a running "
+                      L"game within a moment where the game was started in 4X; "
+                      L"a game started in 2X or 3X needs a restart for 4X."
+                    : multiplier == 3
+                        ? L"Two generated frames for every frame the game "
+                          L"renders: the game runs at a third of your headset's "
+                          L"refresh rate (30 FPS at 90 Hz). Switches in a running "
+                          L"game within a moment."
+                        : L"Back to one generated frame per game frame. Switches "
+                          L"in a running game within a moment.");
         }
+    }
         break;
     case overlay_off:
     case overlay_upper_left:
@@ -1979,8 +2003,8 @@ void handle_command(AppState& state, UINT command) {
     case toggle_overlay_multiplier:
         state.settings.overlay_multiplier = !state.settings.overlay_multiplier;
         update_runtime_options(
-            state, L"The multiplier below the latency, 2X or 3X, updates in running "
-                   L"applications.");
+            state, L"The multiplier below the latency, 2X, 3X or 4X, updates in "
+                   L"running applications.");
         break;
     case toggle_overlay_hybrid:
         state.settings.overlay_hybrid = !state.settings.overlay_hybrid;

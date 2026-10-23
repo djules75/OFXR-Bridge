@@ -92,8 +92,9 @@ constexpr UINT kMaxReprojectionViews = 2;
 // for the hybrid (V507); t9: the depth search's dilated tiles (V530); t10:
 // the coverage mask (V539); t11: the depth search's midpoint splat (V554).
 constexpr UINT kSrvDescriptorCount = 12;
-// A pair's synthetic outputs: one, or two at 3X.
-constexpr UINT kMaxSyntheticOutputs = 2;
+// A pair's synthetic outputs: one, two at 3X, three at 4X (V558).
+constexpr UINT kMaxSyntheticOutputs = 1U + kMaxExtraSynthetics;
+static_assert(kMaxSyntheticOutputs <= 4U, "bits 27-28 carry the output index");
 // The tuning block's upload buffer, per work slot; the block is 72 bytes.
 constexpr UINT kTuningBufferBytes = 256;
 static_assert(sizeof(xrfg::live_tuning::Block) <= kTuningBufferBytes);
@@ -1070,23 +1071,26 @@ struct D3D12FrameSynthesizer::Impl {
     // is only correct when the application runs at exactly half the display
     // rate; away from that the synthetic belongs somewhere else between them.
     float synthetic_fraction{0.5F};
-    // The pair's second synthetic, when the caller asked for one: set and
-    // cleared by each submit_pair alongside the fraction above. Every
-    // composition loop draws once per output, so the flow a pair computed
-    // serves both.
-    std::optional<std::uint32_t> extra_synthetic_destination;
-    float extra_synthetic_fraction{0.5F};
+    // The pair's further synthetics (one at 3X, two at 4X), when the caller
+    // asked for them: set and cleared by each submit_pair alongside the
+    // fraction above. Every composition loop draws once per output, so the
+    // flow a pair computed serves them all.
+    std::array<std::uint32_t, kMaxExtraSynthetics> extra_synthetic_destinations{};
+    std::array<float, kMaxExtraSynthetics> extra_synthetic_fractions{};
+    UINT extra_synthetic_count{};
 
     [[nodiscard]] UINT synthetic_output_count() const noexcept {
-        return extra_synthetic_destination ? 2U : 1U;
+        return 1U + extra_synthetic_count;
     }
     [[nodiscard]] float synthetic_output_fraction(UINT output) const noexcept {
-        return output == 0U ? synthetic_fraction : extra_synthetic_fraction;
+        return output == 0U ? synthetic_fraction
+                            : extra_synthetic_fractions[output - 1U];
     }
     [[nodiscard]] std::uint32_t synthetic_output_destination(
         UINT output,
         std::uint32_t first_destination) const noexcept {
-        return output == 0U ? first_destination : *extra_synthetic_destination;
+        return output == 0U ? first_destination
+                            : extra_synthetic_destinations[output - 1U];
     }
     // The work slot whose current copy has been recorded and closed but not
     // yet submitted, and the fence value that submission will signal. The
@@ -6397,26 +6401,35 @@ struct D3D12FrameSynthesizer::Impl {
         std::shared_ptr<const DlssMotionVectorSet> motion_vectors,
         bool defer_current_copy,
         float interpolation_fraction,
-        const std::optional<D3D12ExtraSynthetic>& extra_synthetic) noexcept {
+        std::span<const D3D12ExtraSynthetic> extra_synthetics) noexcept {
         // A degenerate interval says the pairing is not in a steady cadence;
         // half is the safe answer there, not an extrapolation.
         const auto usable_fraction = [](float fraction) noexcept {
             return fraction > 0.05F && fraction < 0.95F ? fraction : 0.5F;
         };
         synthetic_fraction = usable_fraction(interpolation_fraction);
-        extra_synthetic_destination.reset();
+        extra_synthetic_count = 0;
         if (output_ticket == nullptr) {
             return E_POINTER;
         }
         *output_ticket = {};
-        if (extra_synthetic) {
-            if (extra_synthetic->destination_index >= synthetic_destinations.size() ||
-                extra_synthetic->destination_index == synthetic_destination_index) {
+        if (extra_synthetics.size() > kMaxExtraSynthetics) {
+            return E_INVALIDARG;
+        }
+        for (const D3D12ExtraSynthetic& extra : extra_synthetics) {
+            if (extra.destination_index >= synthetic_destinations.size() ||
+                extra.destination_index == synthetic_destination_index) {
                 return E_INVALIDARG;
             }
-            extra_synthetic_destination = extra_synthetic->destination_index;
-            extra_synthetic_fraction =
-                usable_fraction(extra_synthetic->interpolation_fraction);
+            for (UINT earlier = 0; earlier < extra_synthetic_count; ++earlier) {
+                if (extra_synthetic_destinations[earlier] == extra.destination_index) {
+                    return E_INVALIDARG;
+                }
+            }
+            extra_synthetic_destinations[extra_synthetic_count] = extra.destination_index;
+            extra_synthetic_fractions[extra_synthetic_count] =
+                usable_fraction(extra.interpolation_fraction);
+            ++extra_synthetic_count;
         }
         const bool repeated_capture =
             previous.active() && current.serial == previous.ticket.serial &&
@@ -6498,16 +6511,23 @@ struct D3D12FrameSynthesizer::Impl {
         if (FAILED(result)) {
             return result;
         }
-        if (extra_synthetic_destination) {
+        for (UINT extra = 0; extra < extra_synthetic_count; ++extra) {
             result = destination_available(
-                synthetic_destinations[*extra_synthetic_destination]);
+                synthetic_destinations[extra_synthetic_destinations[extra]]);
             if (FAILED(result)) {
                 return result;
             }
         }
-        ID3D12Resource* const extra_destination = extra_synthetic_destination
-            ? synthetic_destinations[*extra_synthetic_destination].resource.Get()
-            : nullptr;
+        // The further destinations, in output order, for the barriers below.
+        std::array<ID3D12Resource*, kMaxExtraSynthetics> extra_destinations{};
+        for (UINT extra = 0; extra < extra_synthetic_count; ++extra) {
+            extra_destinations[extra] =
+                synthetic_destinations[extra_synthetic_destinations[extra]].resource.Get();
+        }
+        ID3D12Resource* const extra_destination =
+            extra_synthetic_count != 0 ? extra_destinations[0] : nullptr;
+        ID3D12Resource* const third_destination =
+            extra_synthetic_count > 1 ? extra_destinations[1] : nullptr;
         std::uint32_t work_slot_index = 0;
         result = acquire_work_slot(&work_slot_index);
         if (FAILED(result)) {
@@ -6522,7 +6542,8 @@ struct D3D12FrameSynthesizer::Impl {
                 current_destinations[current_destination_index].resource.Get();
             if (repeated_resource == synthetic_destination ||
                 repeated_resource == current_destination ||
-                repeated_resource == extra_destination) {
+                repeated_resource == extra_destination ||
+                repeated_resource == third_destination) {
                 return E_INVALIDARG;
             }
 
@@ -6567,8 +6588,8 @@ struct D3D12FrameSynthesizer::Impl {
             previous.last_use_fence_value = fence_value;
             current_destinations[current_destination_index].fence_value = fence_value;
             synthetic_destinations[synthetic_destination_index].fence_value = fence_value;
-            if (extra_synthetic_destination) {
-                synthetic_destinations[*extra_synthetic_destination].fence_value =
+            for (UINT extra = 0; extra < extra_synthetic_count; ++extra) {
+                synthetic_destinations[extra_synthetic_destinations[extra]].fence_value =
                     fence_value;
             }
             next_work_slot = (work_slot_index + 1U) %
@@ -6605,7 +6626,10 @@ struct D3D12FrameSynthesizer::Impl {
             next.resource.Get() == current_destination ||
             (extra_destination != nullptr &&
              (previous.resource.Get() == extra_destination ||
-              next.resource.Get() == extra_destination))) {
+              next.resource.Get() == extra_destination)) ||
+            (third_destination != nullptr &&
+             (previous.resource.Get() == third_destination ||
+              next.resource.Get() == third_destination))) {
             cancel_next();
             return E_INVALIDARG;
         }
@@ -6679,8 +6703,8 @@ struct D3D12FrameSynthesizer::Impl {
         previous = std::move(next);
         current_destinations[current_destination_index].fence_value = fence_value;
         synthetic_destinations[synthetic_destination_index].fence_value = fence_value;
-        if (extra_synthetic_destination) {
-            synthetic_destinations[*extra_synthetic_destination].fence_value =
+        for (UINT extra = 0; extra < extra_synthetic_count; ++extra) {
+            synthetic_destinations[extra_synthetic_destinations[extra]].fence_value =
                 fence_value;
         }
         next_work_slot = (work_slot_index + 1U) %
@@ -6909,7 +6933,7 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
     std::shared_ptr<const DlssMotionVectorSet> motion_vectors,
     bool defer_current_copy,
     float interpolation_fraction,
-    std::optional<D3D12ExtraSynthetic> extra_synthetic) noexcept {
+    std::span<const D3D12ExtraSynthetic> extra_synthetics) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr) {
@@ -6930,7 +6954,7 @@ HRESULT D3D12FrameSynthesizer::submit_pair(
             std::move(motion_vectors),
             defer_current_copy,
             interpolation_fraction,
-            extra_synthetic);
+            extra_synthetics);
     } catch (...) {
         if (ticket != nullptr) {
             *ticket = {};

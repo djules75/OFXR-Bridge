@@ -32,7 +32,7 @@ int main() {
         const std::string without = xrfg::standalone::build_status_json(idle);
         xrfg::standalone::StatusInputs running = idle;
         running.paused = true;
-        running.settings.triple_frame_gen = false;
+        running.settings.frame_multiplier = 2;
         running.session_present = true;
         running.session.pid = 23456;
         running.session.process = "Flight\"Sim\\2024.exe";
@@ -98,7 +98,7 @@ int main() {
         release_defaults.nvidia_input_scale != NvidiaInputScale::half ||
         release_defaults.nvidia_bidirectional || release_defaults.diagnostics ||
         !release_defaults.deep_pipeline ||
-        release_defaults.triple_frame_gen ||
+        release_defaults.frame_multiplier != 2 ||
         release_defaults.hybrid ||
         !contains(default_runtime_ini, "hybrid=0") ||
         release_defaults.hybrid_depth_search ||
@@ -110,6 +110,7 @@ int main() {
         !release_defaults.vulkan_session_bridge ||
         !contains(default_runtime_ini, "vulkan_session_bridge=1") ||
         !contains(default_runtime_ini, "triple_frame_gen=0") ||
+        !contains(default_runtime_ini, "frame_multiplier=2") ||
         !contains(default_runtime_ini, "deep_pipeline=1") ||
         !release_defaults.vulkan_support ||
         !release_defaults.d3d11_bridge ||
@@ -149,7 +150,7 @@ int main() {
     settings.nvidia_input_scale = NvidiaInputScale::quarter;
     settings.nvidia_bidirectional = true;
     settings.deep_pipeline = false;
-    settings.triple_frame_gen = true;
+    settings.frame_multiplier = 4;
     settings.hybrid = true;
     settings.hybrid_depth_search = true;
     settings.excluded_processes = "Home.exe; Other-Shipping.exe";
@@ -170,7 +171,7 @@ int main() {
         parsed.nvidia_preset != NvidiaPerformancePreset::slow ||
         parsed.nvidia_input_scale != NvidiaInputScale::quarter ||
         !parsed.nvidia_bidirectional || parsed.deep_pipeline ||
-        !parsed.triple_frame_gen || !parsed.hybrid || !parsed.hybrid_depth_search ||
+        parsed.frame_multiplier != 4 || !parsed.hybrid || !parsed.hybrid_depth_search ||
         parsed.excluded_processes != "Home.exe; Other-Shipping.exe" ||
         parsed.single_swapchain_rings || parsed.vulkan_session_bridge ||
         parsed.vulkan_support || parsed.d3d11_bridge ||

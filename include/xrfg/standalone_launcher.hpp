@@ -40,9 +40,11 @@ struct LauncherSettings {
     bool nvidia_bidirectional{};
     // "Prefer FPS over latency": the layer's deeper pipeline. On by default.
     bool deep_pipeline{true};
-    // "3X Frame Gen": two synthetic frames per application frame. Off by
-    // default.
-    bool triple_frame_gen{};
+    // "Frame Gen multiplier": frames shown per game frame, 2 (one
+    // synthetic), 3 ("3X", two) or 4 ("4X", three; V558). 2 by default.
+    // Written to the inis as frame_multiplier, with triple_frame_gen beside
+    // it for older layers.
+    std::uint32_t frame_multiplier{2};
     // "Hybrid": the game's own DLSS motion vectors composed per pixel with
     // the optical flow, on a D3D12 game that runs DLSS (V497). Off by
     // default; applies at the next game start.

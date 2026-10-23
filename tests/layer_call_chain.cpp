@@ -69,6 +69,9 @@ XrSwapchain g_current_swapchain_right_b = fake_handle<XrSwapchain>(0x30a);
 // has the previous one un-retired.
 XrSwapchain g_synthetic_swapchain_b = fake_handle<XrSwapchain>(0x30b);
 XrSwapchain g_synthetic_swapchain_right_b = fake_handle<XrSwapchain>(0x30c);
+// 4X (V558): a third synthetic slot, one per synthetic. Single-eye scenarios
+// only; the split-eye routing stops at two.
+XrSwapchain g_synthetic_swapchain_c = fake_handle<XrSwapchain>(0x31f);
 // An overlay's own colour swapchain, created mid-session beside the
 // application's - a HUD panel, CheekyFoveatedDLSS's menu. Handed out, while
 // g_overlay_swapchain_mode is on, for an application-owned create after the
@@ -379,6 +382,7 @@ std::array<VkImage, 3> g_vulkan_current_swapchain_images{};
 std::array<VkImage, 3> g_vulkan_current_swapchain_b_images{};
 std::array<VkImage, 3> g_vulkan_synthetic_swapchain_images{};
 std::array<VkImage, 3> g_vulkan_synthetic_swapchain_b_images{};
+std::array<VkImage, 3> g_vulkan_synthetic_swapchain_c_images{};
 
 // Everything the vulkan mode creates, loaded through vulkan-1.dll the way an
 // application does; the test links no Vulkan library either. Nothing is
@@ -416,12 +420,14 @@ std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_current_swapchain_images;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_current_swapchain_b_images;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_synthetic_swapchain_images;
 std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_synthetic_swapchain_b_images;
+std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_synthetic_swapchain_c_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_application_swapchain_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_application_depth_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_current_swapchain_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_current_swapchain_b_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_b_images;
+std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_c_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_application_swapchain_right_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_current_swapchain_right_images;
 std::array<ComPtr<ID3D12Resource>, 3> g_current_swapchain_right_b_images;
@@ -443,6 +449,7 @@ std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_right_b_images;
 [[nodiscard]] bool is_synthetic_swapchain(XrSwapchain swapchain) {
     return swapchain == g_synthetic_swapchain ||
            swapchain == g_synthetic_swapchain_b ||
+           swapchain == g_synthetic_swapchain_c ||
            swapchain == g_synthetic_swapchain_right ||
            swapchain == g_synthetic_swapchain_right_b;
 }
@@ -1143,6 +1150,21 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
             std::memory_order_release);
         g_synthetic_private_creates.fetch_add(1, std::memory_order_relaxed);
         *swapchain = g_synthetic_swapchain_b;
+    } else if (role == 5 && g_frames_per_application_frame > 3) {
+        // Third synthetic slot (4X): same create info as the first.
+        const std::uint32_t expected_width = g_double_wide_mode ? 8U : 4U;
+        const std::uint32_t expected_array_size = g_double_wide_mode ? 1U : 2U;
+        const bool valid = create_info != nullptr &&
+                           (create_info->usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) != 0 &&
+                           (create_info->usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) != 0 &&
+                           create_info->width == expected_width &&
+                           create_info->height == 4 &&
+                           create_info->arraySize == expected_array_size;
+        g_synthetic_create_info_valid.store(
+            g_synthetic_create_info_valid.load(std::memory_order_acquire) && valid,
+            std::memory_order_release);
+        g_synthetic_private_creates.fetch_add(1, std::memory_order_relaxed);
+        *swapchain = g_synthetic_swapchain_c;
     } else {
         return XR_ERROR_LIMIT_REACHED;
     }
@@ -1227,6 +1249,8 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_swapchain_images(
             selected_images = &g_vulkan_synthetic_swapchain_images;
         } else if (swapchain == g_synthetic_swapchain_b) {
             selected_images = &g_vulkan_synthetic_swapchain_b_images;
+        } else if (swapchain == g_synthetic_swapchain_c) {
+            selected_images = &g_vulkan_synthetic_swapchain_c_images;
         }
         for (std::uint32_t index = 0; index < kImageCount; ++index) {
             if (vulkan_images[index].type !=
@@ -1250,6 +1274,8 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_swapchain_images(
             selected_images = &g_d3d11_synthetic_swapchain_images;
         } else if (swapchain == g_synthetic_swapchain_b) {
             selected_images = &g_d3d11_synthetic_swapchain_b_images;
+        } else if (swapchain == g_synthetic_swapchain_c) {
+            selected_images = &g_d3d11_synthetic_swapchain_c_images;
         }
         for (std::uint32_t index = 0; index < kImageCount; ++index) {
             if (d3d11_images[index].type !=
@@ -1278,6 +1304,8 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_swapchain_images(
             selected_images = &g_synthetic_swapchain_images;
         } else if (swapchain == g_synthetic_swapchain_b) {
             selected_images = &g_synthetic_swapchain_b_images;
+        } else if (swapchain == g_synthetic_swapchain_c) {
+            selected_images = &g_synthetic_swapchain_c_images;
         } else if (swapchain == g_application_swapchain_right) {
             selected_images = &g_application_swapchain_right_images;
         } else if (swapchain == g_current_swapchain_right) {
@@ -1523,6 +1551,7 @@ template <typename Function>
              &g_current_swapchain_b_images,
              &g_synthetic_swapchain_images,
              &g_synthetic_swapchain_b_images,
+             &g_synthetic_swapchain_c_images,
              &g_application_swapchain_right_images,
              &g_current_swapchain_right_images,
              &g_current_swapchain_right_b_images,
@@ -1628,7 +1657,8 @@ template <typename Function>
              &g_d3d11_current_swapchain_images,
              &g_d3d11_current_swapchain_b_images,
              &g_d3d11_synthetic_swapchain_images,
-             &g_d3d11_synthetic_swapchain_b_images}) {
+             &g_d3d11_synthetic_swapchain_b_images,
+             &g_d3d11_synthetic_swapchain_c_images}) {
         for (auto& image : *images) {
             if (FAILED(g_d3d11_device->CreateTexture2D(
                     &description,
@@ -1893,7 +1923,8 @@ template <typename Function>
              &g_vulkan_current_swapchain_images,
              &g_vulkan_current_swapchain_b_images,
              &g_vulkan_synthetic_swapchain_images,
-             &g_vulkan_synthetic_swapchain_b_images}) {
+             &g_vulkan_synthetic_swapchain_b_images,
+             &g_vulkan_synthetic_swapchain_c_images}) {
         for (VkImage& image : *images) {
             if (!make_image(1, &image)) {
                 std::cerr << "failed to create a fake Vulkan private image\n";
@@ -2334,6 +2365,14 @@ int main(int argc, char** argv) {
             // two slots, and 3X takes two as well: one per synthetic.
             g_frames_per_application_frame = 3;
             g_deep_pipeline = true;
+        }
+        // V558: frame_multiplier overrides it, as in the layer; 4X takes a
+        // three-slot ring.
+        const int multiplier = GetPrivateProfileIntW(
+            L"ofxr", L"frame_multiplier", 0, ini.wstring().c_str());
+        if (multiplier >= 2 && multiplier <= 4) {
+            g_frames_per_application_frame = multiplier;
+            g_deep_pipeline = g_deep_pipeline || multiplier > 2;
         }
     }
     if (argc == 4 && !g_split_eye_mode && !g_double_wide_mode &&

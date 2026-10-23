@@ -2149,7 +2149,8 @@ void BuildCoverageMask(uint3 id : SV_DispatchThreadID) {
 void ClearDepthSplat(uint3 id : SV_DispatchThreadID) {
     float2 limit = ceil(GameMotionRect.zw);
     if (float(id.x) <= limit.x && float(id.y) <= limit.y) {
-        DepthSplatOut[uint3(id.xy, 2u * Slice + depth_splat_output())] = 0u;
+        // Slices per eye = kMaxSyntheticOutputs (three since 4X, V558).
+        DepthSplatOut[uint3(id.xy, 3u * Slice + depth_splat_output())] = 0u;
     }
 }
 
@@ -2173,7 +2174,7 @@ void BuildDepthSplat(uint3 id : SV_DispatchThreadID) {
     float2 at = (midpoint - output_rect.xy + 0.5) * per_pixel;
     int2 limit = int2(ceil(extent));
     int2 base = int2(floor(at - 0.5));
-    uint slice = 2u * Slice + depth_splat_output();
+    uint slice = 3u * Slice + depth_splat_output();
     [unroll] for (uint corner = 0; corner < 4; ++corner) {
         int2 texel = base + int2(corner & 1u, corner >> 1);
         if (all(texel >= 0) && all(texel <= limit)) {

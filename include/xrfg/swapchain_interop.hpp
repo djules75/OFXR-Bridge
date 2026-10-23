@@ -48,13 +48,14 @@ public:
 
     // Called immediately after the synthesizer submission on the same D3D12
     // queue. Queues, on the application's queue, a wait for that submission
-    // and the copies into the acquired private OpenXR images. A pair with a
-    // second synthetic names it last; an interop that carries only one
-    // refuses the call with E_INVALIDARG rather than drop it.
+    // and the copies into the acquired private OpenXR images. A pair with
+    // further synthetics (one at 3X, two at 4X) names them last, in the
+    // order they are shown; an interop that carries only one synthetic
+    // refuses the call with E_INVALIDARG rather than drop them.
     [[nodiscard]] virtual HRESULT publish(
         std::uint32_t current_destination_index,
         std::optional<std::uint32_t> synthetic_destination_index,
-        std::optional<std::uint32_t> extra_synthetic_destination_index) noexcept = 0;
+        std::span<const std::uint32_t> extra_synthetic_destination_indices) noexcept = 0;
 
     // The shared fence, AddRef'd into *fence, and the value the most recent
     // publish signals once its copies have run. Read it straight after

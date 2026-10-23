@@ -891,11 +891,11 @@ HRESULT D3D11D3D12SwapchainInterop::prepare_synthesis() noexcept {
 HRESULT D3D11D3D12SwapchainInterop::publish(
     std::uint32_t current_destination_index,
     std::optional<std::uint32_t> synthetic_destination_index,
-    std::optional<std::uint32_t> extra_synthetic_destination_index) noexcept {
+    std::span<const std::uint32_t> extra_synthetic_destination_indices) noexcept {
     try {
-        // One synthetic per pair here: a D3D11 session that wants two takes
+        // One synthetic per pair here: a D3D11 session that wants more takes
         // the D3D11 bridge, which has no publish at all.
-        if (extra_synthetic_destination_index) {
+        if (!extra_synthetic_destination_indices.empty()) {
             return E_INVALIDARG;
         }
         std::scoped_lock lock(mutex_);

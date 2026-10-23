@@ -97,7 +97,7 @@ public:
     [[nodiscard]] HRESULT publish(
         std::uint32_t current_destination_index,
         std::optional<std::uint32_t> synthetic_destination_index,
-        std::optional<std::uint32_t> extra_synthetic_destination_index) noexcept override;
+        std::span<const std::uint32_t> extra_synthetic_destination_indices) noexcept override;
 
     // The shared fence, AddRef'd into *fence, and the value the most recent
     // publish signals on the D3D11 context once its copies have run. Only
