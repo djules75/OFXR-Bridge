@@ -33,7 +33,7 @@ public:
                 L"-"+std::to_wstring(GetTickCount64()));
         std::filesystem::create_directories(directory_);
         SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",directory_.c_str());
-        auto initial=xrfg::embedded::snapshot().desired;initial.pacing_mode=2;
+        auto initial=xrfg::embedded::snapshot().desired;initial.pacing_mode=2;initial.enabled=true;
         if (!request_control(initial))
             throw std::runtime_error("autonomous fixture publication failed");
     }

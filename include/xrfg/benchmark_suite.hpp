@@ -123,6 +123,7 @@ struct BenchmarkScore {
     int shading{};
     std::uint32_t eye_long_side{};
     double display_hz{};
+    bool triple{};
 };
 inline BenchmarkScore benchmark_score(const BenchmarkSamples& samples,bool complete) {
     // A partial/failed trial, unknown timing or a single sample cannot establish
@@ -148,6 +149,12 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
         if(luke && ((s.shading==8 && s.eye_long_side<4000) || (s.shading==4 && s.eye_long_side<3000)))continue;
         pool.push_back(i);
     }
+    // 3X is a last resort, not a competitor to a sufficiently useful 2X/Off
+    // route. Unknown refresh does not establish permission to choose 3X.
+    const bool normal_sufficient=std::any_of(pool.begin(),pool.end(),[&](auto i) {
+        const auto& s=scores[i];return !s.triple && (s.display_hz<=0 || s.fps+1e-3>=s.display_hz*.66);
+    });
+    std::erase_if(pool,[&](auto i){return scores[i].triple && (normal_sufficient || scores[i].display_hz<=0);});
     if(luke) {
         std::vector<std::size_t> afw;
         for(const auto i:pool)if(scores[i].afw_only && scores[i].display_hz>0 &&
@@ -158,14 +165,25 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
         });
         if(full_quality)std::erase_if(pool,[&](auto i){return scores[i].shading!=0;});
     }
-    double highest=0;
-    for(const auto i:pool)highest=std::max(highest,scores[i].fps);
-    std::erase_if(pool,[&](auto i){return highest-scores[i].fps>1+epsilon;});
+    const auto keep_fps=[&](auto& candidates) {
+        double highest=0;
+        for(const auto i:candidates)highest=std::max(highest,scores[i].fps);
+        std::erase_if(candidates,[&](auto i){return highest-scores[i].fps>1+epsilon;});
+    };
+    // Preserve the ordinary 1 FPS group. Only the optical-to-vector comparison
+    // may widen to 3 FPS; vector-to-vector comparisons still use 1 FPS.
+    auto ordinary=pool;keep_fps(ordinary);
     double optical_latency=std::numeric_limits<double>::infinity();
-    for(const auto i:pool)if(!scores[i].vectors)optical_latency=std::min(optical_latency,scores[i].latency);
+    double optical_fps=0;
+    for(const auto i:ordinary)if(!scores[i].vectors) {
+        optical_latency=std::min(optical_latency,scores[i].latency);
+        optical_fps=std::max(optical_fps,scores[i].fps);
+    }
     std::vector<std::size_t> vectors;
-    for(const auto i:pool)if(scores[i].vectors && scores[i].latency<=optical_latency+12+epsilon)vectors.push_back(i);
-    if(!vectors.empty())pool=std::move(vectors);
+    if(optical_fps>0)for(const auto i:pool)if(scores[i].vectors &&
+        optical_fps-scores[i].fps<=3+epsilon && scores[i].latency<=optical_latency+12+epsilon)vectors.push_back(i);
+    if(!vectors.empty()) {pool=std::move(vectors);keep_fps(pool);}
+    else pool=std::move(ordinary);
     double lowest=std::numeric_limits<double>::infinity();
     for(const auto i:pool)lowest=std::min(lowest,scores[i].latency);
     std::optional<std::size_t> best;

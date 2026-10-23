@@ -170,6 +170,13 @@ int main(int argc,char** argv) {
                 auto next=xrfg::autonomous::snapshot().desired;next.pacing_mode=mode;
                 check(xrfg::autonomous::request(next),"request a live pacing policy");
                 xrfg::autonomous::apply_runtime_settings();ok(apply_embedded_control(created),"apply live policy without recreating session");
+                if(transport->director_enabled()!=(mode!=0) || single_director_pacing(*created)!=(mode==1)) {
+                    const auto diagnostic=xrfg::autonomous::snapshot();
+                    std::fprintf(stderr,"POLICY mode%d desired%d advanced%d embedded%d director%d single%d enabled%d revision%llu applied%llu profile=%ls\n",
+                        mode,diagnostic.desired.pacing_mode,int(diagnostic.desired.advanced_mode),xrfg::embedded::snapshot().desired.pacing_mode,
+                        int(transport->director_enabled()),int(single_director_pacing(*created)),int(diagnostic.desired.enabled),
+                        diagnostic.revision,diagnostic.runtime.applied_revision,xrfg::autonomous::configuration_path().c_str());
+                }
                 check(created->private_runtime==transport && transport->director_enabled()==(mode!=0) &&
                     single_director_pacing(*created)==(mode==1),"every pacing choice applies to the original endpoint");
             }

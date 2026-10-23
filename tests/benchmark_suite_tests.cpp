@@ -60,8 +60,24 @@ void quality_choice_rules() {
     check(benchmark_best({score(81,90,0,4100,90,true),score(90,20,4,4100,90,true)},true)==0,"within AFW-only group prefer full quality near refresh");
     check(benchmark_best({score(90,40),score(89.5,52,0,4100,90,false,true)})==1,"vectors may cost twelve ms at equivalent FPS");
     check(benchmark_best({score(90,40),score(89.5,52.01,0,4100,90,false,true)})==0,"vector preference cannot exceed twelve ms");
-    check(benchmark_best({score(90,40),score(88.99,40,0,4100,90,false,true)})==0,"vector preference cannot exceed one FPS loss");
+    check(benchmark_best({score(90,40),score(87,52,0,4100,90,false,true)})==1,"vectors can lose exactly three FPS with twelve extra ms");
+    check(benchmark_best({score(90,40),score(86.99,40,0,4100,90,false,true)})==0,"vector preference cannot exceed three FPS loss");
+    check(benchmark_best({score(90,40),score(87,52.01,0,4100,90,false,true)})==0,"three-FPS vector preference still has a twelve-ms cap");
+    check(benchmark_best({score(90,40),score(87,40,0,4100,90,false,true),score(89,50,0,4100,90,false,true)})==2,
+        "vector-to-vector comparison retains one FPS tolerance");
+    check(benchmark_best({score(90,40),score(90.5,60,0,4100,90,false,true),score(87,52,0,4100,90,false,true)})==2,
+        "three-FPS preference is anchored to the best optical result, not an expensive native peak");
     check(benchmark_best({score(90,40),score(89.5,52)})==0,"unconfirmed optical fallback does not gain native-vector preference");
+    auto triple=score(90,40);triple.triple=true;
+    check(benchmark_best({score(59.4,20),triple})==0,"3X excluded when a normal route reaches exactly 66 percent refresh");
+    check(benchmark_best({score(59.39,20),triple})==1,"3X can win when all normal routes are below 66 percent");
+    auto at120=score(120,40,0,4100,120);at120.triple=true;
+    check(benchmark_best({score(79.2,20,0,4100,120),at120})==0,"3X threshold follows measured headset refresh");
+    auto invalid=score(90,20);invalid.valid=false;
+    check(benchmark_best({score(59,20),invalid,triple})==2,"failed normal trials cannot block a valid 3X result");
+    check(benchmark_best({score(59,20,0,4100,0),triple})==0,"unknown normal refresh cannot authorize 3X");
+    auto vector_triple=triple;vector_triple.vectors=true;
+    check(benchmark_best({score(90,40),vector_triple})==0,"native-vector preference never reintroduces excluded 3X");
 
     XrCompositionLayerProjectionView eyes[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
     for(auto& eye:eyes)eye.subImage.imageRect.extent={2048,2800};
@@ -81,7 +97,7 @@ void quality_choice_rules() {
 void automatic_choice_controller() {
     RuntimeStatus runtime{};runtime.sessions=1;runtime.dlssg_preset_request=1;
     // Original VDXR, private basic, private full and Luke all use the same chooser.
-    for(unsigned scenario=0;scenario<8;++scenario) {
+    for(unsigned scenario=0;scenario<10;++scenario) {
         const bool modern=scenario!=0,luke=scenario>=3 && scenario<=6,full=scenario==2 || scenario==7;
         auto saved=snapshot().desired;saved.advanced_mode=false;saved.pacing_mode=1;
         saved.benchmark_auto_pick=true;saved.nr_enabled=true;saved.afw_mode=3;saved.afw_shading_rate=0;
@@ -95,6 +111,12 @@ void automatic_choice_controller() {
             check(winner<plan.size(),"full-quality OFXR candidate exists");
         }
         if(scenario==5)winner=0;
+        if(scenario==8 || scenario==9) {
+            winner=0;
+            while(winner<plan.size() && (!plan[winner].triple || plan[winner].a))++winner;
+            check(winner<plan.size(),"3X Normal candidate exists");
+            if(scenario==9)winner=plan.size()-1; // the eligible non-3X route must win
+        }
         check(start_benchmark(full,luke) && snapshot().benchmark.auto_pick,"freeze auto-pick at suite start");
         for(std::size_t i=0;i<plan.size();++i) {
             // Telemetry is timestamped by the real reporter. Start this trial's
@@ -106,7 +128,10 @@ void automatic_choice_controller() {
             runtime.afw_running=luke;runtime.telemetry={};report_runtime(runtime);report_interface_telemetry({});tick_benchmark(clock);
             check(snapshot().benchmark.phase==BenchmarkPhase::running,"auto-pick trial settings applied");
             for(unsigned sample=0;sample<3;++sample) {
-                Sleep(2); // distinct actual telemetry timestamps, not duplicate samples
+                // GetTickCount64 may advance in ~16 ms steps. Wait for an actual
+                // new tick so no boundary-case median loses a duplicate sample.
+                const auto previous_tick=GetTickCount64();
+                do {Sleep(1);} while(GetTickCount64()==previous_tick);
                 auto& t=runtime.telemetry;t.updated_ms=clock+4000+sample*1000;
                 t.rates_valid=true;t.output_source=modern?xrfg::InterfaceSource::steamvr_delivery:xrfg::InterfaceSource::runtime_accepted_delivery;
                 // Step1 never generates. The remaining FidelityFX steps generate
@@ -123,8 +148,13 @@ void automatic_choice_controller() {
                     t.cycle_estimated_ms=(i==winner?80.F:40.F)+float(sample);
                 }
                 if(scenario==7) {
-                    t.output_fps=(i==winner?89.5F:current.desired.frame_generation?70.F:fidelity?120.F:current.desired.enabled?90.F:70.F)+(float(sample)-1)*.5F;
+                    t.output_fps=(i==winner?87.F:current.desired.frame_generation?70.F:fidelity?120.F:current.desired.enabled?90.F:70.F)+(float(sample)-1)*.5F;
                     t.cycle_estimated_ms=(i==winner?52.F:current.desired.frame_generation?70.F:40.F)+float(sample);
+                }
+                if(scenario==8 || scenario==9) {
+                    const bool triple=current.desired.enabled && current.desired.triple_frame_gen;
+                    t.output_fps=(triple?110.F:scenario==9 && i==winner?80.F:70.F)+(float(sample)-1)*.5F;
+                    t.cycle_estimated_ms=(i==winner?40.F:60.F)+float(sample);
                 }
                 report_runtime(runtime);report_interface_telemetry(t);tick_benchmark(GetTickCount64()+sample*300);
             }

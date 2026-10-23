@@ -466,6 +466,9 @@ void automatic_buttons() {
     require(snapshot().benchmark.count==21 && !snapshot().benchmark.advanced,"basic Display starts reduced matrix");
     tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
     require(tray.rendered_text.find("Auto pick best one")!=std::string::npos,"auto-pick checkbox is in Display");
+    require(tray.rendered_text.find("On completion: within")==std::string::npos &&
+        tray.rendered_text.find("Native vectors take priority")==std::string::npos,
+        "automatic selection rules stay out of the product interface");
     tray.activate("/Display_","Auto pick best one");tray.draw();tray.draw();
     require(snapshot().desired.benchmark_auto_pick,"actual checkbox saves the per-profile automatic preference");
     tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
