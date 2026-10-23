@@ -14,6 +14,18 @@
 
 namespace xrfg {
 namespace {
+// Outlaws' final REAL VR color can translate the corner barcode beyond the
+// eye boundary; its FPS text also covers that corner. Keep its exact token
+// inside the eye, away from that overlay. Other titles retain their layout.
+std::array<unsigned,2> origin_inset() noexcept {
+    static const bool outlaws=[] {
+        wchar_t path[MAX_PATH]{};
+        GetModuleFileNameW(nullptr,path,MAX_PATH);
+        const auto* name=wcsrchr(path,L'\\');
+        return _wcsicmp(name?name+1:path,L"Outlaws.exe")==0;
+    }();
+    return outlaws?std::array<unsigned,2>{256,32}:std::array<unsigned,2>{0,0};
+}
 using Microsoft::WRL::ComPtr;
 struct Uploads {
     ComPtr<ID3D12Device> device;
@@ -279,8 +291,9 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             return E_PENDING; // Actual eye viewport is not known during startup.
         }
         LukeColorOriginLayout layout;
+        const auto inset=origin_inset();
         if (!compact_luke_origin_layout(rect.width, rect.height,
-                static_cast<UINT>(color_extent >> 32), static_cast<UINT>(color_extent), layout))
+                static_cast<UINT>(color_extent >> 32), static_cast<UINT>(color_extent), layout,inset[0],inset[1]))
         {
             report_origin_layout(true,2,extent_bits(rect.width,rect.height),color_extent);
             return E_PENDING;
@@ -370,8 +383,9 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
                 report_origin_layout(false,1,0,extent_bits(static_cast<UINT>(original.Width),original.Height));
                 results[i]=E_PENDING; continue;
             }
+            const auto inset=origin_inset();
             if (!compact_luke_origin_layout(static_cast<UINT>(output_extent>>32),static_cast<UINT>(output_extent),
-                    static_cast<UINT>(original.Width),original.Height,plan.layout)) {
+                    static_cast<UINT>(original.Width),original.Height,plan.layout,inset[0],inset[1])) {
                 report_origin_layout(false,2,output_extent,extent_bits(static_cast<UINT>(original.Width),original.Height));
                 results[i]=E_PENDING; continue;
             }
@@ -429,7 +443,8 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
                 auto barrier=transition(colors[i],state,D3D12_RESOURCE_STATE_COPY_SOURCE);
                 reader->list->ResourceBarrier(1,&barrier);
             }
-            const D3D12_BOX box{0,0,0,plan.layout.scan.width,plan.layout.scan.height,1};
+            const auto& scan=plan.layout.scan;
+            const D3D12_BOX box{scan.x,scan.y,0,scan.x+scan.width,scan.y+scan.height,1};
             reader->list->CopyTextureRegion(&destination,0,0,0,&source,&box);
             if (state!=D3D12_RESOURCE_STATE_COPY_SOURCE) {
                 auto barrier=transition(colors[i],D3D12_RESOURCE_STATE_COPY_SOURCE,state);

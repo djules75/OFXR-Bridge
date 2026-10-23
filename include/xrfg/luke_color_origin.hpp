@@ -244,35 +244,46 @@ struct LukeColorOriginLayout {
 // copies of ONE token. A narrow common intersection need not contain a marker.
 // Geometry selects positions, never an eye, frame or alternate metadata source.
 inline bool compact_luke_origin_layout(unsigned output_width, unsigned output_height,
-    unsigned color_width, unsigned color_height, LukeColorOriginLayout& layout) noexcept {
+    unsigned color_width, unsigned color_height, LukeColorOriginLayout& layout,
+    unsigned inset_x = 0, unsigned inset_y = 0) noexcept {
     layout = {};
     if (!color_width || !color_height || output_width>16384 || output_height>8192 ||
         color_width > output_width || color_height > output_height ||
-        color_width<kLukeOriginWidth+2*kLukeOriginMargin) return false;
+        inset_x>16384 || inset_y>8192 ||
+        color_width<kLukeOriginWidth+2*(kLukeOriginMargin+inset_x)) return false;
+    const unsigned horizontal_margin=kLukeOriginMargin+inset_x;
     const unsigned dx = output_width - color_width, dy = output_height - color_height;
-    if (static_cast<std::uint64_t>(dy) + kLukeOriginHeight + 2 * kLukeOriginMargin > color_height)
+    if (static_cast<std::uint64_t>(dy) + kLukeOriginHeight + 2 * kLukeOriginMargin + 2*inset_y > color_height)
         return false;
     LukeColorOriginLayout candidate{};
-    const unsigned capacity=color_width-kLukeOriginWidth-2*kLukeOriginMargin;
-    unsigned x=std::min(dx,capacity)+kLukeOriginMargin,uncovered=0;
+    const unsigned capacity=color_width-kLukeOriginWidth-2*horizontal_margin;
+    unsigned x=std::min(dx,capacity)+horizontal_margin,uncovered=0;
     for(;;) {
         if(candidate.band_count==candidate.bands.size()||
-            x+kLukeOriginWidth+kLukeOriginMargin>output_width)return false;
+            x+kLukeOriginWidth+horizontal_margin>output_width)return false;
         // A complete band survives crop starts in this inclusive interval.
-        const unsigned end=x+kLukeOriginWidth+kLukeOriginMargin;
+        const unsigned end=x+kLukeOriginWidth+horizontal_margin;
         const unsigned first=end>color_width?end-color_width:0;
-        const unsigned last=x-kLukeOriginMargin;
+        const unsigned last=x-horizontal_margin;
         if(first>uncovered)return false; // Reject gaps; no inferred crop.
-        candidate.bands[candidate.band_count++]={x,dy+kLukeOriginMargin,kLukeOriginWidth,kLukeOriginHeight};
+        candidate.bands[candidate.band_count++]={x,dy+kLukeOriginMargin+inset_y,kLukeOriginWidth,kLukeOriginHeight};
         candidate.scan.width=std::min(color_width,end);
         if(last>=dx)break;
         uncovered=last+1;
         // Next placement covers the remaining crop interval without overwriting
         // any Manchester cell in the preceding copy.
-        x=std::max(std::min(dx,uncovered+capacity)+kLukeOriginMargin,
+        x=std::max(std::min(dx,uncovered+capacity)+horizontal_margin,
             x+kLukeOriginWidth+2*kLukeOriginMargin);
     }
-    candidate.scan.height=dy+kLukeOriginHeight+2*kLukeOriginMargin;
+    // Read only the protected band plus bounded final-color translation, not
+    // the empty inset/FPS area. Default geometry remains byte-for-byte equal.
+    const unsigned translation_x=std::min(inset_x,16U),translation_y=std::min(inset_y,16U);
+    candidate.scan.x=inset_x-translation_x;
+    candidate.scan.y=inset_y-translation_y;
+    candidate.scan.width=std::min(color_width,candidate.bands[candidate.band_count-1].x+
+        kLukeOriginWidth+kLukeOriginMargin+translation_x)-candidate.scan.x;
+    candidate.scan.height=dy+kLukeOriginHeight+2*kLukeOriginMargin+inset_y+
+        translation_y-candidate.scan.y;
     layout=candidate;
     return true;
 }

@@ -144,6 +144,40 @@ void codec_tests() {
     require(!xrfg::compact_luke_origin_layout(UINT32_MAX,1440,1319,1440,layout),"oversized/overflow layout admitted");
     require(!xrfg::compact_luke_origin_layout(512,8,512,8,layout),"insufficient band margin accepted");
     require(!xrfg::compact_luke_origin_layout(512,32,1024,32,layout),"upscaled/crop mismatch accepted");
+    // V641 Outlaws F8: 3056x3344 -> 3056x3337; final-color translation can
+    // clip the corner sync, while REAL VR's FPS block covers its left side.
+    // Protect the token, not the decoder: all bits/CRC remain mandatory.
+    xrfg::LukeColorOriginLayout protected_layout;
+    require(xrfg::compact_luke_origin_layout(3056,3344,3056,3337,protected_layout,256,32),
+        "Outlaws protected origin layout");
+    require(protected_layout.band_count==1 && protected_layout.bands[0].x==258 &&
+        protected_layout.bands[0].y==41 && protected_layout.scan.x==240 && protected_layout.scan.y==16 &&
+        protected_layout.scan.width==292 && protected_layout.scan.height==51,"Outlaws bounded protected scan");
+    for(int shift=-16;shift<=16;++shift) {
+        std::vector<float> projected(3056,.15F);
+        const int x=static_cast<int>(protected_layout.bands[0].x)+shift;
+        for(unsigned cell=0;cell<256;++cell)
+            projected[x+cell]=xrfg::luke_origin_white(coverage_token,cell)?1.F:0.F;
+        std::fill_n(projected.begin(),192,.0F); // Independent final FPS overlay.
+        const auto decoded=xrfg::decode_luke_origin_row(std::span<const float>(projected).subspan(
+            protected_layout.scan.x,protected_layout.scan.width));
+        require(decoded.token==coverage_token&&!decoded.ambiguous,"translated token / FPS overlay lost identity");
+        for(unsigned crop=0;crop<=7;++crop) {
+            const int y=static_cast<int>(protected_layout.bands[0].y)-crop+shift-
+                static_cast<int>(protected_layout.scan.y);
+            require(y>=0 && y+8<=static_cast<int>(protected_layout.scan.height),
+                "Outlaws vertical crop/translation clipped protected token");
+        }
+    }
+    require(xrfg::compact_luke_origin_layout(3344,3344,3056,3337,protected_layout,256,32),
+        "protected inset rejected cropped stereo source");
+    for(unsigned crop=0;crop<=288;++crop) {
+        const auto& band=protected_layout.bands[0];
+        require(band.x>=crop+256 && band.x+256+256<=crop+3056,
+            "protected marker lost either-eye crop margin");
+    }
+    require(!xrfg::compact_luke_origin_layout(512,32,512,32,protected_layout,256,32),
+        "unrepresentable protected marker silently lost its inset");
 }
 void luma_tests() {
     const auto close=[](float actual,float expected,float tolerance=1.e-6F) {
@@ -558,6 +592,40 @@ void cpu_batch_tests() {
  for(auto& t:callers)t.join();
  images[0].row_pitch=3;xrfg::decode_luke_origin_images(images,results);require(!results[0].token&&results[1].token==101,"invalid stride consumed or poisoned peer");
 }
+void outlaws_protected_gpu_test() {
+    wchar_t executable[MAX_PATH]{};GetModuleFileNameW(nullptr,executable,MAX_PATH);
+    const auto* name=wcsrchr(executable,L'\\');
+    require(_wcsicmp(name?name+1:executable,L"Outlaws.exe")==0,
+        "protected GPU test requires the real Outlaws process-name routing");
+    Gpu gpu;
+    auto source=gpu.texture(1024,256);
+    xrfg::configure_luke_color_origin_extent(1024,249);
+    xrfg::LukeColorOriginRect written{};
+    constexpr std::uint32_t expected=0x64231292;
+    check(xrfg::mark_luke_color_origin(gpu.list.Get(),source.Get(),expected,
+        D3D12_RESOURCE_STATE_COMMON,gpu.device.Get(),{},DXGI_FORMAT_UNKNOWN,&written),
+        "Outlaws real scoped writer");
+    require(written.x==258 && written.y==41 && written.width==256 && written.height==8,
+        "Outlaws process failed to select protected marker");
+    std::vector<ComPtr<ID3D12Resource>> eyes;
+    for(int shift:{-16,-8,0,8,16}) {
+        auto eye=gpu.texture(1024,249);
+        const unsigned sx=shift<0?unsigned(-shift):0,dx=shift>0?unsigned(shift):0;
+        const int origin_y=3-shift;
+        const unsigned sy=origin_y>0?unsigned(origin_y):0,dy=origin_y<0?unsigned(-origin_y):0;
+        gpu.crop(source.Get(),eye.Get(),sx,sy,1024-std::abs(shift),
+            std::min(256-sy,249-dy),dx,dy);
+        eyes.push_back(std::move(eye));
+    }
+    gpu.submit();
+    for(const auto& eye:eyes) {
+        std::uint32_t token{};
+        check(xrfg::read_luke_color_origin(gpu.queue.Get(),eye.Get(),&token,
+            D3D12_RESOURCE_STATE_COMMON,5000),"Outlaws shifted writer/reader GPU roundtrip");
+        require(token==expected,"Outlaws translation changed exact token identity");
+    }
+    std::cout<<"Outlaws protected GPU: "<<checks<<" checks PASS\n";
+}
 int captured_decode_benchmark(char** argv) {
  constexpr unsigned width=260,height=303,pitch=14080;
  std::array<std::vector<std::byte>,2> bytes;
@@ -575,6 +643,7 @@ int captured_decode_benchmark(char** argv) {
  std::sort(serial_ms.begin(),serial_ms.end());std::sort(parallel_ms.begin(),parallel_ms.end());std::cout<<"CAPTURED_DECODE serial_ms="<<serial_ms[7]<<" parallel_ms="<<parallel_ms[7]<<" token0="<<expected[0].token<<" token1="<<expected[1].token<<" ambiguous="<<expected[0].ambiguous<<','<<expected[1].ambiguous<<'\n';return 0;
 }
 int main(int argc,char** argv) {
-    try { if(argc==3)return captured_decode_benchmark(argv);cpu_batch_tests();codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }
+    try { if(argc==2 && std::string_view(argv[1])=="outlaws-protected") {outlaws_protected_gpu_test();return 0;}
+        if(argc==3)return captured_decode_benchmark(argv);cpu_batch_tests();codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }
     catch(const std::exception& e) {std::cerr<<"Compact origin FAIL: "<<e.what()<<"\n";return 1;}
 }

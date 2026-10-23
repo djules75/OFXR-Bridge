@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.641.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.647.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -828,6 +828,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_link_libraries(xrfg_luke_color_origin_tests PRIVATE d3d12 dxgi xrfg_bridge_flight_logger)
         add_test(NAME xrfg_luke_color_origin COMMAND xrfg_luke_color_origin_tests)
         set_tests_properties(xrfg_luke_color_origin PROPERTIES TIMEOUT 30)
+        add_test(NAME xrfg_outlaws_protected_origin COMMAND ${CMAKE_COMMAND}
+            "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_color_origin_tests>"
+            "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/outlaws-protected-origin"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_outlaws_origin_test.cmake")
+        set_tests_properties(xrfg_outlaws_protected_origin PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         add_executable(xrfg_ngx_feature_metadata_tests tests/ngx_feature_metadata_tests.cpp)
         target_include_directories(xrfg_ngx_feature_metadata_tests PRIVATE include "${XRFG_DLSS_SDK_ROOT}/include")
         target_compile_features(xrfg_ngx_feature_metadata_tests PRIVATE cxx_std_20)
