@@ -31,7 +31,7 @@ void status(const Snapshot& state) {
     const auto now = GetTickCount64();
     const bool current = state.connected && m.updated_ms && now >= m.updated_ms && now - m.updated_ms < 2000;
     const float header_x=ImGui::GetCursorPosX(),header_width=ImGui::GetContentRegionAvail().x;
-    ImGui::TextDisabled("OFXR Autonomous V%d",XRFG_IMPLEMENTATION_VERSION);
+    ImGui::TextDisabled("OFXR-BRIDGE 0.3.0 (v%d)",XRFG_IMPLEMENTATION_VERSION);
     const auto vram=interface_vram_text(state);
     const auto vram_width=ImGui::CalcTextSize(vram.c_str()).x;
     ImGui::SameLine();
@@ -161,12 +161,24 @@ void dlssg_preset(SettingsWidgetState& ui, const Snapshot& state, bool compact) 
     ImGui::TextWrapped("C uses Lite blending; A uses Full quality. If the driver rejects C, OFXR tries A. A saved request does not verify the model loaded by NVIDIA; global overrides may still apply.");
 }
 bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
-    if(state.connected && state.runtime.pacing_mode==kAfwOnlyPacingMode) {
-        ImGui::TextWrapped("AFW only: direct OpenXR delivery. OFXR is disabled for this session. AFW, Neural Rendering and latency meters remain available. Disable AFW only in the tray and restart the game to restore OFXR.");
-        return false;
+    auto& draft=ui.draft;
+    bool changed=ImGui::Checkbox("Enable frame generation",&draft.enabled);
+    ImGui::SameLine();
+    if(ImGui::Button("Reset to defaults")) {
+        if(reset_to_defaults()) {ui.dirty=false;ui.scale_editing=false;ui.dlssg_profile_loaded=false;synchronize_settings_widgets(ui,snapshot());changed=false;}
+        else ui.save_failed=true;
     }
-    auto& draft = ui.draft;
-    bool changed = ImGui::Checkbox("Enable frame generation", &draft.enabled);
+    const bool framework_only=state.connected && !pacing_comparison_runtime(state.runtime);
+    int pacing=framework_only?0:draft.pacing_mode;
+    ImGui::BeginDisabled(framework_only || (state.connected && state.runtime.pacing_mode==kAfwOnlyPacingMode));
+    if(ImGui::Combo("Pacing",&pacing,"Framework\0Director\0Framework+director\0")) {draft.pacing_mode=pacing;changed=true;}
+    ImGui::EndDisabled();
+    ImGui::TextWrapped(framework_only ? "VDXR transport uses Framework pacing. Change Pacing in the tray and restart the game to use director pacing."
+        : "Framework bypasses director pacing; Director uses only the final director; Framework+director combines both. Changes apply live after queued frames complete.");
+    if(state.connected && state.runtime.pacing_mode==kAfwOnlyPacingMode) {
+        ImGui::TextWrapped("AFW Only: direct OpenXR delivery. Disable AFW Only in the Luke Ross tab and restart the game to restore OFXR. Neural Rendering remains available.");
+        return changed;
+    }
     int selected_generation = generation_ui_index(draft.frame_generation);
     if (ImGui::Combo("Frame generation", &selected_generation,
             "OFXR (fast)\0Hybrid (slow, needs DLSS)\0FSR 3.1 (slow, needs DLSS)\0DLSS Frame Generation (slowest, needs DLSS)\0")) {
@@ -183,7 +195,7 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
             select_generation(draft, 0, engine_order[selected_engine]);
             changed = true;
         }
-        changed |= ImGui::Combo("Motion source", &draft.motion_vectors,
+        if(draft.advanced_mode)changed |= ImGui::Combo("Motion source", &draft.motion_vectors,
             "Optical flow\0Game motion vectors\0");
         if (draft.backend != 0 && (draft.motion_vectors == 0 ||
                 (state.runtime.luke_detected && draft.afw_mode != 0))) {
@@ -228,15 +240,6 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
         : "Uses private synthesis textures and fewer XR swapchains.");
     if(pacing_comparison_runtime(state.runtime) && draft.triple_frame_gen && !state.runtime.luke_detected)
         ImGui::TextWrapped("Fast mode preserves the output capacity needed for 3X; VRAM reduction may be limited.");
-    const bool framework_only=state.connected && !pacing_comparison_runtime(state.runtime);
-    int pacing=framework_only?0:draft.pacing_mode;
-    ImGui::BeginDisabled(framework_only);
-    if(ImGui::Combo("Pacing",&pacing,"Framework\0Director\0Framework+director\0")) {
-        draft.pacing_mode=pacing;changed=true;
-    }
-    ImGui::EndDisabled();
-    ImGui::TextWrapped(framework_only ? "Legacy VDXR uses the original Framework path. Disable Legacy VDXR in the tray and restart the game to compare director pacing."
-        : "Framework bypasses director pacing; Director uses only the final director; Framework+director combines both. Changes apply live after queued frames complete.");
     ImGui::Separator();
     if (!ImGui::CollapsingHeader("Details")) return changed;
     const auto& telemetry = state.runtime.telemetry;
@@ -275,7 +278,10 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
 }
 
 bool framewarp(Settings& draft, const Snapshot& state) {
-    bool changed = ImGui::Combo("Framewarp mode", &draft.afw_mode,
+    bool changed=ImGui::Checkbox("AFW Only (restart game)",&draft.afw_only);
+    if(state.connected && (state.runtime.pacing_mode==kAfwOnlyPacingMode)!=draft.afw_only)
+        ImGui::TextWrapped("AFW Only change saved. Restart the game to apply it.");
+    changed |= ImGui::Combo("Framewarp mode", &draft.afw_mode,
         "Off\0Alternate eye (for debug)\0Previous frame (for debug)\0Combined\0");
     if (draft.afw_mode == 3) {
         constexpr int rates[]{0,4,8};
@@ -291,7 +297,7 @@ bool framewarp(Settings& draft, const Snapshot& state) {
     }
     changed |= ImGui::Checkbox("Debug framewarp", &draft.afw_debug);
     ImGui::TextWrapped("Requires Luke Ross and RealVR.ini. Camera and stereo motion correction is always applied; same-eye history reconstructs the missing camera interval.");
-    changed |= ImGui::Checkbox("Clear before framewarp", &draft.afw_clear_before_warping);
+    if(draft.advanced_mode)changed |= ImGui::Checkbox("Clear before framewarp", &draft.afw_clear_before_warping);
     changed |= ImGui::SliderFloat("Ignore motion", &draft.afw_ignore_motion_threshold, 0, 16, "%.2f");
     ImGui::TextWrapped("Threshold for ignoring per-object motion vectors.");
     changed |= ImGui::Combo("Depth dilation", &draft.afw_depth_dilate_mode,
@@ -356,14 +362,9 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
         ? (draft.diagnostics ? "Logging active" : "Stopping logging...")
         : (draft.diagnostics ? "Starting logging..." : "Logging disabled"));
     ImGui::SeparatorText("Automatic tests");
-    if (ImGui::Button("Open ofxr-bridge.ini"))
-        ShellExecuteW(GetActiveWindow(), L"open", configuration_path().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     const bool permitted=benchmark_enabled();
-    if (!permitted) ImGui::TextWrapped("Benchmarks disabled. Enable Benchmark mode in the tray to enable sampling and these buttons.");
+    if (!permitted) ImGui::TextWrapped("Benchmarks disabled. Enable benchmarks in the tray to enable sampling and these buttons.");
     const bool active=benchmark_active(state.benchmark);
-    ImGui::BeginDisabled(active || !permitted);
-    changed |= ImGui::Checkbox("Output CSV",&draft.benchmark_csv);
-    ImGui::EndDisabled();
     ImGui::TextWrapped("10 seconds per configuration; discard only the first 3 seconds. CSV: min / median / max Output FPS and Cycle estimated. Works with diagnostic logging off. Neural and AFW choices are kept.");
     ImGui::BeginDisabled(active || !permitted || !state.connected);
     const bool optical=ImGui::Button("Tests without vectors");
@@ -374,7 +375,7 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     const bool luke=ImGui::Button("Test Luke Ross");
     ImGui::EndDisabled();
     if(ImGui::Button("Open benchmark folder")) {
-        const auto folder=configuration_path().parent_path()/L"Benchmarks";
+        const auto folder=common_folder()/L"Benchmarks";
         std::error_code error;std::filesystem::create_directories(folder,error);
         ui.benchmark_folder_failed=bool(error) || reinterpret_cast<INT_PTR>(ShellExecuteW(
             GetActiveWindow(),L"open",folder.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32;
@@ -402,7 +403,7 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
         ImGui::TextWrapped("Legacy VDXR: 11 optical or 17 complete tests. Every route compares Normal/Fast. Luke: 15 tests, three AFW qualities through 0.3.0, no Fast or 3X.");
     }
     ImGui::TextWrapped("Close the menu and keep the same test scene. Original settings are restored after Stop or completion. Memory is sampled once near the end of each trial. Tests keep the startup DLSS-G preset and never change its NVIDIA profile. A is the initial preference; changing presets requires restarting the game.");
-    if(ImGui::CollapsingHeader("Experimental features")) {
+    if(draft.advanced_mode && ImGui::CollapsingHeader("Experimental features")) {
         changed |= ImGui::Checkbox("Reduce black bars during headset rotation###R19 synthetic camera (experimental)", &draft.r19_camera);
     }
     return changed;
@@ -410,6 +411,8 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
 } // namespace
 
 void synchronize_settings_widgets(SettingsWidgetState& ui, const Snapshot& state) noexcept {
+    const auto file=configuration_path();
+    if(ui.configuration_file!=file) {ui=SettingsWidgetState{};ui.configuration_file=file;}
     if (!ui.initialized) {
         ui.draft = ui.base = state.desired;
         ui.initialized = true;
@@ -421,6 +424,7 @@ void synchronize_settings_widgets(SettingsWidgetState& ui, const Snapshot& state
 }
 
 bool publish_settings_widgets(SettingsWidgetState& ui) noexcept {
+    if(!ui.configuration_file.empty() && ui.configuration_file!=configuration_path()){ui.dirty=false;ui.initialized=false;return false;}
     if (!ui.dirty || ui.scale_editing) return false;
     if (!request_changes(ui.base, ui.draft)) {
         ui.save_failed = true;
@@ -484,9 +488,11 @@ bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& state,
     set_interface_visible(options.compact ? InterfaceSurface::headset : InterfaceSurface::desktop, true);
     synchronize_settings_widgets(ui, state);
     ui.scale_editing = false;
-    ImGui::PushID("OFXRAutonomousSettings");
+    ImGui::PushID("OFXRBridgeSettings");
     if (options.compact) ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 7));
     status(state);
+    const auto profile=configuration_path();
+    ImGui::TextWrapped("Settings: %s",profile==global_configuration_path()?"Global defaults":utf8(profile.filename().wstring()).c_str());
     if(const auto warning=overlay_limit_text(state.runtime.overlay_limit_mask);!warning.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(1.F,.75F,.25F,1.F));
         ImGui::TextWrapped("%.*s",static_cast<int>(warning.size()),warning.data());

@@ -8,6 +8,7 @@
 namespace xrfg_fixture {
 inline bool request_control(const xrfg::embedded::Settings& desired) {
     auto s=xrfg::autonomous::snapshot().desired;
+    s.advanced_mode=true;
     s.pacing_mode=desired.pacing_mode;
     s.enabled=desired.enabled; s.backend=desired.backend; s.preset=desired.preset;
     s.scale=desired.scale; s.backward=desired.backward; s.lower_vram=desired.lower_vram;
@@ -31,7 +32,7 @@ public:
             (L"ofxr-autonomous-layer-test-"+std::to_wstring(GetCurrentProcessId())+
                 L"-"+std::to_wstring(GetTickCount64()));
         std::filesystem::create_directories(directory_);
-        SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",directory_.c_str());
+        SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",directory_.c_str());
         auto initial=xrfg::embedded::snapshot().desired;initial.pacing_mode=2;
         if (!request_control(initial))
             throw std::runtime_error("autonomous fixture publication failed");
@@ -41,7 +42,7 @@ public:
         static_cast<void>(request_control(restored));
         std::error_code error;
         std::filesystem::remove(directory_/L"ofxr-bridge.ini",error);
-        std::filesystem::remove(directory_,error);
+        if(directory_.is_absolute() && directory_.filename().wstring().starts_with(L"ofxr-autonomous-layer-test-"))std::filesystem::remove_all(directory_,error);
     }
 };
 }

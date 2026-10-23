@@ -12,11 +12,11 @@
 #include <optional>
 
 // Consumer of the existing OptiScaler V2 identity, not a producer API export.
-// Based on the preserved V232 bootstrap. Autonomous and the embedded layer have
+// Based on the preserved V232 bootstrap. OFXR-BRIDGE and the embedded layer have
 // different loader names: adapt only our own nextInfo entry at instance creation.
 namespace xrfg::optiscaler_bootstrap {
 inline constexpr char embedded_name[] = "XR_APILAYER_XRFrameBridge_diagnostic";
-inline constexpr char autonomous_name[] = "XR_APILAYER_OFXRAutonomous";
+inline constexpr char autonomous_name[] = "XR_APILAYER_OFXRBridge";
 struct Identity {
     std::uint32_t struct_size{sizeof(Identity)};
     std::uint32_t api_version{2};

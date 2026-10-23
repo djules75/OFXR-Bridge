@@ -40,7 +40,7 @@ private:
 inline constexpr wchar_t kRegistrySubkey[] =
     L"SOFTWARE\\Khronos\\OpenXR\\1\\ApiLayers\\Implicit";
 inline constexpr wchar_t kManifestPrefix[] =
-    L"XR_APILAYER_OFXRAutonomous_manual-";
+    L"XR_APILAYER_OFXRBridge_manual-";
 inline constexpr wchar_t kManifestSuffix[] = L".json";
 // The Vulkan implicit layer that serialises queue submissions, registered
 // beside the OpenXR one while the bridge is armed with Vulkan support on.
@@ -49,7 +49,7 @@ inline constexpr wchar_t kVulkanRegistrySubkey[] =
     L"SOFTWARE\\Khronos\\Vulkan\\ImplicitLayers";
 inline constexpr wchar_t kVulkanManifestPrefix[] =
     L"OFXR_vulkan_queue_manual-";
-inline constexpr wchar_t kVulkanLayerName[] = L"VK_LAYER_OFXRAutonomous_queue_serialize";
+inline constexpr wchar_t kVulkanLayerName[] = L"VK_LAYER_OFXRBridge_queue_serialize";
 inline constexpr wchar_t kVulkanLayerDll[] = L"OFXR_vulkan_queue_layer.dll";
 
 enum class RegistryScope {

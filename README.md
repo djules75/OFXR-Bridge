@@ -1,3 +1,16 @@
+# OFXR-BRIDGE 0.3.0 (v637)
+
+Local release-preparation candidate. Includes per-game profiles, factory reset,
+simplified controls and global Auto / Force VDXR / Force SteamVR transport.
+AFW Only is now a per-game setting in Luke Ross. Benchmark CSV output is always
+on when the benchmark suite is enabled.
+
+[Current configuration and validation boundaries](docs/V637_RELEASE_PREPARATION.md).
+[Italian quick start](docs/V637_RELEASE_PREPARATION_IT.md).
+
+The laboratory source and all earlier build history remain local. Hardware
+acceptance is pending. This candidate is not published.
+
 ## V636: Crash debug
 
 The tray adds **Crash debug (restart game)**, disabled by default. When enabled,

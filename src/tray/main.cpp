@@ -30,12 +30,12 @@
 
 namespace {
 
-constexpr wchar_t kWindowClass[] = L"OFXRAutonomousTrayWindow";
+constexpr wchar_t kWindowClass[] = L"OFXRBridgeTrayWindow";
 #define XRFG_STRING_IMPL(x) #x
 #define XRFG_STRING(x) XRFG_STRING_IMPL(x)
 #define XRFG_WIDE_IMPL(x) L##x
 #define XRFG_WIDE(x) XRFG_WIDE_IMPL(x)
-constexpr wchar_t kApplicationName[] = L"OFXR Autonomous V" XRFG_WIDE(XRFG_STRING(XRFG_IMPLEMENTATION_VERSION));
+constexpr wchar_t kApplicationName[] = L"OFXR-BRIDGE 0.3.0 (v" XRFG_WIDE(XRFG_STRING(XRFG_IMPLEMENTATION_VERSION)) L")";
 constexpr wchar_t kCleanupArgument[] = L"--cleanup-manual-arm";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kTrayId = 1;
@@ -57,9 +57,10 @@ enum MenuCommand : UINT {
     change_pause_key = 92,
     steamvr_queue_separate = 93,
     steamvr_queue_shared = 94,
-    toggle_afw_only = 95,
     toggle_benchmark_mode = 96,
-    toggle_vdxr_legacy = 97,
+    pacing_auto = 97,
+    pacing_vdxr = 110,
+    pacing_steamvr = 111,
     toggle_crash_debug = 98,
     show_settings = 100,
     open_logs = 130,
@@ -624,46 +625,6 @@ void close_pause_signal(AppState& state) {
     return true;
 }
 
-// `running_message`: what the balloon says for an option a running game
-// follows; without one the option is for the next session.
-// The pause symbol shown beside "Resume frame generation": two orange bars on
-// a transparent square the size of a check mark. A 32-bit premultiplied
-// bitmap set as the entry's item bitmap is the one way to colour an entry
-// that leaves the popup in the system's own menu style; an owner-drawn entry
-// puts the whole menu in the flat unthemed one.
-[[nodiscard]] HBITMAP create_pause_bitmap() {
-    const int size = std::max(GetSystemMetrics(SM_CXMENUCHECK), 8);
-    BITMAPINFO info{};
-    info.bmiHeader.biSize = sizeof(info.bmiHeader);
-    info.bmiHeader.biWidth = size;
-    info.bmiHeader.biHeight = -size;
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biCompression = BI_RGB;
-    void* bits = nullptr;
-    HBITMAP bitmap = CreateDIBSection(
-        nullptr, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (bitmap == nullptr || bits == nullptr) return bitmap;
-    auto* pixels = static_cast<std::uint32_t*>(bits);
-    std::fill_n(pixels, static_cast<std::size_t>(size) * size, 0U);
-    const std::uint32_t ink = 0xff000000U |
-        (static_cast<std::uint32_t>(GetRValue(kPausedColor)) << 16) |
-        (static_cast<std::uint32_t>(GetGValue(kPausedColor)) << 8) |
-        GetBValue(kPausedColor);
-    const int bar = std::max(size / 5, 2);
-    const int gap = std::max(size / 5, 2);
-    const int left = (size - 2 * bar - gap) / 2;
-    const int top = size / 5;
-    for (int y = top; y < size - top; ++y) {
-        for (int x = 0; x < bar; ++x) {
-            pixels[y * size + left + x] = ink;
-            pixels[y * size + left + bar + gap + x] = ink;
-        }
-    }
-    return bitmap;
-}
-
-// What the "Current key binding" entry and the dialog call a setting.
 [[nodiscard]] std::wstring pause_key_display(std::string_view setting) {
     const std::string name = xrfg::standalone::hotkey_display_name(setting);
     if (name.empty()) return L"none";
@@ -815,37 +776,24 @@ void show_context_menu(AppState& state) {
         toggle_arm, L"Enable");
     AppendMenuW(menu, MF_STRING | (state.armed ? MF_UNCHECKED : MF_CHECKED),
         toggle_arm, L"Disable");
-    AppendMenuW(menu, MF_STRING | (state.armed && state.pause_signal ? MF_ENABLED : MF_GRAYED),
-        toggle_pause, state.paused ? L"Resume frame generation" : L"Pause frame generation");
     std::wstring binding = L"Pause key: " + pause_key_display(state.settings.pause_hotkey);
     AppendMenuW(menu, MF_STRING, change_pause_key, binding.c_str());
-    AppendMenuW(menu,MF_STRING | (state.settings.vdxr_legacy ? MF_CHECKED : MF_UNCHECKED),
-        toggle_vdxr_legacy,L"Legacy VDXR (restart game)");
-    AppendMenuW(menu,MF_STRING | (state.settings.afw_only ? MF_CHECKED : MF_UNCHECKED),
-        toggle_afw_only,L"AFW only (Luke Ross, restart game)");
+    HMENU pacing_menu=CreatePopupMenu();
+    if(pacing_menu) {
+        using xrfg::standalone::RuntimePacing;
+        AppendMenuW(pacing_menu,MF_STRING | (state.settings.pacing==RuntimePacing::automatic?MF_CHECKED:0),pacing_auto,L"Auto");
+        AppendMenuW(pacing_menu,MF_STRING | (state.settings.pacing==RuntimePacing::force_vdxr?MF_CHECKED:0),pacing_vdxr,L"Force VDXR");
+        AppendMenuW(pacing_menu,MF_STRING | (state.settings.pacing==RuntimePacing::force_steamvr?MF_CHECKED:0),pacing_steamvr,L"Force SteamVR");
+        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(pacing_menu),L"Pacing (restart game)");
+    }
     AppendMenuW(menu,MF_STRING | (state.settings.crash_debug ? MF_CHECKED : MF_UNCHECKED),
         toggle_crash_debug,L"Crash debug (restart game)");
     if(!state.crash_debug_status.empty())
         AppendMenuW(menu,MF_STRING | MF_GRAYED,0,state.crash_debug_status.c_str());
     AppendMenuW(menu,MF_STRING | (xrfg::autonomous::benchmark_enabled() ? MF_CHECKED : MF_UNCHECKED),
-        toggle_benchmark_mode,L"Benchmark mode");
-    HMENU queue_menu = CreatePopupMenu();
-    if (queue_menu) {
-        AppendMenuW(queue_menu, MF_STRING | (state.settings.steamvr_separate_queue ? MF_CHECKED : MF_UNCHECKED),
-            steamvr_queue_separate, L"Separate from game");
-        AppendMenuW(queue_menu, MF_STRING | (state.settings.steamvr_separate_queue ? MF_UNCHECKED : MF_CHECKED),
-            steamvr_queue_shared, L"Shared with game");
-        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(queue_menu), L"SteamVR preparation queue (restart game)");
-    }
-    HBITMAP pause_bitmap = state.paused ? create_pause_bitmap() : nullptr;
-    if (pause_bitmap) {
-        MENUITEMINFOW item{sizeof(item)};
-        item.fMask = MIIM_BITMAP;
-        item.hbmpItem = pause_bitmap;
-        SetMenuItemInfoW(menu, toggle_pause, FALSE, &item);
-    }
+        toggle_benchmark_mode,L"Enable benchmarks");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, open_logs, L"Open logs");
+    AppendMenuW(menu, MF_STRING, open_logs, L"Open folder");
     AppendMenuW(menu, MF_STRING, show_about, L"About");
     AppendMenuW(menu, MF_STRING, exit_application, L"Exit");
     POINT cursor{};
@@ -854,7 +802,7 @@ void show_context_menu(AppState& state) {
     TrackPopupMenu(menu, TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, state.window, nullptr);
     PostMessageW(state.window, WM_NULL, 0, 0);
     DestroyMenu(menu);
-    if (pause_bitmap) DeleteObject(pause_bitmap);
+
 }
 
 [[nodiscard]] bool set_benchmark_preference(const std::filesystem::path& ini, bool enabled, std::wstring* error) {
@@ -870,41 +818,18 @@ void show_context_menu(AppState& state) {
     return true;
 }
 
-[[nodiscard]] bool set_afw_only_preference(AppState& state, bool enabled, std::wstring* error) {
-    const bool previous=state.settings.afw_only;
-    state.settings.afw_only=enabled;
-    if (!xrfg::autonomous::write_configuration_sections(state.settings_path,xrfg::standalone::serialize_settings(state.settings))) {
-        state.settings.afw_only=previous;
-        if(error)*error=L"Could not save ofxr-bridge.ini.";
-        return false;
+[[nodiscard]] bool set_pacing_preference(AppState& state,xrfg::standalone::RuntimePacing pacing,std::wstring* error) {
+    const auto previous=state.settings.pacing;state.settings.pacing=pacing;
+    if(!xrfg::autonomous::write_configuration_sections(state.settings_path,xrfg::standalone::serialize_settings(state.settings))) {
+        state.settings.pacing=previous;if(error)*error=L"Could not save Pacing in ofxr-bridge.ini.";return false;
     }
     if(state.armed) {
         const auto ini=runtime_directory(state.local_directory)/L"ofxr_bridge.ini";
-        if(!WritePrivateProfileStringW(L"ofxr",L"afw_only",enabled?L"1":L"0",ini.c_str())) {
-            if(error)*error=last_error_message(L"Saving AFW only");
-            state.settings.afw_only=previous;save_settings(state);return false;
+        const wchar_t* value=pacing==xrfg::standalone::RuntimePacing::force_vdxr?L"force_vdxr":pacing==xrfg::standalone::RuntimePacing::force_steamvr?L"force_steamvr":L"auto";
+        if(!WritePrivateProfileStringW(L"ofxr",L"pacing",value,ini.c_str())) {
+            state.settings.pacing=previous;save_settings(state);if(error)*error=last_error_message(L"Saving Pacing");return false;
         }
     }
-    log_lifecycle(state.local_directory,enabled?L"afw-only-next-session":L"full-ofxr-next-session");
-    return true;
-}
-
-[[nodiscard]] bool set_vdxr_legacy_preference(AppState& state, bool enabled, std::wstring* error) {
-    const bool previous=state.settings.vdxr_legacy;
-    state.settings.vdxr_legacy=enabled;
-    if (!xrfg::autonomous::write_configuration_sections(state.settings_path,xrfg::standalone::serialize_settings(state.settings))) {
-        state.settings.vdxr_legacy=previous;
-        if(error)*error=L"Could not save ofxr-bridge.ini.";
-        return false;
-    }
-    if(state.armed) {
-        const auto ini=runtime_directory(state.local_directory)/L"ofxr_bridge.ini";
-        if(!WritePrivateProfileStringW(L"ofxr",L"vdxr_legacy",enabled?L"1":L"0",ini.c_str())) {
-            if(error)*error=last_error_message(L"Saving Legacy VDXR");
-            state.settings.vdxr_legacy=previous;save_settings(state);return false;
-        }
-    }
-    log_lifecycle(state.local_directory,enabled?L"legacy-vdxr-next-session":L"director-vdxr-next-session");
     return true;
 }
 
@@ -1029,14 +954,12 @@ void handle_command(AppState& state, UINT command) {
         prepare_crash_debug(state,xrfg::standalone::last_dlssg_game(state.settings_path));
         return;
     }
-    case toggle_vdxr_legacy: {
-        std::wstring error;
-        if(!set_vdxr_legacy_preference(state,!state.settings.vdxr_legacy,&error))show_error(state.window,error);
-        break;
-    }
-    case toggle_afw_only: {
-        std::wstring error;
-        if(!set_afw_only_preference(state,!state.settings.afw_only,&error))show_error(state.window,error);
+    case pacing_auto:
+    case pacing_vdxr:
+    case pacing_steamvr: {
+        using xrfg::standalone::RuntimePacing;
+        const auto mode=command==pacing_vdxr?RuntimePacing::force_vdxr:command==pacing_steamvr?RuntimePacing::force_steamvr:RuntimePacing::automatic;
+        std::wstring error;if(!set_pacing_preference(state,mode,&error))show_error(state.window,error);
         return;
     }
     case steamvr_queue_separate:
@@ -1051,7 +974,7 @@ void handle_command(AppState& state, UINT command) {
             show_error(state.window, L"Could not open the settings window.");
         break;
     case open_logs: {
-        const auto directory = runtime_directory(state.local_directory);
+        const auto directory = state.local_directory;
         std::error_code ignored;
         std::filesystem::create_directories(directory, ignored);
         ShellExecuteW(
@@ -1067,7 +990,7 @@ void handle_command(AppState& state, UINT command) {
         break;
     case show_about: {
         wchar_t version_label[64]{};
-        swprintf_s(version_label, L"OFXR 0.3.0 (v%03u)", kImplementationVersion);
+        swprintf_s(version_label, L"OFXR-BRIDGE 0.3.0 (v%03u)", kImplementationVersion);
         TASKDIALOGCONFIG dialog{};
         dialog.cbSize = sizeof(dialog);
         dialog.hwndParent = state.window;
@@ -1175,10 +1098,10 @@ LRESULT CALLBACK window_procedure(
                     const auto game = xrfg::standalone::game_executable(current.runtime.process_id);
                     if(state->settings.crash_debug)prepare_crash_debug(*state,game);
                     if (xrfg::standalone::remember_dlssg_game(
-                            xrfg::autonomous::configuration_path(), game)) {
+                            xrfg::autonomous::global_configuration_path(), game)) {
                         std::wstring preset_error;
                         if(!xrfg::standalone::apply_preferred_dlssg_preset(
-                            xrfg::autonomous::configuration_path(),game,preset_error))
+                            xrfg::autonomous::game_configuration_path(game),game,preset_error))
                             log_lifecycle(state->local_directory,L"DLSS-G-preference",preset_error);
                         remembered_game = current.runtime.process_id;
                     }
@@ -1370,7 +1293,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
         return *helper_result;
     }
 
-    HANDLE single_instance = CreateMutexW(nullptr, TRUE, L"Local\\OFXRAutonomousTrayV474");
+    HANDLE single_instance = CreateMutexW(nullptr, TRUE, L"Local\\OFXRBridgeTrayV474");
     if (single_instance == nullptr) {
         return EXIT_FAILURE;
     }
@@ -1388,7 +1311,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
     try {
         state.executable_directory = executable_directory();
         state.local_directory = local_app_data() / L"ofxr-bridge";
-        state.settings_path = xrfg::autonomous::configuration_path();
+        state.settings_path = xrfg::autonomous::global_configuration_path();
         std::wstring cleanup_error;
         if (!cleanup_all_owned_registrations(state, &cleanup_error)) {
             log_lifecycle(state.local_directory, L"startup-cleanup", cleanup_error);
@@ -1403,7 +1326,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
         prepare_crash_debug(state,preset_target);
         if(!preset_target.empty()) {
             std::wstring preset_error;
-            if(!xrfg::standalone::apply_preferred_dlssg_preset(state.settings_path,preset_target,preset_error))
+            if(!xrfg::standalone::apply_preferred_dlssg_preset(
+                std::filesystem::exists(xrfg::autonomous::game_configuration_path(preset_target))?xrfg::autonomous::game_configuration_path(preset_target):state.settings_path,preset_target,preset_error))
                 log_lifecycle(state.local_directory,L"DLSS-G-preference",preset_error);
         }
     } catch (...) {

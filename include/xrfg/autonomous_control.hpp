@@ -29,6 +29,8 @@ constexpr std::size_t kGenerationProfileCount = 7; // four OFXR engines, FSR, DL
 // No application resource pointers cross this boundary.
 struct Settings {
     bool enabled{true};
+    bool advanced_mode{}; // INI-only AdvancedMode; simplified UI by default
+    bool afw_only{}; // per-game startup choice, independent of Neural Rendering
     int pacing_mode{2}; // 0 framework, 1 sole director, 2 framework + director
     int backend{2}; // 0 FidelityFX, 1 NVIDIA reference, 2 NVIDIA new, 3 NVIDIA djules
     int motion_vectors{}; // 0 optical flow, 1 native game guides
@@ -141,7 +143,7 @@ struct RuntimeStatus {
     bool vdxr_runtime{}, vdxr_legacy{true}; // active startup transport, not next-launch preference
 };
 inline bool pacing_comparison_runtime(const RuntimeStatus& r) noexcept {
-    return r.steamvr_runtime || (r.vdxr_runtime && !r.vdxr_legacy);
+    return !r.vdxr_legacy;
 }
 
 enum class BenchmarkPhase : unsigned { idle, applying, running, complete, stopped, error, restart_required };
@@ -196,7 +198,15 @@ void report_interface_telemetry(InterfaceTelemetry value) noexcept;
 std::string interface_status_text(const Snapshot& value);
 std::string_view interface_state_text(const Snapshot& value) noexcept;
 std::string_view interface_vectors_text(const Snapshot& value, std::uint64_t now_ms) noexcept;
+// Global settings are never redirected by the active game.
+std::filesystem::path global_configuration_path();
+std::filesystem::path common_folder();
+std::filesystem::path game_configuration_path(const std::filesystem::path& executable);
+// Active game profile in-process / while attached on desktop; base otherwise.
 std::filesystem::path configuration_path();
+// Called before any runtime settings or startup-only resources are read.
+bool initialize_game_configuration(const std::filesystem::path& executable = {}) noexcept;
+bool reset_to_defaults() noexcept;
 // One user configuration, with fresh defaults and no legacy file import.
 bool initialize_user_configuration() noexcept;
 bool write_configuration_sections(const std::filesystem::path& path, std::string_view sections) noexcept;

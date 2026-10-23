@@ -100,7 +100,7 @@ __declspec(dllexport) NVSDK_NGX_Result ofxr_dlssg_requirements(IDXGIAdapter* ada
 __declspec(dllexport) NVSDK_NGX_Result ofxr_dlssg_init(ID3D12Device* device,
     const wchar_t* logs, NVSDK_NGX_Parameter* params) {
     if (!load()) return NVSDK_NGX_Result_FAIL_FeatureNotFound;
-    // Stable custom identifier for OFXR Autonomous; not a different game's ID.
+    // Stable custom identifier for OFXR-BRIDGE; not a different game's ID.
     auto result = init(0x4f4658524155544full, logs, device, NVSDK_NGX_Version_API, params);
     if (NVSDK_NGX_FAILED(result)) return result;
     result = populate(params);

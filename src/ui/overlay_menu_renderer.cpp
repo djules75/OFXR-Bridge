@@ -199,7 +199,7 @@ public:
         if (initialized_) return true;
         auto& io=ImGui::GetIO();
         if (io.BackendRendererUserData) return false;
-        io.BackendRendererUserData=this; io.BackendRendererName="OFXR_Autonomous_immutable_DX12";
+        io.BackendRendererUserData=this; io.BackendRendererName="OFXR_Bridge_immutable_DX12";
         io.BackendFlags|=ImGuiBackendFlags_RendererHasVtxOffset|ImGuiBackendFlags_RendererHasTextures;
         initialized_=true; return true;
     }
@@ -236,8 +236,8 @@ public:
         auto draw=std::make_shared<Draw>(); draw->output=output;
         if (!Pipeline(format,*draw) || !Buffer((UINT64)data->TotalVtxCount*sizeof(ImDrawVert),draw->vertices) ||
             !Buffer((UINT64)data->TotalIdxCount*sizeof(ImDrawIdx),draw->indices)) return false;
-        draw->vertices->SetName(L"OFXR Autonomous V449 immutable menu vertices");
-        draw->indices->SetName(L"OFXR Autonomous V449 immutable menu indices");
+        draw->vertices->SetName(L"OFXR-BRIDGE V449 immutable menu vertices");
+        draw->indices->SetName(L"OFXR-BRIDGE V449 immutable menu indices");
         void* vertices=nullptr; void* indices=nullptr; D3D12_RANGE empty{0,0};
         if (FAILED(draw->vertices->Map(0,&empty,&vertices))) return false;
         if (FAILED(draw->indices->Map(0,&empty,&indices))) { draw->vertices->Unmap(0,nullptr); return false; }
@@ -265,7 +265,7 @@ public:
             const auto& image=found->second; auto& texture=draw->textures[index];
             if(!TextureResource(image.width,image.height,DXGI_FORMAT_R8G8B8A8_UNORM,D3D12_RESOURCE_FLAG_NONE,
                 D3D12_RESOURCE_STATE_COMMON,texture.image)) return false;
-            texture.image->SetName(L"OFXR Autonomous V449 immutable menu atlas");
+            texture.image->SetName(L"OFXR-BRIDGE V449 immutable menu atlas");
             const auto td=texture.image->GetDesc(); UINT64 bytes=0;
             device_->GetCopyableFootprints(&td,0,1,0,&texture.footprint,nullptr,nullptr,&bytes);
             if(!Buffer(bytes,texture.upload)) return false;

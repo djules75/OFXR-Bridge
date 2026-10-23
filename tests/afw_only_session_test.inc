@@ -19,6 +19,7 @@ int afw_only_session_test(std::string_view route,const char* fixture) {
     check(nonluke || marker,"load actual Luke detection marker");
     check(WritePrivateProfileStringW(L"ofxr",L"afw_only",shared_session?L"0":L"1",ini.c_str())!=0,"isolated startup flag");
     auto desired=xrfg::autonomous::snapshot().desired;
+    desired.afw_only=!shared_session;
     desired.enabled=true;desired.frame_generation=2;desired.backend=0;desired.afw_mode=3;desired.nr_enabled=true;
     desired.pacing_mode=2;desired.triple_frame_gen=true;desired.luke_shared_swapchains=shared_session;
     check(xrfg::autonomous::request(desired),"preserve requested OFXR/DLSS-G and DLSS5");xrfg::autonomous::apply_runtime_settings();
@@ -93,7 +94,7 @@ int afw_only_session_test(std::string_view route,const char* fixture) {
             state->luke_fresh_only=fresh_filter;
             if(fresh_filter)state->last_inline_frame_state.predictedDisplayTime+=period*10;
             // Next-session flag changes cannot alter ownership mid-frame.
-            check(WritePrivateProfileStringW(L"ofxr",L"afw_only",L"0",ini.c_str())!=0,"save next-session OFF");
+            auto next=xrfg::autonomous::snapshot().desired;next.afw_only=false;check(xrfg::autonomous::request(next),"save next-session OFF in game profile");
             check(state->afw_only && !state->private_runtime,"transport selection is immutable until restart");
             xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,true);
             const auto started=xrfg::interface_clock_ns();

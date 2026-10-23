@@ -308,7 +308,7 @@ int main() {
     try {
         const auto fixture=std::filesystem::temp_directory_path()/(L"ofxr-v460-timing-"+std::to_wstring(GetCurrentProcessId()));
         std::filesystem::create_directories(fixture);
-        SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",fixture.c_str());
+        SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",fixture.c_str());
         production_boundaries();timing();complete_cycle();estimated_cycle();native_delivery_cycle();stage_partition_and_baseline();wording();
         const auto before=snapshot();
         check(!interface_telemetry_requested(), "hidden by default");

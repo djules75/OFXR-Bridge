@@ -16,6 +16,8 @@
 #include <type_traits>
 #include <atomic>
 #include <locale>
+#include <map>
+#include <memory>
 #ifdef _WIN32
 #include <windows.h>
 #include <shlobj.h>
@@ -76,7 +78,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465852;
-constexpr std::uint32_t kAbi = 62701;
+constexpr std::uint32_t kAbi = 63701;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -86,6 +88,7 @@ struct Shared {
     std::uint32_t abi{};
     std::uint32_t bytes{};
     Snapshot snapshot{};
+    wchar_t configuration_file[32768]{};
     alignas(8) std::uint64_t visible_until_ms[3]{};
     alignas(8) std::uint64_t benchmark_metrics_until_ms{};
     Settings benchmark_saved{};
@@ -125,7 +128,7 @@ std::string configuration_text(const std::filesystem::path& path) {
     std::ifstream input(path,std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(input), {});
 }
-Settings load() { return parse_settings(configuration_text(configuration_path())); }
+Settings load(const std::filesystem::path& path) { return parse_settings(configuration_text(path)); }
 std::string merge_sections(std::string_view old, std::string_view replacement) {
     std::vector<std::string> replaced;
     std::istringstream fresh{std::string(replacement)}; std::string line;
@@ -141,7 +144,7 @@ std::string merge_sections(std::string_view old, std::string_view replacement) {
         if (keep) result+=line+'\n';
     }
     result+='\n'; result+=replacement;
-    if(result.find("[benchmark]")==std::string::npos)result+="\n[benchmark]\nenabled=0\n";
+
     return result;
 }
 bool save_sections(const std::filesystem::path& path, std::string_view sections) {
@@ -171,7 +174,62 @@ bool save_sections(const std::filesystem::path& path, std::string_view sections)
     return !error;
 #endif
 }
-bool save(const Settings& value) { return save_sections(configuration_path(),serialize_settings(value)); }
+bool save(const Shared& shared, const Settings& value) {
+    return save_sections(std::filesystem::path(shared.configuration_file),serialize_settings(value));
+}
+std::filesystem::path process_profile;
+std::atomic_bool process_profile_bound{};
+std::uint64_t path_identity(const std::filesystem::path& path) {
+    std::uint64_t identity=14695981039346656037ULL;
+    for (const auto c:path.wstring()) {identity^=static_cast<std::uint64_t>(std::towlower(c));identity*=1099511628211ULL;}
+    return identity;
+}
+#ifdef _WIN32
+// Discovery only. Settings, leases and benchmark state use per-profile mappings.
+struct DiscoveryState { DWORD pid{}; std::uint64_t heartbeat{}; wchar_t executable[260]{}; };
+class Discovery {
+    HANDLE mutex{},mapping{};
+    DiscoveryState* data{};
+public:
+    Discovery() {
+        const auto prefix=L"Local\\OFXRBridgeV637-discovery-"+std::to_wstring(path_identity(global_configuration_path()));
+        mutex=CreateMutexW(nullptr,FALSE,(prefix+L"-mutex").c_str());
+        mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(DiscoveryState),(prefix+L"-data").c_str());
+        if(mapping)data=static_cast<DiscoveryState*>(MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(DiscoveryState)));
+    }
+    ~Discovery(){if(data)UnmapViewOfFile(data);if(mapping)CloseHandle(mapping);if(mutex)CloseHandle(mutex);}
+    std::filesystem::path active() {
+        if(!mutex || !data)return {};
+        const auto result=WaitForSingleObject(mutex,0);
+        if(result!=WAIT_OBJECT_0 && result!=WAIT_ABANDONED)return {};
+        const auto state=*data;ReleaseMutex(mutex);
+        const auto now=GetTickCount64();
+        if(!state.pid || !state.heartbeat || now<state.heartbeat)return {};
+        const auto handle=OpenProcess(SYNCHRONIZE,FALSE,state.pid);
+        if(!handle)return {};
+        const bool alive=WaitForSingleObject(handle,0)==WAIT_TIMEOUT;CloseHandle(handle);
+        if(!alive)return {};
+        const std::filesystem::path name(state.executable);
+        return name==name.filename() ? game_configuration_path(name) : std::filesystem::path{};
+    }
+    void report(const RuntimeStatus& status) {
+        static std::atomic_uint64_t last{};
+        if(status.sessions && status.heartbeat_ms-last.load(std::memory_order_relaxed)<250)return;
+        last.store(status.heartbeat_ms,std::memory_order_relaxed);
+        if(!process_profile_bound.load(std::memory_order_acquire) || !mutex || !data)return;
+        const auto result=WaitForSingleObject(mutex,0);
+        if(result!=WAIT_OBJECT_0 && result!=WAIT_ABANDONED)return;
+        if(status.sessions) {
+            data->pid=status.process_id;data->heartbeat=status.heartbeat_ms;
+            auto name=process_profile.filename().wstring();
+            if(name.ends_with(L".ini"))name.resize(name.size()-4);
+            wcsncpy_s(data->executable,name.c_str(),_TRUNCATE);
+        } else if(data->pid==status.process_id)*data={};
+        ReleaseMutex(mutex);
+    }
+};
+Discovery& discovery(){static Discovery value;return value;}
+#endif
 
 class Channel {
 public:
@@ -179,15 +237,11 @@ public:
     HANDLE mutex{};
     HANDLE mapping{};
     Shared* data{};
-    Channel() {
+    explicit Channel(const std::filesystem::path& file) {
         // Profile identity is part of the mapping name, so fixture profiles
         // and future concurrent candidates cannot modify the user's settings.
-        std::uint64_t identity = 14695981039346656037ULL;
-        for (const auto character : configuration_path().wstring()) {
-            identity ^= static_cast<std::uint64_t>(std::towlower(character));
-            identity *= 1099511628211ULL;
-        }
-        const auto prefix = L"Local\\OFXRBridgeV627-" + std::to_wstring(identity);
+        const auto identity=path_identity(file);
+        const auto prefix = L"Local\\OFXRBridgeV637-" + std::to_wstring(identity);
         mutex = CreateMutexW(nullptr, FALSE, (prefix + L"-mutex").c_str());
         if (!mutex) return;
         const DWORD waited = WaitForSingleObject(mutex, 2000);
@@ -206,7 +260,8 @@ public:
                 initial.magic = kMagic;
                 initial.abi = kAbi;
                 initial.bytes = sizeof(Shared);
-                initial.snapshot.desired = load();
+                initial.snapshot.desired = load(file);
+                wcsncpy_s(initial.configuration_file,file.c_str(),_TRUNCATE);
                 *data = initial;
             }
         }
@@ -225,13 +280,24 @@ public:
     void unlock() { ReleaseMutex(mutex); }
 #else
     std::mutex mutex;
-    Shared storage{kMagic, kAbi, sizeof(Shared), {load(), 1, {}, false}};
+    Shared storage{};
+    explicit Channel(const std::filesystem::path& file) { storage.magic=kMagic;storage.abi=kAbi;storage.bytes=sizeof(Shared);storage.snapshot.desired=load(file);std::wcsncpy(storage.configuration_file,file.wstring().c_str(),32767); }
     Shared* data{&storage};
     bool lock(unsigned) { mutex.lock(); return true; }
     void unlock() { mutex.unlock(); }
 #endif
 };
-Channel& channel() { static Channel instance; return instance; }
+Channel& channel() {
+    if(process_profile_bound.load(std::memory_order_acquire)) {
+        static Channel runtime(process_profile);return runtime;
+    }
+    const auto file=configuration_path();
+    static std::mutex mutex;
+    static std::map<std::filesystem::path,std::unique_ptr<Channel>> instances;
+    std::scoped_lock lock(mutex);
+    auto& instance=instances[file];if(!instance)instance=std::make_unique<Channel>(file);
+    return *instance;
+}
 struct Lock {
     Channel& owner;
     bool acquired;
@@ -242,6 +308,8 @@ struct Lock {
 
 Settings sanitize(Settings value) noexcept {
     value.pacing_mode=std::clamp(value.pacing_mode,0,2);
+    value.benchmark_csv=true;
+    if(!value.advanced_mode && value.frame_generation==0)value.motion_vectors=0;
     value.backend = std::clamp(value.backend, 0, 3);
     value.hybrid_backend = 0; // Migrate old selectable fallbacks to FidelityFX.
     value.motion_vectors = std::clamp(value.motion_vectors, 0, 1);
@@ -308,7 +376,7 @@ void select_generation(Settings& value, int generation, int ofxr_engine) noexcep
 
 Settings parse_settings(std::string_view text) {
     Settings value;
-    int section = -2; // -1 autonomous, 0..5 generation profile, -2 ignored
+    int section = -2; // -1 ofxr, 0..5 generation profile, -2 ignored
     std::array<bool, kGenerationProfileCount> profile_seen{}, separation_seen{};
     bool flat_separation_seen{},pacing_seen{};
     int legacy_single_director=-1;
@@ -318,7 +386,7 @@ Settings parse_settings(std::string_view text) {
         line = trim(line);
         if (line.empty() || line[0] == ';' || line[0] == '#') continue;
         if (line[0] == '[') {
-            section = line == "[autonomous]" ? -1 : -2;
+            section = line == "[ofxr]" ? -1 : -2;
             for (std::size_t i = 0; i < profile_sections.size(); ++i)
                 if (line == profile_sections[i]) { section = static_cast<int>(i); profile_seen[i] = true; }
             continue;
@@ -346,9 +414,10 @@ Settings parse_settings(std::string_view text) {
         }
         if(key=="separate_synthesis") flat_separation_seen=true;
         if(key=="pacing_mode") pacing_seen=true;
+        if(key=="AdvancedMode")value.advanced_mode=number!=0;
         if(key=="single_director") legacy_single_director=number!=0;
 #define READ_FIELD(name) if (key == #name) value.name = static_cast<decltype(value.name)>(number);
-        READ_FIELD(enabled) READ_FIELD(backend) READ_FIELD(motion_vectors)
+        READ_FIELD(enabled) READ_FIELD(afw_only) READ_FIELD(backend) READ_FIELD(motion_vectors)
         READ_FIELD(frame_generation) READ_FIELD(hybrid_backend) READ_FIELD(preset) READ_FIELD(scale)
         READ_FIELD(pacing_mode) READ_FIELD(backward) READ_FIELD(separate_synthesis) READ_FIELD(lower_vram) READ_FIELD(prefer_fps)
         READ_FIELD(triple_frame_gen) READ_FIELD(native_scale) READ_FIELD(r19_camera)
@@ -383,9 +452,9 @@ Settings parse_settings(std::string_view text) {
 std::string serialize_settings(const Settings& settings) {
     const Settings value = sanitize(settings);
     std::ostringstream output;
-    output << "[autonomous]\n" << std::setprecision(9);
+    output << "[ofxr]\nAdvancedMode=" << value.advanced_mode << '\n' << std::setprecision(9);
 #define WRITE_FIELD(name) output << #name << '=' << value.name << '\n';
-    WRITE_FIELD(enabled) WRITE_FIELD(backend) WRITE_FIELD(motion_vectors)
+    WRITE_FIELD(enabled) WRITE_FIELD(afw_only) WRITE_FIELD(backend) WRITE_FIELD(motion_vectors)
     WRITE_FIELD(frame_generation) WRITE_FIELD(hybrid_backend) WRITE_FIELD(preset) WRITE_FIELD(scale)
     WRITE_FIELD(pacing_mode) WRITE_FIELD(backward) WRITE_FIELD(separate_synthesis) WRITE_FIELD(lower_vram) WRITE_FIELD(prefer_fps)
     WRITE_FIELD(triple_frame_gen) WRITE_FIELD(native_scale) WRITE_FIELD(r19_camera)
@@ -414,10 +483,10 @@ std::string serialize_settings(const Settings& settings) {
     return output.str();
 }
 
-std::filesystem::path configuration_path() {
+std::filesystem::path global_configuration_path() {
 #ifdef _WIN32
     wchar_t override_directory[32768]{};
-    const auto override_length = GetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",
+    const auto override_length = GetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",
         override_directory, static_cast<DWORD>(std::size(override_directory)));
     if (override_length && override_length < std::size(override_directory)) {
         const std::filesystem::path override_path(override_directory);
@@ -435,25 +504,86 @@ std::filesystem::path configuration_path() {
 #endif
 }
 
+std::filesystem::path common_folder(){return global_configuration_path().parent_path();}
+std::filesystem::path game_configuration_path(const std::filesystem::path& executable) {
+    auto name=executable.filename();
+    if(name.empty() || name==L"." || name==L"..")throw std::runtime_error("Invalid game executable name");
+    name+=L".ini";return common_folder()/L"Profiles"/name;
+}
+std::filesystem::path configuration_path() {
+    if(process_profile_bound.load(std::memory_order_acquire))return process_profile;
+#ifdef _WIN32
+    if(const auto active=discovery().active();!active.empty())return active;
+#endif
+    return global_configuration_path();
+}
+bool initialize_game_configuration(const std::filesystem::path& executable) noexcept {
+    try {
+        if(process_profile_bound.load(std::memory_order_acquire))return true;
+        auto game=executable;
+#ifdef _WIN32
+        if(game.empty()) {wchar_t name[32768]{};const auto size=GetModuleFileNameW(nullptr,name,32768);if(!size || size>=32768)return false;game=name;}
+#endif
+        const auto file=game_configuration_path(game);
+        // Serialize only game settings. Never clone tray/benchmark/driver state.
+        // A dedicated creation mutex prevents two simultaneous first launches
+        // overwriting one another's freshly created profile.
+#ifdef _WIN32
+        const auto name=L"Local\\OFXRBridgeV637-create-"+std::to_wstring(path_identity(file));
+        HANDLE mutex=CreateMutexW(nullptr,FALSE,name.c_str());if(!mutex)return false;
+        struct CreationGuard {HANDLE handle;bool locked{};~CreationGuard(){if(locked)ReleaseMutex(handle);CloseHandle(handle);}} guard{mutex};
+        const auto waited=WaitForSingleObject(mutex,2000);
+        if(waited!=WAIT_OBJECT_0 && waited!=WAIT_ABANDONED)return false;
+        guard.locked=true;
+#endif
+        bool ok=true;
+        if(std::filesystem::exists(file) && !std::filesystem::is_regular_file(file))return false;
+        if(!std::filesystem::exists(file)) {
+            auto text=serialize_settings(load(global_configuration_path()));
+#ifdef _WIN32
+            const auto preset=GetPrivateProfileIntW(L"dlssg",L"preset",1,global_configuration_path().c_str());
+            text+="\n[dlssg]\npreset="+std::to_string(preset==0?0:preset==3?3:1)+"\n";
+#endif
+            ok=save_sections(file,text);
+        }
+        if(!ok)return false;
+        process_profile=file;process_profile_bound.store(true,std::memory_order_release);
+        auto& c=channel();Lock lock(c,2000);if(!lock.acquired)return false;
+        // A desktop peer may have kept this mapping alive since the previous
+        // game launch. Disk is authoritative at each new process start.
+        const auto desired=load(file);
+        if(c.data->snapshot.desired!=desired){c.data->snapshot.desired=desired;++c.data->snapshot.revision;}
+        return true;
+    }catch(...){return false;}
+}
+bool reset_to_defaults() noexcept {
+    try {
+        auto& c=channel();Lock lock(c,2000);if(!lock.acquired)return false;
+        const auto desired=sanitize(Settings{});
+        if(!save_sections(c.data->configuration_file,serialize_settings(desired)+"\n[dlssg]\npreset=1\n"))return false;
+        auto& s=c.data->snapshot;
+        if(benchmark_active(s.benchmark)) {s.benchmark.phase=BenchmarkPhase::stopped;std::snprintf(s.benchmark.message,sizeof(s.benchmark.message),"Stopped by Reset to defaults.");}
+        s.desired=desired;++s.revision;return true;
+    }catch(...){return false;}
+}
+
 bool write_configuration_sections(const std::filesystem::path& path, std::string_view sections) noexcept {
     try { auto& c=channel();Lock lock(c,2000);return lock.acquired && save_sections(path,sections); }
     catch (...) { return false; }
 }
 bool initialize_user_configuration() noexcept {
     try {
-        const auto file=configuration_path();
-        if(std::filesystem::exists(file))return true;
+        const auto file=global_configuration_path();
+        if(std::filesystem::exists(file))return std::filesystem::is_regular_file(file);
         const auto defaults=sanitize(Settings{});
         const auto settings=serialize_settings(defaults);
-        auto& c=channel();Lock lock(c,2000);
-        if(!lock.acquired || !save_sections(file,settings))return false;
-        if(c.data->snapshot.desired!=defaults) {c.data->snapshot.desired=defaults;++c.data->snapshot.revision;}
+        if(!save_sections(file,settings+"\n[benchmark]\nenabled=0\n"))return false;
         return true;
     } catch (...) {return false;}
 }
 bool benchmark_enabled() noexcept {
 #ifdef _WIN32
-    try {return GetPrivateProfileIntW(L"benchmark",L"enabled",0,configuration_path().c_str())!=0;}
+    try {return GetPrivateProfileIntW(L"benchmark",L"enabled",0,global_configuration_path().c_str())!=0;}
     catch (...) {}
 #endif
     return false;
@@ -464,7 +594,9 @@ Snapshot snapshot() noexcept {
         auto& connection = channel();
         // A frame thread never waits for disk publication from the panel.
         // Retain the last coherent settings while another peer holds the lock.
-        thread_local Snapshot last_good{load(), 1, {}, false};
+        thread_local Snapshot last_good{};
+        thread_local Channel* last_channel{};
+        if(last_channel!=&connection) {last_good={load(connection.data ? std::filesystem::path(connection.data->configuration_file) : global_configuration_path()),1,{},false};last_channel=&connection;}
         Lock lock(connection);
         if (lock.acquired) last_good = connection.data->snapshot;
         Snapshot result = last_good;
@@ -482,7 +614,7 @@ bool request(Settings desired) noexcept {
         desired = sanitize(desired);
         auto& connection = channel();
         Lock lock(connection, 2000);
-        if (!lock.acquired || !save(desired)) return false;
+        if (!lock.acquired || !save(*connection.data,desired)) return false;
         if (connection.data->snapshot.desired != desired) {
             if(benchmark_active(connection.data->snapshot.benchmark)) {
                 auto& b=connection.data->snapshot.benchmark;b.phase=BenchmarkPhase::stopped;
@@ -510,7 +642,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
 #undef MERGE_PROFILE
     }
 #define MERGE_FIELD(name) if (base.name != desired.name) current.name = desired.name;
-    MERGE_FIELD(pacing_mode) MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(hybrid_backend) MERGE_FIELD(r19_camera)
+    MERGE_FIELD(afw_only) MERGE_FIELD(pacing_mode) MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(hybrid_backend) MERGE_FIELD(r19_camera)
     MERGE_FIELD(afw_mode) MERGE_FIELD(afw_debug) MERGE_FIELD(afw_clear_before_warping)
     MERGE_FIELD(afw_ignore_motion_threshold) MERGE_FIELD(afw_depth_dilate_mode) MERGE_FIELD(afw_shading_rate)
     MERGE_FIELD(nr_enabled) MERGE_FIELD(nr_before_sr) MERGE_FIELD(nr_intensity)
@@ -524,6 +656,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
     MERGE_FIELD(menu_scale) MERGE_FIELD(menu_offset_x) MERGE_FIELD(menu_offset_y)
     MERGE_FIELD(luke_shared_swapchains)
 #undef MERGE_FIELD
+    if(base.advanced_mode!=desired.advanced_mode)current.advanced_mode=desired.advanced_mode;
     restore_preferences(current);
     return sanitize(current);
 }
@@ -535,7 +668,7 @@ bool request_changes(const Settings& base, const Settings& desired) noexcept {
         if (!lock.acquired) return false;
         const auto merged = merge_changes(connection.data->snapshot.desired, base, desired);
         if (merged == connection.data->snapshot.desired) return true;
-        if (!save(merged)) return false;
+        if (!save(*connection.data,merged)) return false;
         if(benchmark_active(connection.data->snapshot.benchmark)) {
             auto& b=connection.data->snapshot.benchmark;b.phase=BenchmarkPhase::stopped;
             b.requested_ms=GetTickCount64();
@@ -550,6 +683,7 @@ bool request_changes(const Settings& base, const Settings& desired) noexcept {
 namespace {
 struct SuiteResult { Settings settings;BenchmarkSamples samples;BenchmarkMemory memory; };
 struct SuiteRecorder {
+    Channel* controller{};
     std::uint64_t run{}, revision{}, started{}, next_sample{};
     unsigned index{};
     unsigned dlssg_preset{};
@@ -588,7 +722,7 @@ bool suite_runtime_fresh(const RuntimeStatus& r) {
 }
 bool suite_publish(Shared& shared,Settings desired,std::uint64_t now) {
     desired=sanitize(desired);
-    if(!save(desired)) return false;
+    if(!save(shared,desired)) return false;
     auto& s=shared.snapshot;
     s.desired=desired;++s.revision;
     s.benchmark.revision=s.revision;
@@ -678,14 +812,14 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
     rec.revision=0;rec.samples={};
 }
 void csv_open(SuiteRecorder& rec,BenchmarkStatus& b,unsigned preset,const RuntimeStatus& runtime) {
-    rec=SuiteRecorder{};rec.run=b.run_id;
+    {auto* owner=rec.controller;rec=SuiteRecorder{};rec.controller=owner;}rec.run=b.run_id;
     rec.steamvr=pacing_comparison_runtime(runtime);
-    rec.legacy_vdxr=runtime.vdxr_runtime && runtime.vdxr_legacy;
+    rec.legacy_vdxr=runtime.vdxr_legacy;
     rec.runtime=runtime.vdxr_runtime?"VDXR":runtime.steamvr_runtime?"SteamVR":"Other";
     rec.dlssg_preset=preset;
     rec.game=utf8_path(benchmark_game_path(b.game_pid).filename());
     if(!b.csv)return;
-    const auto folder=configuration_path().parent_path()/L"Benchmarks";
+    const auto folder=common_folder()/L"Benchmarks";
     std::filesystem::create_directories(folder);
     const auto stem=L"OFXR-V"+std::to_wstring(XRFG_IMPLEMENTATION_VERSION)+L"-"+std::to_wstring(b.run_id);
     rec.layout_path=folder/(stem+L".csv");
@@ -711,7 +845,7 @@ bool start_benchmark(bool full,bool luke) noexcept {
         }
         if(s.runtime.pacing_mode==kAfwOnlyPacingMode) {
             b={};b.phase=BenchmarkPhase::error;
-            std::snprintf(b.message,sizeof(b.message),"AFW only is active. Disable it in the tray and restart the game for the OFXR matrix.");return false;
+            std::snprintf(b.message,sizeof(b.message),"AFW only is active. Disable it in the Luke Ross tab and restart the game for the OFXR matrix.");return false;
         }
         if(luke && !s.runtime.luke_detected) {
             b={};b.phase=BenchmarkPhase::error;
@@ -728,12 +862,13 @@ bool start_benchmark(bool full,bool luke) noexcept {
         if(!suite_publish(shared,benchmark_settings(shared.benchmark_saved,plan[0]),now)) {
             b.phase=BenchmarkPhase::error;std::snprintf(b.message,sizeof(b.message),"Could not save the first test settings.");return false;
         }
+        suite_recorder().controller=&c;
         return true;
     } catch(...) {return false;}
 }
 void stop_benchmark() noexcept {
     try {
-        auto& c=channel();Lock lock(c,2000);if(!lock.acquired)return;
+        auto& rec=suite_recorder();auto& c=rec.controller?*rec.controller:channel();Lock lock(c,2000);if(!lock.acquired)return;
         if(benchmark_active(c.data->snapshot.benchmark))
             suite_restore(*c.data,BenchmarkPhase::stopped,"Stopped. Original settings restored.",GetTickCount64());
     } catch(...) {}
@@ -741,9 +876,9 @@ void stop_benchmark() noexcept {
 void tick_benchmark(std::uint64_t now) noexcept {
     try {
         const bool permitted=benchmark_enabled();
-        auto& c=channel();Lock lock(c);if(!lock.acquired)return;
+        auto& rec=suite_recorder();auto& c=rec.controller?*rec.controller:channel();Lock lock(c);if(!lock.acquired)return;
         if(!now)now=GetTickCount64();
-        auto& shared=*c.data;auto& s=shared.snapshot;auto& b=s.benchmark;auto& rec=suite_recorder();
+        auto& shared=*c.data;auto& s=shared.snapshot;auto& b=s.benchmark;
         const auto own_pid=GetCurrentProcessId();
         if (!permitted && benchmark_active(b))
             suite_restore(shared,BenchmarkPhase::stopped,"Benchmarks disabled in ofxr-bridge.ini; original settings restored.",now);
@@ -754,10 +889,11 @@ void tick_benchmark(std::uint64_t now) noexcept {
                 csv_finish(rec,b,b.requested_ms,b.phase==BenchmarkPhase::complete ? "complete" : "stopped / partial");
                 rec.stream.close();
             }
+            rec.controller=nullptr;
             return;
         }
         if(b.controller_pid && b.controller_pid!=own_pid)return;
-        b.controller_pid=own_pid;
+        b.controller_pid=own_pid;rec.controller=&c;
         std::atomic_ref<std::uint64_t>(shared.benchmark_metrics_until_ms).store(GetTickCount64()+2000,std::memory_order_release);
         try {
             if(rec.run!=b.run_id)csv_open(rec,b,s.runtime.dlssg_preset_request,s.runtime);
@@ -850,6 +986,9 @@ void report_runtime(RuntimeStatus status) noexcept {
             status.video_memory = connection.data->snapshot.runtime.video_memory;
         }
         connection.data->snapshot.runtime = status;
+#ifdef _WIN32
+        discovery().report(status);
+#endif
     } catch (...) {}
 }
 void report_video_memory(VideoMemoryStatus value) noexcept {

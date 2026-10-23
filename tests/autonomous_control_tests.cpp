@@ -50,9 +50,9 @@ void codec() {
         auto choice=desired;choice.pacing_mode=mode;
         require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(choice)).pacing_mode==mode,"three pacing modes persist independently of generator");
     }
-    require(xrfg::autonomous::parse_settings("[autonomous]\nsingle_director=1\n").pacing_mode==1,"V610 ON preserves sole director");
-    require(xrfg::autonomous::parse_settings("[autonomous]\nsingle_director=0\n").pacing_mode==2,"V610 OFF preserves framework plus director");
-    require(xrfg::autonomous::parse_settings("[autonomous]\npacing_mode=0\nsingle_director=1\n").pacing_mode==0,"explicit new choice overrides old checkbox");
+    require(xrfg::autonomous::parse_settings("[ofxr]\nsingle_director=1\n").pacing_mode==1,"V610 ON preserves sole director");
+    require(xrfg::autonomous::parse_settings("[ofxr]\nsingle_director=0\n").pacing_mode==2,"V610 OFF preserves framework plus director");
+    require(xrfg::autonomous::parse_settings("[ofxr]\npacing_mode=0\nsingle_director=1\n").pacing_mode==0,"explicit new choice overrides old checkbox");
     auto experiment=desired;experiment.pacing_mode=1;
     auto experiment_saved=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(experiment));
     require(experiment_saved.pacing_mode==1,"global single-director setting persists in the existing INI");
@@ -85,9 +85,9 @@ void codec() {
     r19_edit.r19_camera=false; concurrent.enabled=false;
     const auto merged=xrfg::autonomous::merge_changes(concurrent,r19_base,r19_edit);
     require(!merged.r19_camera && !merged.enabled,"R19 live edit preserves concurrent FG edit");
-    const auto old_memory = xrfg::autonomous::parse_settings("[autonomous]\nlower_vram=-1\n");
+    const auto old_memory = xrfg::autonomous::parse_settings("[ofxr]\nlower_vram=-1\n");
     require(old_memory.lower_vram == 0, "legacy route default migrates to Lower VRAM off");
-    const auto explicit_memory = xrfg::autonomous::parse_settings("[autonomous]\nlower_vram=1\n");
+    const auto explicit_memory = xrfg::autonomous::parse_settings("[ofxr]\nlower_vram=1\n");
     require(explicit_memory.lower_vram == 1 && explicit_memory.separate_synthesis == 1,
         "old Lower VRAM migrates both controls on");
     for (int separate : {0,1}) for (int reduce : {0,1}) {
@@ -98,7 +98,7 @@ void codec() {
             "Unified Lower VRAM requests both operations together");
     }
     const auto migrated_profiles = xrfg::autonomous::parse_settings(
-        "[autonomous]\nbackend=1\n[route.ofxr_reference]\nlower_vram=1\n"
+        "[ofxr]\nbackend=1\n[route.ofxr_reference]\nlower_vram=1\n"
         "[route.ofxr_new]\nlower_vram=1\nseparate_synthesis=0\n");
     require(migrated_profiles.generation_profiles[1].separate_synthesis == 1 &&
         migrated_profiles.generation_profiles[2].separate_synthesis == 1,
@@ -130,7 +130,7 @@ void codec() {
     require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(desired)) == xrfg::autonomous::sanitize(desired),
         "Lower VRAM on profile round trip");
     const auto guarded = xrfg::autonomous::parse_settings(
-        "[other]\nbackend=1\n[autonomous]\nbackend=77\nnr_intensity=nan\n"
+        "[other]\nbackend=1\n[ofxr]\nbackend=77\nnr_intensity=nan\n"
         "native_scale=4\nnr_working_scale=0\nnr_compare_split=2\n"
         "frame_generation=1\nmotion_vectors=0\nnr_style=1e30\n");
     require(guarded.backend == 3, "backend bounded");
@@ -141,10 +141,10 @@ void codec() {
     require(guarded.motion_vectors == 1, "FSR requires native guides");
     require(guarded.nr_style == 0, "out-of-range integral conversion rejected");
     const auto menu = xrfg::autonomous::parse_settings(
-        "[autonomous]\nmenu_scale=2\nmenu_offset_x=5\nmenu_offset_y=nan\n");
+        "[ofxr]\nmenu_scale=2\nmenu_offset_x=5\nmenu_offset_y=nan\n");
     require(menu.menu_scale == 1.25F && menu.menu_offset_x == 1.F && menu.menu_offset_y == 0.F,
         "menu presentation bounded without changing game options");
-    const auto legacy = xrfg::autonomous::parse_settings("[autonomous]\nbackend=3\n");
+    const auto legacy = xrfg::autonomous::parse_settings("[ofxr]\nbackend=3\n");
     require(legacy.menu_scale == 1.F && legacy.menu_offset_x == 0.F && legacy.menu_offset_y == 0.F,
         "existing profiles preserve centred V441-size default");
     desired.nr_local_tone = std::numeric_limits<float>::infinity();
@@ -164,7 +164,7 @@ void route_profiles() {
     select_generation(hybrid,0,2);
     require(hybrid.scale==0 && hybrid.lower_vram==0 && hybrid.motion_vectors==0,"Hybrid leaves existing OFXR profile unchanged");
     require(generation_status_text(3,1,GenerationState::missing_motion).starts_with("Fallback to optical flow:"),"Hybrid missing guides reports fallback");
-    Settings saved;
+    Settings saved;saved.advanced_mode=true;
     for (int i = 0; i < 6; ++i) {
         select_generation(saved, i < 4 ? 0 : i - 3, i < 4 ? i : 3);
         require(!saved.triple_frame_gen && saved.lower_vram == 0,
@@ -192,7 +192,7 @@ void route_profiles() {
             restored.native_scale == 30 + i * 10 && restored.backward == bool(i % 2) &&
             restored.prefer_fps == !bool(i % 2), "each route restores its own complete preferences");
     }
-    auto legacy = parse_settings("[autonomous]\nframe_generation=2\nbackend=3\nmotion_vectors=1\ntriple_frame_gen=1\nlower_vram=1\n");
+    auto legacy = parse_settings("[ofxr]\nframe_generation=2\nbackend=3\nmotion_vectors=1\ntriple_frame_gen=1\nlower_vram=1\n");
     require(legacy.triple_frame_gen && legacy.lower_vram, "legacy active DLSS-G preferences retained");
     select_generation(legacy, 0, 3);
     require(!legacy.triple_frame_gen && !legacy.lower_vram && legacy.motion_vectors == 0,
@@ -210,7 +210,7 @@ void route_profiles() {
     select_generation(merged, 0, 3);
     require(!merged.triple_frame_gen && merged.lower_vram,
         "stale headset edits remain attached to the original DJ profile");
-    const auto hostile = parse_settings("[autonomous]\nbackend=3\n[route.ofxr_djules]\nmotion_vectors=77\npreset=-99\nscale=nan\nnative_scale=999\n[route.dlssg]\nmotion_vectors=0\nnative_scale=-9\n");
+    const auto hostile = parse_settings("[ofxr]\nAdvancedMode=1\nbackend=3\n[route.ofxr_djules]\nmotion_vectors=77\npreset=-99\nscale=nan\nnative_scale=999\n[route.dlssg]\nmotion_vectors=0\nnative_scale=-9\n");
     require(hostile.motion_vectors == 1 && hostile.preset == 0 && hostile.scale == 2 &&
         hostile.native_scale == 100 && hostile.generation_profiles[5].motion_vectors == 1 &&
         hostile.generation_profiles[5].native_scale == 25,
@@ -246,13 +246,13 @@ int wmain(int count, wchar_t** arguments) {
         const auto fixture = std::filesystem::temp_directory_path() /
             (L"ofxr-autonomous-control-fixture-" + std::to_wstring(GetCurrentProcessId()) +
                 L"-" + std::to_wstring(GetTickCount64()));
-        SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR", fixture.c_str());
+        SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", fixture.c_str());
         require(xrfg::autonomous::configuration_path().parent_path() == fixture, "fixture profile isolation");
         std::uint64_t old_identity=14695981039346656037ULL;
         for(const auto c:xrfg::autonomous::configuration_path().wstring()) {
             old_identity^=std::uint64_t(std::towlower(c));old_identity*=1099511628211ULL;
         }
-        const auto legacy_name=L"Local\\OFXRAutonomousV558-"+std::to_wstring(old_identity)+L"-control";
+        const auto legacy_name=L"Local\\OFXRBridgeV558-"+std::to_wstring(old_identity)+L"-control";
         const HANDLE legacy_mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,512,legacy_name.c_str());
         require(legacy_mapping!=nullptr,"old control mapping fixture");
         auto* legacy=static_cast<std::uint32_t*>(MapViewOfFile(legacy_mapping,FILE_MAP_ALL_ACCESS,0,0,512));
@@ -308,11 +308,11 @@ int wmain(int count, wchar_t** arguments) {
         const auto restart_profile = fixture / L"restart";
         std::filesystem::create_directory(restart_profile);
         std::filesystem::copy_file(xrfg::autonomous::configuration_path(), restart_profile / L"ofxr-bridge.ini");
-        SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR", restart_profile.c_str());
+        SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", restart_profile.c_str());
         command = L"\"" + std::wstring(executable) + L"\" --restart";
         const bool restart_started = CreateProcessW(executable, command.data(), nullptr, nullptr, FALSE,
             CREATE_NO_WINDOW, nullptr, nullptr, &startup, &child) != FALSE;
-        SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR", fixture.c_str());
+        SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", fixture.c_str());
         require(restart_started, "start clean process from persisted route profiles");
         require(WaitForSingleObject(child.hProcess, 10000) == WAIT_OBJECT_0, "profile restart peer completes");
         GetExitCodeProcess(child.hProcess, &result);

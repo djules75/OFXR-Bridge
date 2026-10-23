@@ -225,7 +225,28 @@ void route_multiplier_widgets() {
     tray.choose("OFXR engine", 2, "Nvidia 0.2.13 (medium latency, high compatibility)");
     require(!snapshot().desired.triple_frame_gen, "DJ keeps its own 2X");
 }
+void release_controls() {
+    auto simple=Settings{};simple.backend=1;simple.scale=3;require(request(simple),"seed simple release UI");
+    Context desktop({690,900},false);desktop.draw();desktop.draw(true);
+    require(desktop.rendered_text.find("Motion source")==std::string::npos,"basic mode hides motion source");
+    require(desktop.rendered_text.find("Reset to defaults")!=std::string::npos,"reset appears beside enable");
+    require(desktop.rendered_text.find("Pacing")<desktop.rendered_text.find("Frame generationOFXR"),"pacing is first under enable");
+    desktop.activate("/Generation_","Reset to defaults");desktop.draw();desktop.draw();
+    require(snapshot().desired==sanitize(Settings{}),"actual Reset button restores all factory settings");
+    desktop.select_tab("Display");desktop.draw(true);
+    require(desktop.rendered_text.find("Experimental features")==std::string::npos &&
+        desktop.rendered_text.find("Output CSV")==std::string::npos &&
+        desktop.rendered_text.find("Open ofxr-bridge.ini")==std::string::npos,"basic Display removes experimental and redundant controls");
+    desktop.select_tab("Luke Ross");desktop.draw(true);
+    require(desktop.rendered_text.find("AFW Only (restart game)")!=std::string::npos && desktop.rendered_text.find("Clear before framewarp")==std::string::npos,"basic Luke UI exposes per-game AFW Only without Clear");
+    desktop.activate("/Framewarp_","AFW Only (restart game)");desktop.draw();
+    require(snapshot().desired.afw_only,"actual AFW Only control persists settings");
+    auto advanced=snapshot().desired;advanced.advanced_mode=true;advanced.afw_only=false;require(request(advanced),"enable advanced UI by configuration");
+    desktop.select_tab("Frame generation");desktop.draw(true);
+    require(desktop.rendered_text.find("Motion source")!=std::string::npos,"advanced mode restores motion source");
+}
 void actual_widgets() {
+    auto advanced=snapshot().desired;advanced.advanced_mode=true;require(request(advanced),"enable advanced-only UI fixture");
     Context tray(ImVec2(674, 861), false);
     Context headset(ImVec2(1024, 768), true);
     const auto before = snapshot();
@@ -306,7 +327,7 @@ void actual_widgets() {
         headset.rendered_text.find("OpenXR swapchain limit reached")==std::string::npos,
         "actual settings surfaces clear the warning after a successful retry");
     status=snapshot().runtime;status.swapchains.updated_ms=GetTickCount64();
-    status.luke_detected=true;status.steamvr_runtime=true;status.pacing_mode=2;
+    status.luke_detected=true;status.steamvr_runtime=true;status.vdxr_legacy=false;status.pacing_mode=2;
     status.swapchains.current=9;status.swapchains.menu=1;
     status.swapchains.fallback=true;status.swapchains.application=3;status.swapchains.total=14;
     status.swapchains.auxiliary_outputs=1;status.swapchains.private_snapshots=3;
@@ -406,11 +427,11 @@ void offline_preset() {
 void automatic_buttons() {
     require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable benchmark GUI fixture in single INI");
     RuntimeStatus runtime{};runtime.sessions=1;runtime.luke_detected=true;
-    runtime.steamvr_runtime=true;
+    runtime.steamvr_runtime=true;runtime.vdxr_legacy=false;
     runtime.dlssg_preset_request=3;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
     const auto prior=snapshot().desired;
     Context tray({690,900},false);tray.draw();tray.draw();tray.select_tab("Display");tray.draw(true);
-    for(const auto label:{"Tests without vectors","Complete tests","Test Luke Ross","Output CSV","Open benchmark folder"})
+    for(const auto label:{"Tests without vectors","Complete tests","Test Luke Ross","Open benchmark folder"})
         require(tray.rendered_text.find(label)!=std::string::npos,"All automatic controls are in Display");
     require(tray.rendered_text.find("31 optical or 49 complete")!=std::string::npos &&
         tray.rendered_text.find("Luke Ross: 39 tests")!=std::string::npos,
@@ -441,11 +462,11 @@ int main(int argc, char** argv) {
     const auto profile = std::filesystem::temp_directory_path() /
         (L"ofxr-settings-widgets-" + std::to_wstring(GetCurrentProcessId()) +
             L"-" + std::to_wstring(GetTickCount64()));
-    SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR", profile.c_str());
+    SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", profile.c_str());
     try {
         if (argc == 2 && std::strcmp(argv[1], "--route-motion") == 0) route_motion_widgets();
         else if (argc == 2 && std::strcmp(argv[1], "--route-multiplier") == 0) route_multiplier_widgets();
-        else { rebase_and_publish(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); automatic_buttons(); offline_preset(); }
+        else { rebase_and_publish(); release_controls(); actual_widgets(); route_motion_widgets(); route_multiplier_widgets(); automatic_buttons(); offline_preset(); }
         std::filesystem::remove(configuration_path());
         std::filesystem::remove(profile/L"dlssg-profile-selection.ini");
         std::filesystem::remove(profile);

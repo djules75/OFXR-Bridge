@@ -1,4 +1,4 @@
-// Autonomous extraction from accepted OptiScaler V33034 / 6c36e598.
+// OFXR-BRIDGE extraction from accepted OptiScaler V33034 / 6c36e598.
 // Original licensing is retained in licenses/. No OptiScaler runtime dependency.
 #include "nr_host.hpp"
 
@@ -222,7 +222,7 @@ void CaptureSourceHistoryReset(NrPerHandle& nr, unsigned int sourceHandleId,
     const auto now = GetTickCount64();
     if (nr.lastSourceResetReport == 0 || now - nr.lastSourceResetReport >= 1000)
     {
-        LOG_INFO("OFXR Autonomous V449 NR source history reset handle {} source_requests {} pending {}",
+        LOG_INFO("OFXR-BRIDGE V449 NR source history reset handle {} source_requests {} pending {}",
                  sourceHandleId, nr.sourceResetRequests, nr.reset);
         nr.lastSourceResetReport = now;
     }
@@ -273,7 +273,7 @@ std::atomic<bool> g_nrRetirementSignalFailed { false };
 
 void MarkNrRecorded(unsigned int sourceHandleId, ID3D12GraphicsCommandList* commandList)
 {
-    // Autonomous ingress observes actual native queue submissions in every lane.
+    // OFXR-BRIDGE ingress observes actual native queue submissions in every lane.
     if (commandList == nullptr)
         return;
 
@@ -352,7 +352,7 @@ struct NrRetirementObservation
         const auto now = GetTickCount64();
         window.stats.Observe(now - started, admitted, waited, pending);
         if (now - window.started < 1000) return;
-        LOG_INFO("OFXR Autonomous V449 NR cadence handle {} calls {} waits {} skips {} pending {} cpu_total_ms {} cpu_max_ms {} scope=feature",
+        LOG_INFO("OFXR-BRIDGE V449 NR cadence handle {} calls {} waits {} skips {} pending {} cpu_total_ms {} cpu_max_ms {} scope=feature",
                  handle, window.stats.calls, window.stats.waits, window.stats.skipped,
                  window.stats.pending, window.stats.totalMs, window.stats.maximumMs);
         window.stats = {};
@@ -377,7 +377,7 @@ bool RetirePreviousNrEvaluate(unsigned int sourceHandleId)
             observation.pending = true;
             const auto skipped = ++g_nrRetirementSkips;
             if (skipped == 1 || (skipped % 120) == 0)
-                LOG_WARN("OFXR Autonomous V449 DLSS-NR skipped handle {}: its previous command list has not been submitted yet (skip {})",
+                LOG_WARN("OFXR-BRIDGE V449 DLSS-NR skipped handle {}: its previous command list has not been submitted yet (skip {})",
                          sourceHandleId, skipped);
             return false;
         }
@@ -421,7 +421,7 @@ bool RetirePreviousNrEvaluate(unsigned int sourceHandleId)
 
     const auto skipped = ++g_nrRetirementSkips;
     if (skipped == 1 || (skipped % 120) == 0)
-        LOG_WARN("OFXR Autonomous V449 DLSS-NR skipped handle {}: previous GPU evaluate has not retired (skip {})",
+        LOG_WARN("OFXR-BRIDGE V449 DLSS-NR skipped handle {}: previous GPU evaluate has not retired (skip {})",
                  sourceHandleId, skipped);
     return false;
 }
@@ -544,14 +544,14 @@ bool EnsureForwarder()
     std::array<wchar_t, 32768> loadedPath{};
     const auto loadedLength = GetModuleFileNameW(g_runtime.forwarder,
         loadedPath.data(), static_cast<DWORD>(loadedPath.size()));
-    LOG_INFO("OFXR Autonomous V449 NR forwarder requested={} loaded={} exports=0x{:X} required=0x{:X}",
+    LOG_INFO("OFXR-BRIDGE V449 NR forwarder requested={} loaded={} exports=0x{:X} required=0x{:X}",
         path.string(), loadedLength && loadedLength < loadedPath.size()
             ? wstring_to_string(std::wstring(loadedPath.data(), loadedLength)) : "unknown",
         exportMask, nr_forwarder::required_exports);
     g_runtime.forwarderReady = nr_forwarder::complete(exportMask);
     if (!g_runtime.forwarderReady)
     {
-        LOG_ERROR("OFXR Autonomous V449 NR forwarder ABI mismatch: missing export mask=0x{:X}; use the matched checkpoint forwarder",
+        LOG_ERROR("OFXR-BRIDGE V449 NR forwarder ABI mismatch: missing export mask=0x{:X}; use the matched checkpoint forwarder",
             nr_forwarder::required_exports & ~exportMask);
         g_runtime.reason = "the forwarder is missing its exports";
         return false;
@@ -645,7 +645,7 @@ NVSDK_NGX_Parameter* EvaluateParamsForCommandList(
     }
 
     nr.evaluateParams.emplace(commandList, params);
-    LOG_INFO("OFXR Autonomous V449 DLSS-NR acquired params {:X} for command list {:X}",
+    LOG_INFO("OFXR-BRIDGE V449 DLSS-NR acquired params {:X} for command list {:X}",
              (size_t) params, (size_t) commandList);
     return params;
 }
@@ -873,11 +873,11 @@ ID3D12Resource* PrivateNrGuide(ID3D12Device* device, ID3D12GraphicsCommandList* 
     const HRESULT result = DlssNr::SnapshotNrGuide(device, cmdList, source, snapshot, Barrier,
         [&](ID3D12Resource*& replaced) { ParkNrResource(replaced); reset = true; });
     if (FAILED(result)) {
-        NrFlightTrace::Write("NR_GUIDE_FAILED", cmdList, L"OFXR Autonomous V449 private NR guide", source,
+        NrFlightTrace::Write("NR_GUIDE_FAILED", cmdList, L"OFXR-BRIDGE V449 private NR guide", source,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE, result);
         return nullptr;
     }
-    NrFlightTrace::Write("NR_GUIDE_PRIVATE", cmdList, L"OFXR Autonomous V449 private NR guide", *snapshot);
+    NrFlightTrace::Write("NR_GUIDE_PRIVATE", cmdList, L"OFXR-BRIDGE V449 private NR guide", *snapshot);
     return *snapshot;
 }
 
@@ -926,7 +926,7 @@ ID3D12Resource* GetResource(const NVSDK_NGX_Parameter* params, const char* a, co
     // back out of Get(name, ID3D12Resource**). A game running its own D3D12 upscaler sets these
     // typed, so the typed read above is enough and always was.
     //
-    // Autonomous D3D11/Vulkan ingress exposes immutable D3D12 transport
+    // OFXR-BRIDGE D3D11/Vulkan ingress exposes immutable D3D12 transport
     // resources. Retain the native NGX untyped-slot convention as well as the
     // typed read, since those are separate slots in real NGX parameter blocks.
     void* untyped = nullptr;
@@ -1060,11 +1060,11 @@ void CompleteCommandListSubmission(ID3D12CommandQueue* queue,
                                        IID_PPV_ARGS(queueFence.fence.ReleaseAndGetAddressOf()))))
         {
             g_nrRetirementSignalFailed.store(true, std::memory_order_release);
-            LOG_ERROR("OFXR Autonomous V449 DLSS-NR could not create its submission-retirement fence");
+            LOG_ERROR("OFXR-BRIDGE V449 DLSS-NR could not create its submission-retirement fence");
             return;
         }
         queueFence.queue = queue;
-        LOG_INFO("OFXR Autonomous V449 DLSS-NR retirement fence attached to game queue {:X}", (size_t) queue);
+        LOG_INFO("OFXR-BRIDGE V449 DLSS-NR retirement fence attached to game queue {:X}", (size_t) queue);
     }
 
     const unsigned long long fenceValue = ++queueFence.nextValue;
@@ -1072,7 +1072,7 @@ void CompleteCommandListSubmission(ID3D12CommandQueue* queue,
     if (FAILED(signalResult))
     {
         g_nrRetirementSignalFailed.store(true, std::memory_order_release);
-        LOG_ERROR("OFXR Autonomous V449 DLSS-NR could not signal its submission-retirement fence: 0x{:X}",
+        LOG_ERROR("OFXR-BRIDGE V449 DLSS-NR could not signal its submission-retirement fence: 0x{:X}",
                   (unsigned int) signalResult);
         return;
     }
@@ -1243,7 +1243,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         !FitsBeforeSr(active, depthDesc.Width, depthDesc.Height) ||
         !FitsBeforeSr(active, motionDesc.Width, motionDesc.Height))
     {
-        ReportSkipOnce("OFXR Autonomous V449 pre-SR requires valid zero-origin, separate 2D color/depth/motion inputs");
+        ReportSkipOnce("OFXR-BRIDGE V449 pre-SR requires valid zero-origin, separate 2D color/depth/motion inputs");
         device->Release();
         return;
     }
@@ -1280,7 +1280,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
     if (!reportedGuides)
     {
         reportedGuides = true;
-        LOG_INFO("OFXR Autonomous V449 DLSS-NR BEFORE SR: depth {}, game motion vector scale {} x {}",
+        LOG_INFO("OFXR-BRIDGE V449 DLSS-NR BEFORE SR: depth {}, game motion vector scale {} x {}",
                  nr.guideDepthInverted ? "inverted" : "not inverted", nr.guideMvScaleX,
                  nr.guideMvScaleY);
     }
@@ -1352,7 +1352,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         (reduced && nr.colorSmall == nullptr) || (!targetSupportsUav && nr.resolveCopy == nullptr))
     {
         g_runtime.failed = true;
-        g_runtime.reason = "OFXR Autonomous V449 pre-SR scratch allocation failed";
+        g_runtime.reason = "OFXR-BRIDGE V449 pre-SR scratch allocation failed";
         LOG_ERROR("DLSS-NR unavailable: {}", g_runtime.reason);
         device->Release();
         return;
@@ -1420,10 +1420,10 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         nr.height = height;
         nr.reset = true;
         RecordBuiltTuning(nr, cfg);
-        LOG_INFO("OFXR Autonomous V449 DLSS-NR BEFORE SR handle {} running at {}x{}, guides {}x{} (preset {}, intensity {}, style {})",
+        LOG_INFO("OFXR-BRIDGE V449 DLSS-NR BEFORE SR handle {} running at {}x{}, guides {}x{} (preset {}, intensity {}, style {})",
                  sourceHandleId, width, height, guideWidth, guideHeight, nr.builtPreset,
                  nr.builtIntensity, nr.builtStyle);
-        LOG_INFO("OFXR Autonomous V449 pre-SR allocation {}x{}, SR output {}x{}, copy resolve {}, create params {:X}, game params {:X}",
+        LOG_INFO("OFXR-BRIDGE V449 pre-SR allocation {}x{}, SR output {}x{}, copy resolve {}, create params {:X}, game params {:X}",
                  desc.Width, desc.Height, outputDesc.Width, outputDesc.Height, !targetSupportsUav,
                  (size_t) nr.params, (size_t) params);
         LOG_INFO("DLSS-NR contract: input/output {}x{}, native scale 1, upscaling off, create flags "
@@ -1536,7 +1536,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
         down.Width = workWidth;
         down.Height = workHeight;
         {
-            DredScope stage(cmdList, L"OFXR Autonomous V449 DLSS-NR pre-SR downsample");
+            DredScope stage(cmdList, L"OFXR-BRIDGE V449 DLSS-NR pre-SR downsample");
             nr.compose->Dispatch(cmdList, down, modelInput, nullptr, nullptr, nullptr, nullptr,
                                 nr.colorSmall, nullptr);
         }
@@ -1583,7 +1583,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
                    nr.reset ? 1u : 0u, nr.sourceReset ? 1u : 0u);
         NrFlightTrace::Write("NR_MODEL", cmdList, modelReceipt);
         }
-        DredScope stage(cmdList, L"OFXR Autonomous V449 DLSS-NR pre-SR model");
+        DredScope stage(cmdList, L"OFXR-BRIDGE V449 DLSS-NR pre-SR model");
         result = g_runtime.evaluate(
             cmdList, nr.feature, evaluateParams, modelInput, depthIn, motionIn, nr.output,
             workWidth, workHeight, guideWidth, guideHeight, nr.guideDepthInverted ? 1 : 0,
@@ -1669,7 +1669,7 @@ void EvaluateBeforeUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandLis
             Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"pre-SR-resolve-target-write");
         {
-            DredScope stage(cmdList, L"OFXR Autonomous V449 DLSS-NR pre-SR resolve");
+            DredScope stage(cmdList, L"OFXR-BRIDGE V449 DLSS-NR pre-SR resolve");
             nr.compose->Dispatch(cmdList, resolveParams, modelInput, nr.output, nr.hdrCopy, motionIn,
                                 nullptr, resolveTarget, nullptr);
         }
@@ -2020,7 +2020,7 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
         nr.height = height;
         nr.reset = true;
         RecordBuiltTuning(nr, cfg);
-        LOG_INFO("OFXR Autonomous V449 DLSS-NR AFTER SR handle {} running at {}x{}, guides {}x{} (preset {}, intensity {}, style {})",
+        LOG_INFO("OFXR-BRIDGE V449 DLSS-NR AFTER SR handle {} running at {}x{}, guides {}x{} (preset {}, intensity {}, style {})",
                  sourceHandleId, width, height, guideWidth, guideHeight, nr.builtPreset,
                  nr.builtIntensity, nr.builtStyle);
         LOG_INFO("DLSS-NR contract: input/output {}x{}, native scale 1, upscaling off, create flags "
@@ -2137,7 +2137,7 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
         down.Width = workWidth;
         down.Height = workHeight;
         {
-            DredScope stage(cmdList, L"OFXR Autonomous V449 DLSS-NR post-SR downsample");
+            DredScope stage(cmdList, L"OFXR-BRIDGE V449 DLSS-NR post-SR downsample");
             nr.compose->Dispatch(cmdList, down, modelInput, nullptr, nullptr, nullptr, nullptr,
                                 nr.colorSmall, nullptr);
         }
@@ -2184,7 +2184,7 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
                    nr.reset ? 1u : 0u, nr.sourceReset ? 1u : 0u);
         NrFlightTrace::Write("NR_MODEL", cmdList, modelReceipt);
         }
-        DredScope stage(cmdList, L"OFXR Autonomous V449 DLSS-NR post-SR model");
+        DredScope stage(cmdList, L"OFXR-BRIDGE V449 DLSS-NR post-SR model");
         result = g_runtime.evaluate(
             cmdList, nr.feature, evaluateParams, modelInput, depthIn, motionIn, nr.output,
             workWidth, workHeight, guideWidth, guideHeight, nr.guideDepthInverted ? 1 : 0,
@@ -2265,7 +2265,7 @@ void EvaluateAfterUpscale(unsigned int sourceHandleId, ID3D12GraphicsCommandList
         Barrier(cmdList, nr.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"post-SR-model-output-ready");
         {
-            DredScope stage(cmdList, L"OFXR Autonomous V449 DLSS-NR post-SR resolve");
+            DredScope stage(cmdList, L"OFXR-BRIDGE V449 DLSS-NR post-SR resolve");
             nr.compose->Dispatch(cmdList, resolveParams, modelInput, nr.output, nr.hdrCopy, motionIn,
                                 nullptr, target, nullptr);
         }

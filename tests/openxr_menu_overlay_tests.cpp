@@ -164,7 +164,7 @@ void preview11(const Chain& chain,const std::filesystem::path& output) {
 int main(int argc,char** argv) {
     auto fixture=std::filesystem::temp_directory_path()/(L"ofxr-menu-xr-"+std::to_wstring(GetCurrentProcessId()));
     try {
-        std::filesystem::create_directories(fixture);SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",fixture.c_str());
+        std::filesystem::create_directories(fixture);SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",fixture.c_str());
         d11=argc>1&&std::string(argv[1])=="d3d11";
         if(d11)check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,
             &device11,nullptr,nullptr)),"WARP11");

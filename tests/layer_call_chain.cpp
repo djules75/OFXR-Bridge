@@ -34,7 +34,7 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 
-constexpr char kLayerName[] = "XR_APILAYER_OFXRAutonomous";
+constexpr char kLayerName[] = "XR_APILAYER_OFXRBridge";
 constexpr XrDuration kFakeDisplayPeriod = 10'000'000;
 constexpr XrDuration kGenerationCooldownDuration = 1'000'000'000;
 

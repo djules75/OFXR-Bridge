@@ -53,7 +53,7 @@ inline void BeforeBarrier(ID3D12GraphicsCommandList* commandList, const wchar_t*
 
     wchar_t marker[256] {};
     NrFlightTrace::BarrierBefore(commandList, role, resource, before, after);
-    swprintf_s(marker, L"OFXR Autonomous V448 NR barrier role=%ls resource=%p before=0x%08X after=0x%08X",
+    swprintf_s(marker, L"OFXR-BRIDGE V448 NR barrier role=%ls resource=%p before=0x%08X after=0x%08X",
                role == nullptr ? L"unspecified" : role, static_cast<void*>(resource),
                static_cast<unsigned int>(before), static_cast<unsigned int>(after));
     Set(commandList, marker);

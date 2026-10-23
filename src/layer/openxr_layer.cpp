@@ -95,7 +95,7 @@ namespace {
 
 
 
-constexpr char kLayerName[] = "XR_APILAYER_OFXRAutonomous";
+constexpr char kLayerName[] = "XR_APILAYER_OFXRBridge";
 constexpr XrVersion kLayerApiVersion = XR_MAKE_VERSION(1, 0, 0);
 constexpr XrDuration kGenerationCooldownDuration = 1'000'000'000;
 // Consecutive submissions one scanout apart before any phase correction is
@@ -1501,7 +1501,7 @@ private:
 }
 
 [[nodiscard]] bool comparison_delivery_runtime(const SessionState& state) noexcept {
-    return state.dispatch->steamvr_runtime || (state.dispatch->virtual_desktop_runtime && !state.vdxr_legacy);
+    return !state.vdxr_legacy;
 }
 
 [[nodiscard]] bool advanced_native_outputs(const SessionState& state) noexcept {
@@ -2703,8 +2703,8 @@ void release_pending_bridge_images(const std::shared_ptr<SessionState>& state) n
 [[nodiscard]] bool djules_inline_runtime(const SessionState& state) noexcept {
     return !state.private_runtime && state.djules_route && state.nvidia_new_route && !state.luke_afw_enabled &&
         state.frame_generation_mode != xrfg::D3D12FrameGenerationMode::fsr3 &&
-        state.dispatch->inline_unless_pipelined && !state.pipelined_presenter_mode &&
-        !(state.dispatch->virtual_desktop_runtime &&
+        (state.vdxr_legacy || state.dispatch->inline_unless_pipelined) && !state.pipelined_presenter_mode &&
+        !(state.vdxr_legacy &&
           ((ordinary_djules_route(state) && (state.presenter_restore_after_bypass || state.presenter_active)) ||
            (!state.split_frame_loop && state.application_wait_thread_id && state.application_end_thread_id &&
             state.application_wait_thread_id == state.application_end_thread_id)));
@@ -5145,6 +5145,7 @@ XrResult layer_create_api_layer_instance_impl(
         bridge_extension_added = false;
     }
 
+    if(!xrfg::autonomous::initialize_game_configuration())return XR_ERROR_INITIALIZATION_FAILED;
     xrfg::autonomous::apply_runtime_settings();
     xrfg::prepare_ngx_feature_discovery(current_layer_directory().c_str());
     XrInstance created_instance = XR_NULL_HANDLE;
@@ -5394,14 +5395,18 @@ XrResult layer_create_session_impl(
     }
 
     auto state = std::make_shared<SessionState>(dispatch);
-    state->steamvr_separate_queue = GetPrivateProfileIntW(L"ofxr", L"steamvr_separate_queue", 1,
-        (current_layer_directory() / L"ofxr_bridge.ini").c_str()) != 0;
+    state->steamvr_separate_queue = GetPrivateProfileIntW(L"tray", L"steamvr_separate_queue", 1,
+        xrfg::autonomous::global_configuration_path().c_str()) != 0;
     state->luke_afw_enabled=xrfg::native_ingress::luke_detected();
-    state->vdxr_legacy=GetPrivateProfileIntW(L"ofxr",L"vdxr_legacy",1,
-        (current_layer_directory()/L"ofxr_bridge.ini").c_str())!=0;
-    state->afw_only=state->luke_afw_enabled && GetPrivateProfileIntW(L"ofxr",L"afw_only",0,
-        (current_layer_directory()/L"ofxr_bridge.ini").c_str())!=0;
-    state->luke_shared_swapchains=xrfg::autonomous::snapshot().desired.luke_shared_swapchains;
+    // The transport preference is global; physical runtime identity stays intact.
+    wchar_t transport[32]{};
+    GetPrivateProfileStringW(L"tray",L"pacing",L"auto",transport,32,
+        xrfg::autonomous::global_configuration_path().c_str());
+    state->vdxr_legacy=_wcsicmp(transport,L"force_vdxr")==0 ||
+        (_wcsicmp(transport,L"force_steamvr")!=0 && dispatch->virtual_desktop_runtime);
+    const auto game_preferences=xrfg::autonomous::snapshot().desired;
+    state->afw_only=state->luke_afw_enabled && game_preferences.afw_only;
+    state->luke_shared_swapchains=game_preferences.luke_shared_swapchains;
     auto initial_control = xrfg::embedded::snapshot();
     initial_control.desired=effective_session_settings(*state,initial_control.desired);
     state->optical_flow_backend = initial_control.desired.backend == 0
@@ -5409,10 +5414,8 @@ XrResult layer_create_session_impl(
     state->nvidia_new_route = initial_control.desired.backend >= 2;
     state->djules_route = initial_control.desired.backend == 3;
     state->djules_pipeline_switchable=true;
-    state->djules_triple_requested=GetPrivateProfileIntW(L"ofxr",L"triple_frame_gen",0,
-        (current_layer_directory()/L"ofxr_bridge.ini").c_str())==1;
-    state->djules_deep_pipeline = state->djules_triple_requested || GetPrivateProfileIntW(L"ofxr",L"deep_pipeline",1,
-        (current_layer_directory()/L"ofxr_bridge.ini").c_str())==1;
+    state->djules_triple_requested=game_preferences.triple_frame_gen;
+    state->djules_deep_pipeline=state->djules_triple_requested || game_preferences.prefer_fps;
     xrfg::embedded::register_djules_pipeline(state->control_id, state->djules_deep_pipeline, state->djules_triple_requested);
     state->nvidia_options = {
         static_cast<xrfg::D3D12NvidiaPerformancePreset>(initial_control.desired.preset),
@@ -9886,7 +9889,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
         state->presenter_display_period = 0;
         state->presenter_stop_requested = false;
         state->presenter_active = true;
-        if (ordinary_djules_route(*state) && state->dispatch->virtual_desktop_runtime)
+        if (ordinary_djules_route(*state) && state->vdxr_legacy)
             xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
                 602,state->pipelined_presenter_mode?1:0,state->presenter_restore_after_bypass?1:0,state->split_frame_loop?1:0);
         state->presenter_restore_after_bypass=false;
@@ -15303,9 +15306,9 @@ XrResult layer_end_frame_impl(
                 ((!pipelined_presenter_mode && !keep_generation_presenter) || presenter_route_mismatch ||
                  presenter_forbidden(*state))) {
                 state->presenter_restore_after_bypass =
-                    ordinary_djules_route(*state) && state->dispatch->virtual_desktop_runtime &&
+                    ordinary_djules_route(*state) && state->vdxr_legacy &&
                     reason != GenerationPrepareReason::manual_disarmed && !state->manual_stop_applied;
-                if (ordinary_djules_route(*state) && state->dispatch->virtual_desktop_runtime)
+                if (ordinary_djules_route(*state) && state->vdxr_legacy)
                     xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
                         603,static_cast<std::uint64_t>(reason),state->presenter_restore_after_bypass?1:0,state->split_frame_loop?1:0);
                 stop_continuous_presenter(state);
@@ -16311,7 +16314,7 @@ XrResult layer_end_frame_impl(
         }
         if (demote) {
             // Not under state->mutex: stopping the presenter joins its thread.
-            if (ordinary_djules_route(*state) && state->dispatch->virtual_desktop_runtime)
+            if (ordinary_djules_route(*state) && state->vdxr_legacy)
                 xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
                     604,static_cast<std::uint64_t>(prepare_reason),0,state->split_frame_loop?1:0);
             state->presenter_restore_after_bypass=false;

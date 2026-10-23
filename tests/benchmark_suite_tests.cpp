@@ -11,7 +11,7 @@ using namespace xrfg::autonomous;
 void check(bool condition,const char* text) {if(!condition)throw std::runtime_error(text);}
 int main() {
     const auto folder=std::filesystem::temp_directory_path()/(L"ofxr-suite-"+std::to_wstring(GetCurrentProcessId()));
-    SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",folder.c_str());
+    SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",folder.c_str());
     try {
         const auto optical=benchmark_plan(false),full=benchmark_plan(true);
         check(optical.size()==31 && full.size()==49,"SteamVR: three pacing modes, Normal/Fast, one Off reference");
@@ -92,7 +92,7 @@ int main() {
         ++m.updated_ms;m.output_source=xrfg::InterfaceSource::accepted_scene_submissions;
         unknown.observe(m,1000,11000);check(unknown.fps.size()==2,"Distinct accepted Luke total enters benchmark with explicit source");
         baseline.benchmark_csv=true;check(request(baseline),"Save isolated test profile");baseline=snapshot().desired;
-        RuntimeStatus runtime{};runtime.sessions=1;runtime.steamvr_runtime=true;runtime.dlssg_preset_request=1;
+        RuntimeStatus runtime{};runtime.sessions=1;runtime.steamvr_runtime=true;runtime.vdxr_legacy=false;runtime.dlssg_preset_request=1;
         runtime.applied_revision=snapshot().revision;report_runtime(runtime);
         check(!benchmark_enabled() && !start_benchmark(true),"INI flag defaults off and blocks suite commands");
         check(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable isolated benchmarks in the single INI");

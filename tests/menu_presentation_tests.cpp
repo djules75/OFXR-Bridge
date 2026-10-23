@@ -313,7 +313,7 @@ int main() {
     const auto profile = std::filesystem::temp_directory_path() /
         (L"ofxr-menu-presentation-" + std::to_wstring(GetCurrentProcessId()) +
             L"-" + std::to_wstring(GetTickCount64()));
-    SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR", profile.c_str());
+    SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", profile.c_str());
     try {
         geometry();
         interactions();

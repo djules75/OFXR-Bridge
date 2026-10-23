@@ -9,7 +9,7 @@ int main() {
     using namespace xrfg;
     const auto root = std::filesystem::temp_directory_path() / (L"ofxr-benchmark-" + std::to_wstring(GetCurrentProcessId()));
     std::filesystem::create_directories(root);
-    SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR", root.c_str());
+    SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", root.c_str());
     try {
         std::ofstream(root / L"ofxr_bridge.ini") << "[diagnostics]\nlogging_enabled=1\n";
         auto& logger = bridge_flight_logger(); logger.initialize(root);

@@ -13,9 +13,14 @@
 static bool framework_session_probe{},vdxr_legacy_probe{};
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
-    const bool vdxr_probe=route.starts_with("vdxr-");if(vdxr_probe)route=route.substr(5);
+    const bool force_vdxr_steamvr=route=="force-vdxr-steamvr-session";
+    const bool force_steamvr_vdxr=route=="force-steamvr-vdxr-session";
+    const bool unknown_session=route=="other-session";
+    const bool vdxr_probe=route.starts_with("vdxr-") || force_steamvr_vdxr;
+    if(route.starts_with("vdxr-"))route=route.substr(5);
+    if(force_vdxr_steamvr || force_steamvr_vdxr || unknown_session)route="session";
     if(vdxr_probe)period=8'333'333; // 120Hz runtime predictions, no SteamVR timing API
-    vdxr_legacy_probe=route=="legacy-session";if(vdxr_legacy_probe)route="session";
+    vdxr_legacy_probe=force_vdxr_steamvr || route=="legacy-session";if(vdxr_legacy_probe)route="session";
     if(route.starts_with("afw-only") || route=="luke-shared-session")return afw_only_session_test(route,argc>2?argv[2]:nullptr);
     const bool shared_budget=route=="luke-shared-budget",unshared_budget=route=="luke-unshared-budget";
     const bool outlaws_budget=route=="outlaws-budget";
@@ -50,7 +55,8 @@ int main(int argc,char** argv) {
         }
         ~StartupRestore(){if(existed){std::ofstream f(p,std::ios::binary);f<<bytes;}else{std::error_code e;std::filesystem::remove(p,e);}WritePrivateProfileStringW(nullptr,nullptr,nullptr,p.c_str());}
     } startup_restore(startup_ini);
-    if(vdxr_probe)check(WritePrivateProfileStringW(L"ofxr",L"vdxr_legacy",vdxr_legacy_probe?L"1":L"0",startup_ini.c_str()),"isolated VDXR startup flag");
+    if(force_vdxr_steamvr)check(WritePrivateProfileStringW(L"tray",L"pacing",L"force_vdxr",xrfg::autonomous::global_configuration_path().c_str()),"force VDXR on real SteamVR identity");
+    if(vdxr_probe)check(WritePrivateProfileStringW(L"tray",L"pacing",vdxr_legacy_probe?L"auto":L"force_steamvr",xrfg::autonomous::global_configuration_path().c_str()),"isolated VDXR transport preference");
     if(benchmark_sequence && GetEnvironmentVariableW(L"XRFG_BENCH_TRACE",nullptr,0)) {
         const auto folder=xrfg::autonomous::configuration_path().parent_path()/L"trace";
         std::filesystem::create_directories(folder);
@@ -88,7 +94,7 @@ int main(int argc,char** argv) {
     if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
     Fixture f(native12);f.transport->stop();if(route!="memory" && route!="scope" && !framework_session_probe)f.transport.reset();f.throttled=false;f.real_common=true;f.expected_views=2;f.unblock();
     f.create_state=[] {std::scoped_lock lock(g_state_mutex);return g_swapchains.empty()?D3D12_RESOURCE_STATE_RENDER_TARGET:D3D12_RESOURCE_STATE_COMMON;};
-    auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=!vdxr_probe;dispatch->virtual_desktop_runtime=vdxr_probe;
+    auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=!vdxr_probe && !unknown_session;dispatch->virtual_desktop_runtime=vdxr_probe;
     if(measured)dispatch->get_instance_proc_addr=+[](XrInstance,const char*,PFN_xrVoidFunction* out)->XrResult{*out=nullptr;return XR_ERROR_FUNCTION_UNSUPPORTED;};
     dispatch->wait_frame=Fixture::wait;dispatch->begin_frame=Fixture::begin;dispatch->end_frame=Fixture::end;
     dispatch->create_swapchain=Fixture::create;dispatch->destroy_swapchain=Fixture::destroy;dispatch->enumerate_swapchain_images=Fixture::enumerate;
@@ -111,6 +117,7 @@ int main(int argc,char** argv) {
             check(created && created->vdxr_legacy && !created->private_runtime && !created->private_delivery_queue,
                 "Legacy VDXR keeps original native binding without a private director");
             check(f.delivery_queue==f.queue,"Legacy keeps the exact application runtime queue");
+            if(force_vdxr_steamvr)check(created->dispatch->steamvr_runtime && !created->dispatch->virtual_desktop_runtime,"forcing transport preserves true SteamVR identity");
             xr_ok(layer_destroy_session_impl(handle),"Legacy VDXR session cleanup");
             {std::scoped_lock lock(g_state_mutex);g_instances.clear();}return 0;
         }
@@ -199,18 +206,18 @@ int main(int argc,char** argv) {
     if(!native12)ok(xrfg::create_d3d12_device_for_d3d11(f.device11.Get(),f.device12.GetAddressOf(),f.queue.GetAddressOf()),"D11 generator interop device");
     state->d3d12_device=f.device12;state->d3d12_queue=f.queue;
     state->d3d11_device=f.device11;state->d3d11_context=f.context;
-    state->vdxr_legacy=!vdxr_probe;
+    state->vdxr_legacy=false;
     state->single_director_requested=sole;
     state->luke_afw_enabled=luke;
     if(route=="scope") {
         state->single_director_requested=true;
         check(!single_director_pacing(*state),"a request alone cannot bypass a native runtime's pacing");
         state->private_runtime=f.transport;
-        dispatch->steamvr_runtime=false;dispatch->virtual_desktop_runtime=true;
+        dispatch->steamvr_runtime=false;dispatch->virtual_desktop_runtime=true;state->vdxr_legacy=true;
         check(!single_director_pacing(*state),"VDXR remains unchanged with the experimental flag requested");
         state->vdxr_legacy=false;
         check(single_director_pacing(*state),"opt-in private VDXR enables sole-director pacing");
-        state->vdxr_legacy=true;
+        state->vdxr_legacy=false;
         dispatch->steamvr_runtime=true;dispatch->virtual_desktop_runtime=false;
         check(single_director_pacing(*state),"only private SteamVR enables sole-director pacing");
         state->single_director_requested=false;
@@ -232,7 +239,7 @@ int main(int argc,char** argv) {
     }
     if(route=="memory") {
         using namespace xrfg::autonomous;
-        check(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable isolated memory benchmark");
+        check(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",global_configuration_path().c_str()),"enable isolated memory benchmark");
         auto desired=snapshot().desired;desired.benchmark_csv=true;desired.diagnostics=false;
         check(request(desired),"isolated memory test settings");
         RuntimeStatus runtime{};runtime.sessions=1;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
@@ -533,6 +540,14 @@ int main(int argc,char** argv) {
     stop_continuous_presenter(state);
     auto generated=count>0 && f.real_ends>=(switching?10:12);
     std::printf("%s physical outputs=%u generation state=%u\n",route.c_str(),f.real_ends.load(),unsigned(state->generation_status.load()));
+    if(!generated) {
+        const auto ext=xrfg::autonomous::snapshot();const auto inner=xrfg::embedded::snapshot();const auto chain_state=find_swapchain(chain);
+        std::fprintf(stderr,"CONTROL external=%d/%d advanced=%d enabled=%d rev=%llu internal=%d/%d enabled=%d rev=%llu state=%d motion=%d control=%llu luke=%d capture=%d guides=%d refused=%d pending=%d detail=%llu\n",
+            ext.desired.frame_generation,ext.desired.backend,ext.desired.advanced_mode,ext.desired.enabled,ext.revision,
+            inner.desired.frame_generation,inner.desired.backend,inner.desired.enabled,inner.revision,
+            int(state->frame_generation_mode),state->dlss_motion_vectors,state->control_revision,state->luke_afw_enabled,
+            bool(chain_state->last_released_capture),bool(chain_state->last_released_motion_vectors),int(chain_state->generation_refusal),chain_state->generation_eligible_pending,chain_state->generation_refusal_detail);
+    }
     check(generated,"actual generator must produce beyond eight real inputs");
     if(sole) {
         check(std::is_sorted(f.positions.begin(),f.positions.end()),"all generated and real metadata leave in source order");

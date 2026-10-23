@@ -220,7 +220,7 @@ int main(int argc, char** argv) {
         (L"ofxr-overlay-test-" + std::to_wstring(GetCurrentProcessId()) + L".ini");
     const auto profile=std::filesystem::temp_directory_path()/(L"ofxr-overlay-profile-"+std::to_wstring(GetCurrentProcessId()));
     try {
-        std::filesystem::create_directories(profile);SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",profile.c_str());
+        std::filesystem::create_directories(profile);SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",profile.c_str());
         d3d11 = argc > 1 && std::string(argv[1]) == "d3d11";
         if (d3d11) {
             check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,

@@ -28,6 +28,7 @@ inline void apply_runtime_settings() {
     static std::mutex mutex;
     static std::uint64_t applied{};
     std::scoped_lock lock(mutex);
+    if(!initialize_game_configuration())return;
     const auto incoming=snapshot();
     if (applied==incoming.revision) return;
     const auto& s=incoming.desired;
@@ -61,7 +62,7 @@ inline void apply_runtime_settings() {
     // Startup-only: DRED must precede the game's device creation. F9 controls
     // verbose logging independently and must not turn this crash recorder off.
     static const bool crash_debug=GetPrivateProfileIntW(L"tray",L"crash_debug",0,
-        configuration_path().c_str())!=0;
+        global_configuration_path().c_str())!=0;
     n.crash_debug=crash_debug;
     n.debug_view=s.nr_debug_view; n.compare=s.nr_compare;
     n.compare_split=s.nr_compare_split; n.compare_zoom=s.nr_compare_zoom;

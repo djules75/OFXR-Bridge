@@ -27,7 +27,7 @@ polling is not intercepted; the menu is operated by keyboard and mouse.
 
 Opening the panel never activates the layer. The tray starts inactive; only
 the explicit Activate command stages the package and registers its OpenXR and
-Vulkan manifests. The OpenXR layer identity is `XR_APILAYER_OFXRAutonomous`,
+Vulkan manifests. The OpenXR layer identity is `XR_APILAYER_OFXROFXR-BRIDGE`,
 distinct from the original OFXR tray. The DLL retains the existing component
 filename for build and packaging continuity.
 
@@ -35,7 +35,7 @@ filename for build and packaging continuity.
 and logging preferences. `tray.ini` in that directory retains activation/API
 bridge and pause-key preferences. The version cache and manifest cleanup stay
 inside this profile's `RuntimeLayer` directory. Manifest filenames use the
-`XR_APILAYER_OFXRAutonomous_manual-` prefix; the original OFXR profile and
+`XR_APILAYER_OFXROFXR-BRIDGE_manual-` prefix; the original OFXR profile and
 its registry entries are outside this tray's ownership.
 
 The plain CPU interface in `xrfg/autonomous_control.hpp` publishes revisions
@@ -59,7 +59,7 @@ it in the package's `ofxr` directory. No game directory is modified.
 For engineering inspection, `--settings-only` opens just the panel,
 `--settings-smoke` opens it briefly, and `--settings-preview <image.bmp>`
 captures the panel's own backbuffer. These paths perform no activation or
-registry cleanup. The test profile override `XRFG_AUTONOMOUS_PROFILE_DIR`
+registry cleanup. The test profile override `OFXR_BRIDGE_PROFILE_DIR`
 keeps IPC and fake-runtime fixtures separate from the user's configuration.
 
 The new UI/control code is part of the bridge and covered by the repository's

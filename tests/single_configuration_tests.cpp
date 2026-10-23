@@ -12,11 +12,11 @@ int main() {
     if(configuration_path().parent_path().filename()!=L"ofxr-bridge") {
         std::cerr<<"Stable shared data root must be ofxr-bridge\n";return 1;
     }
-    SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",root.c_str());
+    SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",root.c_str());
     const auto check=[](bool ok,const char* why){if(!ok)throw std::runtime_error(why);};
     try {
         std::filesystem::create_directories(root);
-        std::ofstream(root/L"autonomous.ini")<<"[autonomous]\nbackend=1\ndiagnostics=1\nnr_intensity=0.7\n";
+        std::ofstream(root/L"autonomous.ini")<<"[ofxr]\nbackend=1\ndiagnostics=1\nnr_intensity=0.7\n";
         std::ofstream(root/L"tray.ini")<<"[tray]\npause_hotkey=ctrl+alt+f7\nsteamvr_separate_queue=0\n";
         check(initialize_user_configuration(),"fresh configuration creation failed");
         check(configuration_path().filename()==L"ofxr-bridge.ini","single public INI name");

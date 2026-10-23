@@ -1073,7 +1073,7 @@ float4 synthesize_midpoint(
                             rgb_error(stable_previous, current_fallback.color),
                             compared, confidence);
                     } else {
-                        // Autonomous's XR mapping can explain a head turn
+                        // OFXR-BRIDGE's XR mapping can explain a head turn
                         // even when the game publishes zero scene motion.
                         // Do not force a mismatching guide warp over that
                         // exact camera result. Moving guides still own the

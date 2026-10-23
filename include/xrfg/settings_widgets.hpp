@@ -12,6 +12,7 @@ struct SettingsWidgetState {
     Settings base{};
     std::uint64_t observed_revision{};
     bool initialized{};
+    std::filesystem::path configuration_file;
     bool dirty{};
     bool scale_editing{};
     bool save_failed{};

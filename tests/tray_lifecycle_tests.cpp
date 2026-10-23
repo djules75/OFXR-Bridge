@@ -29,7 +29,7 @@ struct Fixture {
     }
     std::filesystem::path seed(std::wstring_view version, unsigned id, bool json = true) {
         const auto path = state.local_directory / L"RuntimeLayer" / version /
-            (L"XR_APILAYER_OFXRAutonomous_manual-42-" + std::to_wstring(id) + L".json");
+            (L"XR_APILAYER_OFXRBridge_manual-42-" + std::to_wstring(id) + L".json");
         std::filesystem::create_directories(path.parent_path());
         if (json) std::ofstream(path) << "{}";
         require(xrfg::implicit_layer::register_manifest(
@@ -48,7 +48,7 @@ void cross_version_cleanup() {
     Fixture test;
     const auto original_profile = test.state.local_directory.parent_path() / L"OFXR Bridge";
     const auto original_manifest = original_profile / L"RuntimeLayer" / L"v444" /
-        L"XR_APILAYER_OFXRAutonomous_manual-1-1.json";
+        L"XR_APILAYER_OFXRBridge_manual-1-1.json";
     require(!xrfg::implicit_layer::owned_registration_path(original_manifest, test.state.local_directory),
         "same-prefix manifests in the original tray profile are never owned by this candidate");
     const auto old = test.seed(L"v065", 1);
@@ -66,7 +66,7 @@ void cross_version_cleanup() {
     require(xrfg::implicit_layer::register_manifest(
         outside, xrfg::implicit_layer::RegistryScope::current_user,
         nullptr, test.state.registry_subkey), "outside registration");
-    const auto orphan = current.parent_path() / L"XR_APILAYER_OFXRAutonomous_manual-99-99.json";
+    const auto orphan = current.parent_path() / L"XR_APILAYER_OFXRBridge_manual-99-99.json";
     std::ofstream(orphan) << "orphan";
     const auto dll = old.parent_path() / L"XR_APILAYER_XRFrameBridge_diagnostic.dll";
     const auto ini = old.parent_path() / L"ofxr_bridge.ini";
@@ -98,16 +98,16 @@ void cross_version_cleanup() {
 
 void ownership() {
     const std::filesystem::path root = L"C:\\Users\\Test\\OFXR Bridge";
-    const auto valid = root / L"RuntimeLayer\\v065\\XR_APILAYER_OFXRAutonomous_manual-32292-11205031.json";
+    const auto valid = root / L"RuntimeLayer\\v065\\XR_APILAYER_OFXRBridge_manual-32292-11205031.json";
     require(xrfg::implicit_layer::owned_registration_path(valid, root), "reported v065 value accepted");
     for (const auto& bad : {
-        root / L"RuntimeLayer\\v065\\XR_APILAYER_OFXRAutonomous_manual-abc.json",
-        root / L"RuntimeLayer\\v065\\XR_APILAYER_OFXRAutonomous_manual-1-2-3.json",
-        root / L"RuntimeLayer\\v065\\XR_APILAYER_OFXRAutonomous_manual--2.json",
-        root / L"RuntimeLayer\\v065\\nested\\XR_APILAYER_OFXRAutonomous_manual-1-2.json",
-        root / L"RuntimeLayer\\v065\\..\\v068\\XR_APILAYER_OFXRAutonomous_manual-1-2.json",
-        root / L"RuntimeLayer\\other\\XR_APILAYER_OFXRAutonomous_manual-1-2.json",
-        std::filesystem::path(L"relative\\RuntimeLayer\\v065\\XR_APILAYER_OFXRAutonomous_manual-1-2.json")})
+        root / L"RuntimeLayer\\v065\\XR_APILAYER_OFXRBridge_manual-abc.json",
+        root / L"RuntimeLayer\\v065\\XR_APILAYER_OFXRBridge_manual-1-2-3.json",
+        root / L"RuntimeLayer\\v065\\XR_APILAYER_OFXRBridge_manual--2.json",
+        root / L"RuntimeLayer\\v065\\nested\\XR_APILAYER_OFXRBridge_manual-1-2.json",
+        root / L"RuntimeLayer\\v065\\..\\v068\\XR_APILAYER_OFXRBridge_manual-1-2.json",
+        root / L"RuntimeLayer\\other\\XR_APILAYER_OFXRBridge_manual-1-2.json",
+        std::filesystem::path(L"relative\\RuntimeLayer\\v065\\XR_APILAYER_OFXRBridge_manual-1-2.json")})
         require(!xrfg::implicit_layer::owned_registration_path(bad, root), "unsafe/unrelated path rejected");
 }
 
@@ -203,7 +203,7 @@ void runtime_stop_and_watchdog() {
     CloseHandle(event);
 
     // Missing event is fail-closed for managed DLLs; embedded INIs have no lease.
-    const auto absent = test.state.local_directory / L"RuntimeLayer\\v069\\XR_APILAYER_OFXRAutonomous_manual-8-8.json";
+    const auto absent = test.state.local_directory / L"RuntimeLayer\\v069\\XR_APILAYER_OFXRBridge_manual-8-8.json";
     require(write_runtime_configuration(test.state, nullptr, absent), "write absent lease");
     xrfg::implicit_layer::ManualArmControl absent_reader(runtime_directory(test.state.local_directory));
     require(absent_reader.stop_requested(), "orphaned managed DLL starts disabled");
@@ -229,33 +229,22 @@ void integrity_scope_policy() {
 }
 
 void experimental_preferences() {
-    Fixture test;
-    test.state.settings_path=test.state.local_directory/L"ofxr-bridge.ini";
-    std::wstring error;
-    const auto revision=xrfg::autonomous::snapshot().revision;
-    require(set_afw_only_preference(test.state,true,&error),"save AFW-only while unarmed");
-    AppState restarted;restarted.settings_path=test.state.settings_path;load_settings(restarted);
-    require(restarted.settings.afw_only,"AFW only survives tray restart");
-    const auto runtime=runtime_directory(test.state.local_directory);
-    std::filesystem::create_directories(runtime);const auto shim=runtime/L"ofxr_bridge.ini";
-    std::ofstream(shim)<<"[ofxr]\nenabled=1\n[neural]\nenabled=1\n[experimental]\nkeep=42\n";
-    test.state.armed=true;
-    for(bool enabled:{false,true,false}) {
-        require(set_afw_only_preference(test.state,enabled,&error),"armed next-session toggle");
-        require(GetPrivateProfileIntW(L"ofxr",L"afw_only",-1,shim.c_str())==int(enabled),"runtime startup toggle");
-        require(GetPrivateProfileIntW(L"ofxr",L"enabled",-1,shim.c_str())==1 &&
-            GetPrivateProfileIntW(L"neural",L"enabled",-1,shim.c_str())==1 &&
-            GetPrivateProfileIntW(L"experimental",L"keep",-1,shim.c_str())==42,"retain OFXR preference, DLSS5 and unrelated keys");
+    Fixture test;test.state.settings_path=test.state.local_directory/L"ofxr-bridge.ini";
+    std::wstring error;const auto revision=xrfg::autonomous::snapshot().revision;
+    using xrfg::standalone::RuntimePacing;
+    for(const auto mode:{RuntimePacing::automatic,RuntimePacing::force_vdxr,RuntimePacing::force_steamvr}) {
+        require(set_pacing_preference(test.state,mode,&error),"global pacing choice saved");
+        AppState restarted;restarted.settings_path=test.state.settings_path;load_settings(restarted);
+        require(restarted.settings.pacing==mode,"global pacing survives tray restart");
     }
-    for(bool enabled:{true,false,true,false}) {
-        require(set_benchmark_preference(test.state.settings_path,enabled,&error),"tray benchmark INI switch");
+    for(bool enabled:{true,false}) {
+        require(set_benchmark_preference(test.state.settings_path,enabled,&error),"benchmark switch saved globally");
         require(GetPrivateProfileIntW(L"benchmark",L"enabled",-1,test.state.settings_path.c_str())==int(enabled),"benchmark canonical value");
-        load_settings(restarted);require(!restarted.settings.afw_only,"benchmark write preserves AFW-only selection");
     }
-    require(xrfg::autonomous::snapshot().revision==revision,"tray toggles must not reconfigure a running renderer");
-    test.state.armed=false;test.state.settings_path=test.state.local_directory;
-    require(!set_afw_only_preference(test.state,true,&error) && !test.state.settings.afw_only,"failed AFW-only write rolls back");
-    require(!set_benchmark_preference(test.state.settings_path,true,&error),"benchmark persistence failure reported");
+    require(xrfg::autonomous::snapshot().revision==revision,"tray choices do not reconfigure live game");
+    require(xrfg::standalone::serialize_settings(test.state.settings).find("afw_only=")==std::string::npos,"AFW Only is not a tray preference");
+    test.state.settings_path=test.state.local_directory;
+    require(!set_pacing_preference(test.state,RuntimePacing::automatic,&error),"pacing save failure reported");
 }
 
 void queue_preference() {
@@ -290,7 +279,7 @@ void queue_preference() {
 
 int main() {
     Fixture isolated_control;
-    SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",isolated_control.state.local_directory.c_str());
+    SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",isolated_control.state.local_directory.c_str());
     try {
         ownership();
         cross_version_cleanup();

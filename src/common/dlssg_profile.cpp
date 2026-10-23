@@ -239,7 +239,7 @@ std::filesystem::path game_executable(unsigned process_id) noexcept {
 
 std::filesystem::path last_dlssg_game(const std::filesystem::path& selection_file) noexcept {
     try {
-        if (selection_file == autonomous::configuration_path()) {
+        if ((selection_file == autonomous::configuration_path() || selection_file == autonomous::global_configuration_path() || selection_file.parent_path()==autonomous::common_folder()/L"Profiles")) {
             std::ifstream input(selection_file,std::ios::binary);std::string line;bool selected=false;
             while(std::getline(input,line)) {
                 if(!line.empty() && line.back()=='\r')line.pop_back();
@@ -270,7 +270,7 @@ bool remember_dlssg_game(const std::filesystem::path& selection_file,
     try {
         const auto path = validated_path(executable);
         if (_wcsicmp(last_dlssg_game(selection_file).c_str(), path.c_str()) == 0) return true;
-        if (selection_file == autonomous::configuration_path()) {
+        if ((selection_file == autonomous::configuration_path() || selection_file == autonomous::global_configuration_path() || selection_file.parent_path()==autonomous::common_folder()/L"Profiles")) {
             const int bytes=WideCharToMultiByte(CP_UTF8,0,path.c_str(),int(path.size()),nullptr,0,nullptr,nullptr);
             std::string encoded(bytes,'\0');
             WideCharToMultiByte(CP_UTF8,0,path.c_str(),int(path.size()),encoded.data(),bytes,nullptr,nullptr);

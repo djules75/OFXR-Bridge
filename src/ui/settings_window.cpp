@@ -17,7 +17,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 namespace xrfg::autonomous {
 namespace {
 using Microsoft::WRL::ComPtr;
-constexpr wchar_t kClassName[] = L"OFXRAutonomousSettingsV449";
+constexpr wchar_t kClassName[] = L"OFXRBridgeSettingsV449";
 constexpr UINT_PTR kRenderTimer = 1;
 
 struct Window {
@@ -194,7 +194,7 @@ bool show_settings_window(HWND owner) noexcept {
             cls.lpszClassName = kClassName;
             if (!RegisterClassExW(&cls) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
             auto candidate = std::make_unique<Window>();
-            const auto title=L"OFXR Autonomous V"+std::to_wstring(XRFG_IMPLEMENTATION_VERSION)+L" - Settings";
+            const auto title=L"OFXR-BRIDGE 0.3.0 (v"+std::to_wstring(XRFG_IMPLEMENTATION_VERSION)+L") - Settings";
             const HWND handle = CreateWindowExW(WS_EX_APPWINDOW, kClassName,
                 title.c_str(), WS_OVERLAPPEDWINDOW,
                 CW_USEDEFAULT, CW_USEDEFAULT, 690, 900, owner, nullptr,

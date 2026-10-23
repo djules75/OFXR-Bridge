@@ -43,7 +43,7 @@ if(DEFINED QUEUE_LAYER_DLL)
 ")
     file(TO_NATIVE_PATH "${WORK_DIR}" work_dir_native)
     set(ENV{VK_LAYER_PATH} "${work_dir_native}")
-    set(ENV{VK_INSTANCE_LAYERS} "VK_LAYER_OFXRAutonomous_queue_serialize")
+    set(ENV{VK_INSTANCE_LAYERS} "VK_LAYER_OFXRBridge_queue_serialize")
     set(ENV{OFXR_TEST_EXPECT_QUEUE_LAYER} "1")
 endif()
 

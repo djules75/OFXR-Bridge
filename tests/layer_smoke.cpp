@@ -54,7 +54,7 @@ int main(int argc, char** argv) {
 
     const XrResult result = negotiate(
         &loader_info,
-        "XR_APILAYER_OFXRAutonomous",
+        "XR_APILAYER_OFXRBridge",
         &request);
     if (expect_excluded) {
         const bool refused = result == XR_ERROR_INITIALIZATION_FAILED &&

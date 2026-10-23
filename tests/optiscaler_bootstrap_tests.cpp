@@ -57,13 +57,13 @@ int main(int argc, char** argv) {
         require(XR_FAILED(negotiate(&loader, "wrong-name", &r)), "invalid name refused before host");
         require(active() == 0, "invalid negotiation cannot activate host");
         if (mode == "excluded") {
-            require(negotiate(&loader, "XR_APILAYER_OFXRAutonomous", &r) == XR_ERROR_INITIALIZATION_FAILED &&
+            require(negotiate(&loader, "XR_APILAYER_OFXRBridge", &r) == XR_ERROR_INITIALIZATION_FAILED &&
                 active() == 0 && !r.getInstanceProcAddr && !r.createApiLayerInstance,
                 "exclusion wins over compatible embedded owner");
             std::cout << "OptiScaler bootstrap PASS: exclusion before activation\n";
             return 0;
         }
-        require(negotiate(&loader, "XR_APILAYER_OFXRAutonomous", &r) == XR_SUCCESS, "valid negotiation");
+        require(negotiate(&loader, "XR_APILAYER_OFXRBridge", &r) == XR_SUCCESS, "valid negotiation");
         const bool delegated = mode == "success" || mode == "actual";
         require(active() == int(delegated), "host activation and rollback");
         require(owner(reinterpret_cast<PFN_xrVoidFunction>(r.getInstanceProcAddr)) == (delegated ? host : layer), "dispatch owner");
@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
         std::atomic_bool consistent{true};
         for (auto& t : callers) t = std::thread([&] {
             auto another = request();
-            if (negotiate(&loader, "XR_APILAYER_OFXRAutonomous", &another) != XR_SUCCESS ||
+            if (negotiate(&loader, "XR_APILAYER_OFXRBridge", &another) != XR_SUCCESS ||
                 another.getInstanceProcAddr != r.getInstanceProcAddr ||
                 another.createApiLayerInstance != r.createApiLayerInstance) consistent = false;
         });
@@ -84,7 +84,7 @@ int main(int argc, char** argv) {
             XrApiLayerNextInfo next{};
             next.structType = XR_LOADER_INTERFACE_STRUCT_API_LAYER_NEXT_INFO;
             next.structVersion = XR_API_LAYER_NEXT_INFO_STRUCT_VERSION; next.structSize = sizeof(next);
-            std::strcpy(next.layerName, "XR_APILAYER_OFXRAutonomous");
+            std::strcpy(next.layerName, "XR_APILAYER_OFXRBridge");
             next.nextGetInstanceProcAddr = runtime_gipa; next.nextCreateApiLayerInstance = runtime_create;
             next.next = &terminal;
             XrApiLayerCreateInfo chain{};
@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
             XrInstance instance{};
             require(r.createApiLayerInstance(&info, &chain, &instance) == XR_ERROR_RUNTIME_FAILURE, "real host reached downstream creation");
             require(creates == 1 && chain.nextInfo == &next && next.next == &terminal &&
-                !std::strcmp(next.layerName, "XR_APILAYER_OFXRAutonomous"), "input chain unchanged");
+                !std::strcmp(next.layerName, "XR_APILAYER_OFXRBridge"), "input chain unchanged");
             next.structSize = 0;
             require(r.createApiLayerInstance(&info, &chain, &instance) == XR_ERROR_INITIALIZATION_FAILED && creates == 1, "malformed chain refused");
             require(r.createApiLayerInstance(&info, nullptr, &instance) == XR_ERROR_INITIALIZATION_FAILED, "null chain refused");

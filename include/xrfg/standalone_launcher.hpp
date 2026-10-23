@@ -11,13 +11,17 @@
 namespace xrfg::standalone {
 
 inline constexpr wchar_t kLayerName[] =
-    L"XR_APILAYER_OFXRAutonomous";
+    L"XR_APILAYER_OFXRBridge";
 
 enum class FlowBackend {
     fidelity_fx,
     nvidia,
 };
 enum class FrameGeneration { ofxr, native_dlss };
+enum class RuntimePacing { automatic, force_vdxr, force_steamvr };
+constexpr bool director_transport(RuntimePacing mode, bool actual_vdxr) noexcept {
+    return mode==RuntimePacing::force_steamvr || (mode==RuntimePacing::automatic && !actual_vdxr);
+}
 
 enum class NvidiaPerformancePreset {
     slow,
@@ -65,8 +69,8 @@ struct LauncherSettings {
     bool steamvr_separate_queue{true};
     // Tray-only startup experiment: Luke AFW goes straight to native OpenXR.
     // OFXR is disabled for this session; Neural Rendering remains independent.
-    bool afw_only{};
-    bool vdxr_legacy{true}; // tray-only startup choice; preserve original VDXR by default
+    bool afw_only{}; // runtime-INI serialization only; user preference lives in game Settings
+    RuntimePacing pacing{RuntimePacing::automatic}; // global, startup-only transport selection
     // The Vulkan bridge (see the layer's vulkan_session_bridge): a Vulkan
     // game's session is handed to the runtime as D3D12. On by default; no
     // menu entry.

@@ -228,10 +228,8 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "single_swapchain_rings") {
                     settings.single_swapchain_rings = value == "1" ||
                         lower_ascii(value) == "true";
-                } else if (key == "vdxr_legacy") {
-                    settings.vdxr_legacy = value != "0" && lower_ascii(value) != "false";
-                } else if (key == "afw_only") {
-                    settings.afw_only = value != "0" && lower_ascii(value) != "false";
+                } else if (key == "pacing") {
+                    settings.pacing = value == "force_vdxr" ? RuntimePacing::force_vdxr : value == "force_steamvr" ? RuntimePacing::force_steamvr : RuntimePacing::automatic;
                 } else if (key == "steamvr_separate_queue") {
                     settings.steamvr_separate_queue = value != "0" && lower_ascii(value) != "false";
                 } else if (key == "vulkan_session_bridge") {
@@ -287,8 +285,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\nexcluded_processes=" + settings.excluded_processes +
            "\r\nseparate_synthesis=" + (settings.separate_synthesis ? "1" : "0") +
            "\r\nsingle_swapchain_rings=" + (settings.single_swapchain_rings ? "1" : "0") +
-           "\r\nvdxr_legacy=" + (settings.vdxr_legacy ? "1" : "0") +
-           "\r\nafw_only=" + (settings.afw_only ? "1" : "0") +
+           "\r\npacing=" + (settings.pacing==RuntimePacing::force_vdxr ? "force_vdxr" : settings.pacing==RuntimePacing::force_steamvr ? "force_steamvr" : "auto") +
            "\r\nsteamvr_separate_queue=" + (settings.steamvr_separate_queue ? "1" : "0") +
            "\r\nvulkan_session_bridge=" + (settings.vulkan_session_bridge ? "1" : "0") +
            "\r\nvulkan_bridge=" + (settings.vulkan_support ? "1" : "0") +
@@ -469,15 +466,15 @@ std::string build_vulkan_layer_manifest(
     return "{\n"
            "  \"file_format_version\": \"1.2.0\",\n"
            "  \"layer\": {\n"
-           "    \"name\": \"VK_LAYER_OFXRAutonomous_queue_serialize\",\n"
+           "    \"name\": \"VK_LAYER_OFXRBridge_queue_serialize\",\n"
            "    \"type\": \"GLOBAL\",\n"
            "    \"library_path\": \"" + escaped_path + "\",\n"
            "    \"api_version\": \"1.3.296\",\n"
            "    \"implementation_version\": \"" +
            std::to_string(implementation_version) + "\",\n"
-           "    \"description\": \"OFXR Autonomous V" +
+           "    \"description\": \"OFXR-BRIDGE 0.3.0 (v" +
            std::to_string(implementation_version) +
-           ": serialises Vulkan queue submissions while the bridge is armed\",\n"
+           "): serialises Vulkan queue submissions while the bridge is armed\",\n"
            "    \"functions\": {\n"
            "      \"vkNegotiateLoaderLayerInterfaceVersion\": \"OFXR_vkNegotiateLoaderLayerInterfaceVersion\",\n"
            "      \"vkGetInstanceProcAddr\": \"OFXR_vkGetInstanceProcAddr\",\n"
@@ -498,14 +495,14 @@ std::string build_implicit_layer_manifest(
     return "{\n"
            "  \"file_format_version\": \"1.0.0\",\n"
            "  \"api_layer\": {\n"
-           "    \"name\": \"XR_APILAYER_OFXRAutonomous\",\n"
+           "    \"name\": \"XR_APILAYER_OFXRBridge\",\n"
            "    \"library_path\": \"" + escaped_path + "\",\n"
            "    \"api_version\": \"1.0\",\n"
            "    \"implementation_version\": \"" +
            std::to_string(implementation_version) + "\",\n"
-           "    \"description\": \"OFXR Autonomous V" +
+           "    \"description\": \"OFXR-BRIDGE 0.3.0 (v" +
            std::to_string(implementation_version) +
-           " manual persistent implicit layer\",\n"
+           ") manual persistent implicit layer\",\n"
            "    \"disable_environment\": \"XRFG_DISABLE_OFXR_BRIDGE\"\n"
            "  }\n"
            "}\n";
@@ -531,7 +528,7 @@ std::string build_runtime_ini(
            "\r\nexcluded_processes=" + settings.excluded_processes +
            "\r\nseparate_synthesis=" + (settings.separate_synthesis ? "1" : "0") +
            "\r\nsingle_swapchain_rings=" + (settings.single_swapchain_rings ? "1" : "0") +
-           "\r\nvdxr_legacy=" + (settings.vdxr_legacy ? "1" : "0") +
+           "\r\npacing=" + (settings.pacing==RuntimePacing::force_vdxr ? "force_vdxr" : settings.pacing==RuntimePacing::force_steamvr ? "force_steamvr" : "auto") +
            "\r\nafw_only=" + (settings.afw_only ? "1" : "0") +
            "\r\nsteamvr_separate_queue=" + (settings.steamvr_separate_queue ? "1" : "0") +
            "\r\nvulkan_session_bridge=" + (settings.vulkan_session_bridge ? "1" : "0") +
@@ -567,6 +564,7 @@ std::string build_runtime_ini(
     settings.triple_frame_gen = desired.triple_frame_gen;
     settings.separate_synthesis = desired.separate_synthesis > 0;
     settings.single_swapchain_rings = desired.lower_vram > 0;
+    settings.afw_only=desired.afw_only;
     settings.diagnostics = desired.diagnostics;
     settings.overlay_position = static_cast<FpsOverlayPosition>(desired.overlay_position);
     std::string result = build_runtime_ini(settings, max_file_mb, flush_each_event);

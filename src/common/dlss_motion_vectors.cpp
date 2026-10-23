@@ -1137,7 +1137,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 return stale();
             if (other && other != chosen)
                 shared_stream = other->stream == chosen->stream;
-            // In Autonomous a CPU publication is not a cross-queue receipt.
+            // In OFXR-BRIDGE a CPU publication is not a cross-queue receipt.
             // Apply the existing synchronization check to the actual chosen
             // frame, including older snapshots selected by the watermark.
             if (!synchronize(chosen)) {

@@ -246,7 +246,7 @@ int main(int argc, char** argv) {
         restore_ini{ini,ini_existed,ini_backup};
     const auto profile=std::filesystem::temp_directory_path()/(L"ofxr-overlay-profile-"+std::to_wstring(GetCurrentProcessId()));
     try {
-        std::filesystem::create_directories(profile);SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR",profile.c_str());
+        std::filesystem::create_directories(profile);SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",profile.c_str());
         auto initial=xrfg::autonomous::snapshot().desired;initial.overlay_position=2;
         check(xrfg::autonomous::request(initial),"initial classic settings");
         xrfg::autonomous::apply_runtime_settings();

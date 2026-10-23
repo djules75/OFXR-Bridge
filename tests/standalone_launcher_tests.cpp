@@ -29,18 +29,16 @@ int main() {
             !contains(build_runtime_ini(choice),key))return 1;
     }
     if (!release_defaults.steamvr_separate_queue || release_defaults.afw_only) return 1;
-    if(!release_defaults.vdxr_legacy)return 1;
-    for(bool legacy:{false,true}) {
-        auto choice=release_defaults;choice.vdxr_legacy=legacy;
-        const auto key=legacy?"vdxr_legacy=1":"vdxr_legacy=0";
-        if(parse_settings(serialize_settings(choice)).vdxr_legacy!=legacy || !contains(build_runtime_ini(choice),key))return 1;
+    if(release_defaults.pacing!=RuntimePacing::automatic)return 1;
+    for(auto mode:{RuntimePacing::automatic,RuntimePacing::force_vdxr,RuntimePacing::force_steamvr}) {
+        auto choice=release_defaults;choice.pacing=mode;
+        if(parse_settings(serialize_settings(choice)).pacing!=mode)return 1;
     }
+    if(director_transport(RuntimePacing::automatic,true) || !director_transport(RuntimePacing::automatic,false) ||
+       director_transport(RuntimePacing::force_vdxr,false) || !director_transport(RuntimePacing::force_steamvr,true))return 1;
     for(bool enabled:{false,true}) {
-        auto s=release_defaults;s.afw_only=enabled;
-        const auto key=enabled?"afw_only=1":"afw_only=0";
-        if(parse_settings(serialize_settings(s)).afw_only!=enabled || !contains(build_runtime_ini(s),key))return 1;
-        xrfg::autonomous::Settings controls;controls.nr_enabled=true;controls.enabled=true;
-        if(!contains(build_runtime_ini(s,controls),key))return 1;
+        xrfg::autonomous::Settings controls;controls.afw_only=enabled;
+        if(!contains(build_runtime_ini(release_defaults,controls),enabled?"afw_only=1":"afw_only=0"))return 1;
     }
     for (bool separate : {false, true}) {
         auto queue_settings = release_defaults;
@@ -280,14 +278,14 @@ int main() {
     const std::filesystem::path runtime_directory =
         L"C:\\Users\\Test\\OFXR Bridge\\RuntimeLayer\\v030";
     const std::filesystem::path implicit_manifest = runtime_directory /
-        L"XR_APILAYER_OFXRAutonomous_manual-42-99.json";
+        L"XR_APILAYER_OFXRBridge_manual-42-99.json";
     if (!xrfg::implicit_layer::owned_manifest_path(
             implicit_manifest, runtime_directory) ||
         xrfg::implicit_layer::owned_manifest_path(
             runtime_directory / L"different-layer.json", runtime_directory) ||
         xrfg::implicit_layer::owned_manifest_path(
             runtime_directory.parent_path() /
-                L"XR_APILAYER_OFXRAutonomous_manual-42-99.json",
+                L"XR_APILAYER_OFXRBridge_manual-42-99.json",
             runtime_directory)) {
         std::cerr << "owned manifest path validation failed\n";
         return 1;

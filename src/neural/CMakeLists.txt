@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(OFXRAutonomousNeural LANGUAGES CXX)
+project(OFXRBridgeNeural LANGUAGES CXX)
 set(NR_SDK_INCLUDE "" CACHE PATH "NGX SDK include folder")
 add_library(xrfg_neural_rendering STATIC nr_feature.cpp nr_host.cpp nr_codec.cpp)
 target_include_directories(xrfg_neural_rendering PUBLIC ../../include "${NR_SDK_INCLUDE}" PRIVATE .)

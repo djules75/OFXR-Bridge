@@ -21,14 +21,14 @@ class ExternalControlProfile {
 public:
     explicit ExternalControlProfile(const std::filesystem::path& runtime_ini) : runtime_ini_(runtime_ini) {
         std::array<wchar_t, 32768> previous{};
-        const auto length = GetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR", previous.data(),
+        const auto length = GetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", previous.data(),
             static_cast<DWORD>(previous.size()));
         if (length && length < previous.size()) original_profile_ = previous.data();
         directory_ = std::filesystem::temp_directory_path() /
             (L"ofxr-autonomous-external-test-" + std::to_wstring(GetCurrentProcessId()) +
                 L"-" + std::to_wstring(GetTickCount64()));
         std::filesystem::create_directories(directory_);
-        if (!SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR", directory_.c_str()))
+        if (!SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", directory_.c_str()))
             throw std::runtime_error("cannot isolate fake-runtime control profile");
         std::ifstream original(runtime_ini_, std::ios::binary);
         if (original) original_ini_ = std::string(std::istreambuf_iterator<char>(original), {});
@@ -46,6 +46,11 @@ public:
         constexpr const wchar_t* positions[]{L"off", L"upper_left", L"upper_right", L"lower_left", L"lower_right"};
         for (int index = 0; index < 5; ++index)
             if (_wcsicmp(position, positions[index]) == 0) desired.overlay_position = index;
+        wchar_t transport[32]{};
+        GetPrivateProfileStringW(L"ofxr",L"pacing",L"auto",transport,32,runtime_ini_.c_str());
+        std::string mode=_wcsicmp(transport,L"force_steamvr")==0?"force_steamvr":"force_vdxr";
+        if(GetPrivateProfileIntW(L"ofxr",L"vdxr_legacy",1,runtime_ini_.c_str())==0)mode="force_steamvr";
+        xrfg::autonomous::write_configuration_sections(xrfg::autonomous::global_configuration_path(),"[tray]\npacing="+mode+"\n");
         if (!xrfg::autonomous::request(desired))
             throw std::runtime_error("cannot publish explicit fake-runtime settings");
     }
@@ -59,10 +64,10 @@ public:
             std::error_code ignored;
             std::filesystem::remove(runtime_ini_, ignored);
         }
-        SetEnvironmentVariableW(L"XRFG_AUTONOMOUS_PROFILE_DIR", original_profile_ ? original_profile_->c_str() : nullptr);
+        SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR", original_profile_ ? original_profile_->c_str() : nullptr);
         std::error_code ignored;
         std::filesystem::remove(directory_ / L"ofxr-bridge.ini", ignored);
-        std::filesystem::remove(directory_, ignored);
+        if(directory_.is_absolute() && directory_.filename().wstring().starts_with(L"ofxr-autonomous-external-test-"))std::filesystem::remove_all(directory_,ignored);
     }
 };
 } // namespace xrfg_fixture

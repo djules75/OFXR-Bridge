@@ -1,4 +1,4 @@
-# Autonomous Neural Rendering
+# OFXR-BRIDGE Neural Rendering
 
 The surviving model/colour implementation is extracted from accepted OptiScaler
 V33034 at canonical source `6c36e598b9027a852ce2b759a1851378468a0938`.
