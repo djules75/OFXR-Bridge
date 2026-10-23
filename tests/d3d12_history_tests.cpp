@@ -5094,6 +5094,14 @@ enum class HybridScene {
     // V559: the translucent strokes dark on the lighter background, as dark
     // HUD text and icon lines are.
     overlay_translucent_dark,
+    // V561: the translucent strokes dim, their edges about 14/255 (Star
+    // Citizen's dim HUD elements, which ghosted on stick turns).
+    overlay_translucent_dim,
+    // V561: the translucent HUD with a soft glow in the moving background
+    // beside it, whose vectors are wrong (a light's flow is poor; a sprite
+    // has none). The glow must never be held. Run only with the still
+    // mask's tint (it judges nothing else).
+    overlay_glow,
     occlusion_foveated, occlusion_foveated_moved, occlusion_foveated_moved_current,
     // V539: the object twice as fast over a flat background, the revealed
     // strip wider than the edge probes' reach.
@@ -5133,8 +5141,19 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
     const bool sway = kind == HybridScene::overlay_translucent_sway;
     const bool panel = kind == HybridScene::overlay_panel || panel_fast;
     const bool dark_strokes = kind == HybridScene::overlay_translucent_dark;
-    const bool translucent =
-        kind == HybridScene::overlay_translucent || sway || panel || dark_strokes;
+    const bool dim_strokes = kind == HybridScene::overlay_translucent_dim;
+    const bool glow = kind == HybridScene::overlay_glow;
+    const bool translucent = kind == HybridScene::overlay_translucent || sway || panel ||
+        dark_strokes || dim_strokes || glow;
+    // V561: the glow's centre on the screen for a background shift, and its
+    // radius: right of the HUD, a pixel a pair - a far light on a strafe,
+    // which nearly stays put while its vectors are wrong.
+    constexpr int glow_radius = 14;
+    const int glow_step = panel_fast ? 24 : 6;  // the background's motion a pair
+    const auto glow_centre_x = [glow_step](int background_shift) {
+        return 176 + background_shift / glow_step;
+    };
+    constexpr int glow_centre_y = 64;
     // The still mask counts pairs in a row: the overlays run these before
     // the pair that is judged.
     const int warm_up_pairs = translucent ? 4 : 0;
@@ -5157,6 +5176,8 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
     const char* const name = fade ? "fade" : sway ? "overlay translucent sway"
         : panel_fast ? "overlay panel fast" : panel ? "overlay panel"
         : dark_strokes ? "overlay translucent dark"
+        : dim_strokes ? "overlay translucent dim"
+        : glow ? "overlay glow"
         : translucent ? "overlay translucent" : overlay ? "overlay"
         : dark ? "occlusion fast, dark low contrast"
         : far_depth ? "occlusion fast, far inverted depth"
@@ -5193,17 +5214,33 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
                     // V559: the translucent HUD over the flat background: the
                     // vectors drag it there as anywhere, and its strokes keep
                     // one contrast, as a HUD's do over most of a scene.
-                    const RgbaBytes background = dark ? RgbaBytes{28, 28, 30, 255}
+                    RgbaBytes background = dark ? RgbaBytes{28, 28, 30, 255}
                         : fast || translucent ? RgbaBytes{70, 90, 110, 255}
                         : RgbaBytes{static_cast<std::uint8_t>(40 + (bx * 13 + static_cast<int>(y) * 5) % 160),
                                     static_cast<std::uint8_t>(60 + ((bx / 3) % 7) * 20 + eye * 9),
                                     static_cast<std::uint8_t>(90 + (bx * 7) % 120), 255};
+                    if (glow) {
+                        // V561: a light's soft glow, brightest at its centre
+                        // and fading over the radius.
+                        const double dx = static_cast<double>(x) - glow_centre_x(background_shift);
+                        const double dy = static_cast<double>(y) - glow_centre_y;
+                        const double fall = std::max(0.0, 1.0 - std::sqrt(dx * dx + dy * dy) / glow_radius);
+                        for (UINT c = 0; c < 3; ++c) {
+                            background[c] = static_cast<std::uint8_t>(std::min(255L,
+                                background[c] + std::lround(170.0 * fall * fall)));
+                        }
+                    }
                     // V559: the translucent HUD's strokes are all the bright
                     // colour, as HUD text is; a dark stroke at 65% over this
                     // background is under the edge threshold and not a HUD.
                     const RgbaBytes object_color =
                         dark ? ((ox / 5) % 2 ? RgbaBytes{40, 40, 42, 255} : RgbaBytes{17, 17, 19, 255})
                              : panel || dark_strokes ? RgbaBytes{20, 40, 70, 255}
+                             // V561: 65% of this over the background is
+                             // about 14/255 brighter (luma): over the
+                             // built-in edge threshold (10), under the dim
+                             // edges' bound (24).
+                             : dim_strokes ? RgbaBytes{92, 112, 130, 255}
                              : (ox / 5) % 2 || translucent ? RgbaBytes{240, 210, 40, 255}
                                                            : RgbaBytes{30, 60, 200, 255};
                     RgbaBytes color = object ? object_color : background;
@@ -5247,6 +5284,15 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
             const bool object = y >= object_top && y < object_bottom &&
                 ox >= object_left && ox < object_left + object_width;
             const float scale = static_cast<float>(motion_width) / field_width;
+            // V561: the glow's vectors wrong, twice its motion the other
+            // way, over the band it sweeps through every pair (the warm-up
+            // pairs' too), its radius and a margin either side.
+            const bool in_glow = glow && std::abs(y - glow_centre_y) <= glow_radius + 4 &&
+                x >= glow_centre_x(0) - glow_radius - 4 &&
+                x <= glow_centre_x(background_motion * (warm_up_pairs + 1)) + glow_radius + 4;
+            if (in_glow) {
+                return std::array<float, 2>{scale * 2.0F * static_cast<float>(background_motion), 0.0F};
+            }
             return std::array<float, 2>{
                 -scale * static_cast<float>(object && !overlay ? object_motion : background_motion),
                 0.0F};
@@ -5496,9 +5542,12 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
                 // Magenta: the first and third channels well above the
                 // second, whichever of RGBA or BGRA the pattern is. The
                 // scene has none of its own (yellow strokes over grey).
+                // (3, V561: the glow's band alone, which must have none.)
                 std::size_t magenta = 0;
+                const int count_left = still_tint_check == 3
+                    ? glow_centre_x(0) - glow_radius - 4 : 0;
                 for (int y = 0; y < static_cast<int>(height); ++y) {
-                    for (int x = 0; x < static_cast<int>(width); ++x) {
+                    for (int x = count_left; x < static_cast<int>(width); ++x) {
                         const std::size_t offset =
                             (static_cast<std::size_t>(y) * width + static_cast<UINT>(x)) * kBytesPerPixel;
                         const int c0 = actual[eye][offset], c1 = actual[eye][offset + 1],
@@ -5509,7 +5558,8 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
                 std::cout << "  still tint: " << magenta << " magenta pixels\n";
                 require(still_tint_check == 1 ? magenta >= 50 : magenta == 0,
                     still_tint_check == 1 ? "the still mask's tint did not reach the frame"
-                                          : "still against moved at 0% did not stop the hold");
+                    : still_tint_check == 3 ? "the still mask held a light's glow"
+                                            : "still against moved at 0% did not stop the hold");
             }
         }
         if (occluding) {
@@ -6338,7 +6388,8 @@ int main(int argc, char** argv) {
             for (const auto scene : {HybridScene::occlusion, HybridScene::overlay,
                                      HybridScene::overlay_translucent, HybridScene::overlay_panel,
                                      HybridScene::overlay_panel_fast,
-                                     HybridScene::overlay_translucent_dark, HybridScene::fade,
+                                     HybridScene::overlay_translucent_dark,
+                                     HybridScene::overlay_translucent_dim, HybridScene::fade,
                                      HybridScene::occlusion_low_res, HybridScene::occlusion_periphery,
                                      HybridScene::occlusion_foveated,
                                      HybridScene::occlusion_foveated_moved,
@@ -6375,7 +6426,8 @@ int main(int argc, char** argv) {
             for (const auto scene : {HybridScene::occlusion, HybridScene::overlay,
                                      HybridScene::overlay_translucent, HybridScene::overlay_panel,
                                      HybridScene::overlay_panel_fast,
-                                     HybridScene::overlay_translucent_dark, HybridScene::fade,
+                                     HybridScene::overlay_translucent_dark,
+                                     HybridScene::overlay_translucent_dim, HybridScene::fade,
                                      HybridScene::occlusion_low_res, HybridScene::occlusion_periphery,
                                      HybridScene::occlusion_foveated,
                                      HybridScene::occlusion_foveated_moved,
@@ -6464,6 +6516,15 @@ int main(int argc, char** argv) {
                     *block = values;
                     test_hybrid_composition(hybrid_fixture, HybridScene::overlay_translucent,
                         xrfg::D3D12OpticalFlowBackend::fidelity_fx, 2);
+                    // V561: at the built-in values, the dim strokes held
+                    // and a light's glow beside them not.
+                    values.still_moved_percent = xrfg::live_tuning::kDefaults.still_moved_percent;
+                    values.sequence = 5;
+                    *block = values;
+                    test_hybrid_composition(hybrid_fixture, HybridScene::overlay_translucent_dim,
+                        xrfg::D3D12OpticalFlowBackend::fidelity_fx, 1);
+                    test_hybrid_composition(hybrid_fixture, HybridScene::overlay_glow,
+                        xrfg::D3D12OpticalFlowBackend::fidelity_fx, 3);
                     SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
                     UnmapViewOfFile(block);
                     CloseHandle(mapping);

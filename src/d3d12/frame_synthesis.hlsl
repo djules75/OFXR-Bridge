@@ -193,7 +193,7 @@ uint depth_splat_output() {
 ByteAddressBuffer HybridTuning : register(t8);
 
 static const uint kTuningMagic = 0x4C565446u;
-static const uint kTuningVersion = 16u;
+static const uint kTuningVersion = 17u;
 // Field indices: xrfg::live_tuning::Block's order after its header.
 static const uint kTuningAgree = 0u;
 static const uint kTuningChoiceSlope = 1u;
@@ -1020,6 +1020,9 @@ struct StrokeProbe {
     // from within three pixels.
     bool edge;
     bool stroke;
+    // V561: the share of the rise over five pixels along the axis that
+    // happens between the two adjacent ones, 0-1 (probe_stroke).
+    float sharpness;
 };
 
 // The still mask's edge threshold: low, since a dim HUD element has little
@@ -1034,11 +1037,18 @@ ByteAddressBuffer HybridTuning : register(t8);
 // The still mask's tunables (live_tuning still_*), the built-in values
 // where the block is absent.
 uint still_tuning(uint index, uint built_in, uint minimum, uint maximum) {
-    bool present = HybridTuning.Load(0u) == 0x4C565446u && HybridTuning.Load(4u) == 16u;
+    bool present = HybridTuning.Load(0u) == 0x4C565446u && HybridTuning.Load(4u) == 17u;
     return present ? clamp(HybridTuning.Load(12u + 4u * index), minimum, maximum) : built_in;
 }
-float strong_edge() { return float(still_tuning(14u, 10u, 1u, 40u)) / 255.0; }
-float still_match_ratio() { return float(still_tuning(15u, 40u, 10u, 100u)) / 100.0; }
+// V561: the dimmest edge held, for an edge sharp in both frames (any other
+// needs 10/255); 10 built in (the headset's set; the loose tier's threshold too until V561).
+float strong_edge() { return float(still_tuning(14u, 10u, 1u, 10u)) / 255.0; }
+// V561: an edge whose adjacent pixels carry this share of its rise (a HUD's
+// line or text, not a light's glow), and dimmer than 24/255, is a dim HUD
+// element's: matched down to strong_edge() and judged on its own contrast.
+static const float kStillSharp = 0.5;
+static const float kStillDim = 24.0 / 255.0;
+float still_match_ratio() { return float(still_tuning(15u, 100u, 10u, 100u)) / 100.0; }
 // (100 since V560, the headset's: lower lets a light's glow be confirmed
 // while strafing. A cosine of 1 leaves the loose tier little beyond edges
 // exactly along a pixel axis - a HUD's lines and text mostly are.)
@@ -1047,10 +1057,10 @@ uint still_age_pairs() { return still_tuning(17u, 2u, 1u, 5u); }
 // V560: the head motion, in pixels, that confirms a texel (12, the
 // headset's set; V559's 2, a test build's slider made no difference once
 // head motion was judged against the pose); the share of the moved
-// reading's error the still reading may have (12%, the headset's; V559's
+// reading's error the still reading may have (5%, the headset's; V559's
 // 75%; 0 holds nothing that moved).
 float still_confirm_pixels() { return 12.0; }
-float still_moved_ratio() { return float(still_tuning(18u, 12u, 0u, 100u)) / 100.0; }
+float still_moved_ratio() { return float(still_tuning(18u, 5u, 0u, 100u)) / 100.0; }
 // 3: tint generated frames by the still mask (live_tuning hybrid_tint).
 bool still_tint() { return still_tuning(12u, 0u, 0u, 3u) == 3u; }
 
@@ -1062,6 +1072,7 @@ StrokeProbe probe_stroke(float2 pixel, uint slice, bool previous_frame) {
     probe.color = float4(0.0, 0.0, 0.0, 1.0);
     probe.edge = false;
     probe.stroke = false;
+    probe.sharpness = 0.0;
     // The edge between this pixel and the next, right and down: a
     // difference across adjacent pixels sees a pattern two pixels wide (a
     // HUD panel's scanlines), which one taken either side of the pixel
@@ -1116,6 +1127,15 @@ StrokeProbe probe_stroke(float2 pixel, uint slice, bool previous_frame) {
         float dark_stroke = edge_luma(far_minus.color) - near_minus;
         probe.stroke = far_plus.valid >= 0.5 && far_minus.valid >= 0.5 &&
             max(bright_stroke, dark_stroke) >= 0.5 * probe.strength;
+        // V561: how much of the rise across the five pixels from far minus
+        // to far plus happens between the two adjacent ones: a HUD line or
+        // text's edge rises within a pixel or two (a stroke comes back down
+        // beyond it: 1), a light's glow gradually (about 0.2).
+        float near_rise = near_plus - near_minus;
+        float span_rise = edge_luma(far_plus.color) - edge_luma(far_minus.color);
+        probe.sharpness = far_plus.valid >= 0.5 && far_minus.valid >= 0.5
+            ? near_rise / max(max(span_rise, near_rise), 1.0e-4)
+            : 0.0;
         // The brighter side (the luma rises along the axis).
         probe.color = forward ? (abs(probe.axis.x) > 0.0 ? r.color : d.color) : c.color;
     }
@@ -2494,24 +2514,51 @@ void BuildStillMask(uint3 id : SV_DispatchThreadID) {
     // loosely, through stick turns and still views, and dropped when it
     // stops. The age byte: bits 0-6 the age, bit 7 confirmed.
     bool matched = false, stroke = false, loose = false;
-    float edge_slider = strong_edge();
+    float dim_edge = min(strong_edge(), 10.0 / 255.0);
     float ratio_slider = still_match_ratio();
     float cosine_slider = still_angle_cosine();
-    // (A V560 test build tried a brightness ceiling and a sharpness gate
-    // here; neither changed what the headset showed.)
+    // V561: a dim HUD element's edge - sharp in both frames and dimmer than
+    // kStillDim - is matched down to the Still edge threshold, and judged
+    // below on its own contrast (`dim_strength`, its weakest matched
+    // strength): its colour differences are a few levels, which the fixed
+    // margin and share below never let it win, and it ghosted on stick
+    // turns. Any other edge - a light's soft glow among them - needs
+    // 10/255 and the fixed margin as before. Dim is the reading only where
+    // no matched edge of the texel is a bright one. (A V560 test build
+    // gated the confirmation by sharpness instead; it changed nothing.)
+    bool dim = false, bright = false;
+    float dim_strength = 1.0;
     [branch] if (now.edge) {
         StrokeProbe before = probe_stroke(pixel, Slice, true);
-        matched = edges_match(before, now);
+        bool sharp = before.sharpness >= kStillSharp && now.sharpness >= kStillSharp;
+        float weakest = min(before.strength, now.strength);
+        matched = edges_match_within(before, now, sharp ? dim_edge : 10.0 / 255.0, 0.4, 0.85);
         stroke = matched && now.stroke;
-        loose = edges_match_within(before, now, edge_slider, ratio_slider, cosine_slider);
+        loose = edges_match_within(before, now, 10.0 / 255.0, ratio_slider, cosine_slider);
+        if (matched && sharp && weakest < kStillDim) {
+            dim = true;
+            dim_strength = min(dim_strength, weakest);
+        } else if (matched) {
+            bright = true;
+        }
     }
     [branch] if (now_odd.edge) {
         StrokeProbe before_odd = probe_stroke(pixel + float2(1.0, 1.0), Slice, true);
-        bool matched_odd = edges_match(before_odd, now_odd);
+        bool sharp_odd = before_odd.sharpness >= kStillSharp && now_odd.sharpness >= kStillSharp;
+        float weakest_odd = min(before_odd.strength, now_odd.strength);
+        bool matched_odd = edges_match_within(before_odd, now_odd,
+            sharp_odd ? dim_edge : 10.0 / 255.0, 0.4, 0.85);
         stroke = stroke || (matched_odd && now_odd.stroke);
         matched = matched || matched_odd;
-        loose = loose || edges_match_within(before_odd, now_odd, edge_slider, ratio_slider, cosine_slider);
+        loose = loose || edges_match_within(before_odd, now_odd, 10.0 / 255.0, ratio_slider, cosine_slider);
+        if (matched_odd && sharp_odd && weakest_odd < kStillDim) {
+            dim = true;
+            dim_strength = min(dim_strength, weakest_odd);
+        } else if (matched_odd) {
+            bright = true;
+        }
     }
+    dim = dim && !bright;
     MappedCoordinate shifted = map_source_to_target(pixel, PreviousMappings[ViewIndex]);
     float pose_shift = shifted.valid >= 0.5 ? length(shifted.coordinate - pixel) : 0.0;
     // The edge at its own image place in A: a head-locked HUD is there
@@ -2601,7 +2648,17 @@ void BuildStillMask(uint3 id : SV_DispatchThreadID) {
             // something to lose: a repeating pattern moved by its period
             // reads 0 either way, and that is not a HUD.
             // (V560: the share is the tuning window's, 0.75 before.)
-            still_wins = judged && still_error + 3.0 * 2.0 / 255.0 <= still_moved_ratio() * moved_error;
+            // V561: a dim HUD element's edge on its own scale: a margin of a
+            // tenth of its contrast a pixel, and holding's error at most half
+            // of moving's (or the window's share, if larger; 0 still holds
+            // nothing) - over a few levels of contrast, moving's error is
+            // only a little larger than the contrast itself.
+            float share = still_moved_ratio();
+            float margin = dim ? 3.0 * 0.1 * dim_strength : 3.0 * 2.0 / 255.0;
+            if (dim && share > 0.0) {
+                share = max(share, 0.5);
+            }
+            still_wins = judged && still_error + margin <= share * moved_error;
             // V560: the age resets only where moving clearly explains the
             // two frames (its error under half of holding's), and is kept
             // where neither reading clearly wins: lines of HUD text stacked
@@ -2611,7 +2668,7 @@ void BuildStillMask(uint3 id : SV_DispatchThreadID) {
             // hold every nod. A light on a head motion still resets (the pose
             // explains it). Confirmation is untouched: any pair still does
             // not win still clears it (V559's re-earned confirmation).
-            bool moved_wins = judged && 2.0 * moved_error + 3.0 * 2.0 / 255.0 <= still_error;
+            bool moved_wins = judged && 2.0 * moved_error + margin <= still_error;
             age = still_wins ? min(previous_age + 1u, 127u) : moved_wins ? 0u : previous_age;
         }
     }

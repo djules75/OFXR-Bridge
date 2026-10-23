@@ -33,8 +33,9 @@ inline constexpr std::uint32_t kMagic = 0x4C565446U;  // "FTVL"
 // mask's edge threshold. 13 (V559): the mask's match ratio, angle and age.
 // 14 and 15: V560 test builds (confirming head motion, brightness ceiling,
 // sharpness: no effect in the headset, removed). 16 (V560): the mask's
-// still-against-moved ratio; hybrid_tint 3, the still mask's tint.
-inline constexpr std::uint32_t kVersion = 16U;
+// still-against-moved ratio; hybrid_tint 3, the still mask's tint. 17
+// (V561): still_edge_255ths is the sharp edges' threshold, 1-10.
+inline constexpr std::uint32_t kVersion = 17U;
 
 // Each slider in the tray runs from cheaper on the GPU (left) to costlier
 // (right); the comments say which way that is for a value.
@@ -109,20 +110,22 @@ struct Block {
     // strongest colour channel) needs this contrast to be matched between
     // the frames and held; lower holds dimmer elements and costs a little
     // more of the mask. Read by the mask's passes in every composition.
-    std::uint32_t still_edge_255ths;              // 1-40, default 10
+    // V561: the threshold for an edge sharp in both frames (a HUD's line or
+    // text; any other edge needs 10/255) - the dim HUD elements'.
+    std::uint32_t still_edge_255ths;              // 1-10, default 10 (V559/V560: 1-40)
     // The two frames' edges match when the weaker is at least this share of
     // the stronger, their orientations agree to at least this cosine, and
     // the texel has matched this many pairs in a row (a step one more).
     // Looser (lower) holds more; what it then holds wrongly is static world
     // texture.
-    std::uint32_t still_match_percent;            // 10-100, default 40
+    std::uint32_t still_match_percent;            // 10-100, default 100 (V559/V560: 40)
     std::uint32_t still_angle_percent;            // 50-100, default 100 (V559's 85)
     std::uint32_t still_age_pairs;                // 1-5, default 2
     // V560. Holding must explain the two frames better than moving: the
     // still reading's error at most this share of the moved reading's
     // (lower asks a clearer win: holds less; 0 holds nothing that moved).
-    // 12 the headset's set (V559's 75).
-    std::uint32_t still_moved_percent;            // 0-100, default 12
+    // 5 the headset's set (V559's 75).
+    std::uint32_t still_moved_percent;            // 0-100, default 5
 };
 
 // The composition's built-in values (frame_synthesis.hlsl), so the window
@@ -140,8 +143,8 @@ inline constexpr Block kDefaults{
     0U,
     0U,
     10U,
-    40U, 100U, 2U,
-    12U,
+    100U, 100U, 2U,
+    5U,
 };
 
 // The block's values within their ranges, as the shader expects them.
@@ -160,7 +163,7 @@ inline constexpr Block kDefaults{
     block.depth_agree_1000ths = std::min(block.depth_agree_1000ths, 250U);
     block.hybrid_tint = std::min(block.hybrid_tint, 3U);
     block.mask_band_percent = std::min(block.mask_band_percent, 50U);
-    block.still_edge_255ths = std::clamp(block.still_edge_255ths, 1U, 40U);
+    block.still_edge_255ths = std::clamp(block.still_edge_255ths, 1U, 10U);
     block.still_match_percent = std::clamp(block.still_match_percent, 10U, 100U);
     block.still_angle_percent = std::clamp(block.still_angle_percent, 50U, 100U);
     block.still_age_pairs = std::clamp(block.still_age_pairs, 1U, 5U);
