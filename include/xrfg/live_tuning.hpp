@@ -34,8 +34,11 @@ inline constexpr std::uint32_t kMagic = 0x4C565446U;  // "FTVL"
 // 14 and 15: V560 test builds (confirming head motion, brightness ceiling,
 // sharpness: no effect in the headset, removed). 16 (V560): the mask's
 // still-against-moved ratio; hybrid_tint 3, the still mask's tint. 17
-// (V561): still_edge_255ths is the sharp edges' threshold, 1-10.
-inline constexpr std::uint32_t kVersion = 17U;
+// (V561): still_edge_255ths is the sharp edges' threshold, 1-10. 18 (V562):
+// the still mask's edge threshold, match ratio and angle left with its
+// loose tier (the headset had settled on 10, 100% and 100%): age and the
+// still-against-moved share are the fields 14 and 15.
+inline constexpr std::uint32_t kVersion = 18U;
 
 // Each slider in the tray runs from cheaper on the GPU (left) to costlier
 // (right); the comments say which way that is for a value.
@@ -93,8 +96,8 @@ struct Block {
     // each pixel (1) or by the coverage mask's verdict (2); 0 off. A
     // diagnostic for the headset, never saved: off at every tray start.
     // V560: 3, by the still mask, in every composition (not the hybrid's
-    // alone): magenta held by its age, cyan held by a head-motion
-    // confirmation, yellow a warped sample refused for crossing the mask.
+    // alone): magenta held, yellow a warped sample refused for crossing the
+    // mask (V560-V561: cyan held by a head-motion confirmation).
     std::uint32_t hybrid_tint;                    // 0 off, 1 branches, 2 mask, 3 still
 
     // V543: the coverage mask's band. Each moving surface's footprint is
@@ -106,20 +109,10 @@ struct Block {
     // blend, the ghost at a fast edge.
     std::uint32_t mask_band_percent;              // 0-50 (0 V539's), default 0
 
-    // V559: the still mask for head-locked HUDs. An edge (on luma, or the
-    // strongest colour channel) needs this contrast to be matched between
-    // the frames and held; lower holds dimmer elements and costs a little
-    // more of the mask. Read by the mask's passes in every composition.
-    // V561: the threshold for an edge sharp in both frames (a HUD's line or
-    // text; any other edge needs 10/255) - the dim HUD elements'.
-    std::uint32_t still_edge_255ths;              // 1-10, default 10 (V559/V560: 1-40)
-    // The two frames' edges match when the weaker is at least this share of
-    // the stronger, their orientations agree to at least this cosine, and
-    // the texel has matched this many pairs in a row (a step one more).
-    // Looser (lower) holds more; what it then holds wrongly is static world
-    // texture.
-    std::uint32_t still_match_percent;            // 10-100, default 100 (V559/V560: 40)
-    std::uint32_t still_angle_percent;            // 50-100, default 100 (V559's 85)
+    // V559: the still mask for head-locked HUDs, read by its passes in every
+    // composition. A texel is held once its edge has matched this many pairs
+    // in a row (a step one more); lower holds sooner. (V559-V561 had the
+    // edge threshold, match ratio and angle here too.)
     std::uint32_t still_age_pairs;                // 1-5, default 2
     // V560. Holding must explain the two frames better than moving: the
     // still reading's error at most this share of the moved reading's
@@ -142,8 +135,7 @@ inline constexpr Block kDefaults{
     1U, 50U, 250U,
     0U,
     0U,
-    10U,
-    100U, 100U, 2U,
+    2U,
     5U,
 };
 
@@ -163,24 +155,21 @@ inline constexpr Block kDefaults{
     block.depth_agree_1000ths = std::min(block.depth_agree_1000ths, 250U);
     block.hybrid_tint = std::min(block.hybrid_tint, 3U);
     block.mask_band_percent = std::min(block.mask_band_percent, 50U);
-    block.still_edge_255ths = std::clamp(block.still_edge_255ths, 1U, 10U);
-    block.still_match_percent = std::clamp(block.still_match_percent, 10U, 100U);
-    block.still_angle_percent = std::clamp(block.still_angle_percent, 50U, 100U);
     block.still_age_pairs = std::clamp(block.still_age_pairs, 1U, 5U);
     block.still_moved_percent = std::min(block.still_moved_percent, 100U);
     return block;
 }
 
 // The fields after the header, in order: what the shader indexes and what the
-// 813 and 866 records pack, 8 bits a value (every range fits): 813 the first
-// sixteen, 866 the rest (V559 had two past 813's sixteen unrecorded).
-inline constexpr std::size_t kFieldCount = 19;
+// 813 record packs, 8 bits a value (every range fits; since V562 all of them
+// fit 813's sixteen again - V560-V561's 866 carried the rest).
+inline constexpr std::size_t kFieldCount = 16;
 [[nodiscard]] inline const std::uint32_t* fields(const Block& block) noexcept {
     return &block.hybrid_agree_threshold_255ths;
 }
 static_assert(sizeof(Block) == sizeof(std::uint32_t) * (3 + kFieldCount));
 static_assert(offsetof(Block, hybrid_agree_threshold_255ths) == 12);
 static_assert(offsetof(Block, still_moved_percent) == 12 + 4 * (kFieldCount - 1));
-static_assert(kFieldCount <= 24);
+static_assert(kFieldCount <= 16);
 
 }  // namespace xrfg::live_tuning

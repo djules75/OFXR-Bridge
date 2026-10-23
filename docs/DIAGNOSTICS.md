@@ -544,12 +544,12 @@ V543-V554 recorded it as 866 (the tuning fields past 813's sixteen); since
 V555 the window has fourteen fields and 813 carries them all.
 
 V560: a third box tints generated frames by the still mask for head-locked
-HUDs (V559), with Hybrid on or off: **magenta** a pixel held by its age (the
-same stroke at the same place for enough pairs), **cyan** held by a
-head-motion confirmation alone (the loose tolerances), **yellow** a warped
-sample refused for crossing the mask. 866 is back for the tuning fields
-past the sixteenth, the still mask's: a their values, 8 bits each from bit 0
-(still angle, still age, still vs moved), b the window's sequence.
+HUDs (V559), with Hybrid on or off: **magenta** a pixel held (the same
+stroke at the same place for enough pairs), **yellow** a warped sample
+refused for crossing the mask. (V560-V561 also tinted **cyan** a pixel held
+by a head-motion confirmation alone, and recorded the tuning fields past the
+sixteenth as 866; V562 removed that tier, and 813 carries every field again:
+still age and still vs moved are its last two.)
 
 The second-surface search (Edge surface solves) accepts a surface only
 where the coverage mask does not give its previous-frame spot to another

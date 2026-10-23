@@ -124,10 +124,10 @@ struct AppState {
     // values set once hold for every game started after them.
     HWND tuning_window{};
     std::array<HWND, 3> tuning_switches{};
-    std::array<HWND, 17> tuning_sliders{};
+    std::array<HWND, 14> tuning_sliders{};
     // One per slider (V559's had one fewer, and its last label's handle
     // was written past the end).
-    std::array<HWND, 17> tuning_labels{};
+    std::array<HWND, 14> tuning_labels{};
     HANDLE tuning_mapping{};
     xrfg::live_tuning::Block* tuning_block{};
 };
@@ -1146,7 +1146,7 @@ struct TuningSlider {
     bool column_break = false;
 };
 
-constexpr std::array<TuningSlider, 17> kTuningSliders{{
+constexpr std::array<TuningSlider, 14> kTuningSliders{{
     {L"Agree threshold", 0, 62,
      &xrfg::live_tuning::Block::hybrid_agree_threshold_255ths, 1U, 1.0, L"/255",
      L"the flow is asked only where the vectors' two frames disagree by more",
@@ -1192,22 +1192,10 @@ constexpr std::array<TuningSlider, 17> kTuningSliders{{
     {L"Depth agreement", 0, 250,
      &xrfg::live_tuning::Block::depth_agree_1000ths, 1U, 0.001, L"",
      L"a nearer surface's two frames must agree within this (no cost)", nullptr, false},
-    {L"Still edge", 1, 10,
-     &xrfg::live_tuning::Block::still_edge_255ths, 1U, 1.0, L"/255",
-     L"the dimmest sharp HUD edge held still (soft edges need 10); lower holds dimmer elements",
-     L"Still mask for head-locked HUDs (V559), every composition", true},
-    {L"Still match", 10, 100,
-     &xrfg::live_tuning::Block::still_match_percent, 1U, 1.0, L"%",
-     L"the weaker frame's edge must be this share of the stronger's; lower holds more",
-     nullptr, true},
-    {L"Still angle", 50, 100,
-     &xrfg::live_tuning::Block::still_angle_percent, 1U, 1.0, L"%",
-     L"the two frames' edge orientations must agree to this cosine; lower holds more",
-     nullptr, true},
     {L"Still age", 1, 5,
      &xrfg::live_tuning::Block::still_age_pairs, 1U, 1.0, L" pairs",
      L"pairs in a row an edge must stay put before it is held (a step one more); lower holds sooner",
-     nullptr, true},
+     L"Still mask for head-locked HUDs (V559), every composition", true},
     {L"Still vs moved", 0, 100,
      &xrfg::live_tuning::Block::still_moved_percent, 1U, 1.0, L"%",
      L"holding's error must be under this share of moving's; lower asks a clearer win, 0 holds nothing moving",
@@ -1235,8 +1223,8 @@ constexpr std::array<TuningSwitch, 3> kTuningSwitches{{
      &xrfg::live_tuning::Block::hybrid_tint, 1U, 0},
     {L"Tint generated frames by the coverage mask's verdict instead (diagnostic, not saved)",
      &xrfg::live_tuning::Block::hybrid_tint, 2U, 0},
-    {L"Tint generated frames by the still mask: magenta held by age, cyan held by a head-motion "
-     L"confirmation, yellow a sample refused (any composition; diagnostic, not saved)",
+    {L"Tint generated frames by the still mask: magenta held, yellow a sample refused "
+     L"(any composition; diagnostic, not saved)",
      &xrfg::live_tuning::Block::hybrid_tint, 3U, 0},
 }};
 static_assert(kTuningSwitches.size() == std::tuple_size_v<decltype(AppState::tuning_switches)>);

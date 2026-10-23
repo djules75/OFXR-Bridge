@@ -6364,7 +6364,174 @@ void test_flat_panel_marker_synthesis(
     require(operation_succeeded(history->invalidate()), "flat panel history invalidate failed");
 }
 
+// V562: the still mask's GPU cost at a headset's eye size, on the NVIDIA
+// GPU ("stillbench <width> <height> [pairs]"): a Hybrid FidelityFX 4X pair
+// (three synthetics) over a textured background moving 12 px a pair, a
+// translucent HUD of strokes held still, timed from submit_pair to the
+// pair's completion, in rounds that alternate the mask on and off
+// (XRFG_DISABLE_STILL_MASK, read at every pair). Measurement only.
+void run_still_mask_benchmark(UINT width, UINT height, int pairs_per_round) {
+    D3D12WarpFixture fixture(true);
+    SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
+    const UINT motion_width = width / 2U, motion_height = height / 2U;
+    constexpr int kMotion = 12;
+    const auto make_scene = [&](int shift) {
+        StereoPattern pattern;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            auto& bytes = pattern[eye];
+            bytes.resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
+            for (UINT y = 0; y < height; ++y) {
+                for (UINT x = 0; x < width; ++x) {
+                    const int bx = static_cast<int>(x) - shift + 4096;
+                    RgbaBytes color{static_cast<std::uint8_t>(40 + (bx * 13 + static_cast<int>(y) * 5) % 160),
+                                    static_cast<std::uint8_t>(60 + ((bx / 3) % 7) * 20 + eye * 9),
+                                    static_cast<std::uint8_t>(90 + (bx * 7 + static_cast<int>(y) / 4) % 120), 255};
+                    const bool hud = x >= width / 4U && x < width / 2U && y >= height / 3U &&
+                        y < height / 2U && (x % 8U) < 2U;
+                    if (hud) {
+                        const RgbaBytes stroke{240, 210, 40, 255};
+                        for (UINT c = 0; c < 3; ++c) {
+                            color[c] = static_cast<std::uint8_t>(std::lround(0.65 * stroke[c] + 0.35 * color[c]));
+                        }
+                    }
+                    std::copy(color.begin(), color.end(), bytes.begin() +
+                        (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel);
+                }
+            }
+        }
+        return pattern;
+    };
+    std::array<ComPtr<ID3D12Resource>, 2> sources{
+        create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
+    std::array<ComPtr<ID3D12Resource>, 2> current_destinations{
+        create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
+    std::array<ComPtr<ID3D12Resource>, 3> synthetic_destinations{
+        create_source_texture(fixture, width, height), create_source_texture(fixture, width, height),
+        create_source_texture(fixture, width, height)};
+    upload_pattern(fixture, sources[0].Get(), make_scene(0));
+    upload_pattern(fixture, sources[1].Get(), make_scene(kMotion));
+    // The game's B-to-A vectors for each direction (the sources alternate).
+    std::array<ComPtr<ID3D12Resource>, 2> motion{};
+    for (int direction = 0; direction < 2; ++direction) {
+        const float value = (direction == 0 ? -1.0F : 1.0F) * static_cast<float>(kMotion) * 0.5F;
+        motion[direction] = create_and_upload_game_motion_field(
+            fixture, motion_width, motion_height,
+            [&](UINT, UINT, UINT) { return std::array<float, 2>{value, 0.0F}; });
+    }
+    std::array<ID3D12Resource*, 2> source_pointers{sources[0].Get(), sources[1].Get()};
+    std::array<ID3D12Resource*, 2> current_pointers{
+        current_destinations[0].Get(), current_destinations[1].Get()};
+    std::array<ID3D12Resource*, 3> synthetic_pointers{synthetic_destinations[0].Get(),
+        synthetic_destinations[1].Get(), synthetic_destinations[2].Get()};
+    auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
+    require(operation_succeeded(history->initialize(fixture.device(), fixture.queue(),
+                source_pointers, D3D12_RESOURCE_STATE_RENDER_TARGET)),
+        "benchmark history initialization failed");
+    xrfg::D3D12FrameSynthesizer synthesizer;
+    xrfg::D3D12NvidiaOpticalFlowOptions options;
+    options.hybrid = true;
+    require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(),
+                history, current_pointers, synthetic_pointers, kFormat,
+                D3D12_RESOURCE_STATE_RENDER_TARGET, xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+                options)),
+        "benchmark synthesizer initialization failed");
+    const auto guides = [&](std::uint64_t serial) {
+        auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
+        set->eye_count = kEyeCount;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            auto frame = std::make_shared<xrfg::DlssMotionVectorFrame>();
+            frame->stream = 311 + eye;
+            frame->epoch = 3;
+            frame->serial = serial;
+            frame->previous_serial = serial - 1;
+            // Serial s is source (s - 1) % 2: source 1 moved +kMotion from
+            // source 0, source 0 -kMotion from source 1.
+            frame->motion_vectors = motion[(serial - 1U) % 2U == 1U ? 0 : 1];
+            frame->producer_queue = fixture.queue();
+            frame->output_width = width;
+            frame->output_height = height;
+            frame->motion_width = motion_width;
+            frame->motion_height = motion_height;
+            frame->motion_slice = frame->output_slice = eye;
+            frame->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            set->eyes[eye] = frame;
+        }
+        return set;
+    };
+    const ReprojectionViews views = make_reprojection_views();
+    xrfg::D3D12HistoryCaptureTicket capture_a{};
+    require(operation_succeeded(history->capture(0, &capture_a)) &&
+            operation_succeeded(history->commit(capture_a)),
+        "benchmark capture A failed");
+    xrfg::D3D12FrameSynthesisTicket prime{};
+    require(operation_succeeded(synthesizer.submit_prime(capture_a, views, 0, &prime, guides(1))),
+        "benchmark prime failed");
+    require_frame_start_gate(synthesizer, "benchmark frame-start gate");
+    const std::array<xrfg::D3D12ExtraSynthetic, 2> extra{{{1U, 0.5F}, {2U, 0.75F}}};
+    std::uint64_t serial = 1;
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
+    const auto run = [&](int count, std::vector<double>* times) {
+        for (int index = 0; index < count; ++index) {
+            ++serial;
+            const UINT source = static_cast<UINT>((serial - 1U) % 2U);
+            xrfg::D3D12HistoryCaptureTicket capture{};
+            require(operation_succeeded(history->capture(source, &capture)) &&
+                    operation_succeeded(history->commit(capture)),
+                "benchmark capture failed");
+            require(operation_succeeded(synthesizer.wait_for_idle()), "benchmark idle");
+            LARGE_INTEGER begin{}, end{};
+            QueryPerformanceCounter(&begin);
+            xrfg::D3D12FrameSynthesisTicket pair{};
+            require(operation_succeeded(synthesizer.submit_pair(capture, views, views, 0, 1, &pair,
+                        std::nullopt, guides(serial), false, 0.25F, extra)),
+                "benchmark pair failed");
+            require(operation_succeeded(synthesizer.wait_for_previous_submission(1000)),
+                "benchmark pair wait");
+            QueryPerformanceCounter(&end);
+            if (times != nullptr) {
+                times->push_back(1000.0 * static_cast<double>(end.QuadPart - begin.QuadPart) /
+                    static_cast<double>(frequency.QuadPart));
+            }
+            require(operation_succeeded(synthesizer.flush_current_copy(fixture.queue(), pair.fence_value)),
+                "benchmark copy flush");
+        }
+    };
+    const auto median = [](std::vector<double> values) {
+        std::sort(values.begin(), values.end());
+        return values.empty() ? 0.0 : values[values.size() / 2];
+    };
+    // Warm-up: clocks up, the mask's ages built.
+    run(40, nullptr);
+    std::vector<double> on, off;
+    for (int round = 0; round < 6; ++round) {
+        SetEnvironmentVariableW(L"XRFG_DISABLE_STILL_MASK", nullptr);
+        run(5, nullptr);
+        run(pairs_per_round, &on);
+        SetEnvironmentVariableW(L"XRFG_DISABLE_STILL_MASK", L"1");
+        run(5, nullptr);
+        run(pairs_per_round, &off);
+    }
+    SetEnvironmentVariableW(L"XRFG_DISABLE_STILL_MASK", nullptr);
+    require(operation_succeeded(synthesizer.wait_for_idle()), "benchmark final idle");
+    std::cout << "stillbench " << width << "x" << height << " x2 eyes, 4X hybrid FidelityFX: "
+              << "mask on median " << median(on) << " ms, off " << median(off) << " ms, "
+              << "difference " << (median(on) - median(off)) << " ms per pair ("
+              << on.size() << " + " << off.size() << " pairs)\n";
+}
+
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "stillbench") {
+        try {
+            run_still_mask_benchmark(argc > 2 ? static_cast<UINT>(std::stoul(argv[2])) : 4172U,
+                argc > 3 ? static_cast<UINT>(std::stoul(argv[3])) : 3268U,
+                argc > 4 ? std::stoi(argv[4]) : 20);
+        } catch (const std::exception& error) {
+            std::cerr << "stillbench failed: " << error.what() << '\n';
+            return 1;
+        }
+        return 0;
+    }
     // V532: off by default in the product; the harness checks it on.
     xrfg::set_hybrid_depth_search(true);
     const bool trace_test = std::getenv("XRFG_TEST_GPU_TRACE") != nullptr;

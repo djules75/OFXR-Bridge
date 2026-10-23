@@ -127,8 +127,8 @@ bool still_mask_available() {
 
 // The still mask's byte at a target coordinate, from the slice grown by a
 // texel or the one as built: bit 7 a stroke of B is here, bits 0-2 and 3-5
-// where its match in A sits, -3..3 pixels each way, biased by 3; bit 6
-// (V560) held by a head-motion confirmation, not its age. Zero: none.
+// where its match in A sits, -3..3 pixels each way, biased by 3. Zero:
+// none. (Bit 6 was V560-V561's confirmed tier's.)
 uint still_mask_word(float2 coordinate, bool grown) {
     uint2 limit = (uint2(Width, Height) - uint2(1u, 1u)) >> 1u;
     int2 texel = clamp(int2(floor(coordinate * 0.5)), int2(0, 0), int2(limit));
@@ -193,7 +193,7 @@ uint depth_splat_output() {
 ByteAddressBuffer HybridTuning : register(t8);
 
 static const uint kTuningMagic = 0x4C565446u;
-static const uint kTuningVersion = 17u;
+static const uint kTuningVersion = 18u;
 // Field indices: xrfg::live_tuning::Block's order after its header.
 static const uint kTuningAgree = 0u;
 static const uint kTuningChoiceSlope = 1u;
@@ -1025,42 +1025,30 @@ struct StrokeProbe {
     float sharpness;
 };
 
-// The still mask's edge threshold: low, since a dim HUD element has little
-// contrast and the age the mask asks for keeps chance matches out (24/255
-// before it). The tray's tuning window moves it (live_tuning
-// still_edge_255ths), for the per-pixel fallback too since V560.
-// V560: every composition reads the block (t8 of every descriptor block,
-// the warm-up's a null raw buffer), for the still mask's tint as well.
+// The still mask's edge threshold, 10/255 (24 before V559's persistence;
+// V559-V561 had it on a slider, which the headset left at 10).
+// V560: every composition reads the tuning block (t8 of every descriptor
+// block, the warm-up's a null raw buffer), for the still mask's tint too.
 #ifndef XRFG_HYBRID
 ByteAddressBuffer HybridTuning : register(t8);
 #endif
 // The still mask's tunables (live_tuning still_*), the built-in values
 // where the block is absent.
 uint still_tuning(uint index, uint built_in, uint minimum, uint maximum) {
-    bool present = HybridTuning.Load(0u) == 0x4C565446u && HybridTuning.Load(4u) == 17u;
+    bool present = HybridTuning.Load(0u) == 0x4C565446u && HybridTuning.Load(4u) == 18u;
     return present ? clamp(HybridTuning.Load(12u + 4u * index), minimum, maximum) : built_in;
 }
-// V561: the dimmest edge held, for an edge sharp in both frames (any other
-// needs 10/255); 10 built in (the headset's set; the loose tier's threshold too until V561).
-float strong_edge() { return float(still_tuning(14u, 10u, 1u, 10u)) / 255.0; }
+static const float kStillEdge = 10.0 / 255.0;
 // V561: an edge whose adjacent pixels carry this share of its rise (a HUD's
 // line or text, not a light's glow), and dimmer than 24/255, is a dim HUD
-// element's: matched down to strong_edge() and judged on its own contrast.
+// element's, judged on its own contrast (BuildStillMask).
 static const float kStillSharp = 0.5;
 static const float kStillDim = 24.0 / 255.0;
-float still_match_ratio() { return float(still_tuning(15u, 100u, 10u, 100u)) / 100.0; }
-// (100 since V560, the headset's: lower lets a light's glow be confirmed
-// while strafing. A cosine of 1 leaves the loose tier little beyond edges
-// exactly along a pixel axis - a HUD's lines and text mostly are.)
-float still_angle_cosine() { return float(still_tuning(16u, 100u, 50u, 100u)) / 100.0; }
-uint still_age_pairs() { return still_tuning(17u, 2u, 1u, 5u); }
-// V560: the head motion, in pixels, that confirms a texel (12, the
-// headset's set; V559's 2, a test build's slider made no difference once
-// head motion was judged against the pose); the share of the moved
-// reading's error the still reading may have (5%, the headset's; V559's
-// 75%; 0 holds nothing that moved).
-float still_confirm_pixels() { return 12.0; }
-float still_moved_ratio() { return float(still_tuning(18u, 5u, 0u, 100u)) / 100.0; }
+// Pairs in a row an edge must stay put before it is held (a step one more).
+uint still_age_pairs() { return still_tuning(14u, 2u, 1u, 5u); }
+// The share of the moved reading's error the still reading may have (5%,
+// the headset's; V559's 75%; 0 holds nothing that moved).
+float still_moved_ratio() { return float(still_tuning(15u, 5u, 0u, 100u)) / 100.0; }
 // 3: tint generated frames by the still mask (live_tuning hybrid_tint).
 bool still_tint() { return still_tuning(12u, 0u, 0u, 3u) == 3u; }
 
@@ -1094,7 +1082,7 @@ StrokeProbe probe_stroke(float2 pixel, uint slice, bool previous_frame) {
     probe.gradient = float2(luma_r - luma_c, luma_d - luma_c);
     probe.strength = length(probe.gradient);
     bool edge = min(c.valid, min(r.valid, d.valid)) >= 0.5 &&
-        probe.strength >= min(strong_edge(), 10.0 / 255.0);
+        probe.strength >= kStillEdge;
     probe.edge = edge;
     [branch] if (edge) {
         probe.axis = abs(probe.gradient.x) >= abs(probe.gradient.y)
@@ -1144,21 +1132,15 @@ StrokeProbe probe_stroke(float2 pixel, uint slice, bool previous_frame) {
 
 // The same edge in both frames: the same orientation, a similar strength.
 // (Not its colour: a translucent stroke's follows what is behind it, which
-// a stick turn changes between the frames.)
-bool edges_match_within(StrokeProbe previous, StrokeProbe current,
-    float threshold, float ratio, float cosine) {
+// a stick turn changes between the frames.) Both at least kStillEdge, the
+// weaker at least 40% of the stronger, their orientations within a cosine
+// of 0.85.
+bool edges_match(StrokeProbe previous, StrokeProbe current) {
     float along = dot(previous.gradient, current.gradient) /
         max(previous.strength * current.strength, 1.0e-6);
     return previous.edge && current.edge &&
-        min(previous.strength, current.strength) >= threshold && along >= cosine &&
-        min(previous.strength, current.strength) >= ratio * max(previous.strength, current.strength);
-}
-
-// The built-in tolerances: what holds a HUD's bright text without more
-// evidence. (The tuning window's looser values are the confirmed tier's,
-// see BuildStillMask.)
-bool edges_match(StrokeProbe previous, StrokeProbe current) {
-    return edges_match_within(previous, current, 10.0 / 255.0, 0.4, 0.85);
+        min(previous.strength, current.strength) >= kStillEdge && along >= 0.85 &&
+        min(previous.strength, current.strength) >= 0.4 * max(previous.strength, current.strength);
 }
 
 bool strokes_match(StrokeProbe previous, StrokeProbe current) {
@@ -1766,9 +1748,8 @@ float4 synthesize_midpoint(
     // colour that stands in, applied last so nothing below reads the copy.
     bool hud_exclude = false;
     float4 hud_color = float4(0.0, 0.0, 0.0, 1.0);
-    // V560, for the still mask's tint: 1 the pixel held by its age, 2 by a
-    // head-motion confirmation alone.
-    uint still_tier = 0u;
+    // V560, for the still mask's tint: the pixel held by the mask.
+    bool still_held = false;
 #ifdef XRFG_HYBRID
     last_disagreement = 1.0;
     last_vectors_case = 0u;
@@ -1846,7 +1827,7 @@ float4 synthesize_midpoint(
                 if (edge_stationary) {
                     if (still_mask_available()) {
                         output_color = still_mask_color(hud_source, still_word, output_color);
-                        still_tier = (still_word & 64u) != 0u ? 2u : 1u;
+                        still_held = true;
                     } else {
                         CameraSample image_previous = sample_previous_image(pixel, Slice, ViewIndex);
                         if (image_previous.valid >= 0.5) {
@@ -2322,15 +2303,13 @@ float4 synthesize_midpoint(
         output_color = hud_color;
     }
     // V560: the still mask's tint (the tuning window's third box), on
-    // generated frames only: magenta held by its age, cyan held by a
-    // head-motion confirmation alone, yellow a warped sample refused for
-    // crossing the mask. Nested: fxc evaluates both sides of &&, and the
-    // block is read only at the few pixels the mask touched.
-    [branch] if (still_tier != 0u || hud_exclude) {
+    // generated frames only: magenta held, yellow a warped sample refused
+    // for crossing the mask (cyan, V560-V561, held by a head-motion
+    // confirmation). Nested: fxc evaluates both sides of &&, and the block
+    // is read only at the few pixels the mask touched.
+    [branch] if (still_held || hud_exclude) {
         [branch] if (still_tint()) {
-            float3 tint = still_tier == 1u ? float3(1.0, 0.0, 1.0)
-                : still_tier == 2u ? float3(0.0, 1.0, 1.0)
-                : float3(1.0, 1.0, 0.0);
+            float3 tint = still_held ? float3(1.0, 0.0, 1.0) : float3(1.0, 1.0, 0.0);
             output_color.rgb = lerp(output_color.rgb, tint, 0.5);
         }
     }
@@ -2503,38 +2482,28 @@ void BuildStillMask(uint3 id : SV_DispatchThreadID) {
     // the odd one diagonally next to it are both probed.
     StrokeProbe now = probe_stroke(pixel, Slice, false);
     StrokeProbe now_odd = probe_stroke(pixel + float2(1.0, 1.0), Slice, false);
-    // Two tiers. Strict: the built-in tolerances, held after the age below
-    // - a HUD's bright text. Loose: the tuning window's tolerances, which
-    // may be as loose as the dim elements need, held only once CONFIRMED:
-    // matched at the same image place in a pair whose head motion moved
-    // every world pixel by two pixels or more (the pose shift; twelve since
-    // V560) - nothing
-    // of the world, however far, stays put through that; a head-locked HUD
-    // does. Confirmed, a texel is held for as long as it keeps matching
-    // loosely, through stick turns and still views, and dropped when it
-    // stops. The age byte: bits 0-6 the age, bit 7 confirmed.
-    bool matched = false, stroke = false, loose = false;
-    float dim_edge = min(strong_edge(), 10.0 / 255.0);
-    float ratio_slider = still_match_ratio();
-    float cosine_slider = still_angle_cosine();
-    // V561: a dim HUD element's edge - sharp in both frames and dimmer than
-    // kStillDim - is matched down to the Still edge threshold, and judged
-    // below on its own contrast (`dim_strength`, its weakest matched
-    // strength): its colour differences are a few levels, which the fixed
-    // margin and share below never let it win, and it ghosted on stick
-    // turns. Any other edge - a light's soft glow among them - needs
-    // 10/255 and the fixed margin as before. Dim is the reading only where
-    // no matched edge of the texel is a bright one. (A V560 test build
-    // gated the confirmation by sharpness instead; it changed nothing.)
+    // An edge is matched where the same edge is at the same image place in
+    // A (10/255 contrast, the weaker at least 40% of the stronger, their
+    // orientations within a cosine of 0.85). V561: an edge sharp in both
+    // frames and dimmer than kStillDim is a dim HUD element's, judged below
+    // on its own contrast (`dim_strength`, its weakest matched strength):
+    // its colour differences are a few levels, which the fixed margin and
+    // share never let it win, and it ghosted on stick turns. Any other
+    // edge - a light's soft glow among them - takes the fixed margin. Dim
+    // is the reading only where no matched edge of the texel is a bright
+    // one. (V559-V561 also had a loose tier, held once a head motion
+    // confirmed it, with its own sliders; at the values the headset settled
+    // on it matched only edges identical in both frames, which the age
+    // holds anyway, and V562 removed it.)
+    bool matched = false, stroke = false;
     bool dim = false, bright = false;
     float dim_strength = 1.0;
     [branch] if (now.edge) {
         StrokeProbe before = probe_stroke(pixel, Slice, true);
         bool sharp = before.sharpness >= kStillSharp && now.sharpness >= kStillSharp;
         float weakest = min(before.strength, now.strength);
-        matched = edges_match_within(before, now, sharp ? dim_edge : 10.0 / 255.0, 0.4, 0.85);
+        matched = edges_match(before, now);
         stroke = matched && now.stroke;
-        loose = edges_match_within(before, now, 10.0 / 255.0, ratio_slider, cosine_slider);
         if (matched && sharp && weakest < kStillDim) {
             dim = true;
             dim_strength = min(dim_strength, weakest);
@@ -2546,11 +2515,9 @@ void BuildStillMask(uint3 id : SV_DispatchThreadID) {
         StrokeProbe before_odd = probe_stroke(pixel + float2(1.0, 1.0), Slice, true);
         bool sharp_odd = before_odd.sharpness >= kStillSharp && now_odd.sharpness >= kStillSharp;
         float weakest_odd = min(before_odd.strength, now_odd.strength);
-        bool matched_odd = edges_match_within(before_odd, now_odd,
-            sharp_odd ? dim_edge : 10.0 / 255.0, 0.4, 0.85);
+        bool matched_odd = edges_match(before_odd, now_odd);
         stroke = stroke || (matched_odd && now_odd.stroke);
         matched = matched || matched_odd;
-        loose = loose || edges_match_within(before_odd, now_odd, 10.0 / 255.0, ratio_slider, cosine_slider);
         if (matched_odd && sharp_odd && weakest_odd < kStillDim) {
             dim = true;
             dim_strength = min(dim_strength, weakest_odd);
@@ -2582,15 +2549,10 @@ void BuildStillMask(uint3 id : SV_DispatchThreadID) {
     // match by chance, is where the motion put it. Where nothing moved the
     // two readings are alike and the age is left as it is: a HUD that has
     // earned its age keeps it through a still view, and nothing ghosts
-    // there anyway.
-    uint age_byte = StillMaskOut[uint3(id.xy, 3u * Slice + 2u)];
-    uint previous_age = age_byte & 127u;
-    bool confirmed = (age_byte & 128u) != 0u;
-    bool still_wins = false;
-    // Whether this pair could judge still against moved: content moved,
-    // and every sample could be fetched.
-    bool judged = false;
-    [branch] if (matched || loose) {
+    // there anyway. The age byte holds the age alone (bit 7 was the loose
+    // tier's confirmation until V562).
+    uint previous_age = StillMaskOut[uint3(id.xy, 3u * Slice + 2u)] & 127u;
+    [branch] if (matched) {
         bool vectors = GameMotionRect.z >= 1.0 && GameMotionRect.w >= 1.0;
         float2 residual;
         if (vectors) {
@@ -2605,21 +2567,22 @@ void BuildStillMask(uint3 id : SV_DispatchThreadID) {
         }
         // V560: nothing moved on the screen only where neither the content
         // nor the head did. (V559 asked the content alone, so a head motion
-        // over a still scene judged nothing, and a light confirmed earlier
-        // stayed held for as long as the head kept moving.)
+        // over a still scene judged nothing.)
         if (length(residual) < 1.0 && pose_shift < 1.0) {
             age = previous_age;
         } else {
             float still_error = 0.0, moved_error = 0.0, pose_error = 0.0;
-            judged = true;
+            // Whether this pair can judge: every sample of holding's
+            // reading, and of at least one of moving's, could be fetched (a
+            // sample off the frame or a cropped viewport is no evidence).
+            bool judged = true;
             // V560: with the head moving, moved is also read by the head
             // pose alone, and the better of the two readings counts. A far
             // light follows the pose exactly while the flow on a light and
             // its glow is poor; a head-locked HUD follows neither. Without
             // head motion the pose reading is the still one, so it is not
-            // taken (stick turns are judged as before).
-            bool head = pose_shift >= 2.0;
-            bool pose_valid = head;
+            // taken (stick turns are judged by the flow alone).
+            bool pose_valid = pose_shift >= 2.0;
             bool flow_valid = true;
             float2 taps[3] = {float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0)};
             [unroll] for (uint tap = 0u; tap < 3u; ++tap) {
@@ -2628,8 +2591,6 @@ void BuildStillMask(uint3 id : SV_DispatchThreadID) {
                 CameraSample a_still = sample_previous_image(at, Slice, ViewIndex);
                 CameraSample a_moved = sample_previous_target(at + residual, Slice, ViewIndex);
                 CameraSample a_pose = sample_previous_target(at, Slice, ViewIndex);
-                // A sample that cannot be fetched (off the frame, off a
-                // cropped viewport) is no evidence either way.
                 judged = judged && b.valid >= 0.5 && a_still.valid >= 0.5;
                 flow_valid = flow_valid && a_moved.valid >= 0.5;
                 pose_valid = pose_valid && a_pose.valid >= 0.5;
@@ -2639,61 +2600,39 @@ void BuildStillMask(uint3 id : SV_DispatchThreadID) {
             }
             // V560: moved by whichever readings could be fetched - the pose
             // alone where the flow's points off the frame (a wild vector on
-            // a light), which until now judged nothing and kept the light's
-            // confirmation.
+            // a light).
             judged = judged && (flow_valid || pose_valid);
             moved_error = flow_valid && pose_valid ? min(moved_error, pose_error)
                 : pose_valid ? pose_error : moved_error;
-            // Still must beat moved by a margin, and moved must have
-            // something to lose: a repeating pattern moved by its period
-            // reads 0 either way, and that is not a HUD.
-            // (V560: the share is the tuning window's, 0.75 before.)
-            // V561: a dim HUD element's edge on its own scale: a margin of a
-            // tenth of its contrast a pixel, and holding's error at most half
-            // of moving's (or the window's share, if larger; 0 still holds
-            // nothing) - over a few levels of contrast, moving's error is
-            // only a little larger than the contrast itself.
+            // Still must beat moved by a margin, and by the window's share
+            // (5% built in since V561, 75% in V559): a repeating pattern
+            // moved by its period reads 0 either way, and that is not a HUD.
+            // V561: a dim HUD element's edge on its own scale - a margin of a
+            // tenth of its contrast a pixel, and a share of at least half (0
+            // still holds nothing): over a few levels of contrast, moving's
+            // error is only a little larger than the contrast itself.
             float share = still_moved_ratio();
             float margin = dim ? 3.0 * 0.1 * dim_strength : 3.0 * 2.0 / 255.0;
             if (dim && share > 0.0) {
                 share = max(share, 0.5);
             }
-            still_wins = judged && still_error + margin <= share * moved_error;
+            bool still_wins = judged && still_error + margin <= share * moved_error;
             // V560: the age resets only where moving clearly explains the
             // two frames (its error under half of holding's), and is kept
             // where neither reading clearly wins: lines of HUD text stacked
             // close together, on a vertical head motion of about their
             // spacing, are explained by the pose reading about as well as by
-            // holding (one line lands where the next was), and reset their
-            // hold every nod. A light on a head motion still resets (the pose
-            // explains it). Confirmation is untouched: any pair still does
-            // not win still clears it (V559's re-earned confirmation).
+            // holding (one line lands where the next was). A light on a head
+            // motion still resets (the pose explains it).
             bool moved_wins = judged && 2.0 * moved_error + margin <= still_error;
             age = still_wins ? min(previous_age + 1u, 127u) : moved_wins ? 0u : previous_age;
         }
     }
-    if (!matched) {
-        age = 0u;
-    }
-    // Confirmation is earned on a head turn and re-earned on every pair
-    // that can judge: a texel that once held a HUD element keeps nothing
-    // once the world moves through it and moved beats still there.
-    if (!loose) {
-        confirmed = false;
-    } else if (judged) {
-        if (!still_wins) {
-            confirmed = false;
-        } else if (pose_shift >= still_confirm_pixels()) {
-            confirmed = true;
-        }
-    }
-    // Bit 6 (V560, the tint's): held by the confirmation alone, not the age.
-    bool aged = matched && age >= still_age_pairs() + (stroke ? 0u : 1u);
-    if (aged || (loose && confirmed)) {
-        word = still_mask_pack(int2(0, 0)) | (aged ? 0u : 64u);
+    if (matched && age >= still_age_pairs() + (stroke ? 0u : 1u)) {
+        word = still_mask_pack(int2(0, 0));
     }
     StillMaskOut[uint3(id.xy, 3u * Slice)] = word;
-    StillMaskOut[uint3(id.xy, 3u * Slice + 2u)] = age | (confirmed ? 128u : 0u);
+    StillMaskOut[uint3(id.xy, 3u * Slice + 2u)] = age;
 }
 
 [numthreads(8, 8, 1)]
