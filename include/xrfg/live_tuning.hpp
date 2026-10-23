@@ -31,7 +31,10 @@ inline constexpr std::uint32_t kMagic = 0x4C565446U;  // "FTVL"
 // released. 11 (V555): the splat is the depth search; the probes' reach
 // and solve count left with them. 12 (V559): still_edge_255ths, the still
 // mask's edge threshold. 13 (V559): the mask's match ratio, angle and age.
-inline constexpr std::uint32_t kVersion = 13U;
+// 14 and 15: V560 test builds (confirming head motion, brightness ceiling,
+// sharpness: no effect in the headset, removed). 16 (V560): the mask's
+// still-against-moved ratio; hybrid_tint 3, the still mask's tint.
+inline constexpr std::uint32_t kVersion = 16U;
 
 // Each slider in the tray runs from cheaper on the GPU (left) to costlier
 // (right); the comments say which way that is for a value.
@@ -88,7 +91,10 @@ struct Block {
     // V539: generated frames tinted by what the hybrid composition did at
     // each pixel (1) or by the coverage mask's verdict (2); 0 off. A
     // diagnostic for the headset, never saved: off at every tray start.
-    std::uint32_t hybrid_tint;                    // 0 off, 1 branches, 2 mask
+    // V560: 3, by the still mask, in every composition (not the hybrid's
+    // alone): magenta held by its age, cyan held by a head-motion
+    // confirmation, yellow a warped sample refused for crossing the mask.
+    std::uint32_t hybrid_tint;                    // 0 off, 1 branches, 2 mask, 3 still
 
     // V543: the coverage mask's band. Each moving surface's footprint is
     // drawn along its own motion, either way, by this share of it (at least
@@ -110,8 +116,13 @@ struct Block {
     // Looser (lower) holds more; what it then holds wrongly is static world
     // texture.
     std::uint32_t still_match_percent;            // 10-100, default 40
-    std::uint32_t still_angle_percent;            // 50-100, default 85
+    std::uint32_t still_angle_percent;            // 50-100, default 100 (V559's 85)
     std::uint32_t still_age_pairs;                // 1-5, default 2
+    // V560. Holding must explain the two frames better than moving: the
+    // still reading's error at most this share of the moved reading's
+    // (lower asks a clearer win: holds less; 0 holds nothing that moved).
+    // 12 the headset's set (V559's 75).
+    std::uint32_t still_moved_percent;            // 0-100, default 12
 };
 
 // The composition's built-in values (frame_synthesis.hlsl), so the window
@@ -129,7 +140,8 @@ inline constexpr Block kDefaults{
     0U,
     0U,
     10U,
-    40U, 85U, 2U,
+    40U, 100U, 2U,
+    12U,
 };
 
 // The block's values within their ranges, as the shader expects them.
@@ -146,24 +158,26 @@ inline constexpr Block kDefaults{
     block.depth_search = block.depth_search != 0U ? 1U : 0U;
     block.depth_nearer_percent = std::min(block.depth_nearer_percent, 50U);
     block.depth_agree_1000ths = std::min(block.depth_agree_1000ths, 250U);
-    block.hybrid_tint = std::min(block.hybrid_tint, 2U);
+    block.hybrid_tint = std::min(block.hybrid_tint, 3U);
     block.mask_band_percent = std::min(block.mask_band_percent, 50U);
     block.still_edge_255ths = std::clamp(block.still_edge_255ths, 1U, 40U);
     block.still_match_percent = std::clamp(block.still_match_percent, 10U, 100U);
     block.still_angle_percent = std::clamp(block.still_angle_percent, 50U, 100U);
     block.still_age_pairs = std::clamp(block.still_age_pairs, 1U, 5U);
+    block.still_moved_percent = std::min(block.still_moved_percent, 100U);
     return block;
 }
 
 // The fields after the header, in order: what the shader indexes and what the
-// 813 record packs, 8 bits a value (every range fits; since V555 all of them
-// fit 813's sixteen).
-inline constexpr std::size_t kFieldCount = 18;
+// 813 and 866 records pack, 8 bits a value (every range fits): 813 the first
+// sixteen, 866 the rest (V559 had two past 813's sixteen unrecorded).
+inline constexpr std::size_t kFieldCount = 19;
 [[nodiscard]] inline const std::uint32_t* fields(const Block& block) noexcept {
     return &block.hybrid_agree_threshold_255ths;
 }
 static_assert(sizeof(Block) == sizeof(std::uint32_t) * (3 + kFieldCount));
 static_assert(offsetof(Block, hybrid_agree_threshold_255ths) == 12);
-static_assert(offsetof(Block, still_age_pairs) == 12 + 4 * (kFieldCount - 1));
+static_assert(offsetof(Block, still_moved_percent) == 12 + 4 * (kFieldCount - 1));
+static_assert(kFieldCount <= 24);
 
 }  // namespace xrfg::live_tuning

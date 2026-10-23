@@ -543,6 +543,14 @@ alone too), and it costs about 0.2 ms a pair at 20%, more moving faster.
 V543-V554 recorded it as 866 (the tuning fields past 813's sixteen); since
 V555 the window has fourteen fields and 813 carries them all.
 
+V560: a third box tints generated frames by the still mask for head-locked
+HUDs (V559), with Hybrid on or off: **magenta** a pixel held by its age (the
+same stroke at the same place for enough pairs), **cyan** held by a
+head-motion confirmation alone (the loose tolerances), **yellow** a warped
+sample refused for crossing the mask. 866 is back for the tuning fields
+past the sixteenth, the still mask's: a their values, 8 bits each from bit 0
+(still angle, still age, still vs moved), b the window's sequence.
+
 The second-surface search (Edge surface solves) accepts a surface only
 where the coverage mask does not give its previous-frame spot to another
 surface (V539): white bands in the mask tint were the search painting the

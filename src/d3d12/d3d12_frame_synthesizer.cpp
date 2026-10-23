@@ -484,7 +484,8 @@ void record_composition_switches() noexcept {
 // without the window). (811 was V475-V494's record, with the edge
 // ghosting reduction values that left with the feature; V497-V506's 813
 // packed the pattern lock and three hybrid values; V543-V554's 866 carried
-// the fields past the sixteenth, of which V555 has none.) Returns the
+// the fields past the sixteenth, of which V555 had none; V560's 866 carries
+// them again, the still mask's.) Returns the
 // values the hybrid's draws read.
 xrfg::live_tuning::Block apply_live_composition_tuning(
     void* tuning_mapped,
@@ -518,6 +519,15 @@ xrfg::live_tuning::Block apply_live_composition_tuning(
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::embedded_configuration,
             813, a, b, values.sequence);
+        // V560: 866, the fields past the sixteenth (the still mask's), 8
+        // bits each from bit 0 in a; b the sequence again.
+        std::uint64_t rest = 0;
+        for (std::size_t index = 16; index < xrfg::live_tuning::kFieldCount; ++index) {
+            rest |= static_cast<std::uint64_t>(field[index] & 0xFFU) << (8 * (index - 16));
+        }
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::embedded_configuration,
+            866, rest, values.sequence, 0);
     }
     return values;
 }
@@ -2375,6 +2385,15 @@ struct D3D12FrameSynthesizer::Impl {
             tuning_view.Buffer.FirstElement = 0;
             tuning_view.Buffer.NumElements = kTuningBufferBytes / 4;
             tuning_view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+            // V560: every composition reads t8 (the still mask's tint), and
+            // a draw may bind any eye's block (the still mask's view is in
+            // all of them likewise), so the tuning view goes in every one.
+            for (UINT block = block_count; block < kMaxReprojectionViews; ++block) {
+                device->CreateShaderResourceView(slot.tuning_buffer.Get(), &tuning_view,
+                    offset_cpu_handle(cpu_start,
+                        block * kDescriptorBlockSize + 8U,
+                        descriptor_increment));
+            }
             for (UINT block = 0; block < block_count; ++block) {
                 device->CreateShaderResourceView(nullptr, &null_motion,
                     offset_cpu_handle(cpu_start,

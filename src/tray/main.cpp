@@ -123,9 +123,11 @@ struct AppState {
     // writes (xrfg::live_tuning). The block lives as long as the tray, so
     // values set once hold for every game started after them.
     HWND tuning_window{};
-    std::array<HWND, 2> tuning_switches{};
-    std::array<HWND, 16> tuning_sliders{};
-    std::array<HWND, 15> tuning_labels{};
+    std::array<HWND, 3> tuning_switches{};
+    std::array<HWND, 17> tuning_sliders{};
+    // One per slider (V559's had one fewer, and its last label's handle
+    // was written past the end).
+    std::array<HWND, 17> tuning_labels{};
     HANDLE tuning_mapping{};
     xrfg::live_tuning::Block* tuning_block{};
 };
@@ -1140,9 +1142,11 @@ struct TuningSlider {
     // A heading drawn above this slider, opening a section of the window.
     const wchar_t* section;
     bool reversed;
+    // V560: this slider opens the window's second column.
+    bool column_break = false;
 };
 
-constexpr std::array<TuningSlider, 16> kTuningSliders{{
+constexpr std::array<TuningSlider, 17> kTuningSliders{{
     {L"Agree threshold", 0, 62,
      &xrfg::live_tuning::Block::hybrid_agree_threshold_255ths, 1U, 1.0, L"/255",
      L"the flow is asked only where the vectors' two frames disagree by more",
@@ -1184,7 +1188,7 @@ constexpr std::array<TuningSlider, 16> kTuningSliders{{
      &xrfg::live_tuning::Block::depth_nearer_percent, 1U, 1.0, L"%",
      L"how much nearer the splatted surface must be to solve; smaller tries more",
      L"Depth search for thin near surfaces (V505, midpoint splat V555; on with Hybrid: depth search)",
-     true},
+     true, true},
     {L"Depth agreement", 0, 250,
      &xrfg::live_tuning::Block::depth_agree_1000ths, 1U, 0.001, L"",
      L"a nearer surface's two frames must agree within this (no cost)", nullptr, false},
@@ -1204,11 +1208,16 @@ constexpr std::array<TuningSlider, 16> kTuningSliders{{
      &xrfg::live_tuning::Block::still_age_pairs, 1U, 1.0, L" pairs",
      L"pairs in a row an edge must stay put before it is held (a step one more); lower holds sooner",
      nullptr, true},
+    {L"Still vs moved", 0, 100,
+     &xrfg::live_tuning::Block::still_moved_percent, 1U, 1.0, L"%",
+     L"holding's error must be under this share of moving's; lower asks a clearer win, 0 holds nothing moving",
+     nullptr, false},
 }};
 
 // The depth search's on/off is the menu's "Hybrid: depth search" (V532);
 // the block's field is left as the window found it and the layer ignores it.
 static_assert(kTuningSliders.size() == std::tuple_size_v<decltype(AppState::tuning_sliders)>);
+static_assert(kTuningSliders.size() == std::tuple_size_v<decltype(AppState::tuning_labels)>);
 
 // V539: the diagnostic tint of generated frames, a value of one field; the
 // boxes of one group exclude each other. Unticked at every tray start,
@@ -1221,11 +1230,14 @@ struct TuningSwitch {
     int group;
 };
 
-constexpr std::array<TuningSwitch, 2> kTuningSwitches{{
+constexpr std::array<TuningSwitch, 3> kTuningSwitches{{
     {L"Tint generated frames by what Hybrid did at each pixel (diagnostic, not saved)",
      &xrfg::live_tuning::Block::hybrid_tint, 1U, 0},
     {L"Tint generated frames by the coverage mask's verdict instead (diagnostic, not saved)",
      &xrfg::live_tuning::Block::hybrid_tint, 2U, 0},
+    {L"Tint generated frames by the still mask: magenta held by age, cyan held by a head-motion "
+     L"confirmation, yellow a sample refused (any composition; diagnostic, not saved)",
+     &xrfg::live_tuning::Block::hybrid_tint, 3U, 0},
 }};
 static_assert(kTuningSwitches.size() == std::tuple_size_v<decltype(AppState::tuning_switches)>);
 constexpr int kTuningSwitchBaseId = 2101;
@@ -1384,22 +1396,36 @@ void show_tuning_window(AppState& state) {
         constexpr int kSwitchHeight = 26;
         constexpr int kRowHeight = 44;
         constexpr int kSectionHeight = 30;
+        // V560: two columns of sliders side by side, the switches across
+        // both above them; a slider with column_break opens the second.
+        constexpr int kColumnWidth = 600;
         const int switches_top = 12 + kCaptionHeight;
         const int sliders_top =
             switches_top + static_cast<int>(kTuningSwitches.size()) * kSwitchHeight + 8;
-        // Each slider's row, with a section heading's height above the
-        // sliders that open one.
+        // Each slider's row and column, with a section heading's height
+        // above the sliders that open one.
         std::array<int, kTuningSliders.size()> slider_tops{};
+        std::array<int, kTuningSliders.size()> slider_lefts{};
         int next_top = sliders_top;
+        int column_left = 0;
+        int lowest = sliders_top;
         for (std::size_t index = 0; index < kTuningSliders.size(); ++index) {
+            if (kTuningSliders[index].column_break) {
+                lowest = std::max(lowest, next_top);
+                next_top = sliders_top;
+                column_left += kColumnWidth;
+            }
             if (kTuningSliders[index].section != nullptr) {
                 next_top += kSectionHeight;
             }
             slider_tops[index] = next_top;
+            slider_lefts[index] = column_left;
             next_top += kRowHeight;
         }
-        const int client_height = next_top + 44;
-        RECT frame{0, 0, 600, client_height};
+        lowest = std::max(lowest, next_top);
+        const int client_width = column_left + kColumnWidth;
+        const int client_height = lowest + 44;
+        RECT frame{0, 0, client_width, client_height};
         AdjustWindowRectEx(&frame, WS_CAPTION | WS_SYSMENU, FALSE,
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW);
         state.tuning_window = CreateWindowExW(
@@ -1417,14 +1443,14 @@ void show_tuning_window(AppState& state) {
         const HWND caption = CreateWindowExW(
             0, L"STATIC",
             L"Every slider runs from cheaper on the GPU (left) to costlier (right).",
-            WS_CHILD | WS_VISIBLE, 14, 12, 570, 18,
+            WS_CHILD | WS_VISIBLE, 14, 12, client_width - 30, 18,
             state.tuning_window, nullptr, instance, nullptr);
         SendMessageW(caption, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         for (std::size_t index = 0; index < kTuningSwitches.size(); ++index) {
             state.tuning_switches[index] = CreateWindowExW(
                 0, L"BUTTON", kTuningSwitches[index].label,
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                14, switches_top + static_cast<int>(index) * kSwitchHeight, 570, 22,
+                14, switches_top + static_cast<int>(index) * kSwitchHeight, client_width - 30, 22,
                 state.tuning_window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(
                     kTuningSwitchBaseId + static_cast<int>(index))),
@@ -1434,23 +1460,24 @@ void show_tuning_window(AppState& state) {
         }
         for (std::size_t index = 0; index < kTuningSliders.size(); ++index) {
             const int top = slider_tops[index];
+            const int left = slider_lefts[index];
             if (kTuningSliders[index].section != nullptr) {
                 const HWND heading = CreateWindowExW(
                     0, L"STATIC", kTuningSliders[index].section, WS_CHILD | WS_VISIBLE,
-                    14, top - kSectionHeight + 8, 570, 18,
+                    left + 14, top - kSectionHeight + 8, 570, 18,
                     state.tuning_window, nullptr, instance, nullptr);
                 SendMessageW(heading, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
             }
             state.tuning_labels[index] = CreateWindowExW(
                 0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-                14, top, 570, 18,
+                left + 14, top, 570, 18,
                 state.tuning_window, nullptr, instance, nullptr);
             SendMessageW(state.tuning_labels[index], WM_SETFONT,
                 reinterpret_cast<WPARAM>(font), TRUE);
             state.tuning_sliders[index] = CreateWindowExW(
                 0, TRACKBAR_CLASSW, L"",
                 WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_AUTOTICKS,
-                8, top + 18, 580, 24,
+                left + 8, top + 18, 580, 24,
                 state.tuning_window, nullptr, instance, nullptr);
             const TuningSlider& slider = kTuningSliders[index];
             const bool fine = slider.maximum - slider.minimum > 16;

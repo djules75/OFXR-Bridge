@@ -5114,10 +5114,15 @@ template <typename DepthForPixel>
 
 // backend nvidia: real OFA on the NVIDIA GPU ("hybrid nvidia"), measured
 // only - the bounds below are FidelityFX's on WARP.
+// V560: with the tuning block's still-mask tint on, a translucent scene's held
+// HUD is tinted magenta (1), or nothing is (2, still against moved at 0%);
+// the quality bounds are not judged then.
 void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
-    xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx) {
+    xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+    int still_tint_check = 0) {
     // The fast scene without the coverage mask measures the ghost it removes.
-    const bool measure_only = backend == xrfg::D3D12OpticalFlowBackend::nvidia ||
+    const bool measure_only = still_tint_check != 0 ||
+        backend == xrfg::D3D12OpticalFlowBackend::nvidia ||
         ((kind == HybridScene::occlusion_fast || kind == HybridScene::occlusion_fast_dark ||
           kind == HybridScene::occlusion_fast_far) &&
             GetEnvironmentVariableW(L"XRFG_DISABLE_COVERAGE_MASK", nullptr, 0) != 0);
@@ -5487,6 +5492,25 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
                 "the translucent HUD's edges followed the background");
             require(measure_only || !sway || true_error < held_error,
                 "the swaying HUD's strokes were held at A's place");
+            if (still_tint_check != 0) {
+                // Magenta: the first and third channels well above the
+                // second, whichever of RGBA or BGRA the pattern is. The
+                // scene has none of its own (yellow strokes over grey).
+                std::size_t magenta = 0;
+                for (int y = 0; y < static_cast<int>(height); ++y) {
+                    for (int x = 0; x < static_cast<int>(width); ++x) {
+                        const std::size_t offset =
+                            (static_cast<std::size_t>(y) * width + static_cast<UINT>(x)) * kBytesPerPixel;
+                        const int c0 = actual[eye][offset], c1 = actual[eye][offset + 1],
+                                  c2 = actual[eye][offset + 2];
+                        if (c0 > c1 + 60 && c2 > c1 + 60) ++magenta;
+                    }
+                }
+                std::cout << "  still tint: " << magenta << " magenta pixels\n";
+                require(still_tint_check == 1 ? magenta >= 50 : magenta == 0,
+                    still_tint_check == 1 ? "the still mask's tint did not reach the frame"
+                                          : "still against moved at 0% did not stop the hold");
+            }
         }
         if (occluding) {
             // Each edge alone: the object moves right, so its left edge
@@ -6428,6 +6452,18 @@ int main(int argc, char** argv) {
                     *block = values;
                     require(test_hybrid_bars(hybrid_fixture, true) >= 0.95,
                         "the live tuning block's built-in values did not restore the bars");
+                    // V560: the still mask's tint, and still against moved at
+                    // 0% holding nothing that moved.
+                    values.hybrid_tint = 3;
+                    values.sequence = 3;
+                    *block = values;
+                    test_hybrid_composition(hybrid_fixture, HybridScene::overlay_translucent,
+                        xrfg::D3D12OpticalFlowBackend::fidelity_fx, 1);
+                    values.still_moved_percent = 0;
+                    values.sequence = 4;
+                    *block = values;
+                    test_hybrid_composition(hybrid_fixture, HybridScene::overlay_translucent,
+                        xrfg::D3D12OpticalFlowBackend::fidelity_fx, 2);
                     SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
                     UnmapViewOfFile(block);
                     CloseHandle(mapping);
