@@ -804,6 +804,9 @@ struct SessionState {
         if (application_release_timer != nullptr) {
             CloseHandle(application_release_timer);
         }
+        if (capture_settle_timer != nullptr) {
+            CloseHandle(capture_settle_timer);
+        }
     }
 
     SessionState(const SessionState&) = delete;
@@ -1474,6 +1477,9 @@ struct SessionState {
     std::uint64_t last_enqueued_frame_sequence{};
     // The application's thread only.
     HANDLE application_release_timer{};
+    // The settle before the end-frame capture (settle_end_frame_captures);
+    // the thread ending the application's frames only.
+    HANDLE capture_settle_timer{};
     // A condition variable waits on the system tick, which is 15.6 ms by
     // default on Windows. Every pace wait rounded up to that, so an 11.11 ms
     // schedule produced 15.5 ms submissions and exactly 64/s no matter what
@@ -2372,6 +2378,9 @@ struct SwapchainState {
     // A second release before then replaces it: the earlier image was never
     // going to be shown. Guarded by mutex.
     std::optional<std::uint32_t> pending_end_frame_capture;
+    // When that release happened, for the settle before the capture
+    // (settle_end_frame_captures). Guarded by mutex.
+    std::chrono::steady_clock::time_point pending_end_frame_capture_at{};
     // SessionState::capture_at_end_frame on the D3D11 bridge: the application
     // released an image and the whole release - the bridge's copy into the
     // runtime's image, the history capture and the runtime's own release - is
@@ -7356,6 +7365,8 @@ XrResult release_swapchain_image_locked(
                 // it, the way the runtime shows only the last released image.
                 if (defer_capture) {
                     state->pending_end_frame_capture = released_index;
+                    state->pending_end_frame_capture_at =
+                        std::chrono::steady_clock::now();
                 }
             } else if (state->ownership_tracking_valid) {
                 // A release the runtime accepted with nothing waited here:
@@ -7822,6 +7833,76 @@ void refresh_projection_guides(
     }
 }
 
+// V557fix2: the end-frame capture copies the application's image on its own
+// queue, so the copy runs after whatever the game had submitted when it called
+// xrEndFrame - and before anything it submits a moment later. Firmament on
+// Virtual Desktop showed frames three game frames old (the image's previous
+// contents, a three-image swapchain) and generated frames blending them with
+// the new ones: the copy had run ahead of the game's last drawing into that
+// image. Settling a few milliseconds after the release lets that drawing reach
+// the queue first. Native D3D12 under the presenter only, where the
+// once-per-pair hold after the hand-over keeps the application in this call
+// for most of a frame anyway, so the settle comes out of that hold; inline,
+// it would come out of the game's frame. Taken before frame_call_mutex, which
+// the application's other thread needs for xrWaitFrame.
+constexpr auto kEndFrameCaptureSettle = std::chrono::milliseconds(4);
+
+void settle_end_frame_captures(
+    const std::shared_ptr<SessionState>& session) noexcept {
+    if (!session || !session->capture_at_end_frame ||
+        session->graphics_binding != SessionGraphicsBinding::d3d12 ||
+        !continuous_presenter_active(session)) {
+        return;
+    }
+    try {
+        std::chrono::steady_clock::time_point released_at{};
+        for (const auto& state : find_swapchains(session)) {
+            std::scoped_lock lock(state->mutex);
+            if (state->pending_end_frame_capture && state->d3d12_history &&
+                state->pending_end_frame_capture_at > released_at) {
+                released_at = state->pending_end_frame_capture_at;
+            }
+        }
+        if (released_at == std::chrono::steady_clock::time_point{}) {
+            return;
+        }
+        const auto entered = std::chrono::steady_clock::now();
+        const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            released_at + kEndFrameCaptureSettle - entered);
+        if (remaining > std::chrono::nanoseconds::zero()) {
+            if (session->capture_settle_timer == nullptr) {
+                session->capture_settle_timer = CreateWaitableTimerExW(
+                    nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                    TIMER_ALL_ACCESS);
+                if (session->capture_settle_timer == nullptr) {
+                    session->capture_settle_timer = CreateWaitableTimerExW(
+                        nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+                }
+            }
+            if (session->capture_settle_timer != nullptr) {
+                LARGE_INTEGER due{};
+                due.QuadPart = -(remaining.count() / 100);
+                if (SetWaitableTimer(session->capture_settle_timer, &due, 0,
+                        nullptr, nullptr, FALSE)) {
+                    static_cast<void>(WaitForSingleObject(
+                        session->capture_settle_timer, INFINITE));
+                }
+            }
+        }
+        // 772: the settle. a how long it waited, b from the release to the
+        // end of the settle, both microseconds.
+        const auto left = std::chrono::steady_clock::now();
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::presenter_transition,
+            772,
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(left - entered).count()),
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(left - released_at).count()));
+    } catch (...) {
+    }
+}
+
 void capture_pending_end_frame_images(
     const std::shared_ptr<SessionState>& session) noexcept {
     if (!session || !session->capture_at_end_frame) {
@@ -7878,6 +7959,19 @@ void capture_pending_end_frame_images(
                 wait.limit_us = history_capture_wait_limit_us(*session);
                 capture_result = history->capture(*index, &ticket, &wait);
                 log_history_capture_wait(*state, *index, capture_result, wait);
+                if (wait.probe_valid) {
+                    // 771 (V557fix2, recorder on): a the capture serial the
+                    // probe read, b its patch hash, c its image index << 48 |
+                    // the swapchain's low 48 bits. Equal to the hash three
+                    // captures earlier, unlike the one before: a stale copy.
+                    xrfg::bridge_flight_logger().event(
+                        xrfg::BridgeFlightOperation::presenter_transition,
+                        771,
+                        wait.probe_serial,
+                        wait.probe_hash,
+                        (static_cast<std::uint64_t>(wait.probe_source_index) << 48) |
+                            (handle_value(state->handle) & 0xFFFFFFFFFFFFULL));
+                }
                 if (SUCCEEDED(capture_result)) {
                     // The image went out at its release: nothing is left
                     // to wait for before the capture becomes history.
@@ -14333,6 +14427,7 @@ XrResult layer_end_frame_impl(
     }
     PrivateDepthStrip private_depth_strip;
     end_info = strip_private_depth(*state, end_info, private_depth_strip);
+    settle_end_frame_captures(state);
 
     // Releasable, because the once-per-pair hold at the end of this function
     // must not keep the application's other thread out of xrWaitFrame while it

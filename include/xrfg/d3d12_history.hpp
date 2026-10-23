@@ -45,6 +45,15 @@ struct D3D12HistoryCaptureWait {
     bool slot_busy{};
     // Out: how long the capture blocked, in microseconds.
     std::uint64_t waited_us{};
+    // Out (V557fix2, flight recorder on): a hash of a small patch of what the
+    // capture this slot held before copied, read back now that it has
+    // finished. A capture identical to the one three before it (the same
+    // application image) while the scene moves was copied before the game's
+    // drawing reached the queue.
+    bool probe_valid{};
+    std::uint64_t probe_serial{};
+    std::uint64_t probe_hash{};
+    std::uint32_t probe_source_index{};
 };
 
 struct D3D12HistoryConsumerLease {

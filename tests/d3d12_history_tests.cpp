@@ -1956,6 +1956,86 @@ void test_capture_waits_for_a_busy_slot_within_its_limit(D3D12WarpFixture& fixtu
     require(operation_succeeded(history.wait_for_idle()), "busy-wait history drain failed");
 }
 
+// V557fix2: with the flight recorder on, each capture copies out a patch that
+// the next capture into the same slot reads back. Distinct images hash apart,
+// an unchanged image hashes the same - which is how a stale copy shows.
+void test_capture_probe_reports_each_capture(D3D12WarpFixture& fixture) {
+    std::filesystem::path log_dir;
+    const bool own_logger = !xrfg::bridge_flight_logger().enabled();
+    if (own_logger) {
+        log_dir = std::filesystem::temp_directory_path() /
+            ("xrfg-probe-" + std::to_string(GetCurrentProcessId()));
+        std::filesystem::create_directories(log_dir);
+        std::ofstream(log_dir / "ofxr_bridge.ini") <<
+            "[diagnostics]\nlogging_enabled=1\nmax_file_mb=32\nflush_each_event=0\n";
+        xrfg::bridge_flight_logger().initialize(log_dir);
+    }
+    require(xrfg::bridge_flight_logger().enabled(), "probe test needs the flight recorder");
+
+    std::array<ComPtr<ID3D12Resource>, 3> sources{
+        create_source_texture(fixture),
+        create_source_texture(fixture),
+        create_source_texture(fixture),
+    };
+    std::array<ID3D12Resource*, 3> source_pointers{
+        sources[0].Get(),
+        sources[1].Get(),
+        sources[2].Get(),
+    };
+    for (std::uint32_t index = 0; index < 3; ++index) {
+        upload_pattern(fixture, sources[index].Get(),
+            make_pattern(static_cast<std::uint8_t>(40U + index * 70U)));
+    }
+    xrfg::D3D12SwapchainHistory history;
+    require(
+        operation_succeeded(history.initialize(
+            fixture.device(),
+            fixture.queue(),
+            std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
+            D3D12_RESOURCE_STATE_RENDER_TARGET)),
+        "probe history initialization failed");
+
+    const auto capture = [&](std::uint32_t index) {
+        xrfg::D3D12HistoryCaptureTicket ticket{};
+        xrfg::D3D12HistoryCaptureWait wait{};
+        require(
+            operation_succeeded(history.capture(index, &ticket, &wait)) &&
+                operation_succeeded(history.commit(ticket)) &&
+                operation_succeeded(history.wait_for_idle()),
+            "probe capture failed");
+        return wait;
+    };
+    // The first round fills the three slots: nothing to read back yet.
+    for (std::uint32_t index = 0; index < 3; ++index) {
+        require(!capture(index).probe_valid, "probe reported a slot with no capture");
+    }
+    // The second round reads the first round's patches, in order.
+    std::array<std::uint64_t, 3> hashes{};
+    for (std::uint32_t index = 0; index < 3; ++index) {
+        const auto wait = capture(index);
+        require(wait.probe_valid && wait.probe_serial == index + 1U &&
+                    wait.probe_source_index == index,
+            "probe did not report the slot's previous capture");
+        hashes[index] = wait.probe_hash;
+    }
+    require(hashes[0] != hashes[1] && hashes[1] != hashes[2] && hashes[0] != hashes[2],
+        "probe hashes did not tell distinct images apart");
+    // The images did not change: the second round's patches hash as the first.
+    for (std::uint32_t index = 0; index < 3; ++index) {
+        const auto wait = capture(index);
+        require(wait.probe_valid && wait.probe_serial == index + 4U &&
+                    wait.probe_hash == hashes[index],
+            "probe hash changed for an unchanged image");
+    }
+    require(operation_succeeded(history.wait_for_idle()), "probe history drain failed");
+
+    if (own_logger) {
+        xrfg::bridge_flight_logger().shutdown();
+        std::error_code ignored;
+        std::filesystem::remove_all(log_dir, ignored);
+    }
+}
+
 void test_depth_capture_path(D3D12WarpFixture& fixture) {
     std::array<ComPtr<ID3D12Resource>, 2> sources{
         create_depth_source_texture(fixture),
@@ -6722,6 +6802,7 @@ int main(int argc, char** argv) {
         test_stereo_capture_ring(fixture);
         test_capture_is_async_and_consumer_fence_blocks_reuse(fixture);
         test_capture_waits_for_a_busy_slot_within_its_limit(fixture);
+        test_capture_probe_reports_each_capture(fixture);
         test_depth_capture_path(fixture);
         test_depth_private_history_allows_shader_resource_views(fixture);
         test_rolling_frame_synthesizer(fixture);

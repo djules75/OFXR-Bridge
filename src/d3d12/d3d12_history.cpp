@@ -90,6 +90,35 @@ void dred_marker(ID3D12GraphicsCommandList* command_list, const char* label) noe
     return barrier;
 }
 
+// Bytes per texel of the colour formats a projection swapchain uses, 0 for
+// any other: the probe only reads formats it can size.
+[[nodiscard]] std::uint32_t probe_texel_bytes(DXGI_FORMAT format) noexcept {
+    switch (format) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8X8_UNORM:
+    case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+    case DXGI_FORMAT_R10G10B10A2_UNORM:
+    case DXGI_FORMAT_R11G11B10_FLOAT:
+        return 4;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:
+    case DXGI_FORMAT_R16G16B16A16_UNORM:
+        return 8;
+    case DXGI_FORMAT_R32G32B32A32_TYPELESS:
+    case DXGI_FORMAT_R32G32B32A32_FLOAT:
+        return 16;
+    default:
+        return 0;
+    }
+}
+
 }  // namespace
 
 struct D3D12SwapchainHistory::Impl {
@@ -103,6 +132,12 @@ struct D3D12SwapchainHistory::Impl {
         ComPtr<ID3D12Fence> consumer_fence;
         std::uint64_t consumer_fence_value{};
         bool valid{};
+        // The stale-capture probe (V557fix2): a patch of this slot's last
+        // capture, read back once that capture has finished.
+        ComPtr<ID3D12Resource> probe_buffer;
+        std::uint64_t probe_serial{};
+        std::uint32_t probe_source_index{};
+        bool probe_pending{};
     };
 
     ComPtr<ID3D12Device> device;
@@ -127,6 +162,12 @@ struct D3D12SwapchainHistory::Impl {
     bool has_pending_capture{};
     bool capture_enabled{};
     bool completion_unknown{};
+    // Where the probe reads, and how its copy lands in the readback buffer.
+    // Off for a format it cannot size or a multisampled image.
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT probe_footprint{};
+    D3D12_BOX probe_box{};
+    std::uint32_t probe_row_bytes{};
+    bool probe_supported{};
 
     ~Impl() {
         if (fence_event != nullptr) {
@@ -312,8 +353,101 @@ struct D3D12SwapchainHistory::Impl {
             return HRESULT_FROM_WIN32(error == ERROR_SUCCESS ? ERROR_NOT_ENOUGH_MEMORY : error);
         }
 
+        initialize_probe(source_description, heap_properties.CreationNodeMask);
         capture_enabled = true;
         return S_OK;
+    }
+
+    // The stale-capture probe: a 64x64 patch a third of the way across the
+    // first slice, copied out with every capture while the flight recorder
+    // runs. Optional: a failure here leaves the history working without it.
+    void initialize_probe(
+        const D3D12_RESOURCE_DESC& source_description,
+        UINT node_mask) noexcept {
+        const std::uint32_t texel_bytes =
+            probe_texel_bytes(source_description.Format);
+        if (texel_bytes == 0 || source_description.SampleDesc.Count != 1) {
+            return;
+        }
+        constexpr std::uint32_t kProbeSize = 64;
+        const auto image_width = static_cast<std::uint32_t>(source_description.Width);
+        const std::uint32_t width = std::min(kProbeSize, image_width);
+        const std::uint32_t height = std::min(kProbeSize, source_description.Height);
+        probe_box.left = std::min(image_width / 3U, image_width - width);
+        probe_box.top = (source_description.Height - height) / 2U;
+        probe_box.right = probe_box.left + width;
+        probe_box.bottom = probe_box.top + height;
+        probe_box.front = 0;
+        probe_box.back = 1;
+        probe_row_bytes = width * texel_bytes;
+        const std::uint32_t pitch =
+            (probe_row_bytes + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1U) &
+            ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1U);
+        probe_footprint.Offset = 0;
+        probe_footprint.Footprint.Format = source_description.Format;
+        probe_footprint.Footprint.Width = width;
+        probe_footprint.Footprint.Height = height;
+        probe_footprint.Footprint.Depth = 1;
+        probe_footprint.Footprint.RowPitch = pitch;
+
+        D3D12_HEAP_PROPERTIES readback{};
+        readback.Type = D3D12_HEAP_TYPE_READBACK;
+        readback.CreationNodeMask = node_mask;
+        readback.VisibleNodeMask = node_mask;
+        D3D12_RESOURCE_DESC buffer{};
+        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = static_cast<UINT64>(pitch) * height;
+        buffer.Height = 1;
+        buffer.DepthOrArraySize = 1;
+        buffer.MipLevels = 1;
+        buffer.Format = DXGI_FORMAT_UNKNOWN;
+        buffer.SampleDesc.Count = 1;
+        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        for (HistorySlot& slot : slots) {
+            if (FAILED(device->CreateCommittedResource(
+                    &readback, D3D12_HEAP_FLAG_NONE, &buffer,
+                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                    IID_PPV_ARGS(slot.probe_buffer.GetAddressOf())))) {
+                for (HistorySlot& created : slots) {
+                    created.probe_buffer.Reset();
+                }
+                return;
+            }
+        }
+        probe_supported = true;
+    }
+
+    // FNV-1a over the patch the slot's finished capture copied out.
+    void read_probe(HistorySlot& slot, D3D12HistoryCaptureWait* wait) noexcept {
+        if (!slot.probe_pending) {
+            return;
+        }
+        slot.probe_pending = false;
+        if (wait == nullptr || slot.probe_buffer == nullptr) {
+            return;
+        }
+        void* mapped = nullptr;
+        const D3D12_RANGE read_range{
+            0, static_cast<SIZE_T>(probe_footprint.Footprint.RowPitch) *
+                   probe_footprint.Footprint.Height};
+        if (FAILED(slot.probe_buffer->Map(0, &read_range, &mapped)) || mapped == nullptr) {
+            return;
+        }
+        std::uint64_t hash = 14695981039346656037ULL;
+        const auto* bytes = static_cast<const std::uint8_t*>(mapped);
+        for (std::uint32_t row = 0; row < probe_footprint.Footprint.Height; ++row) {
+            const std::uint8_t* line =
+                bytes + static_cast<std::size_t>(row) * probe_footprint.Footprint.RowPitch;
+            for (std::uint32_t index = 0; index < probe_row_bytes; ++index) {
+                hash = (hash ^ line[index]) * 1099511628211ULL;
+            }
+        }
+        const D3D12_RANGE nothing_written{0, 0};
+        slot.probe_buffer->Unmap(0, &nothing_written);
+        wait->probe_valid = true;
+        wait->probe_serial = slot.probe_serial;
+        wait->probe_hash = hash;
+        wait->probe_source_index = slot.probe_source_index;
     }
 
     [[nodiscard]] static HRESULT fence_status(
@@ -514,6 +648,9 @@ struct D3D12SwapchainHistory::Impl {
         if (FAILED(result)) {
             return result;
         }
+        // The slot's previous capture has finished (prepare_slot_for_capture),
+        // so its probe can be read before this one overwrites it.
+        read_probe(slot, wait);
 
         slot.valid = false;
         slot.ticket = {};
@@ -544,16 +681,40 @@ struct D3D12SwapchainHistory::Impl {
         dred_marker(slot.capture_list.Get(), "OFXR history copy");
         slot.capture_list->CopyResource(slot.resource.Get(), source);
 
+        const bool probe = probe_supported && slot.probe_buffer != nullptr &&
+            bridge_flight_logger().enabled();
+        const D3D12_RESOURCE_STATES copied_state = probe
+            ? D3D12_RESOURCE_STATE_COPY_SOURCE
+            : D3D12_RESOURCE_STATE_COMMON;
         const std::array<D3D12_RESOURCE_BARRIER, 2> after_copy{
             transition_barrier(source, D3D12_RESOURCE_STATE_COPY_SOURCE, release_state),
             transition_barrier(
                 slot.resource.Get(),
                 D3D12_RESOURCE_STATE_COPY_DEST,
-                D3D12_RESOURCE_STATE_COMMON),
+                copied_state),
         };
         slot.capture_list->ResourceBarrier(
             static_cast<UINT>(after_copy.size()),
             after_copy.data());
+        if (probe) {
+            D3D12_TEXTURE_COPY_LOCATION destination{};
+            destination.pResource = slot.probe_buffer.Get();
+            destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            destination.PlacedFootprint = probe_footprint;
+            D3D12_TEXTURE_COPY_LOCATION patch{};
+            patch.pResource = slot.resource.Get();
+            patch.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            patch.SubresourceIndex = 0;
+            slot.capture_list->CopyTextureRegion(&destination, 0, 0, 0, &patch, &probe_box);
+            const D3D12_RESOURCE_BARRIER probed = transition_barrier(
+                slot.resource.Get(),
+                D3D12_RESOURCE_STATE_COPY_SOURCE,
+                D3D12_RESOURCE_STATE_COMMON);
+            slot.capture_list->ResourceBarrier(1, &probed);
+            slot.probe_pending = true;
+            slot.probe_serial = next_serial;
+            slot.probe_source_index = source_index;
+        }
         dred_marker(slot.capture_list.Get(), "OFXR history complete");
 
         result = slot.capture_list->Close();
@@ -605,6 +766,8 @@ struct D3D12SwapchainHistory::Impl {
         HistorySlot& slot = slots[requested_ticket.slot];
         slot.ticket = {};
         slot.valid = false;
+        // Its serial goes to the next capture: no probe reports it.
+        slot.probe_pending = false;
         pending_ticket = {};
         has_pending_capture = false;
     }
@@ -730,6 +893,7 @@ struct D3D12SwapchainHistory::Impl {
             slot.active_lease_serial = 0;
             slot.consumer_fence.Reset();
             slot.consumer_fence_value = 0;
+            slot.probe_pending = false;
         }
         pending_ticket = {};
         has_pending_capture = false;
