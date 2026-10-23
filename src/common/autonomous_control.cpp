@@ -78,7 +78,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465852;
-constexpr std::uint32_t kAbi = 63701;
+constexpr std::uint32_t kAbi = 63801;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -192,7 +192,7 @@ class Discovery {
     DiscoveryState* data{};
 public:
     Discovery() {
-        const auto prefix=L"Local\\OFXRBridgeV637-discovery-"+std::to_wstring(path_identity(global_configuration_path()));
+        const auto prefix=L"Local\\OFXRBridgeV638-discovery-"+std::to_wstring(path_identity(global_configuration_path()));
         mutex=CreateMutexW(nullptr,FALSE,(prefix+L"-mutex").c_str());
         mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(DiscoveryState),(prefix+L"-data").c_str());
         if(mapping)data=static_cast<DiscoveryState*>(MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(DiscoveryState)));
@@ -241,7 +241,7 @@ public:
         // Profile identity is part of the mapping name, so fixture profiles
         // and future concurrent candidates cannot modify the user's settings.
         const auto identity=path_identity(file);
-        const auto prefix = L"Local\\OFXRBridgeV637-" + std::to_wstring(identity);
+        const auto prefix = L"Local\\OFXRBridgeV638-" + std::to_wstring(identity);
         mutex = CreateMutexW(nullptr, FALSE, (prefix + L"-mutex").c_str());
         if (!mutex) return;
         const DWORD waited = WaitForSingleObject(mutex, 2000);
@@ -307,7 +307,7 @@ struct Lock {
 } // namespace
 
 Settings sanitize(Settings value) noexcept {
-    value.pacing_mode=std::clamp(value.pacing_mode,0,2);
+    value.pacing_mode=std::clamp(value.pacing_mode,0,value.advanced_mode?2:1);
     value.benchmark_csv=true;
     if(!value.advanced_mode && value.frame_generation==0)value.motion_vectors=0;
     value.backend = std::clamp(value.backend, 0, 3);
@@ -529,7 +529,7 @@ bool initialize_game_configuration(const std::filesystem::path& executable) noex
         // A dedicated creation mutex prevents two simultaneous first launches
         // overwriting one another's freshly created profile.
 #ifdef _WIN32
-        const auto name=L"Local\\OFXRBridgeV637-create-"+std::to_wstring(path_identity(file));
+        const auto name=L"Local\\OFXRBridgeV638-create-"+std::to_wstring(path_identity(file));
         HANDLE mutex=CreateMutexW(nullptr,FALSE,name.c_str());if(!mutex)return false;
         struct CreationGuard {HANDLE handle;bool locked{};~CreationGuard(){if(locked)ReleaseMutex(handle);CloseHandle(handle);}} guard{mutex};
         const auto waited=WaitForSingleObject(mutex,2000);
@@ -755,7 +755,7 @@ bool same_trial(const Settings& a,const Settings& b) {
 }
 void csv_layout(const SuiteRecorder& rec,const BenchmarkStatus& b) {
     if(rec.layout_path.empty())return;
-    const auto steps=benchmark_export_plan(b.full,b.luke,rec.steamvr);
+    const auto steps=benchmark_export_plan(b.full,b.luke,rec.steamvr,b.advanced);
     std::ofstream output(rec.layout_path,std::ios::trunc);output.imbue(std::locale::classic());
     if(!output)throw std::runtime_error("Cannot write layout CSV");
     output<<"Game,Build,Metric";
@@ -854,9 +854,9 @@ bool start_benchmark(bool full,bool luke) noexcept {
         shared.benchmark_saved=s.desired;
         const auto now=GetTickCount64();
         const auto run=std::max(b.run_id+1,(now<<16)^GetCurrentProcessId());
-        b={};b.full=full;b.luke=luke;b.csv=s.desired.benchmark_csv;b.game_pid=s.runtime.process_id;
+        b={};b.full=full;b.luke=luke;b.advanced=s.desired.advanced_mode;b.csv=s.desired.benchmark_csv;b.game_pid=s.runtime.process_id;
         b.run_id=run;
-        const auto plan=benchmark_plan(full,luke,pacing_comparison_runtime(s.runtime));b.count=static_cast<unsigned>(plan.size());
+        const auto plan=benchmark_plan(full,luke,pacing_comparison_runtime(s.runtime),b.advanced);b.count=static_cast<unsigned>(plan.size());
         b.phase=BenchmarkPhase::applying;
         std::snprintf(b.label,sizeof(b.label),"%s",plan[0].label.c_str());
         if(!suite_publish(shared,benchmark_settings(shared.benchmark_saved,plan[0]),now)) {
@@ -937,7 +937,7 @@ void tick_benchmark(std::uint64_t now) noexcept {
             if(now<b.started_ms+10000)return;
             csv_finish(rec,b,now,b.luke && s.desired.afw_mode && !rec.afw_success ? "no confirmed AFW output" : rec.samples.fps.empty() ? "no measured presentation rate" :
                 s.desired.enabled && !rec.samples.generated ? "no confirmed generation" : "complete");
-            const auto plan=benchmark_plan(b.full,b.luke,rec.steamvr);
+            const auto plan=benchmark_plan(b.full,b.luke,rec.steamvr,b.advanced);
             if(++b.index>=plan.size()) {
                 suite_restore(shared,BenchmarkPhase::complete,"Complete. Original settings restored.",now);rec.stream.close();return;
             }

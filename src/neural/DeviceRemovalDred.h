@@ -208,7 +208,7 @@ class Monitor
         {
             if (!flightHeaderWritten)
             {
-                file_.Line("nr_flight_begin version=V637 first=%llu end=%llu capacity=%zu",
+                file_.Line("nr_flight_begin version=V638 first=%llu end=%llu capacity=%zu",
                            first, end, capacity);
                 flightHeaderWritten = true;
             }
@@ -291,7 +291,7 @@ class Monitor
         monitor->device_ = device;
         SYSTEMTIME now {}; GetSystemTime(&now);
         wchar_t name[180];
-        swprintf_s(name, L"ofxr-dred-V637-%04u%02u%02u-%02u%02u%02u-%lu-device%u.log",
+        swprintf_s(name, L"ofxr-dred-V638-%04u%02u%02u-%02u%02u%02u-%lu-device%u.log",
                    now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond,
                    GetCurrentProcessId(), ++registry->id);
         monitor->path_ = directory / name;
@@ -310,7 +310,7 @@ class Monitor
         if (FAILED(result))
         { monitor->file_.Line("arm_failed SetEventOnCompletion=0x%08X", static_cast<unsigned>(result)); monitor->file_.Flush(); return {}; }
         const auto luid = device->GetAdapterLuid();
-        monitor->file_.Line("armed version=V637 pid=%lu device=%p adapter=%08X:%08X trigger=fence_device_removal",
+        monitor->file_.Line("armed version=V638 pid=%lu device=%p adapter=%08X:%08X trigger=fence_device_removal",
                            GetCurrentProcessId(), static_cast<void*>(device.Get()),
                            static_cast<unsigned>(luid.HighPart), static_cast<unsigned>(luid.LowPart));
         monitor->file_.Line("recorder_mode=%s verbose_logging=%u startup_dred=see_CrashDiagnostics_readiness",

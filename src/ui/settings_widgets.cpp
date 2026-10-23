@@ -171,10 +171,11 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     const bool framework_only=state.connected && !pacing_comparison_runtime(state.runtime);
     int pacing=framework_only?0:draft.pacing_mode;
     ImGui::BeginDisabled(framework_only || (state.connected && state.runtime.pacing_mode==kAfwOnlyPacingMode));
-    if(ImGui::Combo("Pacing",&pacing,"Framework\0Director\0Framework+director\0")) {draft.pacing_mode=pacing;changed=true;}
+    if(ImGui::Combo("Pacing",&pacing,draft.advanced_mode?"Framework\0Director\0Framework+director\0":"Framework\0Director\0")) {draft.pacing_mode=pacing;changed=true;}
     ImGui::EndDisabled();
     ImGui::TextWrapped(framework_only ? "VDXR transport uses Framework pacing. Change Pacing in the tray and restart the game to use director pacing."
-        : "Framework bypasses director pacing; Director uses only the final director; Framework+director combines both. Changes apply live after queued frames complete.");
+        : draft.advanced_mode ? "Framework bypasses director pacing; Director uses only the final director; Framework+director combines both. Changes apply live after queued frames complete."
+        : "Framework bypasses director pacing; Director uses only the final director. Changes apply live after queued frames complete.");
     if(state.connected && state.runtime.pacing_mode==kAfwOnlyPacingMode) {
         ImGui::TextWrapped("AFW Only: direct OpenXR delivery. Disable AFW Only in the Luke Ross tab and restart the game to restore OFXR. Neural Rendering remains available.");
         return changed;
@@ -397,8 +398,13 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     if(state.benchmark.message[0])ImGui::TextWrapped("%s",state.benchmark.message);
     if(state.benchmark.csv_path[0])ImGui::TextWrapped("CSV: %s",state.benchmark.csv_path);
     if(pacing_comparison_runtime(state.runtime)) {
-        ImGui::TextWrapped("Framework, Director, Framework+director for every route. Normal and Fast mode: 31 optical or 49 complete tests including one OFXR Off reference.");
-        ImGui::TextWrapped("Luke Ross: 39 tests through OFXR 0.3.0, no 3X. Three AFW quality passes: 1x1, 2x2, 4x4. AFW alone once per quality, then each route with all three pacing modes. Fast mode has no effect. CSV groups each route/pacing's three qualities.");
+        ImGui::TextWrapped(draft.advanced_mode
+            ? "Framework, Director, Framework+director for every route. Normal and Fast mode: 31 optical or 49 complete tests including one OFXR Off reference."
+            : "Framework and Director for every route. Normal and Fast mode: 21 optical or 33 complete tests including one OFXR Off reference.");
+        ImGui::TextWrapped(draft.advanced_mode
+            ? "Luke Ross: 39 tests through OFXR 0.3.0, no 3X. Three AFW qualities: 1x1, 2x2, 4x4; each route with all three pacing modes."
+            : "Luke Ross: 27 tests through OFXR 0.3.0, no 3X. Three AFW qualities: 1x1, 2x2, 4x4; each route with Framework and Director.");
+        ImGui::TextWrapped("AFW alone once per quality. Fast mode has no Luke effect. CSV groups each route/pacing's three qualities.");
     } else {
         ImGui::TextWrapped("Legacy VDXR: 11 optical or 17 complete tests. Every route compares Normal/Fast. Luke: 15 tests, three AFW qualities through 0.3.0, no Fast or 3X.");
     }

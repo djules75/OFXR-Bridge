@@ -229,6 +229,9 @@ void release_controls() {
     auto simple=Settings{};simple.backend=1;simple.scale=3;require(request(simple),"seed simple release UI");
     Context desktop({690,900},false);desktop.draw();desktop.draw(true);
     require(desktop.rendered_text.find("Motion source")==std::string::npos,"basic mode hides motion source");
+    require(desktop.rendered_text.find("Framework+director")==std::string::npos,"basic UI has no combined mode or help");
+    desktop.choose("Pacing",0,"Framework");require(snapshot().desired.pacing_mode==0,"basic Framework selection works");
+    desktop.choose("Pacing",1,"Director");require(snapshot().desired.pacing_mode==1,"basic Director selection works");
     require(desktop.rendered_text.find("Reset to defaults")!=std::string::npos,"reset appears beside enable");
     require(desktop.rendered_text.find("Pacing")<desktop.rendered_text.find("Frame generationOFXR"),"pacing is first under enable");
     desktop.activate("/Generation_","Reset to defaults");desktop.draw();desktop.draw();
@@ -244,6 +247,7 @@ void release_controls() {
     auto advanced=snapshot().desired;advanced.advanced_mode=true;advanced.afw_only=false;require(request(advanced),"enable advanced UI by configuration");
     desktop.select_tab("Frame generation");desktop.draw(true);
     require(desktop.rendered_text.find("Motion source")!=std::string::npos,"advanced mode restores motion source");
+    desktop.choose("Pacing",2,"Framework+director");require(snapshot().desired.pacing_mode==2,"advanced combined selection works");
 }
 void actual_widgets() {
     auto advanced=snapshot().desired;advanced.advanced_mode=true;require(request(advanced),"enable advanced-only UI fixture");
@@ -454,6 +458,12 @@ void automatic_buttons() {
     tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
     require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==31,
         "VDXR Display button starts all three pacing variants");
+    tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
+    auto simple=snapshot().desired;simple.advanced_mode=false;require(request(simple),"return to basic UI policy");
+    runtime.applied_revision=snapshot().revision;runtime.pacing_mode=1;report_runtime(runtime);tray.draw(true);
+    require(tray.rendered_text.find("21 optical or 33 complete")!=std::string::npos && tray.rendered_text.find("Luke Ross: 27 tests")!=std::string::npos,"basic Display shows reduced counts");
+    tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
+    require(snapshot().benchmark.count==21 && !snapshot().benchmark.advanced,"basic Display starts reduced matrix");
     tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
 }
 } // namespace

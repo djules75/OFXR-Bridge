@@ -38,12 +38,12 @@ inline std::vector<BenchmarkStep> legacy_benchmark_plan(bool full,bool luke=fals
 inline const char* benchmark_pacing_label(int mode) {
     return mode==0 ? "Framework" : mode==1 ? "Director" : "Framework+director";
 }
-inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false,bool steamvr=true) {
+inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false,bool steamvr=true,bool advanced=false) {
     // The session-latched transport selects the new matrix or Legacy VDXR plan.
     if(!steamvr)return legacy_benchmark_plan(full,luke);
     std::vector<BenchmarkStep> steps;
     const auto route=[&](const char* name,int generation,int backend,bool triple,int quality) {
-        for(int pacing=0;pacing<3;++pacing) {
+        for(int pacing=0;pacing<(advanced?3:2);++pacing) {
             for(int fast=0;fast<(luke ? 1 : 2);++fast) {
                 BenchmarkStep step{generation,backend,fast,fast,triple,triple,false,
                     std::string(name)+" "+benchmark_pacing_label(pacing)+(luke ? "" : fast ? " Fast" : " Normal")};
@@ -66,8 +66,8 @@ inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false,bool 
     }
     return steps;
 }
-inline std::vector<BenchmarkStep> benchmark_export_plan(bool full,bool luke,bool steamvr) {
-    auto steps=benchmark_plan(full,luke,steamvr);
+inline std::vector<BenchmarkStep> benchmark_export_plan(bool full,bool luke,bool steamvr,bool advanced=false) {
+    auto steps=benchmark_plan(full,luke,steamvr,advanced);
     if(luke) {
         // Execution minimizes AFW resets with whole-quality passes. Export groups
         // every route/pacing's three qualities without relying on a fixed route count.

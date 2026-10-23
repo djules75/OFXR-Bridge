@@ -13,7 +13,7 @@ int main() {
     const auto folder=std::filesystem::temp_directory_path()/(L"ofxr-suite-"+std::to_wstring(GetCurrentProcessId()));
     SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",folder.c_str());
     try {
-        const auto optical=benchmark_plan(false),full=benchmark_plan(true);
+        const auto optical=benchmark_plan(false,false,true,true),full=benchmark_plan(true,false,true,true);
         check(optical.size()==31 && full.size()==49,"SteamVR: three pacing modes, Normal/Fast, one Off reference");
         for(const bool luke:{false,true}) for(const bool complete:{false,true}) {
             const auto legacy=benchmark_plan(complete,luke,false);
@@ -37,10 +37,19 @@ int main() {
                 }
             }
         }
+        for(const bool complete:{false,true})for(const bool luke:{false,true}) {
+            const auto basic=benchmark_plan(complete,luke,true,false);
+            check(basic.size()==(luke?27:complete?33:21),"basic mode removes exactly the combined pacing trials");
+            check(std::none_of(basic.begin(),basic.end(),[](const auto& step){return step.pacing==2;}),"basic plan never selects hidden combined pacing");
+            const auto exported=benchmark_export_plan(complete,luke,true,false);
+            check(exported.size()==basic.size(),"reduced CSV has only actually tested columns");
+            for(const auto& step:basic)check(benchmark_settings(Settings{},step).pacing_mode==step.pacing,"basic policy cannot alias a combined export to Director");
+            check(benchmark_plan(complete,luke,false,false).size()==benchmark_plan(complete,luke,false,true).size(),"standard VDXR suite is independent of Advanced mode");
+        }
         RuntimeStatus vdxr{};vdxr.vdxr_runtime=true;
         check(!pacing_comparison_runtime(vdxr),"Legacy VDXR keeps its short suite");
         vdxr.vdxr_legacy=false;
-        check(pacing_comparison_runtime(vdxr) && benchmark_plan(true,false,pacing_comparison_runtime(vdxr)).size()==49,
+        check(pacing_comparison_runtime(vdxr) && benchmark_plan(true,false,pacing_comparison_runtime(vdxr),true).size()==49,
             "VDXR opt-in uses all three pacing modes without a false SteamVR identity");
         std::set<std::tuple<bool,int,int,bool,int,int,int>> identities;
         std::set<std::string> names;
@@ -52,7 +61,7 @@ int main() {
         }
         for(const auto& step:optical)check(step.generation==0,"Optical suite must never request vector-only generators");
         unsigned dlssg_steps=0,prefer=0;
-        Settings baseline;baseline.diagnostics=false;baseline.nr_enabled=true;baseline.afw_mode=2;baseline.pacing_mode=1;
+        Settings baseline;baseline.advanced_mode=true;baseline.diagnostics=false;baseline.nr_enabled=true;baseline.afw_mode=2;baseline.pacing_mode=1;
         for(const auto& step:full) {
             auto s=benchmark_settings(baseline,step);
             check(!s.diagnostics && s.nr_enabled && s.afw_mode==2,"Keep diagnostics, Neural and AFW choices");
@@ -151,7 +160,7 @@ int main() {
         check(snapshot().benchmark.phase==BenchmarkPhase::stopped && !snapshot().desired.nr_enabled,"Manual changes cancel automation and are kept");
         runtime.applied_revision=snapshot().revision;report_runtime(runtime);check(start_benchmark(false),"Restart optical suite");stop_benchmark();tick_benchmark();
         check(snapshot().benchmark.phase==BenchmarkPhase::stopped,"Explicit Stop");
-        const auto luke=benchmark_plan(false,true);check(luke.size()==39,"Luke: AFW-only three qualities plus four routes times three pacing times three qualities");
+        const auto luke=benchmark_plan(false,true,true,true);check(luke.size()==39,"Luke: AFW-only three qualities plus four routes times three pacing times three qualities");
         identities.clear();
         for(const auto& step:luke) {
             check(!step.triple && !step.prefer,"Luke omits unsupported 3X and Prefer FPS");
@@ -203,6 +212,23 @@ int main() {
             check(recorded.str().find(preset==3 ? ",C startup request," : ",Game default / unverified,")!=std::string::npos,
                 "CSV preserves the actual startup receipt including an unverified default");
         }
+        for(const bool reduced_luke:{false,true}) {
+            auto simple=snapshot().desired;simple.advanced_mode=false;simple.pacing_mode=1;check(request(simple),"set basic suite policy");
+            runtime.luke_detected=reduced_luke;runtime.applied_revision=snapshot().revision;runtime.pacing_mode=1;report_runtime(runtime);
+            check(start_benchmark(!reduced_luke,reduced_luke),"start reduced full/Luke suite");
+            const auto plan=benchmark_plan(!reduced_luke,reduced_luke,true,false);
+            check(snapshot().benchmark.count==plan.size() && !snapshot().benchmark.advanced,"suite freezes basic mode at start");
+            clock=snapshot().benchmark.requested_ms+500;
+            for(const auto& step:plan) {
+                auto s=snapshot();check(s.desired.pacing_mode==step.pacing && step.pacing!=2,"reduced execution follows exact two-mode sequence");
+                runtime.applied_revision=s.revision;runtime.pacing_mode=s.desired.pacing_mode;runtime.afw_shading_rate=s.desired.afw_shading_rate;report_runtime(runtime);
+                tick_benchmark(clock);check(snapshot().benchmark.phase==BenchmarkPhase::running,"reduced quality/pacing applied");
+                tick_benchmark(clock+10000);clock+=10200;
+            }
+            check(snapshot().benchmark.phase==BenchmarkPhase::complete && snapshot().desired==sanitize(simple),"reduced completion restores original basic settings");
+            std::ifstream csv(std::filesystem::u8path(snapshot().benchmark.csv_path));std::string header;std::getline(csv,header);
+            check(header.find("Framework+director")==std::string::npos,"basic CSV cannot fabricate combined-mode measurements");
+        }
         runtime.steamvr_runtime=false;runtime.vdxr_runtime=true;runtime.vdxr_legacy=true;runtime.luke_detected=false;
         runtime.applied_revision=snapshot().revision;report_runtime(runtime);
         check(start_benchmark(false) && snapshot().benchmark.count==11,"VDXR controller selects the legacy optical suite");
@@ -223,7 +249,7 @@ int main() {
                 <<std::filesystem::u8path(snapshot().benchmark.csv_path).string()<<'\n';
         }
         runtime.vdxr_legacy=false;runtime.luke_detected=false;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
-        check(start_benchmark(true) && snapshot().benchmark.count==49,"New VDXR controller selects full pacing matrix");
+        check(start_benchmark(true) && snapshot().benchmark.count==33,"Forced private VDXR respects the current basic scope");
         stop_benchmark();tick_benchmark();
         std::cout<<"Automatic suite: full/optical with A/C/default, no preset enforcement, truthful A CSV, hidden sampling without F9, timing, median, restore/manual cancellation PASS\n";
         return 0;

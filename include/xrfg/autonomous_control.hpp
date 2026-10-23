@@ -31,7 +31,7 @@ struct Settings {
     bool enabled{true};
     bool advanced_mode{}; // INI-only AdvancedMode; simplified UI by default
     bool afw_only{}; // per-game startup choice, independent of Neural Rendering
-    int pacing_mode{2}; // 0 framework, 1 sole director, 2 framework + director
+    int pacing_mode{1}; // 0 framework, 1 sole director, 2 framework + director
     int backend{2}; // 0 FidelityFX, 1 NVIDIA reference, 2 NVIDIA new, 3 NVIDIA djules
     int motion_vectors{}; // 0 optical flow, 1 native game guides
     int frame_generation{}; // 0 OFXR, 1 FSR 3, 2 native DLSS Frame Generation, 3 Hybrid
@@ -149,7 +149,7 @@ inline bool pacing_comparison_runtime(const RuntimeStatus& r) noexcept {
 enum class BenchmarkPhase : unsigned { idle, applying, running, complete, stopped, error, restart_required };
 struct BenchmarkStatus {
     BenchmarkPhase phase{};
-    bool full{}, csv{}, luke{};
+    bool full{}, csv{}, luke{}, advanced{}; // frozen suite scope
     unsigned index{}, count{}, game_pid{}, controller_pid{};
     std::uint64_t run_id{}, revision{}, requested_ms{}, started_ms{};
     char label[80]{}, message[192]{}, csv_path[1024]{};

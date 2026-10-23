@@ -45,13 +45,14 @@ void codec() {
     auto concurrent_shared=desired;concurrent_shared.enabled=false;
     const auto shared_merged=xrfg::autonomous::merge_changes(concurrent_shared,desired,shared);
     require(shared_merged.luke_shared_swapchains && !shared_merged.enabled,"startup choice merge preserves concurrent edits");
-    require(desired.pacing_mode==2,"Single director experiment defaults OFF");
+    require(desired.pacing_mode==1,"Basic mode defaults to Director on the private transport");
+    require(xrfg::autonomous::parse_settings("[ofxr]\npacing_mode=2\n").pacing_mode==1,"basic mode replaces hidden legacy combined policy with Director");
     for(int mode=0;mode<3;++mode) {
-        auto choice=desired;choice.pacing_mode=mode;
+        auto choice=desired;choice.advanced_mode=true;choice.pacing_mode=mode;
         require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(choice)).pacing_mode==mode,"three pacing modes persist independently of generator");
     }
     require(xrfg::autonomous::parse_settings("[ofxr]\nsingle_director=1\n").pacing_mode==1,"V610 ON preserves sole director");
-    require(xrfg::autonomous::parse_settings("[ofxr]\nsingle_director=0\n").pacing_mode==2,"V610 OFF preserves framework plus director");
+    require(xrfg::autonomous::parse_settings("[ofxr]\nAdvancedMode=1\nsingle_director=0\n").pacing_mode==2,"V610 OFF preserves framework plus director");
     require(xrfg::autonomous::parse_settings("[ofxr]\npacing_mode=0\nsingle_director=1\n").pacing_mode==0,"explicit new choice overrides old checkbox");
     auto experiment=desired;experiment.pacing_mode=1;
     auto experiment_saved=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(experiment));
