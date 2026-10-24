@@ -3999,9 +3999,12 @@ create_vulkan_frame_generation_swapchains(
     const std::shared_ptr<SwapchainState>& refused,
     std::span<const ProjectionResourceMapping> mappings) noexcept {
     try {
+        // V565: a 2X shallow session has spare slots too now, and falls
+        // back to the one slot it needs.
         if (!session ||
             (!session->deep_pipeline &&
-             session->frames_per_application_frame <= 2) ||
+             session->frames_per_application_frame <= 2 &&
+             session->synthetic_ring_slots <= kSyntheticSlotCountShallow) ||
             continuous_presenter_active(session)) {
             return false;
         }
@@ -5349,11 +5352,24 @@ XrResult layer_create_session_impl(
         state->frames_per_application_frame = multiplier_requested;
         state->deep_pipeline = false;
     }
-    // The ring: a slot per synthetic the shape needs, two for the deeper
-    // pipeline; what it fits is what the session can be switched to live.
+    // The ring: what it fits is what the session can be switched to live.
+    // V565: a D3D12 session with single-swapchain rings (the default, and
+    // the D3D11 and Vulkan bridges' too) gets 4X's three slots whatever it
+    // starts in, so any multiplier switches live. A slot is storage the
+    // admission bounds are sized against, not depth: the queue's limits
+    // follow the multiplier and the deeper pipeline, so a spare slot adds no
+    // latency. There it is a staging texture per eye (about 56 MB per eye at
+    // Star Citizen's 4172x3268) and no runtime swapchain. Elsewhere - the
+    // Vulkan interop, rings of a swapchain per slot - a spare slot would be
+    // a runtime swapchain per eye against the runtime's cap (SteamVR's 16;
+    // the harness's fake refused the third), so those keep a slot per
+    // synthetic the shape needs, two for the deeper pipeline.
     const std::uint32_t frames_at_start =
         state->frames_per_application_frame.load();
-    state->synthetic_ring_slots = frames_at_start > 3
+    const bool spare_slots_free = state->single_swapchain_rings &&
+        state->graphics_binding == SessionGraphicsBinding::d3d12 &&
+        !state->panel_corrections_off;
+    state->synthetic_ring_slots = spare_slots_free || frames_at_start > 3
         ? kSyntheticSlotCountQuad
         : (state->deep_pipeline || frames_at_start > 2)
             ? kSyntheticSlotCountDeep
@@ -14315,12 +14331,28 @@ void apply_live_frame_multiplier(
         } else {
             state->fixed_frame_multiplier.release();
         }
-        if (target == state->frames_per_application_frame) {
+        // V565: "Prefer FPS over latency" (the deeper pipeline) follows the
+        // tray live as well, where the ring fits it (two synthetic slots; a
+        // session that fell back to the shallow depth keeps one). It only
+        // shapes 2X - 3X and 4X run shallow - and changes through the same
+        // drained switch as the multiplier.
+        state->deep_pipeline_configured =
+            xrfg::implicit_layer::read_deep_pipeline(current_layer_directory()) &&
+            state->synthetic_ring_slots >= kSyntheticSlotCountDeep;
+        const bool target_deep = target == 2U && state->deep_pipeline_configured;
+        if (target == state->frames_per_application_frame &&
+            target_deep == state->deep_pipeline) {
             return;
         }
         if (use_continuous_presenter &&
             XR_FAILED(wait_for_presenter_idle(state))) {
             return;
+        }
+        // V565: and every synthesizer, history and interop of the session
+        // idle on the GPU before the shape changes - a short freeze, once,
+        // rather than a pair of one shape still running into the next.
+        for (const auto& swapchain : find_swapchains(state)) {
+            drain_swapchain_gpu(swapchain);
         }
         bool deep = false;
         {

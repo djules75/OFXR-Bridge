@@ -1926,7 +1926,8 @@ void handle_command(AppState& state, UINT command) {
             L"Helps games that only just reach half your headset's refresh "
             L"rate hold full FPS more steadily. Adds one frame of latency "
             L"(about 11 ms at 90 Hz). Leave off if the game already runs "
-            L"comfortably. Takes effect the next time the game starts.");
+            L"comfortably. A running game switches within a second, with a "
+            L"short pause.");
         break;
     case toggle_lower_vram:
         state.settings.single_swapchain_rings = !state.settings.single_swapchain_rings;
