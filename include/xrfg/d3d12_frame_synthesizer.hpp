@@ -57,6 +57,12 @@ struct D3D12FrameSynthesisTicket {
     // only the synthetic must use this: waiting on fence_value instead
     // blocks until a copy that has not been submitted yet completes.
     std::uint64_t synthetic_fence_value{};
+    // V569: at 3X and 4X, the value at which the FIRST synthetic output's
+    // pixels exist, signalled before the later outputs are drawn; 0 where the
+    // pair was signalled once (2X, a prime, a repeated pair). The consumer
+    // of that first output alone waits on this; synthetic_fence_value still
+    // covers every output.
+    std::uint64_t first_synthetic_fence_value{};
     std::uint32_t work_slot{};
     std::uint32_t synthetic_destination_index{
         std::numeric_limits<std::uint32_t>::max()};

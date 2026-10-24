@@ -6239,6 +6239,13 @@ double test_hybrid_bars(D3D12WarpFixture& fixture, bool with_depth,
                 three_x ? std::span<const xrfg::D3D12ExtraSynthetic>(extra_synthetics)
                         : std::span<const xrfg::D3D12ExtraSynthetic>())),
         "bars pair failed");
+    // V569: a pair with a second output signals its first one apart, before
+    // the pair's own value; a single output is signalled once.
+    require(three_x
+            ? pair.first_synthetic_fence_value != 0 &&
+                  pair.first_synthetic_fence_value < pair.synthetic_fence_value
+            : pair.first_synthetic_fence_value == 0,
+        "the first synthetic output's own signal is wrong");
     fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
     const UINT outputs = three_x ? 2U : 1U;
     double coverage_total = 0;
@@ -6455,7 +6462,7 @@ void test_flat_panel_marker_synthesis(
 // pair's completion, in rounds that alternate the HUD fix on and off (V563:
 // the tray's switch, read at every pair; off, nothing of it runs, as in
 // V558). Measurement only.
-void run_still_mask_benchmark(UINT width, UINT height, int pairs_per_round) {
+void run_still_mask_benchmark(UINT width, UINT height, int pairs_per_round, UINT outputs = 3) {
     D3D12WarpFixture fixture(true);
     SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
     const UINT motion_width = width / 2U, motion_height = height / 2U;
@@ -6517,7 +6524,10 @@ void run_still_mask_benchmark(UINT width, UINT height, int pairs_per_round) {
     options.hybrid = true;
     require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(),
                 history, current_pointers, synthetic_pointers, kFormat,
-                D3D12_RESOURCE_STATE_RENDER_TARGET, xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+                D3D12_RESOURCE_STATE_RENDER_TARGET,
+                GetEnvironmentVariableW(L"XRFG_BENCH_NVIDIA", nullptr, 0) != 0
+                    ? xrfg::D3D12OpticalFlowBackend::nvidia
+                    : xrfg::D3D12OpticalFlowBackend::fidelity_fx,
                 options)),
         "benchmark synthesizer initialization failed");
     const auto guides = [&](std::uint64_t serial) {
@@ -6552,7 +6562,11 @@ void run_still_mask_benchmark(UINT width, UINT height, int pairs_per_round) {
     require(operation_succeeded(synthesizer.submit_prime(capture_a, views, 0, &prime, guides(1))),
         "benchmark prime failed");
     require_frame_start_gate(synthesizer, "benchmark frame-start gate");
-    const std::array<xrfg::D3D12ExtraSynthetic, 2> extra{{{1U, 0.5F}, {2U, 0.75F}}};
+    const std::array<xrfg::D3D12ExtraSynthetic, 2> extra_all{{{1U, 0.5F}, {2U, 0.75F}}};
+    // The outputs beyond the first: 4X two, 3X one, 2X none.
+    const std::span<const xrfg::D3D12ExtraSynthetic> extra(
+        extra_all.data(), std::min<std::size_t>(outputs > 1 ? outputs - 1 : 0, extra_all.size()));
+    const float first_fraction = outputs >= 3 ? (outputs == 3 ? 1.0F / 3.0F : 0.25F) : 0.5F;
     std::uint64_t serial = 1;
     LARGE_INTEGER frequency{};
     QueryPerformanceFrequency(&frequency);
@@ -6564,13 +6578,20 @@ void run_still_mask_benchmark(UINT width, UINT height, int pairs_per_round) {
             require(operation_succeeded(history->capture(source, &capture)) &&
                     operation_succeeded(history->commit(capture)),
                 "benchmark capture failed");
-            require(operation_succeeded(synthesizer.wait_for_idle()), "benchmark idle");
+            // The frame-start gate, as the layer and the tests use (a full
+            // wait_for_idle drops the previous source a pair needs).
+            require(operation_succeeded(synthesizer.wait_for_previous_submission(1000)),
+                "benchmark frame-start gate");
             LARGE_INTEGER begin{}, end{};
             QueryPerformanceCounter(&begin);
             xrfg::D3D12FrameSynthesisTicket pair{};
-            require(operation_succeeded(synthesizer.submit_pair(capture, views, views, 0, 1, &pair,
-                        std::nullopt, guides(serial), false, 0.25F, extra)),
-                "benchmark pair failed");
+            const HRESULT pair_result = synthesizer.submit_pair(capture, views, views, 0, 1, &pair,
+                std::nullopt, guides(serial), false, first_fraction, extra);
+            if (!operation_succeeded(pair_result)) {
+                std::cerr << "benchmark pair " << serial << " HRESULT 0x" << std::hex
+                          << static_cast<std::uint32_t>(pair_result) << std::dec << '\n';
+            }
+            require(operation_succeeded(pair_result), "benchmark pair failed");
             require(operation_succeeded(synthesizer.wait_for_previous_submission(1000)),
                 "benchmark pair wait");
             QueryPerformanceCounter(&end);
@@ -6599,7 +6620,7 @@ void run_still_mask_benchmark(UINT width, UINT height, int pairs_per_round) {
         run(pairs_per_round, &off);
     }
     require(operation_succeeded(synthesizer.wait_for_idle()), "benchmark final idle");
-    std::cout << "stillbench " << width << "x" << height << " x2 eyes, 4X hybrid FidelityFX: "
+    std::cout << "stillbench " << width << "x" << height << " x2 eyes, " << (outputs + 1) << "X hybrid: "
               << "HUD fix on median " << median(on) << " ms, off " << median(off) << " ms, "
               << "difference " << (median(on) - median(off)) << " ms per pair ("
               << on.size() << " + " << off.size() << " pairs)\n";
@@ -6610,7 +6631,8 @@ int main(int argc, char** argv) {
         try {
             run_still_mask_benchmark(argc > 2 ? static_cast<UINT>(std::stoul(argv[2])) : 4172U,
                 argc > 3 ? static_cast<UINT>(std::stoul(argv[3])) : 3268U,
-                argc > 4 ? std::stoi(argv[4]) : 20);
+                argc > 4 ? std::stoi(argv[4]) : 20,
+                argc > 5 ? static_cast<UINT>(std::stoul(argv[5])) : 3U);
         } catch (const std::exception& error) {
             std::cerr << "stillbench failed: " << error.what() << '\n';
             return 1;
@@ -6653,6 +6675,14 @@ int main(int argc, char** argv) {
                                      HybridScene::occlusion_fast_far}) {
                 test_hybrid_composition(nvidia_fixture, scene, xrfg::D3D12OpticalFlowBackend::nvidia);
             }
+            // V569: a 3X pair through the NVIDIA path, whose later output is
+            // recorded on the tail list: its first output signalled apart
+            // (checked inside), both outputs measured, the debug layer clean.
+            std::cout << "hybrid nvidia 3X bars coverage "
+                      << test_hybrid_bars(nvidia_fixture, true,
+                             xrfg::D3D12OpticalFlowBackend::nvidia, 256, nullptr, false, true)
+                      << '\n';
+            nvidia_fixture.require_no_debug_errors();
             return 0;
         }
         if (argc > 1 && std::string_view(argv[1]) == "panel") {

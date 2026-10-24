@@ -12395,6 +12395,9 @@ struct PreparedGeneration {
     // delay in 3X. Not set otherwise.
     Microsoft::WRL::ComPtr<ID3D12Fence> ready_fence;
     std::uint64_t ready_value{};
+    // V569: on ready_fence, the value the pair's later synthetics exist at,
+    // where ready_value is the first one's earlier signal; 0 otherwise.
+    std::uint64_t extra_ready_value{};
 };
 
 struct PreparedProjectionResource {
@@ -12829,9 +12832,15 @@ struct PreparedProjectionFrame {
                     }
                 } else if (SUCCEEDED(generation->synthesizer->completion_fence(
                                output.ready_fence.ReleaseAndGetAddressOf()))) {
-                    output.ready_value = ticket.synthetic_fence_value != 0
+                    const std::uint64_t all_value = ticket.synthetic_fence_value != 0
                         ? ticket.synthetic_fence_value
                         : ticket.fence_value;
+                    // V569: at 3X and 4X the first synthetic is ready at its
+                    // own, earlier signal; the later ones at the pair's.
+                    output.ready_value = ticket.first_synthetic_fence_value != 0
+                        ? ticket.first_synthetic_fence_value
+                        : all_value;
+                    output.extra_ready_value = all_value;
                 }
             }
             if (release_at_handover) {
@@ -15030,10 +15039,16 @@ XrResult layer_end_frame_impl(
             continue;
         }
         if (deferred.deferred_synthetic != nullptr) {
+            // V569: the first synthetic's hand-over waits on its own
+            // signal, not on the pair's later outputs.
+            xrfg::D3D12FrameSynthesisTicket first_ticket = deferred.deferred_ticket;
+            if (first_ticket.first_synthetic_fence_value != 0) {
+                first_ticket.synthetic_fence_value = first_ticket.first_synthetic_fence_value;
+            }
             synthetic_releases.releases.push_back({
                 deferred.deferred_generation,
                 deferred.deferred_synthetic,
-                deferred.deferred_ticket,
+                first_ticket,
                 deferred.deferred_synthetic_staging,
                 &deferred.deferred_generation->synthetic_runtime_images,
             });
@@ -15207,6 +15222,15 @@ XrResult layer_end_frame_impl(
                     first_generated.synthetic_ready.push_back(
                         {resource.generation.ready_fence,
                          resource.generation.ready_value});
+                    // V569: the later synthetics are ready at the pair's
+                    // signal, which the readiness hold can now wait on too.
+                    if (resource.generation.extra_ready_value != 0) {
+                        for (std::uint32_t extra = 0; extra < extra_count; ++extra) {
+                            extra_generated[extra].synthetic_ready.push_back(
+                                {resource.generation.ready_fence,
+                                 resource.generation.extra_ready_value});
+                        }
+                    }
                 }
             }
             submitted_end_info = &first_generated.info;
