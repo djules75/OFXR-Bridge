@@ -164,6 +164,7 @@ int main() {
     settings.capture_at_end_frame = false;
     settings.diagnostics = true;
     settings.pause_hotkey = "shift+scrolllock";
+    settings.multiplier_hotkey = "ctrl+shift+f10";
     settings.overlay_size = xrfg::FpsOverlaySize::little;
     settings.overlay_latency = false;
     settings.overlay_hybrid = false;
@@ -195,6 +196,9 @@ int main() {
     using xrfg::standalone::parse_hotkey;
     if (release_defaults.pause_hotkey != "ctrl+alt+f7" ||
         parsed.pause_hotkey != "shift+scrolllock" ||
+        release_defaults.multiplier_hotkey != "ctrl+alt+f12" ||
+        parsed.multiplier_hotkey != "ctrl+shift+f10" ||
+        std::string(xrfg::standalone::kDefaultMultiplierHotkey) != "ctrl+alt+f12" ||
         parse_settings("[tray]\r\npause_hotkey= Ctrl+Alt+F9 \r\n").pause_hotkey != "ctrl+alt+f9" ||
         parse_hotkey("ctrl+alt+f7") != Hotkey{3, 0x76} ||
         parse_hotkey(" Alt + Control + F7 ") != Hotkey{3, 0x76} ||

@@ -276,6 +276,8 @@ LauncherSettings parse_settings(std::string_view text) {
                                            lower_ascii(value) == "true";
                 } else if (key == "pause_hotkey") {
                     settings.pause_hotkey = lower_ascii(value);
+                } else if (key == "multiplier_hotkey") {
+                    settings.multiplier_hotkey = lower_ascii(value);
                 } else if (key == "edge_ghosting_reduction") {
                     settings.edge_ghosting_reduction = value == "1" ||
                         lower_ascii(value) == "true";
@@ -370,6 +372,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\noverlay_hybrid=" + (settings.overlay_hybrid ? "1" : "0") +
            "\r\noverlay_multiplier=" + (settings.overlay_multiplier ? "1" : "0") +
            "\r\npause_hotkey=" + settings.pause_hotkey +
+           "\r\nmultiplier_hotkey=" + settings.multiplier_hotkey +
            "\r\nedge_ghosting_reduction=" +
            (settings.edge_ghosting_reduction ? "1" : "0") +
            "\r\nexpert_mode=" + (settings.expert_mode ? "1" : "0") +

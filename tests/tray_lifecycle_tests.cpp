@@ -151,9 +151,20 @@ void pause_switch() {
     // The key does what the menu entry does, and is given back at disarm.
     // A chord nothing else on a developer's machine is likely to hold.
     test.state.settings.pause_hotkey = "ctrl+alt+shift+f24";
+    // V566: and the multiplier key, on a chord as unlikely to be held.
+    test.state.settings.multiplier_hotkey = "ctrl+alt+shift+f22";
     const HWND window = make_window(test.state);
-    register_pause_hotkey(test.state);
+    register_hotkeys(test.state);
     require(test.state.pause_hotkey_registered, "pause key registered while armed");
+    require(test.state.multiplier_hotkey_registered, "multiplier key registered while armed");
+    // V566: each press steps the multiplier 2X, 3X, 4X and back to 2X.
+    test.state.settings.frame_multiplier = 2;
+    SendMessageW(window, WM_HOTKEY, kMultiplierHotkeyId, 0);
+    require(test.state.settings.frame_multiplier == 3, "multiplier key steps 2X to 3X");
+    SendMessageW(window, WM_HOTKEY, kMultiplierHotkeyId, 0);
+    require(test.state.settings.frame_multiplier == 4, "multiplier key steps 3X to 4X");
+    SendMessageW(window, WM_HOTKEY, kMultiplierHotkeyId, 0);
+    require(test.state.settings.frame_multiplier == 2, "multiplier key wraps 4X to 2X");
     SendMessageW(window, WM_HOTKEY, kPauseHotkeyId, 0);
     require(!test.state.paused && !signalled(), "pause key resumes");
     SendMessageW(window, WM_HOTKEY, kPauseHotkeyId, 0);
@@ -170,9 +181,11 @@ void pause_switch() {
         require(text.find("pause_hotkey=ctrl+alt+shift+f23") != std::string::npos,
             "a changed key is saved to tray.ini");
     }
-    require(RegisterHotKey(window, kPauseHotkeyId + 1, MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_F24) != FALSE,
+    // (An id of its own: kPauseHotkeyId + 1 is the multiplier key's since V566.)
+    constexpr int kProbeHotkeyId = 0x7F02;
+    require(RegisterHotKey(window, kProbeHotkeyId, MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_F24) != FALSE,
         "the old chord is given back when the key changes");
-    UnregisterHotKey(window, kPauseHotkeyId + 1);
+    UnregisterHotKey(window, kProbeHotkeyId);
     require(pause_key_display("ctrl+alt+f7") == L"Ctrl + Alt + F7" &&
             pause_key_display("off") == L"none", "the binding as the menu shows it");
     require(hotkey_from_control(hotkey_control_value({MOD_CONTROL | MOD_ALT, VK_F7})) ==
@@ -185,6 +198,7 @@ void pause_switch() {
     require(disarm_bridge(test.state, &error), "disarm while paused");
     require(!test.state.paused && test.state.pause_signal == nullptr, "pause ends with the arm");
     require(!test.state.pause_hotkey_registered, "pause key released with the arm");
+    require(!test.state.multiplier_hotkey_registered, "multiplier key released with the arm");
     require(RegisterHotKey(window, kPauseHotkeyId, MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_F24) != FALSE,
         "the chord is free again after the disarm");
     UnregisterHotKey(window, kPauseHotkeyId);

@@ -110,6 +110,9 @@ struct LauncherSettings {
     // parse_hotkey's form. No menu entry; edit tray.ini. Empty, "off" or
     // anything parse_hotkey refuses means no key.
     std::string pause_hotkey{"ctrl+alt+f7"}; // kDefaultPauseHotkey
+    // V566: the key that steps the Frame Gen multiplier 2X, 3X, 4X, 2X,
+    // held like the pause key while armed. "off" for none.
+    std::string multiplier_hotkey{"ctrl+alt+f12"}; // kDefaultMultiplierHotkey
     // The composition's edge ghosting reduction (the layer's
     // edge_ghosting_reduction). Not in the menu: off by default (it costs
     // about 0.2 ms per game frame in 2X, 0.5 ms in 3X); tray.ini turns it on,
@@ -169,6 +172,7 @@ struct Hotkey {
 // parse_hotkey would refuse: the inverse of parse_hotkey.
 [[nodiscard]] std::optional<std::string> hotkey_setting(Hotkey hotkey);
 inline constexpr char kDefaultPauseHotkey[] = "ctrl+alt+f7";
+inline constexpr char kDefaultMultiplierHotkey[] = "ctrl+alt+f12";
 
 [[nodiscard]] std::string backend_ini_value(FlowBackend backend);
 [[nodiscard]] std::string nvidia_preset_ini_value(

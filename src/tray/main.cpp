@@ -37,6 +37,8 @@ constexpr wchar_t kArmAndExitArgument[] = L"--arm-and-exit";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kTrayId = 1;
 constexpr int kPauseHotkeyId = 1;
+// V566: the key that steps the Frame Gen multiplier.
+constexpr int kMultiplierHotkeyId = 2;
 constexpr UINT kArmPollMilliseconds = 250;
 // status.json is rewritten on this timer, and at once on every command, arm
 // and exit (write_status).
@@ -78,6 +80,9 @@ enum MenuCommand : UINT {
     toggle_hybrid = 141,
     toggle_hybrid_depth_search = 142,
     toggle_hud_fix = 143,
+    // V566: the multiplier key's step, and its dialog.
+    cycle_frame_multiplier = 144,
+    change_multiplier_key = 145,
     reset_defaults = 127,
     toggle_diagnostics = 120,
     overlay_off = 121,
@@ -118,6 +123,8 @@ struct AppState {
     bool paused{};
     // The `pause_hotkey` of tray.ini is held system-wide, while armed only.
     bool pause_hotkey_registered{};
+    // V566: the multiplier_hotkey of tray.ini, likewise.
+    bool multiplier_hotkey_registered{};
     // Alternate namespace used by lifecycle tests, never read from user INI.
     std::wstring registry_subkey{xrfg::implicit_layer::kRegistrySubkey};
     HICON armed_icon{};
@@ -717,33 +724,48 @@ void show_balloon(
     return Shell_NotifyIconW(NIM_ADD, &state.icon) != FALSE;
 }
 
-// Takes tray.ini's `pause_hotkey` for as long as the bridge is armed. The key
-// is the tray's and not the layer's: nothing is added to the game, and the
-// same chord works in every title. A key another program already holds is
-// left to it; the menu entry still works.
-void register_pause_hotkey(AppState& state) {
-    if (state.pause_hotkey_registered || state.window == nullptr ||
-        state.pause_signal == nullptr) return;
-    const auto hotkey = xrfg::standalone::parse_hotkey(state.settings.pause_hotkey);
+// Takes tray.ini's `pause_hotkey` and (V566) `multiplier_hotkey` for as long
+// as the bridge is armed. The keys are the tray's and not the layer's:
+// nothing is added to the game, and the same chord works in every title. A
+// key another program already holds is left to it; the menu entries still
+// work.
+void register_one_hotkey(AppState& state, int id, const std::string& setting,
+    bool& registered, const wchar_t* lifecycle, const wchar_t* what) {
+    if (registered) return;
+    const auto hotkey = xrfg::standalone::parse_hotkey(setting);
     if (!hotkey) return;
-    state.pause_hotkey_registered = RegisterHotKey(
-        state.window, kPauseHotkeyId, hotkey->modifiers | MOD_NOREPEAT,
-        hotkey->key) != FALSE;
-    if (!state.pause_hotkey_registered)
-        log_lifecycle(state.local_directory, L"pause-hotkey",
-            last_error_message(L"Registering the pause key"));
+    registered = RegisterHotKey(
+        state.window, id, hotkey->modifiers | MOD_NOREPEAT, hotkey->key) != FALSE;
+    if (!registered)
+        log_lifecycle(state.local_directory, lifecycle, last_error_message(what));
 }
 
-void unregister_pause_hotkey(AppState& state) {
-    if (!state.pause_hotkey_registered) return;
-    UnregisterHotKey(state.window, kPauseHotkeyId);
-    state.pause_hotkey_registered = false;
+void register_hotkeys(AppState& state) {
+    if (state.window == nullptr) return;
+    if (state.pause_signal != nullptr) {
+        register_one_hotkey(state, kPauseHotkeyId, state.settings.pause_hotkey,
+            state.pause_hotkey_registered, L"pause-hotkey", L"Registering the pause key");
+    }
+    register_one_hotkey(state, kMultiplierHotkeyId, state.settings.multiplier_hotkey,
+        state.multiplier_hotkey_registered, L"multiplier-hotkey",
+        L"Registering the Frame Gen multiplier key");
+}
+
+void unregister_hotkeys(AppState& state) {
+    if (state.pause_hotkey_registered) {
+        UnregisterHotKey(state.window, kPauseHotkeyId);
+        state.pause_hotkey_registered = false;
+    }
+    if (state.multiplier_hotkey_registered) {
+        UnregisterHotKey(state.window, kMultiplierHotkeyId);
+        state.multiplier_hotkey_registered = false;
+    }
 }
 
 // Ends the pause with the arm it belonged to. A running session keeps its own
 // handle, and by now the arm signal has stopped it for good.
 void close_pause_signal(AppState& state) {
-    unregister_pause_hotkey(state);
+    unregister_hotkeys(state);
     if (state.pause_signal) {
         CloseHandle(state.pause_signal);
         state.pause_signal = nullptr;
@@ -836,7 +858,7 @@ void close_pause_signal(AppState& state) {
         return false;
     }
     state.armed = true;
-    register_pause_hotkey(state);
+    register_hotkeys(state);
     state.armed_manifest = manifest;
     state.armed_scope = scope;
     log_lifecycle(state.local_directory,
@@ -960,9 +982,13 @@ void update_runtime_options(
     return std::wstring(name.begin(), name.end());
 }
 
-// The dialog's own state: the setting it opened on and the one it closed on.
+// The dialog's own state: the setting it opened on and the one it closed on,
+// and (V566) what it is for - the pause key's or the multiplier key's.
 struct PauseKeyDialog {
     std::string setting;
+    const wchar_t* caption{L"OFXR Bridge - Pause / Resume key"};
+    const wchar_t* intro{nullptr};  // the resource's own line when null
+    const char* default_setting{xrfg::standalone::kDefaultPauseHotkey};
 };
 
 // The hotkey control's value for a chord, and back. Its modifier flags are
@@ -1007,6 +1033,10 @@ INT_PTR CALLBACK pause_key_dialog_procedure(
     case WM_INITDIALOG: {
         SetWindowLongPtrW(dialog, DWLP_USER, lparam);
         const auto* state = reinterpret_cast<const PauseKeyDialog*>(lparam);
+        SetWindowTextW(dialog, state->caption);
+        if (state->intro != nullptr) {
+            SetDlgItemTextW(dialog, IDC_PAUSE_KEY_INTRO, state->intro);
+        }
         // No rules on the box: any key, with or without modifiers, is the
         // user's to choose. The dialog's text says what a bare key costs.
         show(state->setting);
@@ -1019,7 +1049,8 @@ INT_PTR CALLBACK pause_key_dialog_procedure(
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
         case IDC_PAUSE_KEY_DEFAULT:
-            show(xrfg::standalone::kDefaultPauseHotkey);
+            show(reinterpret_cast<const PauseKeyDialog*>(
+                GetWindowLongPtrW(dialog, DWLP_USER))->default_setting);
             SetFocus(box);
             return TRUE;
         case IDC_PAUSE_KEY_NONE:
@@ -1072,10 +1103,10 @@ INT_PTR CALLBACK pause_key_dialog_procedure(
 
 // Stores a new key and takes it at once if the bridge is armed.
 void apply_pause_hotkey(AppState& state, const std::string& setting) {
-    unregister_pause_hotkey(state);
+    unregister_hotkeys(state);
     state.settings.pause_hotkey = setting;
     save_settings(state);
-    if (state.armed) register_pause_hotkey(state);
+    if (state.armed) register_hotkeys(state);
     log_lifecycle(state.local_directory, L"pause-hotkey-changed");
 }
 
@@ -1087,7 +1118,7 @@ void reset_tuning_controls(AppState& state);
 // recorder's two knobs that only the layer's ini holds, and the live tuning
 // window if it was opened.
 void reset_to_factory_settings(AppState& state) {
-    unregister_pause_hotkey(state);
+    unregister_hotkeys(state);
     // expert_mode is a hand-set key for testers; a reset leaves it as it is.
     const bool expert_mode = state.settings.expert_mode;
     state.settings = xrfg::standalone::LauncherSettings{};
@@ -1111,14 +1142,43 @@ void reset_to_factory_settings(AppState& state) {
         reset_tuning_controls(state);
         write_tuning(state);
     }
-    if (state.armed) register_pause_hotkey(state);
+    if (state.armed) register_hotkeys(state);
     log_lifecycle(state.local_directory, L"reset-to-default");
+}
+
+// V566: the multiplier key, as apply_pause_hotkey.
+void apply_multiplier_hotkey(AppState& state, const std::string& setting) {
+    unregister_hotkeys(state);
+    state.settings.multiplier_hotkey = setting;
+    save_settings(state);
+    if (state.armed) register_hotkeys(state);
+    log_lifecycle(state.local_directory, L"multiplier-hotkey-changed");
+}
+
+void change_multiplier_hotkey(AppState& state) {
+    // Released while the dialog is open, both keys, so either chord reaches
+    // the box instead of acting.
+    unregister_hotkeys(state);
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_HOTKEY_CLASS};
+    InitCommonControlsEx(&controls);
+    PauseKeyDialog dialog{state.settings.multiplier_hotkey,
+        L"OFXR Bridge - Frame Gen multiplier key",
+        L"Press the key or keys that step the Frame Gen multiplier 2X, 3X, 4X and back to 2X, for example Ctrl + Alt + F12.",
+        xrfg::standalone::kDefaultMultiplierHotkey};
+    const INT_PTR answer = DialogBoxParamW(
+        GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_PAUSE_KEY), state.window,
+        pause_key_dialog_procedure, reinterpret_cast<LPARAM>(&dialog));
+    if (answer == IDOK) {
+        apply_multiplier_hotkey(state, dialog.setting);
+    } else if (state.armed) {
+        register_hotkeys(state);
+    }
 }
 
 void change_pause_hotkey(AppState& state) {
     // Released while the dialog is open, or pressing the current chord in
     // the box would pause the game instead of reaching the box.
-    unregister_pause_hotkey(state);
+    unregister_hotkeys(state);
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_HOTKEY_CLASS};
     InitCommonControlsEx(&controls);
     PauseKeyDialog dialog{state.settings.pause_hotkey};
@@ -1128,7 +1188,7 @@ void change_pause_hotkey(AppState& state) {
     if (answer == IDOK) {
         apply_pause_hotkey(state, dialog.setting);
     } else if (state.armed) {
-        register_pause_hotkey(state);
+        register_hotkeys(state);
     }
 }
 
@@ -1540,6 +1600,18 @@ void show_context_menu(AppState& state) {
             reinterpret_cast<UINT_PTR>(multiplier_menu),
             L"Frame Gen multiplier [live change]");
     }
+    // V566: the key that steps it, and the dialog that changes the key,
+    // set apart from the pause entries below.
+    {
+        std::wstring label = L"Current key binding: " +
+            pause_key_display(state.settings.multiplier_hotkey);
+        if (state.armed && !state.multiplier_hotkey_registered &&
+            xrfg::standalone::parse_hotkey(state.settings.multiplier_hotkey)) {
+            label += L" (used by another program)";
+        }
+        AppendMenuW(menu, MF_STRING, change_multiplier_key, label.c_str());
+    }
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(
         menu,
         MF_STRING | (state.armed && state.pause_signal ? MF_ENABLED : MF_GRAYED),
@@ -1684,6 +1756,7 @@ void show_context_menu(AppState& state) {
         MF_STRING | (state.settings.single_swapchain_rings ? MF_CHECKED : MF_UNCHECKED),
         toggle_lower_vram,
         L"Lower VRAM (may cause stuttering)");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(
         menu,
         MF_STRING | (state.settings.hybrid ? MF_CHECKED : MF_UNCHECKED),
@@ -1823,6 +1896,14 @@ void handle_command(AppState& state, UINT command) {
     case change_pause_key:
         change_pause_hotkey(state);
         break;
+    case change_multiplier_key:
+        change_multiplier_hotkey(state);
+        break;
+    case cycle_frame_multiplier:
+        // V566: 2X, 3X, 4X, then 2X again, through the menu's own entries.
+        handle_command(state, state.settings.frame_multiplier >= 4 ? frame_gen_2x
+            : state.settings.frame_multiplier == 3 ? frame_gen_4x : frame_gen_3x);
+        break;
     case backend_fidelity_fx:
         state.settings.backend = xrfg::standalone::FlowBackend::fidelity_fx;
         update_runtime_options(state);
@@ -1950,7 +2031,7 @@ void handle_command(AppState& state, UINT command) {
                 L"Optical flow: FidelityFX (NVIDIA: Medium at 50%, bidirectional "
                 L"consistency off). Prefer FPS over latency: on. Frame Gen "
                 L"multiplier: 2X. Lower VRAM: on. FPS overlay: upper right, big, latency, multiplier and Hybrid status shown. Bridge "
-                L"flight recorder: off. Pause key: Ctrl + Alt + F7. Hybrid: off, "
+                L"flight recorder: off. Pause key: Ctrl + Alt + F7. Multiplier key: Ctrl + Alt + F12. Hybrid: off, "
                 L"its depth search off. "
                 L"Settings "
                 L"only reachable in tray.ini go back to their defaults too.\n\n"
@@ -2018,8 +2099,7 @@ void handle_command(AppState& state, UINT command) {
                     ? L"Three generated frames for every frame the game "
                       L"renders: the game runs at a quarter of your headset's "
                       L"refresh rate (30 FPS at 120 Hz). Switches in a running "
-                      L"game within a moment where the game was started in 4X; "
-                      L"a game started in 2X or 3X needs a restart for 4X."
+                      L"game within a moment."
                     : multiplier == 3
                         ? L"Two generated frames for every frame the game "
                           L"renders: the game runs at a third of your headset's "
@@ -2202,6 +2282,7 @@ LRESULT CALLBACK window_procedure(
         return 0;
     case WM_HOTKEY:
         if (wparam == kPauseHotkeyId) handle_command(*state, toggle_pause);
+        if (wparam == kMultiplierHotkeyId) handle_command(*state, cycle_frame_multiplier);
         write_status(*state);
         return 0;
     case WM_TIMER:
