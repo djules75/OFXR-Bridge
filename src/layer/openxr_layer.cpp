@@ -1580,6 +1580,16 @@ private:
         state.private_runtime && comparison_delivery_runtime(state);
 }
 
+// HFW's unique-production filter is an ingress rule. It must not force the
+// completed AFW packet back through inline OFXR publication when a private
+// SteamVR director and an isolated synthesis lane are already available.
+[[nodiscard]] bool fresh_luke_director_worker(const SessionState& state) noexcept {
+    return state.luke_fresh_only && !state.afw_only && single_director_pacing(state) &&
+        state.dispatch->steamvr_runtime && state.luke_synthesis_queue &&
+        state.optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
+        state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr;
+}
+
 [[nodiscard]] bool staged_native_outputs(const SessionState& state) noexcept {
     return !state.private_runtime && configurable_native_outputs(state) && state.separate_synthesis > 0;
 }
@@ -2486,6 +2496,7 @@ void refresh_luke_prediction_clock(SessionState& state,const XrFrameState& slot,
     state.luke_prediction_wall=now;
 }
 void record_rolling_runtime_output(const XrFrameEndInfo* info) noexcept;
+[[nodiscard]] bool continuous_presenter_active(const std::shared_ptr<SessionState>& state) noexcept;
 XrResult end_frame_with_private_auxiliary(const std::shared_ptr<SessionState>& state,
     const XrFrameEndInfo* info,const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery={});
 
@@ -2493,7 +2504,8 @@ XrResult observed_content_end_frame(const std::shared_ptr<SessionState>& state,c
     const std::shared_ptr<xrfg::InterfaceDeliveryReceipt>& delivery) {
     if(!state || !state->dispatch->end_frame)return XR_ERROR_HANDLE_INVALID;
     const auto session=state->handle;
-    if(!state->luke_fresh_only)return end_frame_with_private_auxiliary(state,info,delivery);
+    if(!state->luke_fresh_only || continuous_presenter_active(state))
+        return end_frame_with_private_auxiliary(state,info,delivery);
     if(!info || info->type!=XR_TYPE_FRAME_END_INFO)return XR_ERROR_VALIDATION_FAILURE;
     if(!state->luke_output_begun) {
         XrFrameState slot{XR_TYPE_FRAME_STATE};
@@ -2705,7 +2717,8 @@ XrResult wait_presenter_runtime_frame(const std::shared_ptr<SessionState>& state
 }
 
 [[nodiscard]] bool presenter_forbidden(const SessionState& state) noexcept {
-    return state.afw_only || state.luke_aux_budget_inline || state.luke_fresh_only || (state.graphics_binding == SessionGraphicsBinding::d3d11 &&
+    return state.afw_only || state.luke_aux_budget_inline ||
+        (state.luke_fresh_only && !fresh_luke_director_worker(state)) || (state.graphics_binding == SessionGraphicsBinding::d3d11 &&
         (state.single_threaded_d3d11 || state.split_frame_loop));
 }
 
@@ -10048,7 +10061,8 @@ void stop_continuous_presenter(
     return !presenter_forbidden(*state) && !djules_inline_runtime(*state) && state->menu_enabled && state->frame_generation_mode !=
                xrfg::D3D12FrameGenerationMode::fsr3 &&
            state->optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
-           state->nvidia_new_route && (!direct_reduced_outputs(*state) || extra_output_capacity(*state)) &&
+           (state->nvidia_new_route || fresh_luke_director_worker(*state)) &&
+           (!direct_reduced_outputs(*state) || extra_output_capacity(*state)) &&
            (state->graphics_binding == SessionGraphicsBinding::d3d11 ||
             state->graphics_binding == SessionGraphicsBinding::d3d12) &&
            !state->pipelined_presenter_mode;
@@ -13353,14 +13367,22 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
             }
             origin_colors[index]=images[entry.prepared.current_destination_index];
         }
-        {
-            std::scoped_lock lock(session->gpu_mutex);
+        const auto read_origins = [&] {
             // Both colors are already frozen in disjoint scratch on this queue.
             // Submit their small marker copies together: one GPU/CPU rendezvous,
             // independent tokens/results and the same producer ordering. No new
             // frame of history or delayed eye selection is introduced.
             xrfg::read_luke_color_origin_pair(session->d3d12_queue.Get(),
                 origin_colors,origin_tokens,origin_results);
+        };
+        if (entries[0].generation->isolated_luke_synthesis && entries[1].generation->isolated_luke_synthesis) {
+            // The reader owns its allocator/readback lock. Its CPU decode must
+            // not exclude OFXR submission on the other lane. Scratch stays on
+            // the capture queue and is never an OFXR destination.
+            read_origins();
+        } else {
+            std::scoped_lock lock(session->gpu_mutex);
+            read_origins();
         }
         for(std::size_t index=0;index<entries.size();++index) {
             auto& entry=entries[index];const HRESULT result=origin_results[index];
@@ -13858,7 +13880,7 @@ struct InternalCycleResult {
         return output;
     }
 
-    if (state->luke_fresh_only) {
+    if (state->luke_fresh_only && !continuous_presenter_active(state)) {
         state->luke_output_begun = true;
         state->luke_output_slot = frame_state;
         state->runtime_frame_waited_unbegun = false;

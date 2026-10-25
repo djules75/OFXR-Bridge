@@ -2476,6 +2476,7 @@ int main(int argc, char** argv) {
             if(mode == "luke-afw-slot") { gpu_pipeline(true, false, false, false, false, true); return 0; }
             if(mode == "post-afw-packet") { gpu_pipeline(true, false, false, false, false, false, true); return 0; }
             if(mode == "luke-isolated-post-afw") { gpu_pipeline(true,false,false,false,false,false,true,false,0,true); return 0; }
+
             if(mode == "luke-isolated-raw") { gpu_pipeline(true,false,false,true,false,false,false,false,0,true); return 0; }
             if(mode == "luke-missing-afw-guides") { gpu_pipeline(true, false, false, false, false, false, false, true); return 0; }
             if(mode == "luke-markerless-ofxr") { gpu_pipeline(true,false,false,false,false,false,false,false,6); return 0; }

@@ -13,6 +13,8 @@
 static bool framework_session_probe{},vdxr_legacy_probe{};
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
+    const bool hfw=route.starts_with("hfw-");if(hfw)route=route.substr(4);
+    const bool hfw_offon=hfw && route.starts_with("offon-");if(hfw_offon)route=route.substr(6);
     const bool force_vdxr_steamvr=route=="force-vdxr-steamvr-session";
     const bool force_steamvr_vdxr=route=="force-steamvr-vdxr-session";
     const bool unknown_session=route=="other-session";
@@ -216,6 +218,15 @@ int main(int argc,char** argv) {
     state->vdxr_legacy=false;
     state->single_director_requested=sole;
     state->luke_afw_enabled=luke;
+    if(hfw) {
+        check(luke && !native12 && sole,"HFW fixture requires Luke D11 Director");
+        state->luke_fresh_only=true;state->luke_source_filter_armed=true;
+        state->graphics_binding_capabilities|=8ULL;
+        initialize_luke_synthesis_queue(*state);
+        check(state->luke_synthesis_queue!=nullptr,"HFW separate lane");
+        auto afw=xrfg::embedded::afw_snapshot().desired;afw.mode=0;
+        check(xrfg::embedded::request_afw(afw),"HFW raw control without native AFW guide fixture");
+    }
     if(route=="scope") {
         state->single_director_requested=true;
         check(!single_director_pacing(*state),"a request alone cannot bypass a native runtime's pacing");
@@ -307,6 +318,13 @@ int main(int argc,char** argv) {
     else state->control_revision=xrfg::embedded::snapshot().revision;
     {std::scoped_lock lock(g_state_mutex);g_sessions[state->handle]=state;g_instances[dispatch->instance]=dispatch;}
     ok(install_private_runtime(state),"install real SteamVR private dispatch");
+    if(hfw) {
+        check(fresh_luke_director_worker(*state) && !presenter_forbidden(*state),"HFW source filter incorrectly forces inline synthesis");
+        state->single_threaded_d3d11=true;check(presenter_forbidden(*state),"single-threaded guard lost");state->single_threaded_d3d11=false;
+        state->split_frame_loop=true;check(presenter_forbidden(*state),"split-loop guard lost");state->split_frame_loop=false;
+        state->afw_only=true;check(presenter_forbidden(*state),"AFW-only enters OFXR worker");state->afw_only=false;
+        state->dispatch->steamvr_runtime=false;check(presenter_forbidden(*state),"VDXR pacing changed");state->dispatch->steamvr_runtime=true;
+    }
     f.transport=state->private_runtime;state->uevr_application=pooled;
     if(pooled)f.native_chain_limit=4; // two app chains plus two physical publication sinks
     if(publication_budget) {
@@ -456,12 +474,21 @@ int main(int argc,char** argv) {
             ID3D12CommandList* lists[]={recorded.Get()};xrfg::report_dlss_motion_vector_submission(f.queue.Get(),1,lists);
         }
         {std::scoped_lock lock(c->mutex);c->acquired_indices.push_back(index);++c->waited_count;}
-        XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};return layer_release_swapchain_image_impl(handle,&release);
+        XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        if(hfw) {static std::uint64_t serial{};
+            return release_swapchain_with_identity(c,&release,xrfg::LukeRenderIdentity{0x649,++serial});}
+        return layer_release_swapchain_image_impl(handle,&release);
     };
     unsigned phase_outputs{};
     const unsigned trial_frames=16;
     const unsigned input_count=benchmark_sequence?7*trial_frames:8;
+    bool hfw_gate_proven=false;
     for(unsigned n=1;n<=input_count;++n) {
+        if(hfw_offon && (n==6 || n==7)) {
+            auto desired=xrfg::autonomous::snapshot().desired;desired.enabled=n==7;
+            check(xrfg::autonomous::request(desired),"HFW actual OFXR off/on control");
+            xrfg::autonomous::apply_runtime_settings();ok(apply_embedded_control(state),"HFW drain/restart off/on");
+        }
         if(benchmark_sequence && n%trial_frames==1) {
             const auto phase=(n-1)/trial_frames;
             auto desired=xrfg::autonomous::snapshot().desired;
@@ -505,7 +532,26 @@ int main(int argc,char** argv) {
         for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=(sole?float(n):0.F)+(eye?.032F:-.032F);v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=split_eyes && eye?right:chain;v.subImage.imageArrayIndex=split_eyes?0:eye;v.subImage.imageRect.extent={256,128};}
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=2;projection.views=views.data();auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
         XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=prediction.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;end.layerCount=1;end.layers=&layer;
-        if(blocked && n==2) {
+        if(hfw) std::fprintf(stderr,"HFW before%u active%u worker%u request%u forbidden%u mode%u enabled%u\n",n,
+            unsigned(continuous_presenter_active(state)),unsigned(state->three_slot_director),unsigned(state->presenter_start_requested),
+            unsigned(presenter_forbidden(*state)),unsigned(state->single_director_requested.load()),unsigned(state->menu_enabled.load()));
+        if(hfw && !toggling && !hfw_gate_proven && n>=4 && state->three_slot_director && continuous_presenter_active(state)) {
+            xr_ok(wait_for_synthesis_handoff(state),"prior HFW generation finished");
+            xr_ok(wait_for_presenter_idle(state),"prior HFW upper output retired");
+            xr_ok(f.transport->drain(),"prior HFW native delivery drained");
+            ComPtr<ID3D12Fence> gate;
+            ok(f.device12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate)),"HFW OFXR gate");
+            ok(state->luke_synthesis_queue->Wait(gate.Get(),1),"park OFXR while game hands over next source");
+            HANDLE returned=CreateEventW(nullptr,TRUE,FALSE,nullptr);check(returned!=nullptr,"HFW return event");
+            std::thread safety([&]{WaitForSingleObject(returned,300);gate->Signal(1);});
+            const auto accepted=layer_end_frame_impl(state->handle,&end);
+            const bool independent=gate->GetCompletedValue()==0;
+            gate->Signal(1);SetEvent(returned);safety.join();CloseHandle(returned);
+            xr_ok(accepted,"HFW accepted next game source");
+            check(independent,"HFW game waited for OFXR synthesis/publication completion");
+            hfw_gate_proven=true;
+            std::puts("HFW game returns while actual OFXR GPU queue is still blocked PASS");
+        } else if(blocked && n==2) {
             f.wait_count(1); // all three endpoint credits are free before the probe
             f.block_end=true;f.end_entered=false;
             auto producer=std::async(std::launch::async,[&]{return layer_end_frame_impl(state->handle,&end);});
@@ -543,11 +589,12 @@ int main(int argc,char** argv) {
             check(outputs>=(phase<6?2*trial_frames+1:trial_frames+1),"Every normal 3X phase must deliver two generated frames per real, including after Fast");
         }
     }
+    if(hfw && !toggling)check(hfw_gate_proven,"HFW never promoted to actual synthesis worker");
     xr_ok(wait_for_synthesis_handoff(state),"worker complete");
     if(continuous_presenter_active(state))xr_ok(wait_for_presenter_idle(state),"generator transport drained");
     xr_ok(f.transport->drain(),"common physical FIFO drained");
     stop_continuous_presenter(state);
-    auto generated=count>0 && f.real_ends>=(switching?10:12);
+    auto generated=count>0 && f.real_ends>=((switching || hfw_offon)?10:12);
     std::printf("%s physical outputs=%u generation state=%u\n",route.c_str(),f.real_ends.load(),unsigned(state->generation_status.load()));
     if(!generated) {
         const auto ext=xrfg::autonomous::snapshot();const auto inner=xrfg::embedded::snapshot();const auto chain_state=find_swapchain(chain);

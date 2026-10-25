@@ -109,6 +109,12 @@ inline LukeColorOriginDecode decode_luke_origin_row(std::span<const float> row) 
                 if (length < 21.) continue;
                 const unsigned anchor = edges[last].falling ? 15 : 14;
                 double origin = edges[first].x, cell = length / (2. * anchor);
+                // Necessary full-payload extent, NOT another decode tolerance.
+                // The existing fits move origin <8px and retain >.94 of this
+                // pitch (15/16 prefix edges, then all64 payload edges). Even
+                // the looser 100-cell extent cannot fit here: its last sample
+                // would be outside the row. Keep every remaining fit/CRC check.
+                if (origin + 100. * cell > static_cast<double>(row.size()-1) + 8.) continue;
                 if (!prefix_matches(origin, cell) || !fit_edges(origin, cell, 16, true)) continue;
                 fit_edges(origin, cell, kLukeOriginBits, false);
                 std::uint16_t checksum{}; std::uint32_t token{}; bool valid = true;
