@@ -1,0 +1,57 @@
+{
+  "version": "V625",
+  "base": "e564f4390ebb56c3ef3533b67478f861a487b260",
+  "status": "runtime-pending",
+  "scope": "Retain already-warmed sealed Outlaws outputs through Off/AFW/OFXR switches. Preserve startup publication pooling and never reopen cold setup during play.",
+  "passed": 23,
+  "failed": 0,
+  "ctest_seconds": 20.49,
+  "tests": [
+    "xrfg_private_framework_bypass_gpu",
+    "xrfg_private_publication_pool_gpu",
+    "xrfg_steamvr_budget_recovery_gpu",
+    "xrfg_all_routes_resource_cleanup_gpu",
+    "xrfg_luke_post_afw_director_packet",
+    "xrfg_luke-aux-private",
+    "xrfg_luke-aux-private-vdxr",
+    "xrfg_luke-aux-private-afw-off",
+    "xrfg_luke_gpu_pipeline",
+    "xrfg_private_runtime_luke-shared-budget_gpu",
+    "xrfg_private_runtime_luke-unshared-budget_gpu",
+    "xrfg_private_runtime_outlaws-budget_gpu",
+    "xrfg_private_runtime_metrics-solo-luke-d11-ref_gpu",
+    "xrfg_private_runtime_metrics-solo-luke-d11-new_gpu",
+    "xrfg_private_runtime_metrics-solo-luke-d11-djules_gpu",
+    "xrfg_private_runtime_metrics-solo-luke-d11-fidelity_gpu",
+    "xrfg_private_runtime_solo-pooled-new_gpu",
+    "xrfg_private_runtime_pooled-switch_gpu",
+    "xrfg_luke_shared_session_gpu",
+    "xrfg_afw_only_session_gpu",
+    "xrfg_afw_only_nonluke_gpu",
+    "xrfg_afw_only_vdxr_gpu",
+    "xrfg_outlaws_startup"
+  ],
+  "headset_validation": "Pending owner Outlaws restart with matching V625 tray/game; compare AFW alone then OFXR+AFW. No in-game FPS/image acceptance inferred.",
+  "ipc_abi": 62401,
+  "provider_abi": 45601,
+  "negative_control": "New actual-control fixture fails on V624 when the first Off revision retires the warm output owners.",
+  "positive_control": "Seven real control changes preserve the same warm outputs/native count; valid stereo mappings no longer remain pending; subsequent exact left/right FIFO pixel delivery and teardown pass.",
+  "test_runs": [
+    {
+      "evidence": "v625-checks.xml",
+      "passed": 22,
+      "failed": 1
+    },
+    {
+      "evidence": "v625-budget-recheck.xml",
+      "passed": 1,
+      "failed": 0
+    }
+  ],
+  "check_observation": "One non-Luke reference display-clock assertion failed in the full pass; same binary isolated recheck passed. No clock/pacing change made. Both original failure and recheck are retained.",
+  "new_waits": false,
+  "new_copies": false,
+  "new_swapchains": false,
+  "pushed": false,
+  "live_installation": false
+}

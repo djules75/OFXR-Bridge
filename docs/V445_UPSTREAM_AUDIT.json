@@ -1,0 +1,266 @@
+{
+  "schema_version": 1,
+  "upstream_url": "https://github.com/elliotttate/OFXR-Bridge",
+  "branch": "native-dlss-fg",
+  "observed_head": "16b709610d6e181eded1786d515baf86988cb6e8",
+  "base": "135185a033453ae7f844b867c7ef34ae26d40ab3",
+  "parent": "46d0a69067a3e776616c24e74e5ff39ee4259ae6",
+  "scope": "selected-port-not-full-merge",
+  "commits": [
+    {
+      "commit": "b8f25b8cb90db8c646e84998c81da07daecfdb70",
+      "subject": "OFXR + DLSS vectors: resolve occlusions instead of blending both frames",
+      "disposition": "renderer-fix-ported-with-autonomous-adaptations"
+    },
+    {
+      "commit": "41aaca07d350072f5bc32d63c616ce7554343dd9",
+      "subject": "Measure OFXR + DLSS vectors at 3X in the scale-quality benchmark",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "751010a02b278dfd62954b3a429022f71ae510d5",
+      "subject": "OFXR + DLSS vectors: keep content its vectors do not move",
+      "disposition": "renderer-fix-ported-with-autonomous-adaptations"
+    },
+    {
+      "commit": "bdf8ba60dc9027e6107fb983bf22f1be0d5b71fa",
+      "subject": "Ask the vector before sampling A in the static-overlay check",
+      "disposition": "renderer-fix-ported-with-autonomous-adaptations"
+    },
+    {
+      "commit": "62f4e5ae3d4950ca47cc249f2774a3b0a29c6e64",
+      "subject": "OFXR + DLSS vectors: blend through fades, resolve occlusions only at motion edges",
+      "disposition": "renderer-fix-ported-with-autonomous-adaptations"
+    },
+    {
+      "commit": "b3211dd5a4f5b61522a962c89fff1a9511624929",
+      "subject": "Measure every method on content the vectors do not describe",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "e1eb8253601363faebcd7acbe18dc3d86926f0e9",
+      "subject": "Match DLSS guides to the right eye by input position",
+      "disposition": "renderer-fix-ported-with-autonomous-adaptations"
+    },
+    {
+      "commit": "2f1887fcc32e9169c21b0ca4356606562a8af12c",
+      "subject": "Record real game frames and replay every method against them",
+      "disposition": "partial-native-depth-parameter-plumbing-only"
+    },
+    {
+      "commit": "aca4f29b263892ac2b70b1f88da21a07620c228f",
+      "subject": "Take the frame-capture trigger once; replay options for single methods",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "7437de72c2b53919fcef877d6dca929ec24c0ccd",
+      "subject": "Offer 50% native resolution again, after real frames",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "e916b38ade9be9cddbb3a13d07b0b047054c0db6",
+      "subject": "Record the generated frame beside each captured real frame",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "cbdea27189bca9e851bf745531190eba92d5ddbf",
+      "subject": "Score replays for structure and sharpness; replay flow options",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "4e94e9590c335e57993f12cbb1f7b3d43160de46",
+      "subject": "Let optical flow keep pixels the camera alone does not explain",
+      "disposition": "renderer-fix-ported-with-autonomous-adaptations"
+    },
+    {
+      "commit": "c00fb5cc148b538d7beceedcd58967814751f2ef",
+      "subject": "Generate native DLSS frames at 67% resolution by default",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "d4dcab37679ba522017a0e03e8adb18675c8928e",
+      "subject": "Treat any non-uniform game motion as two surfaces in OFXR + DLSS vectors",
+      "disposition": "renderer-fix-ported-with-autonomous-adaptations"
+    },
+    {
+      "commit": "022b5290d62c102c8745f72773bddad63839f55f",
+      "subject": "Add a hybrid of the game's DLSS vectors and FidelityFX flow",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "1c7bf0025128a9350bc0d67f4dde2ff9d7331359",
+      "subject": "Scale NGX's linearised depth by a tenth for native generation",
+      "disposition": "renderer-fix-ported-with-autonomous-adaptations"
+    },
+    {
+      "commit": "ae38a755c7dfb931dbd27312dd16559f16b2aac3",
+      "subject": "Add SpaceWarp-style extrapolation from the game's vectors and depth",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "a4d890c8c9b46e629723b6c23ac28c07ef9a030f",
+      "subject": "Show the real frame first and extrapolate after it, behind [ofxr] extrapolate",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "e583e8596fc005d8be797d3a99b882c3160e0659",
+      "subject": "Search for nearer surfaces only near motion edges when extrapolating",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "a22aa3b3758d6b292c4887dfb2fe0dace283fb58",
+      "subject": "Halve extrapolation's search near motion edges",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "a21dea708278911c23d80e6baa126c5313662383",
+      "subject": "Document the hybrid, extrapolation and the 42-triplet sweep",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "2b1a841df525979e029e54641461e51a73fb9be4",
+      "subject": "Correct the extrapolation ordering row to the two triplets measured",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "bdd8d61cd600ecd4500209957fa168d58e1dd306",
+      "subject": "Extrapolate from FidelityFX's optical flow where a game has no DLSS vectors",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "74e9acdbdba89062e3496fe8413aad03a09598cf",
+      "subject": "Extrapolate from the game's vectors and FidelityFX's flow together",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "adf52e9c8f96c79baaa105c93dfda2aa64c2b00a",
+      "subject": "Make combined extrapolation opt-in: extrapolate=2",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "1d89ef3d44503832294b909758f7e7df86a45ffb",
+      "subject": "Tray: store dlss_flow_hybrid and extrapolate for DLSS games",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "907b99ff65fdaab17599d69595d7d13183a776be",
+      "subject": "Add the benchmark model: cases, results file and speed-up estimate",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "594d0b4e75f6e768ea4df021e2fb65ae5c5c55dc",
+      "subject": "Add OFXRBenchmark: every frame-generation method timed on this GPU",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "ff1248c9ed103790648a3398cf994d4b28520ed2",
+      "subject": "Benchmark model: driver numbers, and ASCII-only sources",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "386cce4a7666c5264a2bfa4a0880818aba12cc58",
+      "subject": "Tray: a menu grouped by decision, and Benchmark this PC",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "f6747fe31558e5caec73bbfe7b8204722f2c30db",
+      "subject": "README: the regrouped tray menu and Benchmark this PC",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "f28f78f99a3662dcc73a74583866969e65a0fbc1",
+      "subject": "Tray: follow the layer's extrapolation and hybrid; check the GPU stayed idle",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "e0fa5e911a75df5e384926f8948a8894454181bd",
+      "subject": "README: the tray's OFXR modes as the layer now runs them",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "667f34fc607df42c17bce18016862ddaad1d15c2",
+      "subject": "Benchmark: name extrapolation by what it now runs on",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "7ac1b26835254be06d87d5d61cb1104ab1677382",
+      "subject": "Benchmark: extrapolation runs on the vectors alone again",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "540b1509fdbe01d180abe78ee6e38cbf43a612f5",
+      "subject": "Document extrapolate=2, the flow-only and combined figures, and Hubris",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "60c95f2dc17cbd9ea8c10e3fe79fd1ca9649fc8a",
+      "subject": "Measure latency; promise the time frames are shown; fix and tune extrapolation",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "f0353beaa2ee1de2c1d7907ce737002337bf7795",
+      "subject": "Extrapolation: five candidates, not nine",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "a1ce4a7d63a383dd8dd4d533a528c00bfe3439d8",
+      "subject": "README: extrapolation's live cost with the five-candidate search",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "e51798c2eaa5e7ace0fcedff8a9765404737d1d9",
+      "subject": "DCS pipelined-wait test: require adoption only when there was a wait to adopt",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "c7a2c4f2bef9dad8f8028db8b0fe7bc3790715ef",
+      "subject": "Extrapolate with Meta's mesh warps; the hybrid's flow at a quarter",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "1da40068077407906d1119f389c6c80a7288e1da",
+      "subject": "Release the game in the right phase; promise only at the true rate",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "aa7eb119d853b3f26763a0956814266355c72d26",
+      "subject": "Re-read the hybrid at each control change; every method compared live",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "b0af1f118d3fda1bee0b5111e0a8ae22de4d4c1b",
+      "subject": "Move a slipped phase after twelve late pairs in a row",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "cb0c72d65023bf68e88710b11ae88a1a8ba6e187",
+      "subject": "Move a slipped phase after eight late pairs in a row",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "fb79a42a5fa5767e7d14ac0b871561b5292bbcad",
+      "subject": "BUILDING: what the slow phase still costs, against the measurement's noise",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "e82eebdbadba26f6ef63447e05f1352eb6461a99",
+      "subject": "Place each synthetic at its share of the frame period, not by the stamps",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "231e85e0bdf3b48adc0300025f096a4142aa55ee",
+      "subject": "Give each eye its own DLSS vectors in games with a swapchain per eye",
+      "disposition": "renderer-fix-ported-with-autonomous-adaptations"
+    },
+    {
+      "commit": "142de91f7a3a74be14d3d19c603e2306af700437",
+      "subject": "README, BUILDING: every method again on release 14, and a second race's placement",
+      "disposition": "deferred"
+    },
+    {
+      "commit": "16b709610d6e181eded1786d515baf86988cb6e8",
+      "subject": "Follow the median lateness with the promise, not nine in ten",
+      "disposition": "deferred"
+    }
+  ]
+}

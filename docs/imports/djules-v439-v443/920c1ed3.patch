@@ -1,0 +1,577 @@
+commit 920c1ed34d78f637541d7afc6889f8d2cc023300
+Author:     djules75 <1819336+djules75@users.noreply.github.com>
+AuthorDate: Fri Oct 9 22:26:41 2026 +0800
+Commit:     djules75 <1819336+djules75@users.noreply.github.com>
+CommitDate: Sun Oct 11 09:27:52 2026 +0800
+
+    History: wait for a busy slot instead of resetting continuity (V441)
+    
+    Issue 19 (Skyrim VR on a Steam Frame, SteamVR 72 Hz, D3D11 bridge, NVIDIA
+    backend) drops to about 50 in episodes that grow until permanent. The logs
+    show the prime-burst cycle of issue 16 on SteamVR: a capture finds its
+    history slot still read by the GPU, continuity resets, the frames after the
+    prime arrive bunched, the GPU falls ~50 ms behind and the next capture is
+    busy again. 125 ms per cycle, 32 real and 16 generated images a second. On
+    V440 a loading screen put it in the cycle and it never left.
+    
+    A capture that finds its slot busy on a GPU fence (the reader's completion
+    or the slot's own capture) now waits for it, for at most one display
+    period (11.1 ms before one is known, never more than 20 ms), then fails as
+    before. A slot held by an unsubmitted lease is never waited for. The wait
+    has its own event and a high-resolution timer, so a timed-out wait cannot
+    wake the unbounded waits early and the limit is not rounded to the system
+    tick. Measured in the issue's three NVIDIA logs, 98-100% of the busy
+    captures would have found their slot free within one period, half within
+    6-7 ms, against the 60 ms the failed frame stalled in xrEndFrame anyway.
+    
+    New record history_capture_wait for each capture that found its slot busy
+    (result the capture's HRESULT, b microseconds waited, c limit << 32 |
+    image); the summary script reports them. New history test covers a reader
+    that finishes inside the limit, one that does not, a lease, and a free slot.
+    
+    ctest 87/87. Not run in a headset.
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 685b893..41e76ff 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,6 +1,6 @@
+ cmake_minimum_required(VERSION 3.24)
+ 
+-project(XRFrameGenerationBridge VERSION 0.440.0 LANGUAGES CXX)
++project(XRFrameGenerationBridge VERSION 0.441.0 LANGUAGES CXX)
+ 
+ if(MSVC)
+     # API layers are injected into hosts that can preload an older game-local
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+index ab6b69e..584e9b9 100644
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -224,6 +224,13 @@ enum class BridgeFlightOperation : std::uint32_t {
+     // swapchain released more than once between two xrEndFrames is captured
+     // once, at its last release.
+     deferred_capture,
++    // A history capture that found its ring slot still read or written on the
++    // GPU and waited for it (D3D12HistoryCaptureWait). result is the
++    // capture's HRESULT: 0 when the wait freed the slot, ERROR_BUSY when the
++    // limit ran out and the frame lost its history as before. a the
++    // swapchain, b microseconds waited, c the limit in microseconds << 32 |
++    // the image index. Nothing is written for a capture whose slot was free.
++    history_capture_wait,
+ };
+ 
+ struct BridgeFlightToken {
+diff --git a/include/xrfg/d3d12_history.hpp b/include/xrfg/d3d12_history.hpp
+index 6ff71c1..62f3a53 100644
+--- a/include/xrfg/d3d12_history.hpp
++++ b/include/xrfg/d3d12_history.hpp
+@@ -30,6 +30,23 @@ struct D3D12HistoryCaptureTicket {
+     std::uint32_t source_index{};
+ };
+ 
++// How long a capture may wait for a busy ring slot, and what it found. A slot
++// is busy while the synthesis that read it, or the capture that last wrote
++// it, is still running on the GPU. Failing there loses the frame's history:
++// generation continuity resets and the next frame primes. When the GPU runs a
++// couple of frames behind, that reset is what keeps it behind (the frames
++// after a prime are not paced and arrive together), so a short wait for the
++// GPU is cheaper than the reset it avoids.
++struct D3D12HistoryCaptureWait {
++    // In: the longest the capture may block, in microseconds. 0 fails a busy
++    // slot at once, as before.
++    std::uint32_t limit_us{};
++    // Out: the slot was busy when the capture arrived.
++    bool slot_busy{};
++    // Out: how long the capture blocked, in microseconds.
++    std::uint64_t waited_us{};
++};
++
+ struct D3D12HistoryConsumerLease {
+     std::uint64_t capture_serial{};
+     std::uint64_t lease_serial{};
+@@ -56,12 +73,15 @@ public:
+         D3D12HistoryInitializationStage* failure_stage = nullptr) noexcept;
+ 
+     // Queues the source-to-history copy and returns after signaling its fence;
+-    // it never waits for GPU completion on the release path. If the next ring
+-    // slot or its allocator is still in use, ERROR_BUSY is returned and the
+-    // caller must fail open rather than overwrite it.
++    // it never waits for the copy itself. If the next ring slot is still read
++    // or written on the GPU, it waits for that work for at most
++    // wait->limit_us (none without `wait`), then returns ERROR_BUSY and the
++    // caller must fail open rather than overwrite it. A slot leased to a
++    // consumer that has not submitted yet is never waited for.
+     [[nodiscard]] HRESULT capture(
+         std::uint32_t source_index,
+-        D3D12HistoryCaptureTicket* ticket) noexcept;
++        D3D12HistoryCaptureTicket* ticket,
++        D3D12HistoryCaptureWait* wait = nullptr) noexcept;
+ 
+     [[nodiscard]] HRESULT commit(const D3D12HistoryCaptureTicket& ticket) noexcept;
+ 
+diff --git a/scripts/summarize-flight-log.ps1 b/scripts/summarize-flight-log.ps1
+index 5c4028b..6dcce38 100644
+--- a/scripts/summarize-flight-log.ps1
++++ b/scripts/summarize-flight-log.ps1
+@@ -45,6 +45,8 @@ $deferredCaptures = 0
+ $deferredCaptureFailures = 0
+ $bridgedReleaseDelays = [System.Collections.Generic.List[double]]::new()
+ $bridgedReleaseFailures = 0
++$busyCaptureWaits = [System.Collections.Generic.List[double]]::new()
++$busyCaptureFailures = 0
+ $delivered = [System.Collections.Generic.List[double]]::new()
+ $lineNumber = 0
+ 
+@@ -165,6 +167,15 @@ Get-Content -LiteralPath $resolved | ForEach-Object {
+                     $bridgedReleaseFailures++
+                 }
+             }
++            # V441: a capture that found its history slot busy and waited for
++            # the GPU; result 0 when the wait freed it, b microseconds waited.
++            if ($entry.Operation -eq 'history_capture_wait') {
++                if ($entry.Result -lt 0) {
++                    $busyCaptureFailures++
++                } else {
++                    $busyCaptureWaits.Add($entry.B / 1000.0)
++                }
++            }
+             if ($entry.Operation -eq 'steamvr_delivery') {
+                 $delivered.Add($entry.A / 1000.0)
+             }
+@@ -293,6 +304,13 @@ if ($endFrameBegins.Count -gt 0) {
+         Write-Output '  no end-frame captures: capture_at_end_frame was off, or the build predates V440 on a bridged session'
+     }
+ 
++    if ($busyCaptureWaits.Count -gt 0 -or $busyCaptureFailures -gt 0) {
++        $p50 = if ($busyCaptureWaits.Count -gt 0) { Get-Percentile -Values $busyCaptureWaits.ToArray() -Fraction 0.5 } else { 0 }
++        $p90 = if ($busyCaptureWaits.Count -gt 0) { Get-Percentile -Values $busyCaptureWaits.ToArray() -Fraction 0.9 } else { 0 }
++        Write-Output ("  captures that found their history slot busy: {0}; {1} waited {2:N2} ms (p50), {3:N2} ms (p90); {4} still busy at the limit and lost their history" -f
++            ($busyCaptureWaits.Count + $busyCaptureFailures), $busyCaptureWaits.Count, $p50, $p90, $busyCaptureFailures)
++    }
++
+     if ($delivered.Count -gt 0) {
+         Write-Output ("  SteamVR delivered {0} frames/s (p50), {1} (p10), over {2} windows" -f
+             (Get-Percentile -Values $delivered.ToArray() -Fraction 0.5),
+diff --git a/src/d3d12/d3d12_history.cpp b/src/d3d12/d3d12_history.cpp
+index e600745..b957338 100644
+--- a/src/d3d12/d3d12_history.cpp
++++ b/src/d3d12/d3d12_history.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <chrono>
+ #include <cstring>
+ #include <limits>
+ #include <new>
+@@ -109,6 +110,12 @@ struct D3D12SwapchainHistory::Impl {
+     std::vector<ComPtr<ID3D12Resource>> source_images;
+     ComPtr<ID3D12Fence> producer_fence;
+     HANDLE fence_event{};
++    // A busy slot's bounded wait has its own event: a wait that times out
++    // leaves its completion registered, and the stale signal must not wake
++    // the unbounded waits on fence_event early. The timer bounds it at the
++    // microsecond; a plain timeout would round up to the 15.6 ms tick.
++    HANDLE busy_event{};
++    HANDLE busy_timer{};
+     std::array<HistorySlot, D3D12SwapchainHistory::kSlotCount> slots;
+     D3D12_RESOURCE_STATES release_state{};
+     std::uint64_t next_serial{1};
+@@ -125,6 +132,12 @@ struct D3D12SwapchainHistory::Impl {
+         if (fence_event != nullptr) {
+             CloseHandle(fence_event);
+         }
++        if (busy_event != nullptr) {
++            CloseHandle(busy_event);
++        }
++        if (busy_timer != nullptr) {
++            CloseHandle(busy_timer);
++        }
+     }
+ 
+     [[nodiscard]] static bool matching_ticket(
+@@ -340,6 +353,80 @@ struct D3D12SwapchainHistory::Impl {
+         return fence_status(fence, value) == S_OK ? S_OK : E_FAIL;
+     }
+ 
++    // Waits until `fence` reaches `value` or the timer armed by
++    // wait_for_busy_slot fires. ERROR_BUSY when the time ran out first.
++    [[nodiscard]] HRESULT wait_for_fence_bounded(
++        ID3D12Fence* fence,
++        std::uint64_t value) noexcept {
++        for (;;) {
++            const HRESULT status = fence_status(fence, value);
++            if (status != S_FALSE) {
++                return status;
++            }
++            const HRESULT event_result = fence->SetEventOnCompletion(value, busy_event);
++            if (FAILED(event_result)) {
++                return event_result;
++            }
++            const HANDLE handles[] = {busy_event, busy_timer};
++            const DWORD wait_result =
++                WaitForMultipleObjects(2, handles, FALSE, INFINITE);
++            if (wait_result == WAIT_OBJECT_0 + 1) {
++                return fence_status(fence, value) == S_FALSE
++                    ? HRESULT_FROM_WIN32(ERROR_BUSY)
++                    : fence_status(fence, value);
++            }
++            if (wait_result != WAIT_OBJECT_0) {
++                const DWORD error = GetLastError();
++                return HRESULT_FROM_WIN32(error == ERROR_SUCCESS ? ERROR_GEN_FAILURE : error);
++            }
++            // The event may be a stale registration from an earlier wait that
++            // timed out: the loop checks the fence again before trusting it.
++        }
++    }
++
++    // The bounded wait for a slot whose last reader or writer is still on the
++    // GPU: the consumer's completion first, then the slot's own capture.
++    // Never for a lease, which is CPU state no fence will clear.
++    [[nodiscard]] HRESULT wait_for_busy_slot(
++        HistorySlot& slot,
++        std::uint32_t limit_us) noexcept {
++        if (slot.active_lease_serial != 0 || limit_us == 0) {
++            return HRESULT_FROM_WIN32(ERROR_BUSY);
++        }
++        if (busy_event == nullptr) {
++            busy_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
++            if (busy_event == nullptr) {
++                return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY);
++            }
++        }
++        if (busy_timer == nullptr) {
++            busy_timer = CreateWaitableTimerExW(
++                nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
++            if (busy_timer == nullptr) {
++                busy_timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
++            }
++            if (busy_timer == nullptr) {
++                return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY);
++            }
++        }
++        LARGE_INTEGER due{};
++        due.QuadPart = -static_cast<LONGLONG>(limit_us) * 10;
++        if (!SetWaitableTimer(busy_timer, &due, 0, nullptr, nullptr, FALSE)) {
++            const DWORD error = GetLastError();
++            return HRESULT_FROM_WIN32(error == ERROR_SUCCESS ? ERROR_GEN_FAILURE : error);
++        }
++        HRESULT result = S_OK;
++        if (slot.consumer_fence_value != 0) {
++            result = wait_for_fence_bounded(
++                slot.consumer_fence.Get(), slot.consumer_fence_value);
++        }
++        if (SUCCEEDED(result)) {
++            result = wait_for_fence_bounded(producer_fence.Get(), slot.capture_fence_value);
++        }
++        static_cast<void>(CancelWaitableTimer(busy_timer));
++        return result;
++    }
++
+     [[nodiscard]] HRESULT prepare_slot_for_capture(HistorySlot& slot) noexcept {
+         if (slot.active_lease_serial != 0) {
+             return HRESULT_FROM_WIN32(ERROR_BUSY);
+@@ -393,7 +480,8 @@ struct D3D12SwapchainHistory::Impl {
+ 
+     [[nodiscard]] HRESULT capture(
+         std::uint32_t source_index,
+-        D3D12HistoryCaptureTicket* output_ticket) noexcept {
++        D3D12HistoryCaptureTicket* output_ticket,
++        D3D12HistoryCaptureWait* wait) noexcept {
+         if (output_ticket == nullptr) {
+             return E_POINTER;
+         }
+@@ -412,6 +500,17 @@ struct D3D12SwapchainHistory::Impl {
+ 
+         HistorySlot& slot = slots[next_slot];
+         HRESULT result = prepare_slot_for_capture(slot);
++        if (result == HRESULT_FROM_WIN32(ERROR_BUSY) && wait != nullptr) {
++            wait->slot_busy = true;
++            const auto entered = std::chrono::steady_clock::now();
++            result = wait_for_busy_slot(slot, wait->limit_us);
++            wait->waited_us = static_cast<std::uint64_t>(
++                std::chrono::duration_cast<std::chrono::microseconds>(
++                    std::chrono::steady_clock::now() - entered).count());
++            if (SUCCEEDED(result)) {
++                result = prepare_slot_for_capture(slot);
++            }
++        }
+         if (FAILED(result)) {
+             return result;
+         }
+@@ -683,7 +782,8 @@ HRESULT D3D12SwapchainHistory::initialize(
+ 
+ HRESULT D3D12SwapchainHistory::capture(
+     std::uint32_t source_index,
+-    D3D12HistoryCaptureTicket* ticket) noexcept {
++    D3D12HistoryCaptureTicket* ticket,
++    D3D12HistoryCaptureWait* wait) noexcept {
+     try {
+         std::scoped_lock lock(mutex_);
+         if (impl_ == nullptr) {
+@@ -692,7 +792,7 @@ HRESULT D3D12SwapchainHistory::capture(
+             }
+             return E_UNEXPECTED;
+         }
+-        return impl_->capture(source_index, ticket);
++        return impl_->capture(source_index, ticket, wait);
+     } catch (const std::bad_alloc&) {
+         if (ticket != nullptr) {
+             *ticket = {};
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+index ec8deb1..5bd386d 100644
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -119,6 +119,7 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
+         return "presenter_pair_release";
+     case BridgeFlightOperation::recording: return "recording";
+     case BridgeFlightOperation::deferred_capture: return "deferred_capture";
++    case BridgeFlightOperation::history_capture_wait: return "history_capture_wait";
+     }
+     return "unknown";
+ }
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 42786f4..a30b54a 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -942,6 +942,10 @@ struct SessionState {
+     XrTime generation_resume_display_time{};
+     std::chrono::steady_clock::time_point generation_resume_wall_time{};
+     XrDuration minimum_runtime_display_period{};
++    // minimum_runtime_display_period again, for the history capture's wait on
++    // a busy slot (history_capture_wait_limit_us), which runs under a
++    // swapchain's call_mutex and the gpu_mutex and so does not take `mutex`.
++    std::atomic<XrDuration> history_capture_wait_period{};
+     // How long the runtime's own xrWaitFrame blocked, and how many consecutive
+     // waits came back too quickly to have been pacing anything. This is what
+     // the presenter's existence actually turns on; see
+@@ -5256,6 +5260,7 @@ void reset_frame_bookkeeping(const std::shared_ptr<SessionState>& state) {
+         state->generation_resume_display_time = 0;
+         state->generation_resume_wall_time = {};
+         state->minimum_runtime_display_period = 0;
++        state->history_capture_wait_period.store(0, std::memory_order_relaxed);
+         state->steamvr_throttled_wait_streak = 0;
+         state->unpaced_wait_streak = 0;
+     }
+@@ -5600,6 +5605,8 @@ XrResult layer_wait_frame_impl(
+                 state->minimum_runtime_display_period = scanout->count();
+             }
+         }
++        state->history_capture_wait_period.store(
++            state->minimum_runtime_display_period, std::memory_order_relaxed);
+         if (!use_continuous_presenter && state->fps_overlay) {
+             state->fps_overlay->set_display_period(
+                 state->minimum_runtime_display_period);
+@@ -6645,6 +6652,46 @@ XrResult layer_wait_swapchain_image_impl(
+ // release and the mirror's bookkeeping. Called under the swapchain's
+ // call_mutex, from the application's xrReleaseSwapchainImage or, when a
+ // bridged release was deferred, from release_pending_bridge_image_locked.
++// How long a history capture may wait for a ring slot the GPU is still
++// reading: one display period, the scanout's own (see
++// minimum_runtime_display_period), 11.1 ms before one is known and never
++// more than 20 ms. Failing a busy capture resets generation continuity, and
++// the frames after the reset's prime arrive bunched, which keeps the GPU
++// behind and the next capture busy: issue 19 (Skyrim on a Steam Frame, 72 Hz)
++// sat in that cycle at 32 real and 16 generated images a second. Measured in
++// its logs, 98-100% of the busy captures would have found their slot free
++// within one period, half of them within 6-7 ms - against the 60 ms the
++// failed frame then stalled in xrEndFrame anyway.
++[[nodiscard]] std::uint32_t history_capture_wait_limit_us(
++    const SessionState& session) noexcept {
++    constexpr XrDuration kUnknownPeriod = 11'111'111;
++    constexpr XrDuration kCeiling = 20'000'000;
++    XrDuration period =
++        session.history_capture_wait_period.load(std::memory_order_relaxed);
++    if (period <= 0) {
++        period = kUnknownPeriod;
++    }
++    return static_cast<std::uint32_t>(std::min(period, kCeiling) / 1000);
++}
++
++// Only a capture that found its slot busy is recorded; see
++// BridgeFlightOperation::history_capture_wait.
++void log_history_capture_wait(
++    const SwapchainState& state,
++    std::uint32_t image_index,
++    HRESULT result,
++    const xrfg::D3D12HistoryCaptureWait& wait) noexcept {
++    if (!wait.slot_busy) {
++        return;
++    }
++    xrfg::bridge_flight_logger().event(
++        xrfg::BridgeFlightOperation::history_capture_wait,
++        result,
++        handle_value(state.handle),
++        wait.waited_us,
++        (static_cast<std::uint64_t>(wait.limit_us) << 32) | image_index);
++}
++
+ XrResult release_swapchain_image_locked(
+     const std::shared_ptr<SwapchainState>& state,
+     XrSwapchain swapchain,
+@@ -6750,7 +6797,10 @@ XrResult release_swapchain_image_locked(
+                 0);
+         }
+         if (SUCCEEDED(capture_result)) {
+-            capture_result = history->capture(*candidate_index, &ticket);
++            xrfg::D3D12HistoryCaptureWait wait{};
++            wait.limit_us = history_capture_wait_limit_us(*state->session);
++            capture_result = history->capture(*candidate_index, &ticket, &wait);
++            log_history_capture_wait(*state, *candidate_index, capture_result, wait);
+         }
+         if (SUCCEEDED(capture_result) && interop) {
+             const HRESULT finish_result = interop->finish_capture();
+@@ -7016,7 +7066,10 @@ void capture_pending_end_frame_images(
+                             session->d3d12_queue.Get());
+                     }
+                 }
+-                capture_result = history->capture(*index, &ticket);
++                xrfg::D3D12HistoryCaptureWait wait{};
++                wait.limit_us = history_capture_wait_limit_us(*session);
++                capture_result = history->capture(*index, &ticket, &wait);
++                log_history_capture_wait(*state, *index, capture_result, wait);
+                 if (SUCCEEDED(capture_result)) {
+                     // The image went out at its release: nothing is left
+                     // to wait for before the capture becomes history.
+diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
+index 85666d9..962395c 100644
+--- a/tests/d3d12_history_tests.cpp
++++ b/tests/d3d12_history_tests.cpp
+@@ -25,6 +25,7 @@
+ #include <stdexcept>
+ #include <string>
+ #include <string_view>
++#include <thread>
+ #include <utility>
+ #include <vector>
+ 
+@@ -1841,6 +1842,119 @@ void test_capture_is_async_and_consumer_fence_blocks_reuse(D3D12WarpFixture& fix
+     require_source_is_render_target(fixture, sources[0].Get());
+ }
+ 
++// V441: a capture that finds its slot still read on the GPU waits for the
++// reader for at most its limit, instead of failing at once. Three slots, each
++// in a different state: a reader that finishes inside the limit, one that
++// does not, and a lease no fence will clear, which must not be waited for.
++void test_capture_waits_for_a_busy_slot_within_its_limit(D3D12WarpFixture& fixture) {
++    std::array<ComPtr<ID3D12Resource>, 3> sources{
++        create_source_texture(fixture),
++        create_source_texture(fixture),
++        create_source_texture(fixture),
++    };
++    std::array<ID3D12Resource*, 3> source_pointers{
++        sources[0].Get(),
++        sources[1].Get(),
++        sources[2].Get(),
++    };
++    xrfg::D3D12SwapchainHistory history;
++    require(
++        operation_succeeded(history.initialize(
++            fixture.device(),
++            fixture.queue(),
++            std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
++            D3D12_RESOURCE_STATE_RENDER_TARGET)),
++        "busy-wait history initialization failed");
++
++    std::array<xrfg::D3D12HistoryCaptureTicket, 3> tickets{};
++    std::array<xrfg::D3D12HistoryConsumerLease, 3> leases{};
++    std::array<ComPtr<ID3D12Fence>, 2> readers{};
++    for (std::uint32_t index = 0; index < 3; ++index) {
++        require(
++            operation_succeeded(history.capture(index, &tickets[index])) &&
++                operation_succeeded(history.commit(tickets[index])),
++            "busy-wait ring fill failed");
++        ID3D12Resource* raw_resource = nullptr;
++        ID3D12Fence* raw_producer_fence = nullptr;
++        require(
++            operation_succeeded(history.acquire_consumer(
++                tickets[index], &leases[index], &raw_resource, &raw_producer_fence)),
++            "busy-wait consumer acquisition failed");
++        ComPtr<ID3D12Resource> resource;
++        ComPtr<ID3D12Fence> producer;
++        resource.Attach(raw_resource);
++        producer.Attach(raw_producer_fence);
++        fixture.wait_for_fence(producer.Get(), tickets[index].fence_value);
++        if (index < 2) {
++            require_hresult(
++                fixture.device()->CreateFence(
++                    0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(readers[index].GetAddressOf())),
++                "ID3D12Device::CreateFence(busy-wait reader)");
++            require(
++                operation_succeeded(history.retire_consumer(leases[index], readers[index].Get(), 1)),
++                "busy-wait consumer retirement failed");
++        }
++    }
++
++    // Slot 0: its reader finishes 20 ms in, inside a 200 ms limit.
++    xrfg::D3D12HistoryCaptureWait freed{};
++    freed.limit_us = 200'000;
++    std::future<void> signaller = std::async(std::launch::async, [&readers] {
++        std::this_thread::sleep_for(std::chrono::milliseconds(20));
++        static_cast<void>(readers[0]->Signal(1));
++    });
++    xrfg::D3D12HistoryCaptureTicket ticket_freed{};
++    const HRESULT freed_result = history.capture(0, &ticket_freed, &freed);
++    signaller.get();
++    require(
++        operation_succeeded(freed_result) && freed.slot_busy &&
++            freed.waited_us >= 10'000 && freed.waited_us < 200'000 &&
++            ticket_freed.slot == tickets[0].slot && ticket_freed.serial == 4,
++        "a capture did not wait for a reader that finished inside its limit");
++    require(operation_succeeded(history.commit(ticket_freed)), "busy-wait commit failed");
++
++    // Slot 1: its reader is still running when a 30 ms limit runs out.
++    xrfg::D3D12HistoryCaptureWait expired{};
++    expired.limit_us = 30'000;
++    xrfg::D3D12HistoryCaptureTicket ticket_expired{};
++    require(
++        history.capture(1, &ticket_expired, &expired) == HRESULT_FROM_WIN32(ERROR_BUSY) &&
++            expired.slot_busy && ticket_expired.serial == 0 &&
++            expired.waited_us >= 25'000 && expired.waited_us < 500'000,
++        "a capture did not give up on a busy slot at its limit");
++    require_hresult(readers[1]->Signal(1), "ID3D12Fence::Signal(busy-wait reader)");
++    require(
++        operation_succeeded(history.capture(1, &ticket_expired, &expired)) &&
++            operation_succeeded(history.commit(ticket_expired)),
++        "a slot did not become reusable after its reader finished");
++
++    // Slot 2: leased and not yet submitted - nothing to wait for.
++    xrfg::D3D12HistoryCaptureWait leased{};
++    leased.limit_us = 200'000;
++    xrfg::D3D12HistoryCaptureTicket ticket_leased{};
++    require(
++        history.capture(2, &ticket_leased, &leased) == HRESULT_FROM_WIN32(ERROR_BUSY) &&
++            leased.slot_busy && leased.waited_us < 50'000,
++        "a capture waited for a slot held by an unsubmitted lease");
++    history.cancel_consumer(leases[2]);
++    require(
++        operation_succeeded(history.capture(2, &ticket_leased, &leased)) &&
++            operation_succeeded(history.commit(ticket_leased)),
++        "a slot did not become reusable after its lease was cancelled");
++
++    // A free slot neither waits nor reports a busy slot.
++    require(operation_succeeded(history.wait_for_idle()), "busy-wait history drain failed");
++    xrfg::D3D12HistoryCaptureWait idle{};
++    idle.limit_us = 200'000;
++    xrfg::D3D12HistoryCaptureTicket ticket_idle{};
++    require(
++        operation_succeeded(history.capture(0, &ticket_idle, &idle)) &&
++            !idle.slot_busy && idle.waited_us == 0 &&
++            operation_succeeded(history.commit(ticket_idle)),
++        "a capture into a free slot reported a wait");
++    require(operation_succeeded(history.wait_for_idle()), "busy-wait history drain failed");
++}
++
+ void test_depth_capture_path(D3D12WarpFixture& fixture) {
+     std::array<ComPtr<ID3D12Resource>, 2> sources{
+         create_depth_source_texture(fixture),
+@@ -3998,6 +4112,7 @@ int main() {
+         D3D12WarpFixture fixture;
+         test_stereo_capture_ring(fixture);
+         test_capture_is_async_and_consumer_fence_blocks_reuse(fixture);
++        test_capture_waits_for_a_busy_slot_within_its_limit(fixture);
+         test_depth_capture_path(fixture);
+         test_depth_private_history_allows_shader_resource_views(fixture);
+         test_rolling_frame_synthesizer(fixture);

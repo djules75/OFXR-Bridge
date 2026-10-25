@@ -1,0 +1,19 @@
+{
+  "version": "V568",
+  "base": "b7de5812d0bb380716ab489c738f9ee5982815f8",
+  "status": "runtime-pending",
+  "passed": 14,
+  "failed": 0,
+  "ctest_seconds": 45.46,
+  "ctest_log": "v568-focused-tests.log",
+  "pre_fix_reproduction": "Actual beta6, epoch transition at2x2: GPU debug layer ClearRenderTargetView m_otherEyeLookupDesc shader-read0xC0 vsRTV0x4 atframe13. See v568-epoch-repro-tests.log. 4x4 baseline passed; do not claim both rates reproduced.",
+  "headset_validation": "Owner menu/automatic-switch visual recovery pending; flight logs do not retain the full benchmark segment. Concrete provider fault reproduced and corrected in actual GPU test.",
+  "ipc_abi": 55801,
+  "provider_abi": 45601,
+  "luke_suite_trials": 18,
+  "presentation_pacing_changed": false,
+  "afw_math_changed": false,
+  "swapchain_counts_changed": false,
+  "v567_bootstrap_preserved": true,
+  "v566_meter_preserved": true
+}

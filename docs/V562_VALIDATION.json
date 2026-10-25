@@ -1,0 +1,28 @@
+{
+  "version": "V562",
+  "base": "47e8cde402e227ce45d1f99c2804332204a68f8a",
+  "status": "runtime-pending",
+  "passed": 15,
+  "failed": 0,
+  "ctest_seconds": 16.27,
+  "native_shader_scenarios": 272,
+  "interleaved_shader_scenarios": 272,
+  "actual_bundled_provider_interleaved_modes": [
+    1,
+    2,
+    3
+  ],
+  "interleaved_motion_spans": [
+    1,
+    2
+  ],
+  "afw_depth_camera_subtraction_preserved": true,
+  "shaders_changed": false,
+  "presentation_pacing_changed": false,
+  "swapchain_counts_changed": false,
+  "v558_csv_preserved": true,
+  "ipc_abi": 55801,
+  "provider_abi": 45601,
+  "headset_validation": "V561 AFW rejected: green debug while stationary. V562 Crimson test pending; measured actual F8 native fields fit N-2, not N-1.",
+  "captured_regression": "Actual V561 bad field reconstructed from native inputs to p99<0.028 guide pixels; N-2 fit medians0.260/0.194px versus N-1 medians12.740/12.927px."
+}

@@ -1,0 +1,69 @@
+{
+  "version": "V477",
+  "base": "V474",
+  "focused_suite": {
+    "passed": 19,
+    "total": 19,
+    "seconds": 4.76,
+    "failed": 0,
+    "skipped": 0,
+    "log_sha256": "dba92ea1d652324bcdf43c540f4dffda5f86df1adba66348a80c5c5011cb4f0c"
+  },
+  "split_eye_loader": "passed",
+  "preservation": {
+    "parent_commit": "ed66c354f701881b0061e4e02542505cffcf3e54",
+    "changed_production_files": [
+      "include/xrfg/native_ingress.hpp",
+      "src/ingress/native_ingress.cpp",
+      "src/layer/ngx_guide_capture.cpp",
+      "src/layer/openxr_layer.cpp"
+    ],
+    "unchanged_production_count": 212,
+    "identical_generated_shaders": [
+      "cinema_flatten_pixel_shader.hpp",
+      "cinema_flatten_vertex_shader.hpp",
+      "fsr_cinema_pixel_shader.hpp",
+      "fsr_cinema_vertex_shader.hpp",
+      "fullscreen_vertex_shader.hpp",
+      "game_motion_synthesize_midpoint_pixel_shader.hpp",
+      "guide_composer_compose_shader.hpp",
+      "guide_composer_decide_shader.hpp",
+      "hybrid_pack_flow_input_shader.hpp",
+      "hybrid_synthesize_midpoint_pixel_shader.hpp",
+      "luke_compose_motion_shader.hpp",
+      "luke_depth_calibrate_shader.hpp",
+      "luke_depth_convert_shader.hpp",
+      "native_dlssg_pack_shader.hpp",
+      "native_dlssg_pixel_shader.hpp",
+      "native_dlssg_seed_shader.hpp",
+      "native_dlssg_vertex_shader.hpp",
+      "nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp",
+      "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp",
+      "nvidia_fast_synthesize_midpoint_pixel_shader.hpp",
+      "nvidia_pack_flow_input_shader.hpp",
+      "nvidia_pack_luma_input_shader.hpp",
+      "nvidia_synthesize_midpoint_pixel_shader.hpp",
+      "pack_flow_input_shader.hpp",
+      "reproject_generated_pixel_shader.hpp",
+      "reproject_late_hud_pixel_shader.hpp",
+      "synthesize_midpoint_pixel_shader.hpp"
+    ],
+    "byte_identical_runtime_components": [
+      "ofxr/PDAFWPlugin.dll",
+      "ofxr/ofxr_amd_fidelityfx_framegeneration_dx12.dll",
+      "ofxr/nvngx_dlssg.dll",
+      "ofxr/ofxr_bridge.ini",
+      "ofxr/nvngx.dll_dlssg.dll",
+      "ofxr/nvngx.dll_dlssnr.dll",
+      "ofxr/OFXR_vulkan_queue_layer.dll"
+    ],
+    "reused_unmodified_helpers_from_v474": [
+      "ofxr/nvngx.dll_dlssg.dll",
+      "ofxr/nvngx.dll_dlssnr.dll",
+      "ofxr/OFXR_vulkan_queue_layer.dll"
+    ],
+    "v475_v476_imported": false
+  },
+  "owner_horizon_test": "pending",
+  "live_changes": false
+}

@@ -1,0 +1,13 @@
+{
+  "version": "V536",
+  "status": "owner-accepted",
+  "date": "2026-10-15",
+  "source_commit": "250f9824860952e8cef79c7b4bba54798b00d5ed",
+  "source_tag": "ofxr-autonomous-v536",
+  "zip_sha256": "cd86376a1c781442829011b5f4920af179ea7a382fd5a09e29774cf5e0294392",
+  "owner_statement": "allinea il ramo principale la 536 ? ok poi vediamo di migliorare anche ofxr dentro luke ross",
+  "authorization": "Merge accepted V536 into private main.",
+  "scope_note": "Version accepted by owner. No new quantified FPS result or blanket validation of every title/runtime was supplied.",
+  "next_work": "Investigate OFXR route performance inside Luke Ross; that slowdown is not resolved by this acceptance.",
+  "immutable_artifacts": "Existing V536 ZIP, source tags, symbols and packaged validation records remain unchanged."
+}

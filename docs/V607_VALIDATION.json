@@ -1,0 +1,179 @@
+{
+  "version": "V607",
+  "base": "ac8e4ff69677eadca8fa05417d8b3e9419b23cf7",
+  "scope": "Correct all SteamVR private director cycle timing with source-bound native End and actual predicted-display receipts; preserve V606 pooling, producer completion, native scheduling and FPS counters.",
+  "passed": 74,
+  "failed": 0,
+  "ctest_seconds": 110.52,
+  "checked_tests": [
+    "xrfg_private_openxr_runtime_gpu",
+    "xrfg_private_native_timing_gpu",
+    "xrfg_private_publication_pool_gpu",
+    "xrfg_openxr_fps_overlay_d3d12",
+    "xrfg_openxr_fps_overlay_d3d11",
+    "xrfg_overlay_resource_lifetime_d3d12",
+    "xrfg_overlay_resource_lifetime_d3d11",
+    "xrfg_shipping_luke_bootstrap_DOOMTheDarkAges",
+    "xrfg_shipping_luke_bootstrap_TheGreatCircle",
+    "xrfg_benchmark_log_tests",
+    "xrfg_depth_history_routes",
+    "xrfg_unified_route_shapes_gpu",
+    "xrfg_steamvr_budget_recovery_gpu",
+    "xrfg_all_routes_resource_cleanup_gpu",
+    "xrfg_steamvr_aux_retire_gpu",
+    "xrfg_steamvr_new_bounded_outputs_gpu",
+    "xrfg_paused_route_shapes_gpu",
+    "xrfg_native_provider_recovery_gpu",
+    "xrfg_vulkan_bridge_contract",
+    "xrfg_luke_startup_passthrough",
+    "xrfg_luke_missing_afw_guides_gpu",
+    "xrfg_luke_markerless_ofxr_gpu",
+    "xrfg_luke-aux-private",
+    "xrfg_luke-aux-private-vdxr",
+    "xrfg_luke-aux-private-afw-off",
+    "xrfg_luke_steamvr_aux_budget",
+    "xrfg_luke_steamvr_aux_budget_handoff",
+    "xrfg_private_runtime_metrics-pooled-new_gpu",
+    "xrfg_private_runtime_metrics-new-11_gpu",
+    "xrfg_private_runtime_metrics-djules-11_gpu",
+    "xrfg_private_runtime_metrics-ref_gpu",
+    "xrfg_private_runtime_metrics-new_gpu",
+    "xrfg_private_runtime_metrics-djules_gpu",
+    "xrfg_private_runtime_metrics-fidelity_gpu",
+    "xrfg_private_runtime_metrics-fsr_gpu",
+    "xrfg_private_runtime_metrics-hybrid_gpu",
+    "xrfg_private_runtime_metrics-dlssg_gpu",
+    "xrfg_private_runtime_metrics-djules3_gpu",
+    "xrfg_private_runtime_metrics-dlssg3_gpu",
+    "xrfg_private_runtime_metrics-d11-new_gpu",
+    "xrfg_private_runtime_unpooled-new_gpu",
+    "xrfg_private_runtime_pooled-ref_gpu",
+    "xrfg_private_runtime_pooled-new_gpu",
+    "xrfg_private_runtime_pooled-djules_gpu",
+    "xrfg_private_runtime_pooled-fidelity_gpu",
+    "xrfg_private_runtime_pooled-fsr_gpu",
+    "xrfg_private_runtime_pooled-hybrid_gpu",
+    "xrfg_private_runtime_pooled-dlssg_gpu",
+    "xrfg_private_runtime_pooled-djules3_gpu",
+    "xrfg_private_runtime_pooled-dlssg3_gpu",
+    "xrfg_private_runtime_pooled-switch_gpu",
+    "xrfg_private_runtime_ref_gpu",
+    "xrfg_private_runtime_new_gpu",
+    "xrfg_private_runtime_djules_gpu",
+    "xrfg_private_runtime_fidelity_gpu",
+    "xrfg_private_runtime_fsr_gpu",
+    "xrfg_private_runtime_hybrid_gpu",
+    "xrfg_private_runtime_dlssg_gpu",
+    "xrfg_private_runtime_djules3_gpu",
+    "xrfg_private_runtime_dlssg3_gpu",
+    "xrfg_private_runtime_d11-ref_gpu",
+    "xrfg_private_runtime_d11-new_gpu",
+    "xrfg_private_runtime_d11-djules_gpu",
+    "xrfg_private_runtime_d11-fidelity_gpu",
+    "xrfg_private_runtime_switch_gpu",
+    "xrfg_private_runtime_separate-ref_gpu",
+    "xrfg_private_runtime_separate-new_gpu",
+    "xrfg_private_runtime_separate-fidelity_gpu",
+    "xrfg_private_runtime_separate-fsr_gpu",
+    "xrfg_private_runtime_separate-hybrid_gpu",
+    "xrfg_private_runtime_separate-dlssg_gpu",
+    "xrfg_private_runtime_session_gpu",
+    "xrfg_layer_call_chain",
+    "xrfg_interface_metrics_tests"
+  ],
+  "qualification": "Final74/74 on final binaries. Initial11/13 integration passed; DLSS-G2X/3X fixture measurements exceeded its one-second interface-visibility lease. Refreshing the test visibility heartbeat during sampling fixes the fixture without relaxing the production F9/UI/benchmark gate. Earlier results retained.",
+  "earlier_evidence": [
+    "v607-initial-build.log",
+    "v607-initial-tests.log",
+    "v607-initial-junit.xml",
+    "v607-second-build.log"
+  ],
+  "ipc_abi": 60401,
+  "provider_abi": 45601,
+  "measured_scope": [
+    "Full source WaitFrame to native real End return",
+    "Full source WaitFrame to actual native real predicted display target",
+    "Same-source native synthetic content confirmation",
+    "Delayed native End after virtual producer return, actualD11/D12",
+    "All7shippinggenerators,2X/3X,LowerVRAM,separate-eye pooling"
+  ],
+  "gpu_fixture_examples": {
+    "xrfg_private_runtime_metrics-pooled-new_gpu": {
+      "native_cycle_ms": 61.101,
+      "native_predicted_display_cycle_ms": 73.531,
+      "producer_calls_ms": 5.391
+    },
+    "xrfg_private_runtime_metrics-new-11_gpu": {
+      "native_cycle_ms": 65.979,
+      "native_predicted_display_cycle_ms": 75.342,
+      "producer_calls_ms": 21.711
+    },
+    "xrfg_private_runtime_metrics-djules-11_gpu": {
+      "native_cycle_ms": 65.564,
+      "native_predicted_display_cycle_ms": 75.091,
+      "producer_calls_ms": 21.558
+    },
+    "xrfg_private_runtime_metrics-ref_gpu": {
+      "native_cycle_ms": 75.328,
+      "native_predicted_display_cycle_ms": 84.766,
+      "producer_calls_ms": 21.44
+    },
+    "xrfg_private_runtime_metrics-new_gpu": {
+      "native_cycle_ms": 60.801,
+      "native_predicted_display_cycle_ms": 72.032,
+      "producer_calls_ms": 9.645
+    },
+    "xrfg_private_runtime_metrics-djules_gpu": {
+      "native_cycle_ms": 61.512,
+      "native_predicted_display_cycle_ms": 74.11,
+      "producer_calls_ms": 9.699
+    },
+    "xrfg_private_runtime_metrics-fidelity_gpu": {
+      "native_cycle_ms": 66.145,
+      "native_predicted_display_cycle_ms": 75.284,
+      "producer_calls_ms": 21.431
+    },
+    "xrfg_private_runtime_metrics-fsr_gpu": {
+      "native_cycle_ms": 77.086,
+      "native_predicted_display_cycle_ms": 86.524,
+      "producer_calls_ms": 21.689
+    },
+    "xrfg_private_runtime_metrics-hybrid_gpu": {
+      "native_cycle_ms": 65.159,
+      "native_predicted_display_cycle_ms": 74.478,
+      "producer_calls_ms": 6.399
+    },
+    "xrfg_private_runtime_metrics-dlssg_gpu": {
+      "native_cycle_ms": 77.476,
+      "native_predicted_display_cycle_ms": 86.92,
+      "producer_calls_ms": 1.651
+    },
+    "xrfg_private_runtime_metrics-djules3_gpu": {
+      "native_cycle_ms": 79.737,
+      "native_predicted_display_cycle_ms": 90.001,
+      "producer_calls_ms": 14.603
+    },
+    "xrfg_private_runtime_metrics-dlssg3_gpu": {
+      "native_cycle_ms": 75.138,
+      "native_predicted_display_cycle_ms": 86.998,
+      "producer_calls_ms": 3.738
+    },
+    "xrfg_private_runtime_metrics-d11-new_gpu": {
+      "native_cycle_ms": 62.711,
+      "native_predicted_display_cycle_ms": 74.734,
+      "producer_calls_ms": 0.627
+    }
+  },
+  "headset_validation": "Pending owner Ghostwire DLSS5 V607 run. Native delivery is measured; compositor display time remains predicted. No scanout/performance gain claimed. Old CSV latency values cannot be corrected by a constant.",
+  "measurement_changes": true,
+  "pacing_policy_changes": false,
+  "extra_runtime_calls": false,
+  "extra_GPU_work": false,
+  "extra_director_locks_or_callbacks": false,
+  "extra_handoff_edge_clock_queries": false,
+  "FPS_counter_changes": false,
+  "CSV_layout_changes": false,
+  "shared_interface_layout_changes": false,
+  "live_installation": false,
+  "pushed": false
+}

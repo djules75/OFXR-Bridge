@@ -1,0 +1,40 @@
+# Autonomous extraction of the accepted OptiScaler V33034 NR component only.
+# No OptiScaler target, proxy runtime, menu renderer or generated compiler tree.
+add_library(xrfg_neural_rendering STATIC
+    src/neural/nr_feature.cpp
+    src/neural/nr_host.cpp
+    src/neural/nr_codec.cpp)
+target_include_directories(xrfg_neural_rendering PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/include" "${XRFG_DLSS_SDK_ROOT}/include"
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/neural")
+target_compile_features(xrfg_neural_rendering PUBLIC cxx_std_20)
+target_compile_definitions(xrfg_neural_rendering PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
+    _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
+target_link_libraries(xrfg_neural_rendering PUBLIC d3d12 dxgi d3dcompiler advapi32)
+if(MSVC)
+    target_compile_options(xrfg_neural_rendering PRIVATE /W4 /permissive- /EHsc)
+endif()
+
+add_library(xrfg_neural_forwarder SHARED src/neural/forwarder/dlssnr_forwarder.cpp)
+target_compile_features(xrfg_neural_forwarder PRIVATE cxx_std_17)
+target_link_libraries(xrfg_neural_forwarder PRIVATE d3d12)
+set_target_properties(xrfg_neural_forwarder PROPERTIES
+    OUTPUT_NAME "nvngx.dll_dlssnr" PREFIX "" SUFFIX ".dll")
+
+if(XRFG_BUILD_TESTS)
+    add_executable(xrfg_neural_device_removal_tests tests/neural_device_removal_tests.cpp)
+    target_include_directories(xrfg_neural_device_removal_tests PRIVATE src/neural)
+    target_compile_features(xrfg_neural_device_removal_tests PRIVATE cxx_std_20)
+    target_compile_definitions(xrfg_neural_device_removal_tests PRIVATE WIN32_LEAN_AND_MEAN _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
+    target_link_libraries(xrfg_neural_device_removal_tests PRIVATE xrfg_neural_rendering d3d12 dxgi)
+    add_test(NAME xrfg_neural_device_removal_tests COMMAND xrfg_neural_device_removal_tests)
+    add_executable(xrfg_neural_contract_tests tests/neural_contract_tests.cpp)
+    target_include_directories(xrfg_neural_contract_tests PRIVATE src/neural)
+    target_compile_features(xrfg_neural_contract_tests PRIVATE cxx_std_20)
+    add_test(NAME xrfg_neural_contract_tests COMMAND xrfg_neural_contract_tests)
+    add_executable(xrfg_neural_codec_gpu_tests tests/neural_codec_gpu_tests.cpp)
+    target_include_directories(xrfg_neural_codec_gpu_tests PRIVATE src/neural)
+    target_compile_definitions(xrfg_neural_codec_gpu_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(xrfg_neural_codec_gpu_tests PRIVATE xrfg_neural_rendering)
+    add_test(NAME xrfg_neural_codec_gpu_tests COMMAND xrfg_neural_codec_gpu_tests)
+endif()

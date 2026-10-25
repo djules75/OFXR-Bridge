@@ -1,0 +1,126 @@
+{
+  "version": "V615",
+  "base": "0e4ae317d7919d8c024861c5132a45653a8d2767",
+  "scope": "SteamVR private3X restart after Fast: retired presenter stop latch no longer cancels replacement priming. Fast3X retains independent minimum A/B/S1/S2 output capacity rather than silently running2X; live2X return releases extra capacity. VDXR staged output layout/pacing unchanged.",
+  "passed": 40,
+  "failed": 0,
+  "ctest_passed": 40,
+  "ctest_seconds": 55.48,
+  "checked_tests": [
+    "xrfg_all_routes_resource_cleanup_gpu",
+    "xrfg_autonomous_control_live",
+    "xrfg_autonomous_control_tests",
+    "xrfg_benchmark_log_tests",
+    "xrfg_benchmark_suite_tests",
+    "xrfg_demand_triple_switch_gpu",
+    "xrfg_demand_triple_switch_lower_vram_gpu",
+    "xrfg_elliott_meter_tests",
+    "xrfg_interface_cycle_layer",
+    "xrfg_interface_metrics_tests",
+    "xrfg_openxr_elliott_meter_d3d11",
+    "xrfg_openxr_elliott_meter_d3d12",
+    "xrfg_openxr_fps_overlay_d3d11",
+    "xrfg_openxr_fps_overlay_d3d12",
+    "xrfg_private_runtime_benchmark-sequence_gpu",
+    "xrfg_private_runtime_blocked-solo-djules3_gpu",
+    "xrfg_private_runtime_metrics-canonical-dlssg3_gpu",
+    "xrfg_private_runtime_metrics-deep-solo-djules_gpu",
+    "xrfg_private_runtime_metrics-deep-toggle-solo-djules_gpu",
+    "xrfg_private_runtime_metrics-djules3_gpu",
+    "xrfg_private_runtime_metrics-dlssg3_gpu",
+    "xrfg_private_runtime_metrics-solo-djules-11_gpu",
+    "xrfg_private_runtime_metrics-solo-djules3_gpu",
+    "xrfg_private_runtime_metrics-solo-dlssg3_gpu",
+    "xrfg_private_runtime_metrics-solo-new-11_gpu",
+    "xrfg_private_runtime_metrics-solo-ref-11_gpu",
+    "xrfg_private_runtime_metrics-toggle-solo-djules3_gpu",
+    "xrfg_private_runtime_pooled-djules3_gpu",
+    "xrfg_private_runtime_scope_gpu",
+    "xrfg_private_runtime_solo-pooled-djules3_gpu",
+    "xrfg_settings_widgets_tests",
+    "xrfg_steamvr_budget_recovery_gpu",
+    "xrfg_transport_ref_vdxr_00_gpu",
+    "xrfg_transport_ref_vdxr_00_gpu_single",
+    "xrfg_transport_ref_vdxr_01_gpu",
+    "xrfg_transport_ref_vdxr_01_gpu_single",
+    "xrfg_transport_ref_vdxr_10_gpu",
+    "xrfg_transport_ref_vdxr_10_gpu_single",
+    "xrfg_transport_ref_vdxr_11_gpu",
+    "xrfg_transport_ref_vdxr_11_gpu_single"
+  ],
+  "negative_control": {
+    "renderer": "exact V614 before production correction",
+    "test": "qualified16-source normal3X transition replay",
+    "phase": "Framework Fast -> Director Normal",
+    "physical_outputs": 16,
+    "generated_outputs": 0,
+    "trace": "successful prime alternates with synthesis_busy before pair dispatch; retired presenter stop flag remains latched",
+    "headset_log_coverage": "Compact game log confirms zero generated output; full detailed flight absent for failing intervals."
+  },
+  "positive_control": {
+    "real_inputs_per_phase": 16,
+    "phases": [
+      {
+        "phase": 0,
+        "pacing": 0,
+        "fast": false,
+        "physical_outputs": 42,
+        "triple": true
+      },
+      {
+        "phase": 1,
+        "pacing": 0,
+        "fast": true,
+        "physical_outputs": 46,
+        "triple": true
+      },
+      {
+        "phase": 2,
+        "pacing": 1,
+        "fast": false,
+        "physical_outputs": 46,
+        "triple": true
+      },
+      {
+        "phase": 3,
+        "pacing": 1,
+        "fast": true,
+        "physical_outputs": 46,
+        "triple": true
+      },
+      {
+        "phase": 4,
+        "pacing": 2,
+        "fast": false,
+        "physical_outputs": 46,
+        "triple": true
+      },
+      {
+        "phase": 5,
+        "pacing": 2,
+        "fast": true,
+        "physical_outputs": 46,
+        "triple": true
+      },
+      {
+        "phase": 6,
+        "pacing": 2,
+        "fast": true,
+        "physical_outputs": 30,
+        "triple": false
+      }
+    ],
+    "gpu_debug_layer": "No resource ownership/state errors",
+    "source": "shipping D3D12 layer/worker/generator; mocked downstream runtime only",
+    "actual_live_multiplier_polling": true
+  },
+  "qualification": [
+    "Qualified final40 distinct tests pass across the final40-case run(39passes) and three-case focused recheck(3passes,2overlap). Final recheck fixed a test-fixture omission: shipping xrCreateSession enables live multiplier polling, but this hand-constructed state did not. No final production change was needed for that recheck.",
+    "An earlier40-case run had two failures: intermediate ring helper applied3X minimum to VDXR staging, corrected by explicit private-SteamVR scope; the new sequence fixture omitted live multiplier polling. Earlier evidence retained.",
+    "Initial8-source baseline test thresholds included too little promotion warm-up; qualified negative uses16inputs. A trial reducing3X B storage to one ring failed actual private-release ownership and was rejected before packaging.",
+    "Fast3X retains minimum distinct A/B/S1/S2 buffers and may offer little VRAM reduction. Fast2X and non-SteamVR layouts remain their previous sizes. Native provider capabilities, including DLSS-G supported generated count, are unchanged."
+  ],
+  "headset_validation": "Pending owner Valhalla rerun; automatic proof is not headset acceptance. No live install, active config/registry edit, push or publication.",
+  "ipc_abi": 61101,
+  "provider_abi": 45601
+}

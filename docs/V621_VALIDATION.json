@@ -1,0 +1,62 @@
+{
+  "version": "V621",
+  "base": "4a1462d80b8853577c93362f4ff43494d312fc7c",
+  "status": "runtime-pending",
+  "scope": "OFXR OFF always bypasses added SteamVR pacing, including AFW-only, at startup and live changes; ON restores stored pacing selection",
+  "passed": 12,
+  "failed": 0,
+  "ctest_seconds": 10.32,
+  "tests": [
+    "xrfg_private_framework_bypass_gpu",
+    "xrfg_private_runtime_off-pacing-session_gpu",
+    "xrfg_private_runtime_metrics-toggle-solo-luke-d11-ref_gpu",
+    "xrfg_private_runtime_metrics-toggle-solo-luke-d11-new_gpu",
+    "xrfg_private_runtime_framework-session_gpu",
+    "xrfg_private_runtime_scope_gpu",
+    "xrfg_private_runtime_metrics-toggle-solo-new_gpu",
+    "xrfg_private_runtime_metrics-toggle-solo-djules_gpu",
+    "xrfg_private_runtime_metrics-toggle-solo-fidelity_gpu",
+    "xrfg_private_runtime_metrics-toggle-solo-fsr_gpu",
+    "xrfg_private_runtime_metrics-toggle-solo-hybrid_gpu",
+    "xrfg_private_runtime_metrics-toggle-solo-dlssg_gpu"
+  ],
+  "headset_validation": "Pending owner Horizon/Indiana AFW-only comparison across stored pacing modes; no claim of headset acceptance or FPS gain from fixture results.",
+  "evidence": {
+    "Horizon": {
+      "pid": 40760,
+      "benchmark": "27898734616376",
+      "off_pacing_preferences": [
+        0,
+        2
+      ],
+      "off_transport_events_available": false
+    },
+    "Indiana": {
+      "pid": 35472,
+      "benchmark": "27938300922512",
+      "off_pacing_preferences": [
+        2
+      ],
+      "off_director_slot_trace_count": 1209
+    },
+    "cause": "Private director policy and single-director selector checked pacing preference but not the applied OFXR enable state"
+  },
+  "changes": [
+    "Gate startup director on OFXR enabled",
+    "Gate pacing-only control changes on OFXR enabled",
+    "Apply final policy after generation reconfiguration result is known; failed/disabled configuration remains bypass",
+    "Gate effective sole-director framework policy on applied OFXR enabled",
+    "Keep requested pacing mode saved for re-enable"
+  ],
+  "preserved": [
+    "Stable OpenXR session/graphics binding/private image ownership",
+    "Necessary GPU readiness/copy and native Wait/Begin/End synchronization",
+    "AFW temporal history across pacing-only toggles",
+    "Existing VDXR path",
+    "V619 contour and V620 Horizon native interval fixes"
+  ],
+  "new_waits": false,
+  "new_swapchains": false,
+  "live_installation": false,
+  "pushed": false
+}

@@ -1,0 +1,42 @@
+{
+  "version": "V619",
+  "base": "d3cdc173a73679989300a6fddf8b7a9fc590a614",
+  "status": "runtime-pending",
+  "scope": "AFW Combined reduced colour raster workaround for contour artifacts; native depth/subtraction and guide domain preserved; no pacing changes",
+  "passed": 11,
+  "failed": 0,
+  "ctest_seconds": 51.01,
+  "tests": [
+    "xrfg_luke_kcd_quality_bundled",
+    "xrfg_luke_interleaved_quality_bundled",
+    "xrfg_luke_beta6_shading_4",
+    "xrfg_luke_beta6_shading_8",
+    "xrfg_luke_beta6_shading_9",
+    "xrfg_luke_gap_recovery_4_1",
+    "xrfg_luke_gap_recovery_8_1",
+    "xrfg_luke_epoch_recovery_4",
+    "xrfg_luke_geometry_recovery_8",
+    "xrfg_luke_indiana_live_shading",
+    "xrfg_luke_indiana_quality_bundled"
+  ],
+  "provider_sha256": "5f3cfc38903ac438241a3c47cb4bc3ac329cb39b056e33a63c20045fe15336f9",
+  "headset_validation": "Pending owner Horizon both-eye contour, softness and FPS comparison 1x1/2x2/4x4. Offline captures are not headset acceptance.",
+  "evidence": {
+    "captures": 2,
+    "complete_generated_eyes": [
+      0,
+      1
+    ],
+    "provider_to_generated_to_xr": "byte-identical per generated eye",
+    "capture_quality": "2x2 both",
+    "third_capture_found": false,
+    "replay": "approximate prior camera; compare quality methods, not hidden-history equivalence",
+    "shader_probe": "rejected; not included"
+  },
+  "quality_tradeoff": "Actual colour downsample, softer generated eye especially4x4; formats without typed UAV stores retain old provider route",
+  "no_new_xr_swapchains": true,
+  "no_new_waits": true,
+  "no_new_readbacks": true,
+  "live_installation": false,
+  "pushed": false
+}

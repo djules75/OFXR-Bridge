@@ -1,0 +1,74 @@
+{
+  "version": "V474",
+  "base_v473": "9710d5271a5f61a1a34b5ab707ebc07e5d3ed6da",
+  "upstream_release": "0.2.13.2",
+  "release_target": "07449429c139e5d2070b6f0855ed5323de7cee00",
+  "commits": [
+    {
+      "version": "V439",
+      "commit": "a014cd35b0d38a242ffc09a949df3285e65a0a17",
+      "url": "https://github.com/djules75/OFXR-Bridge/commit/a014cd35b0d38a242ffc09a949df3285e65a0a17",
+      "author": "djules75 <1819336+djules75@users.noreply.github.com>",
+      "author_date": "2026-10-08T22:56:07+08:00",
+      "subject": "Presenter: no prime hold on SteamVR (V439)",
+      "patch": "a014cd35.patch",
+      "patch_sha256": "2590d75b28fdc249507e22d22659670ac53c5284b119ed0d046e725f700ab7fa"
+    },
+    {
+      "version": "V440",
+      "commit": "41378e239394727909853e857b81b3f7fd37415a",
+      "url": "https://github.com/djules75/OFXR-Bridge/commit/41378e239394727909853e857b81b3f7fd37415a",
+      "author": "djules75 <1819336+djules75@users.noreply.github.com>",
+      "author_date": "2026-10-09T22:11:26+08:00",
+      "subject": "D3D11 bridge: release at the game's xrEndFrame, copy and capture together (V440)",
+      "patch": "41378e23.patch",
+      "patch_sha256": "df27a8b76cd5424a598a0bd5c7741c4a892b0e3819f0a417636c8ef33c00f73a"
+    },
+    {
+      "version": "V441",
+      "commit": "920c1ed34d78f637541d7afc6889f8d2cc023300",
+      "url": "https://github.com/djules75/OFXR-Bridge/commit/920c1ed34d78f637541d7afc6889f8d2cc023300",
+      "author": "djules75 <1819336+djules75@users.noreply.github.com>",
+      "author_date": "2026-10-09T22:26:41+08:00",
+      "subject": "History: wait for a busy slot instead of resetting continuity (V441)",
+      "patch": "920c1ed3.patch",
+      "patch_sha256": "2f7854cda6b41e5599c895cae2f0404fb5708c566d308fb785f6d04dbca91f82"
+    },
+    {
+      "version": "V442",
+      "commit": "d556d69e7f5b7cff8012d7b54b6d939c572e2851",
+      "url": "https://github.com/djules75/OFXR-Bridge/commit/d556d69e7f5b7cff8012d7b54b6d939c572e2851",
+      "author": "djules75 <1819336+djules75@users.noreply.github.com>",
+      "author_date": "2026-10-09T23:41:44+08:00",
+      "subject": "Virtual Desktop: give back a presenter a pass-through stopped, past the split-loop latch (V442)",
+      "patch": "d556d69e.patch",
+      "patch_sha256": "57d80683b9754d0b11c2005cdec69cb9ebd37e68bc80567b5243e85e9e95e07b"
+    },
+    {
+      "version": "V443",
+      "commit": "64743e76ff2ad4da4d0064128959898a6b020706",
+      "url": "https://github.com/djules75/OFXR-Bridge/commit/64743e76ff2ad4da4d0064128959898a6b020706",
+      "author": "djules75 <1819336+djules75@users.noreply.github.com>",
+      "author_date": "2026-10-10T16:53:47+08:00",
+      "subject": "Do not hold generation off for a second when a swapchain is created (V443)",
+      "patch": "64743e76.patch",
+      "patch_sha256": "5e5d478571ae87757b9adb8ad15bd790399ea7182ff341be7fc398f8040bd9b5"
+    }
+  ],
+  "original_metadata": "Full original messages, authors and original Co-Authored-By trailers retained in exact patches. Adaptation and new Autonomous tests are separate work.",
+  "scopes": {
+    "V439": "Ordinary Djules on SteamVR only",
+    "V440": "Ordinary shared D11-to-D12 bridge only; same observed EndFrame thread",
+    "V441": "Ordinary Djules input history only; other callers default zero wait",
+    "V442": "Ordinary Djules on Virtual Desktop only; previous valid presenter",
+    "V443": "Shared swapchain-created timer only; lifetime and other quarantine protection retained"
+  },
+  "not_imported": [
+    "Upstream scheduler replacement",
+    "Native D12 capture-at-EndFrame policy/configuration",
+    "Vulkan bridge/capture changes",
+    "Luke/AFW producer changes",
+    "Provider/SDK/shader algorithms",
+    "Upstream release/version/launcher changes"
+  ]
+}

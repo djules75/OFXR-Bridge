@@ -1,0 +1,80 @@
+{
+  "runtime": "V561",
+  "pid": 31836,
+  "dump_debug_enabled": false,
+  "depth_capture_note": "Native depth/stencil format19 raw readback is unsupported; analysis uses actual converted AFW input depth, including the measured remap state.",
+  "frames": [
+    {
+      "frame": 1,
+      "source_eye": 1,
+      "publication": 18567,
+      "sample_count": 149543,
+      "finite_raw_and_corrected": true,
+      "fits": {
+        "native_clip_to_opposite": {
+          "p50_pixel_error": 12.739513237880217,
+          "p90_pixel_error": 37.429984261762144
+        },
+        "native_clip_to_same": {
+          "p50_pixel_error": 0.2598056785166801,
+          "p90_pixel_error": 4.746676958802973
+        }
+      },
+      "v561_shader_reconstruction_p99_pixel_error": 0.027843573643001596,
+      "depth_remap": [
+        [
+          [
+            0.06744416803121567,
+            0.06472554057836533,
+            0.9937517046928406,
+            33.0
+          ]
+        ],
+        [
+          [
+            5.87006388741429e-06,
+            34.0,
+            27.0,
+            0.0
+          ]
+        ]
+      ]
+    },
+    {
+      "frame": 2,
+      "source_eye": 0,
+      "publication": 18568,
+      "sample_count": 149558,
+      "finite_raw_and_corrected": true,
+      "fits": {
+        "native_clip_to_opposite": {
+          "p50_pixel_error": 12.927102928755264,
+          "p90_pixel_error": 34.739641860374405
+        },
+        "native_clip_to_same": {
+          "p50_pixel_error": 0.19420597223519362,
+          "p90_pixel_error": 4.640261342004996
+        }
+      },
+      "v561_shader_reconstruction_p99_pixel_error": 0.026347619395558387,
+      "depth_remap": [
+        [
+          [
+            0.06744416803121567,
+            0.06472554057836533,
+            0.9937517046928406,
+            33.0
+          ]
+        ],
+        [
+          [
+            5.87006388741429e-06,
+            34.0,
+            27.0,
+            0.0
+          ]
+        ]
+      ]
+    }
+  ]
+}

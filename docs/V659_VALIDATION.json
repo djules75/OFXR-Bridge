@@ -1,0 +1,35 @@
+{
+  "version": 659,
+  "base": 658,
+  "change": "Director ready-slot admission independent of past service floor and FIFO capacity",
+  "final_distinct_checks_passed": 173,
+  "rounds": [
+    {
+      "file": "initial-wide.xml",
+      "count": 132,
+      "failed": [
+        "xrfg_private_runtime_metrics-solo-d11-fidelity_gpu"
+      ]
+    },
+    {
+      "file": "metrics-final.xml",
+      "count": 58,
+      "failed": [
+        "xrfg_private_runtime_metrics-toggle-solo-luke-d11-djules_gpu"
+      ]
+    },
+    {
+      "file": "final-recheck.xml",
+      "count": 3,
+      "failed": []
+    }
+  ],
+  "final_targeted_repeat_per_test": 12,
+  "witnesses": 12,
+  "reference_replay": "V65812later/0next, V6590later/12next, zero invalid",
+  "fixture_corrections": "Use same-cycle native receipt bounds instead of ordering independent aggregate medians; deterministic sample-cohort unit confirms why ordering is invalid. Native callback observation is after pre-call QPC:5us sampling allowance, observed1.711us variation. Exact physical schedule/cadence and pending-source/pixel/FIFO checks retained.",
+  "production_metrics_byte_identical": true,
+  "headset_90fps_acceptance": "PENDING",
+  "git_mutation": false,
+  "live_installation_changed": false
+}

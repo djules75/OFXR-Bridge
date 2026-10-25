@@ -1,0 +1,18 @@
+{
+  "version": "V463",
+  "ipc": 46301,
+  "provider_abi": 45601,
+  "base": "caa1eeda61d04d951b7b76e9f8e7b3e31e06f8e4",
+  "r19_default": false,
+  "hybrid_selected_only": true,
+  "existing_shaders_unchanged": 23,
+  "game_validation": "pending",
+  "new": {
+    "passed": 141,
+    "seconds": 97.46
+  },
+  "djules": {
+    "passed": 158,
+    "seconds": 97.69
+  }
+}

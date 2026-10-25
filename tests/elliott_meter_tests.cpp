@@ -1,0 +1,108 @@
+#include "xrfg/elliott_meter.hpp"
+#include "xrfg/fps_overlay_model.hpp"
+#include <fstream>
+#include <iostream>
+#include <stdexcept>
+#include <cmath>
+#include <windows.h>
+#include <algorithm>
+using namespace xrfg;
+void check(bool v,const char* s){if(!v)throw std::runtime_error(s);}
+int main(int argc,char** argv){try{
+    FlipGesture flip;
+    check(grip_upside_down({0,0,1,0})&&!grip_upside_down({}),"upside down gesture");
+    check(!flip.observe(0,true,false)&&!flip.observe(249'999'999,true,false),"no wrist flash");
+    check(flip.observe(250'000'000,true,false)&&flip.hand()==0,"left flip opens after delay");
+    check(flip.observe(260'000'000,true,true)&&flip.hand()==0,"stable hand while both flipped");
+    check(flip.observe(270'000'000,false,true)&&flip.hand()==1,"other flipped hand takes panel");
+    check(flip.observe(280'000'000,false,false)&&flip.observe(779'999'999,false,false),"hide delay");
+    check(!flip.observe(780'000'000,false,false),"upright hides panel");
+    const auto pose=panel_pose_on_grip({{0,0,1,0},{1,2,3}},.2F);
+    check(std::abs(pose.position.y-2.15F)<1e-5F,"upstream grip clearance");
+    check(parse_overlay_position("elliott_controller")==FpsOverlayPosition::elliott_controller&&
+        std::string(overlay_position_name(FpsOverlayPosition::elliott_bottom))=="elliott_bottom","new persistent modes");
+    check(autonomous::sanitize([]{autonomous::Settings s;s.overlay_position=6;return s;}()).overlay_position==6,"mode6 retained");
+    autonomous::Snapshot s;s.connected=true;s.desired.enabled=true;s.runtime.sessions=1;s.runtime.ready=1;
+    s.runtime.generation_state=autonomous::GenerationState::ready;
+    auto& m=s.runtime.telemetry;m.updated_ms=1000;m.rates_valid=true;
+    m.output_source=InterfaceSource::steamvr_delivery;m.output_fps=90;m.game_fps=45;m.generated_fps=45;m.display_hz=90;
+    m.ofxr_time_ms=9;m.cycle_length_ms=17;m.cycle_estimated_ms=28.1F;
+    m.ofxr_time_valid=m.cycle_valid=m.cycle_estimated_valid=true;
+    m.game_time_ms=9;m.generation_time_ms=5;m.delivery_time_ms=14.1F;m.stages_valid=true;m.game_time_valid=true;
+    unsigned rows{};auto pixels=rasterize_elliott_meter(s,1000,false,false,&rows);
+    check(pixels.size()==1024*512&&rows>250&&rows<=512,"two metric rows and diagnostics fit");
+    check(pixels[0]==0&&pixels[100*1024+30]!=0,"rounded upstream canvas");
+    for(int stage=0;stage<3;++stage) {
+        auto changed=s;auto& v=changed.runtime.telemetry;
+        if(stage==0)v.ofxr_time_ms=65;
+        if(stage==1)v.cycle_length_ms=65;
+        if(stage==2)v.cycle_estimated_ms=65;
+        check(rasterize_elliott_meter(changed,1000,false,false)!=pixels,"each of the three corrected timing counters is drawn");
+    }
+    auto stale=rasterize_elliott_meter(s,4000,false,false);
+    check(stale!=pixels,"stale metrics show unavailable");
+    auto bench=s;bench.runtime.process_id=7;auto& b=bench.benchmark;
+    b.game_pid=7;b.count=51;b.index=0;b.phase=autonomous::BenchmarkPhase::applying;
+    check(elliott_benchmark_text(bench,1000)=="Test 1/51 | applying settings","applying settings has progress without a fictitious countdown");
+    b.phase=autonomous::BenchmarkPhase::running;b.started_ms=1000;
+    check(elliott_benchmark_text(bench,2000)=="Test 1/51 | settling | 6.5s left","settling countdown uses the applied trial start");
+    check(elliott_benchmark_text(bench,3500)=="Test 1/51 | measuring | 5.0s left","measuring phase starts exactly at 2.5 seconds");
+    check(elliott_benchmark_text(bench,9500)=="Test 1/51 | measuring | 0.0s left","late controller never produces negative remaining time");
+    unsigned bench_rows{};auto bench_pixels=rasterize_elliott_meter(bench,1000,false,false,&bench_rows);
+    check(bench_rows>rows && bench_rows<=512 && bench_pixels!=pixels,"benchmark progress adds a visible row inside the existing surface");
+    b.index=64;b.count=65;
+    check(elliott_benchmark_text(bench,3500)=="Test 65/65 | measuring | 5.0s left","full matrix index64 is displayed as test65");
+    b.phase=autonomous::BenchmarkPhase::complete;bench.desired.afw_only=true;
+    check(elliott_benchmark_text(bench,3500)=="Tests complete | restart game: AFW Only","AFW-only restart warning remains visible in the headset meter");
+    b.phase=autonomous::BenchmarkPhase::stopped;
+    check(elliott_benchmark_text(bench,3500).empty(),"Stop removes the progress row");
+    b.phase=autonomous::BenchmarkPhase::running;b.game_pid=8;
+    check(elliott_benchmark_text(bench,3500).empty(),"another game cannot show stale benchmark progress");
+    bench.desired.afw_only=false;b.game_pid=7;b.index=0;b.count=51;
+    auto active=s;
+    const auto now=GetTickCount64();
+    active.runtime.telemetry.updated_ms=active.runtime.heartbeat_ms=now;
+    active.runtime.applied_revision=active.revision;
+    active.runtime.telemetry.generating=true;
+    active.desired.afw_mode=3; // Non-Luke default selection must not be an error.
+    const unsigned green=0xff8ee05c, red=0xff6262ff;
+    const auto good=rasterize_elliott_meter(active,now,false,false);
+    const auto count=[](const auto& p,unsigned color){return std::count(p.begin(),p.end(),color);};
+    check(count(good,green)>100 && count(good,red)==0,"working OFXR label and counters must be green");
+    check(autonomous::interface_status_text(active).find("AFW: N/A")!=std::string::npos,
+        "AFW outside Luke must be not applicable");
+    auto idle=active;idle.runtime.telemetry.generating=false;
+    check(count(rasterize_elliott_meter(idle,now,false,false),red)>100,"non-generating meter red");
+    auto disabled=active;disabled.desired.enabled=false;
+    check(count(rasterize_elliott_meter(disabled,now,false,false),green)==0,"disabled meter not green");
+    auto neural=active;neural.desired.nr_enabled=true;
+    check(count(rasterize_elliott_meter(neural,now,false,false),red)>100,"Neural on but idle red");
+    neural.runtime.nr_running=1;
+    check(count(rasterize_elliott_meter(neural,now,false,false),red)==0,"active Neural green");
+    auto luke=active;luke.runtime.luke_detected=1;
+    check(count(rasterize_elliott_meter(luke,now,false,false),red)>100,"requested Luke AFW idle red");
+    luke.runtime.afw_running=1;
+    check(count(rasterize_elliott_meter(luke,now,false,false),red)==0,"active Luke AFW green");
+    auto afw_only=luke;afw_only.desired.enabled=false;
+    afw_only.runtime.telemetry.generating=false;afw_only.runtime.generation_state=autonomous::GenerationState::paused;
+    afw_only.runtime.provider_error=5; // a disabled OFXR failure is irrelevant to AFW
+    check(autonomous::interface_state_text(afw_only)=="AFW" &&
+        !autonomous::interface_generation_active(afw_only),"AFW-only label identifies actual work without claiming OFXR generation");
+    check(count(rasterize_elliott_meter(afw_only,now,false,false),green)>100 &&
+        count(rasterize_elliott_meter(afw_only,now,false,false),red)==0,"AFW alone is green even when OFXR is disabled/paused");
+    afw_only.desired.enabled=true;afw_only.runtime.pacing_mode=autonomous::kAfwOnlyPacingMode;
+    check(count(rasterize_elliott_meter(afw_only,now,false,false),red)==0,"startup AFW-only bypass is also green");
+    afw_only.runtime.afw_running=false;
+    check(count(rasterize_elliott_meter(afw_only,now,false,false),green)==0,"idle AFW-only never falsely reports green");
+    afw_only.runtime.afw_running=true;
+    check(count(rasterize_elliott_meter(afw_only,now+2100,false,false),green)==0,"stale AFW-only receipt never reports green");
+    luke.desired.afw_mode=0;luke.runtime.afw_running=0;
+    check(count(rasterize_elliott_meter(luke,now,false,false),red)==0,"AFW off neutral");
+    check(count(rasterize_elliott_meter(active,now+2100,false,false),green)==0,"stale meter not green");
+    check(rasterize_elliott_meter(s,1000,false,true)!=pixels,"UNORM linear palette conversion");
+    check(rasterize_elliott_meter(s,1000,true,false)!=pixels,"BGRA channels supported");
+    if(argc>1){auto preview=rasterize_elliott_meter(bench,1000,false,false,&bench_rows);
+        std::ofstream out(argv[1],std::ios::binary);out<<"P6\n1024 "<<bench_rows<<"\n255\n";
+        for(unsigned i=0;i<1024*bench_rows;++i){char rgb[]{char(preview[i]),char(preview[i]>>8),char(preview[i]>>16)};out.write(rgb,3);}}
+    std::cout<<"Meter supplied metrics, palette, persistence, gesture and placement passed\n";return 0;
+}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

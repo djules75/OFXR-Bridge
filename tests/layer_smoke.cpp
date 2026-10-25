@@ -4,6 +4,7 @@
 #include <windows.h>
 
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 
 int main(int argc, char** argv) {
@@ -12,8 +13,9 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
+    const bool expect_excluded = argc == 3 && std::strcmp(argv[2], "--expect-excluded") == 0;
     HMODULE delegated_module = nullptr;
-    if (argc == 3) {
+    if (argc == 3 && !expect_excluded) {
         delegated_module = LoadLibraryA(argv[2]);
         if (delegated_module == nullptr) {
             std::cerr << "delegated LoadLibrary failed: " << GetLastError() << '\n';
@@ -52,8 +54,15 @@ int main(int argc, char** argv) {
 
     const XrResult result = negotiate(
         &loader_info,
-        "XR_APILAYER_XRFrameBridge_diagnostic",
+        "XR_APILAYER_OFXRBridge",
         &request);
+    if (expect_excluded) {
+        const bool refused = result == XR_ERROR_INITIALIZATION_FAILED &&
+            request.getInstanceProcAddr == nullptr && request.createApiLayerInstance == nullptr;
+        FreeLibrary(module);
+        std::cout << (refused ? "Excluded process negotiation refused correctly" : "Unexpected exclusion result") << '\n';
+        return refused ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
     if (XR_FAILED(result) || request.getInstanceProcAddr == nullptr ||
         request.createApiLayerInstance == nullptr || request.layerInterfaceVersion != 1 ||
         XR_VERSION_MAJOR(request.layerApiVersion) != 1) {
@@ -63,12 +72,20 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
+    const HMODULE embedded_owner = delegated_module ? delegated_module : module;
+    const auto embedded_active = reinterpret_cast<int (*)() noexcept>(
+        GetProcAddress(embedded_owner, "OFXR_GetEmbeddedLayerActiveV1"));
+    if (embedded_active && embedded_active() != 1) {
+        std::cerr << "successful embedded negotiation did not establish ownership\n";
+        return EXIT_FAILURE;
+    }
+
     if (delegated_module != nullptr) {
         HMODULE owner = nullptr;
         if (!GetModuleHandleExW(
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                reinterpret_cast<LPCWSTR>(request.createApiLayerInstance),
+                reinterpret_cast<LPCWSTR>(request.getInstanceProcAddr),
                 &owner) ||
             owner != delegated_module) {
             std::cerr << "layer negotiation did not delegate to the requested module\n";

@@ -1,0 +1,115 @@
+{
+  "version": "V627",
+  "base": "6cfc5f85624055a3f438e44e2a05b5ce1087ac37",
+  "status": "runtime-pending",
+  "scope": "Tray-latched Legacy VDXR comparison: preserve original native Framework versus opt-in common private endpoint and three pacing modes, with runtime-specific suites and explicit actual native End output rate.",
+  "passed": 43,
+  "failed": 0,
+  "ctest_seconds": 30.85,
+  "tests": [
+    "xrfg_afw_only_nonluke_gpu",
+    "xrfg_afw_only_session_gpu",
+    "xrfg_afw_only_vdxr_gpu",
+    "xrfg_autonomous_control_tests",
+    "xrfg_benchmark_suite_tests",
+    "xrfg_compositor_presentation_rate_tests",
+    "xrfg_luke_shared_session_gpu",
+    "xrfg_menu_presentation_tests",
+    "xrfg_outlaws_logical_capture",
+    "xrfg_outlaws_startup",
+    "xrfg_private_framework_bypass_gpu",
+    "xrfg_private_publication_pool_gpu",
+    "xrfg_private_runtime_framework-session_gpu",
+    "xrfg_private_runtime_metrics-solo-luke-d11-djules_gpu",
+    "xrfg_private_runtime_metrics-solo-luke-d11-fidelity_gpu",
+    "xrfg_private_runtime_metrics-solo-luke-d11-new_gpu",
+    "xrfg_private_runtime_metrics-solo-luke-d11-ref_gpu",
+    "xrfg_private_runtime_off-pacing-session_gpu",
+    "xrfg_private_runtime_outlaws-budget_gpu",
+    "xrfg_private_runtime_scope_gpu",
+    "xrfg_private_runtime_vdxr-djules3_gpu",
+    "xrfg_private_runtime_vdxr-djules_gpu",
+    "xrfg_private_runtime_vdxr-dlssg_gpu",
+    "xrfg_private_runtime_vdxr-fidelity_gpu",
+    "xrfg_private_runtime_vdxr-framework-session_gpu",
+    "xrfg_private_runtime_vdxr-fsr_gpu",
+    "xrfg_private_runtime_vdxr-hybrid_gpu",
+    "xrfg_private_runtime_vdxr-legacy-session_gpu",
+    "xrfg_private_runtime_vdxr-luke-d11-djules_gpu",
+    "xrfg_private_runtime_vdxr-luke-d11-fidelity_gpu",
+    "xrfg_private_runtime_vdxr-luke-d11-new_gpu",
+    "xrfg_private_runtime_vdxr-luke-d11-ref_gpu",
+    "xrfg_private_runtime_vdxr-new_gpu",
+    "xrfg_private_runtime_vdxr-ref_gpu",
+    "xrfg_private_runtime_vdxr-solo-djules_gpu",
+    "xrfg_private_runtime_vdxr-solo-dlssg_gpu",
+    "xrfg_private_runtime_vdxr-solo-fidelity_gpu",
+    "xrfg_private_runtime_vdxr-solo-fsr_gpu",
+    "xrfg_private_runtime_vdxr-solo-hybrid_gpu",
+    "xrfg_private_runtime_vdxr-solo-new_gpu",
+    "xrfg_private_runtime_vdxr-solo-ref_gpu",
+    "xrfg_settings_widgets_tests",
+    "xrfg_standalone_launcher_tests"
+  ],
+  "test_runs": [
+    {
+      "evidence": "v627-checks.xml",
+      "passed": 40,
+      "failed": 0
+    },
+    {
+      "evidence": "v627-ui-checks.xml",
+      "passed": 2,
+      "failed": 1
+    },
+    {
+      "evidence": "v627-ui-final-checks.xml",
+      "passed": 1,
+      "failed": 0
+    }
+  ],
+  "check_observation": "The UI fixture initially expected the superseded 11/17/18 VDXR guidance. Updated it for Legacy7/13/15 and added actual opt-in VDXR Display button coverage; the final UI recheck passes. Main40 checks pass cleanly.",
+  "ipc_abi": 62701,
+  "provider_abi": 45601,
+  "headset_validation": "Pending owner Quest3/VDXR Legacy ON versus OFF comparison; no performance/latency/scanout claim inferred from mocked runtime tests.",
+  "owner_adapter_validation": {
+    "results": [
+      {
+        "legacy": false,
+        "luke": false,
+        "source_values": 49,
+        "cells": 63,
+        "target": "AD86:CN86",
+        "all_source_values_mapped_once": true
+      },
+      {
+        "legacy": false,
+        "luke": true,
+        "source_values": 39,
+        "cells": 63,
+        "target": "AD85:CN85",
+        "all_source_values_mapped_once": true
+      },
+      {
+        "legacy": true,
+        "luke": false,
+        "source_values": 13,
+        "cells": 23,
+        "target": "G86:AC86",
+        "all_source_values_mapped_once": true
+      },
+      {
+        "legacy": true,
+        "luke": true,
+        "source_values": 15,
+        "cells": 23,
+        "target": "G85:AC85",
+        "all_source_values_mapped_once": true
+      }
+    ],
+    "old_adapter_regression_passed": true,
+    "no_sheet_write": true
+  },
+  "pushed": false,
+  "live_installation": false
+}

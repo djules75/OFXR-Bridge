@@ -2,6 +2,7 @@
 
 #include <d3d11_4.h>
 #include <d3d12.h>
+#include <wrl/client.h>
 
 #include <cstdint>
 #include <memory>
@@ -10,6 +11,8 @@
 #include <span>
 
 namespace xrfg {
+
+struct TwoFrameImageInfo;
 
 enum class D3D11InteropInitializationStage : std::uint32_t {
     complete = 0,
@@ -39,6 +42,34 @@ enum class D3D11InteropInitializationStage : std::uint32_t {
     open_d3d11_fence = 24,
     create_event = 25,
 };
+
+// Last queued publication plus a non-blocking completed-fence observation.
+struct D3D11PublicationSnapshot {
+    std::uint64_t fence_identity{};
+    std::uint64_t ready_value{};
+    std::uint64_t copy_complete_value{};
+    std::uint64_t completed_value{};
+    std::uint32_t current_index{UINT32_MAX};
+    std::uint32_t synthetic_index{UINT32_MAX};
+};
+
+// Immutable completion target returned by the publish transaction itself.
+// Retains the fence, not the interop mutex or its mutable last-access cursor.
+struct D3D11PublicationReceipt {
+    Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+    std::uint64_t copy_complete_value{};
+    std::uint32_t current_destination_index{UINT32_MAX};
+    std::uint32_t private_current_index{UINT32_MAX};
+    std::uint32_t synthetic_destination_index{UINT32_MAX};
+};
+
+struct D3D11PublicationTargets {
+    std::uint32_t current_index{};
+    std::optional<std::uint32_t> synthetic_index;
+};
+
+[[nodiscard]] HRESULT wait_for_d3d11_publication(
+    const D3D11PublicationReceipt& receipt) noexcept;
 
 // Creates a private D3D12 device and direct queue on the adapter that owns the
 // supplied D3D11 OpenXR device. The caller retains both returned objects.
@@ -87,16 +118,57 @@ public:
 
     // Makes the D3D12 queue wait for any earlier D3D11 publication copy before
     // the synthesizer can reuse a shared destination.
-    [[nodiscard]] HRESULT prepare_synthesis() noexcept;
+    // Optional OFXR lane. Capture/AFW retain their original queue and timeline.
+    // Configure before use; failure leaves the original lane intact.
+    [[nodiscard]] HRESULT configure_synthesis_queue(ID3D12CommandQueue* queue) noexcept;
+    [[nodiscard]] HRESULT prepare_synthesis(bool isolated = false) noexcept;
+
+    // Isolated worker with an independently fenced immutable input history.
+    // Wait only for D11 accesses to the exact output slots being overwritten.
+    // Raw/mutable source callers must keep prepare_synthesis instead.
+    [[nodiscard]] HRESULT prepare_synthesis_targets(std::uint32_t current_index,
+        std::optional<std::uint32_t> synthetic_index) noexcept;
+
+    // Read the actual acquired OpenXR D3D11 output named by this immutable
+    // publication receipt back into its shared D3D12 mirror. Call before XR
+    // release, then capture history and finish_capture. GPU ordering only.
+    [[nodiscard]] HRESULT capture_published_current(
+        const D3D11PublicationReceipt& receipt) noexcept;
+
+    // F8-only witness of the actual acquired XR image, paired to its immutable
+    // receipt. Does not consume or advance the temporal synthesis history.
+    [[nodiscard]] HRESULT diagnostic_capture_published_current(
+        const D3D11PublicationReceipt& receipt,
+        const TwoFrameImageInfo& info) noexcept;
 
     // Called immediately after the synthesizer submission on the same D3D12
     // queue. Queues a D3D11 wait and mip-zero copies into the acquired private
     // OpenXR images.
     [[nodiscard]] HRESULT publish(
         std::uint32_t current_destination_index,
-        std::optional<std::uint32_t> synthetic_destination_index) noexcept;
+        std::optional<std::uint32_t> synthetic_destination_index,
+        D3D11PublicationReceipt* receipt = nullptr,
+        std::optional<D3D11PublicationTargets> targets = {},
+        bool isolated = false) noexcept;
+
+    // Output already completed on its retained synthesis fence. Reject an
+    // incomplete proof; never append a ready signal behind newer native work.
+    [[nodiscard]] HRESULT publish_completed(
+        std::uint32_t current_destination_index,
+        std::optional<std::uint32_t> synthetic_destination_index,
+        ID3D12Fence* producer_fence, std::uint64_t producer_value,
+        D3D11PublicationReceipt* receipt = nullptr,
+        std::optional<D3D11PublicationTargets> targets = {}) noexcept;
+
 
     [[nodiscard]] HRESULT wait_for_idle() noexcept;
+    // Non-blocking observation only: never wait, flush or submit GPU work.
+    [[nodiscard]] D3D11PublicationSnapshot publication_snapshot() const noexcept;
+    // Diagnostic-only retained reference; no wait, copy or GPU submission.
+    [[nodiscard]] Microsoft::WRL::ComPtr<ID3D11Texture2D>
+        published_current_image(std::uint32_t index) const noexcept;
+    [[nodiscard]] Microsoft::WRL::ComPtr<ID3D11Texture2D>
+        published_image(std::uint32_t index,bool synthetic) const noexcept;
     [[nodiscard]] bool initialized() const noexcept;
 
 private:

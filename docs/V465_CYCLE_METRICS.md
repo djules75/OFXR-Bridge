@@ -1,0 +1,15 @@
+# V465: complete application-frame cycle
+
+Based on sealed V464 (41f7a7247e32ff2ab085d431c06101ce0c2eee0c). The owner requests timings for frame production plus OFXR retention and producer blocking when comparing route options. Renderer, providers, shaders, guide admission, camera math and scheduling remain unchanged.
+
+The desktop and headset row is **OFXR time | Cycle length | Presentation estimated | State**. GPU render is removed. IPC is 46501; native provider ABI remains 45601.
+
+- **Cycle length:** QPC wall time from entry into the application's xrWaitFrame, before locks/runtime calls, until the later of successful acceptance of that same real frame by downstream xrEndFrame and return of the application's xrEndFrame. Includes game production between calls, runtime pacing, OFXR waits, held-real/director residence and post-submit producer teardown. It is a CPU/API request-to-delivery-and-release interval, not an input-to-photon estimate or a GPU completion query.
+- **OFXR time:** union of wall intervals inside that frame's application WaitFrame, BeginFrame, AcquireSwapchainImage, WaitSwapchainImage, ReleaseSwapchainImage and EndFrame hooks. Includes blocking runtime calls, ownership waits and producer tails. Overlapping eye calls count once; game code between these calls and asynchronous worker residence are excluded. This is blocked/call time, not exclusive OFXR CPU compute and not all frame retention.
+- **Presentation estimated:** existing predicted display time minus pre-submit timestamp, unchanged. May show Late by. It is a separate prediction; do not add it to Cycle length to claim measured display latency.
+
+An immutable shared ticket created by the successful visible Wait travels with the real frame through snapshot, worker and presenter. Matching Begin owns the producer-call ticket; a subsequent overlapping Wait cannot replace it. Samples require first successful, nonempty, fresh real submission and producer End completion. Failed/synthetic/repeated/copied outputs do not contribute a new timing. Unknown, incomplete or invalid ticket/clock accounting reports N/A. Fixed per-frame interval capacity is 64 (overflow reports N/A). Samples use a one-second median and publish at most four times per second, only with an interface visible. Live logging is not required. Hidden new frames allocate no timing tickets. No GPU waits/timestamps or scheduling delays are introduced.
+
+Validation includes actual distributed layer hooks with a pre-Wait lock stall, production gap, runtime calls, overlapping next Wait and independent End consumption; real compositor-path successful retry, producer-tail publication and existing admission/visibility tests. Full suites and final evidence are in VALIDATION.md and V465_VALIDATION.json.
+
+Automated fixtures do not establish headset latency improvement. Owner comparison of 0.2.1, Djules and 0.3.0, including Prefer FPS, is pending. The new counters measure rather than change that behavior. V464 FSR release guide fix and fixed FidelityFX Hybrid fallback, default-OFF live R19 and suspended native Vulkan guide ingress remain intact. NMS residual hitches remain open.

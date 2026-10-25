@@ -1,0 +1,41 @@
+{
+  "version": 663,
+  "ipc_abi": 66301,
+  "provider_abi": 45601,
+  "focused_checks_passed": [
+    "xrfg_benchmark_log_tests",
+    "xrfg_private_runtime_luke-shared-budget_gpu",
+    "xrfg_private_runtime_luke-unshared-budget_gpu",
+    "xrfg_private_runtime_outlaws-budget_gpu",
+    "xrfg_private_runtime_outlaws-unshared-budget_gpu",
+    "xrfg_single_configuration_tests",
+    "xrfg_benchmark_suite_tests",
+    "xrfg_adaptive_benchmark_tests",
+    "xrfg_settings_widgets_tests",
+    "xrfg_game_profiles",
+    "xrfg_autonomous_control_tests",
+    "xrfg_luke_standalone_context",
+    "xrfg_luke_queue_policy",
+    "xrfg_luke_no_helper_context",
+    "xrfg_luke_stale_synthesis_context",
+    "xrfg_luke_late_alias_context",
+    "xrfg_outlaws_startup"
+  ],
+  "adaptive_controller_simulated_suites": 25,
+  "raw_evidence": [
+    "controls-first.xml",
+    "selected-first.xml",
+    "outlaws-off-final.xml"
+  ],
+  "fixture_corrections": [
+    "Old expected benchmark/UI counts updated after Fidelity removal",
+    "Fixture reports actual eye resolution before start",
+    "New Outlaws OFF fixture had two sources but its reused post-seal check accessed a third; loops now use source_count"
+  ],
+  "latest_results_aggregation": "16 unchanged passing checks from selected-first + corrected Outlaws OFF GPU case",
+  "owner_sheet_adapter": "83 columns AQ:DU preserved; skipped Fidelity and future cells n.a.; private adapter unchanged",
+  "generation_algorithms_pacing_fences_unchanged": true,
+  "outlaws_ini_override_honored_on_gpu": true,
+  "hardware_acceptance": "pending owner game benchmark",
+  "published": false
+}

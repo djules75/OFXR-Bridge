@@ -1,0 +1,23 @@
+# V519: selected KCD branch merged with pre-HUD V513
+
+V519 integrates the owner-selected latest KCD V603 delta and its V601 terminal
+diagnostics onto the clean exported V513 line. It preserves DOOM native camera
+row correction, sparse marker copyback and batched independent eye marker reads.
+No V514-V518 HUD implementation is included. Original source tags and ZIPs
+remain unchanged; see the shared KCD selection and milestone mapping.
+
+Runtime remains pending for the merged DLL. Original KCD V603 is owner-accepted:
+the owner confirms on 2026-10-14 that the problem is resolved, V603 matches
+OptiScaler and is the final KCD version. Earlier unresolved notes are superseded.
+Mandatory depth-aware native subtraction/same-eye reconstruction/AFW Normal,
+guide/color ownership, route separation and external provider ABI are retained.
+
+Broad V513 reproduction passed 178/179 automated checks. The default CPU mock
+director test timed out twice: its fixture clears the session registry before
+invoking the actual EndFrame dispatcher, which requires a registered session.
+A local fixture-only investigation is excluded from the exported branch.
+The real GPU director tests pass. Integration checks explicitly exclude only
+that existing invalid mock setup; no production renderer behavior is altered
+to accommodate it. This limitation remains documented for later test repair.
+
+Final validation: optimized Release builds. Ten affected checks pass in 10.94s with no skips: terminal D11 capture, native motion/depth GPU, KCD logical and scene capture, Outlaws logical capture/startup, both Vulkan title bootstraps, and bundled/actual-game KCD PDAFW quality. The preceding broad run passed 179/180 applicable cases; its one failure exposed a shared test observer expecting KCD scalars in the Outlaws fixture. The observer now keeps both strict per-title oracles, and affected checks pass. Existing CPU mock director limitation remains excluded. No game/headset verdict is inferred.

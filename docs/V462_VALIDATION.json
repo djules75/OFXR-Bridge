@@ -1,0 +1,19 @@
+{
+  "version": "V462",
+  "ipc": 46201,
+  "provider_abi": 45601,
+  "base": "8d50b2fae85db8ba5345b2a5f378470c1ea38479",
+  "new": {
+    "passed": 141,
+    "seconds": 97.62
+  },
+  "djules": {
+    "passed": 158,
+    "seconds": 98.01
+  },
+  "r19_camera_gpu": "passed",
+  "returnal_provider": "passed",
+  "runtime_hashes_match": true,
+  "game_validation": "pending",
+  "r19_default": false
+}

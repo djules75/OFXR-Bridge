@@ -1,0 +1,16 @@
+{
+  "version": "V566",
+  "base": "b9a860baf8c9b74b5ee917316d4512bb2008bdfd",
+  "status": "runtime-pending",
+  "passed": 8,
+  "failed": 0,
+  "ctest_seconds": 13.65,
+  "ctest_log": "v566-focused-final-tests.log",
+  "headset_validation": "Pending owner trial. Counts unique accepted images, NOT physical scanout. Restores pre-V565 OFXR real/generated counters. Unsupported raw source identities can still have an unknown total.",
+  "ipc_abi": 55801,
+  "provider_abi": 45601,
+  "luke_suite_trials": 18,
+  "presentation_pacing_changed": false,
+  "afw_math_changed": false,
+  "swapchain_counts_changed": false
+}

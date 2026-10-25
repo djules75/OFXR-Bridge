@@ -1,74 +1,51 @@
-#include "xrfg/provider_api.hpp"
-
-#include <openxr/openxr.h>
-#include <openxr/openxr_loader_negotiation.h>
-
-#include <windows.h>
-
-#include <atomic>
-#include <cstring>
+#include "../src/layer/optiscaler_bootstrap.hpp"
+#include <cstdlib>
 
 namespace {
-
-std::atomic_bool g_active{};
-
-bool mode_is(const char* expected) noexcept {
-    char value[32]{};
-    const DWORD length = GetEnvironmentVariableA(
-        "OFXR_BOOTSTRAP_STUB_MODE", value, static_cast<DWORD>(sizeof(value)));
-    return length > 0 && length < sizeof(value) &&
-           std::strcmp(value, expected) == 0;
+bool active{};
+bool mode(const char* expected) {
+    char value[64]{};
+    GetEnvironmentVariableA("OFXR_BOOTSTRAP_TEST_MODE", value, sizeof(value));
+    return std::strcmp(value, expected) == 0;
 }
-
-XRAPI_ATTR XrResult XRAPI_CALL stub_get_instance_proc_addr(
-    XrInstance, const char*, PFN_xrVoidFunction*) {
+XrResult XRAPI_CALL gipa(XrInstance, const char*, PFN_xrVoidFunction*) {
     return XR_ERROR_FUNCTION_UNSUPPORTED;
 }
-
-XRAPI_ATTR XrResult XRAPI_CALL stub_create_api_layer_instance(
-    const XrInstanceCreateInfo*,
-    const XrApiLayerCreateInfo*,
-    XrInstance*) {
-    return XR_ERROR_RUNTIME_FAILURE;
-}
-
-}  // namespace
-
-extern "C" __declspec(dllexport) int OFXR_OptiScalerProviderV2(
-    OFXR_OptiScalerProviderIdentityV2* identity) {
-    if (identity == nullptr) return 0;
-    *identity = {};
-    identity->capabilities = OFXR_OPTISCALER_CAP_DLSS_GUIDES_V2;
-    if (mode_is("incompatible")) {
-        identity->magic = 0;
-    }
-    return 1;
-}
-
-extern "C" __declspec(dllexport) int OFXR_SetEmbeddedLayerActiveV1(int active) {
-    g_active.store(active != 0, std::memory_order_release);
-    return 1;
-}
-
-extern "C" __declspec(dllexport) int OFXR_BootstrapStubActiveV1() {
-    return g_active.load(std::memory_order_acquire) ? 1 : 0;
-}
-
-extern "C" __declspec(dllexport) XRAPI_ATTR XrResult XRAPI_CALL
-xrNegotiateLoaderApiLayerInterface(
-    const XrNegotiateLoaderInfo*,
-    const char*,
-    XrNegotiateApiLayerRequest* request) {
-    if (mode_is("failure")) {
+XrResult XRAPI_CALL create(const XrInstanceCreateInfo* info,
+    const XrApiLayerCreateInfo* layers, XrInstance* instance) {
+    if (!layers || !layers->nextInfo ||
+        std::strcmp(layers->nextInfo->layerName, xrfg::optiscaler_bootstrap::embedded_name) != 0)
         return XR_ERROR_INITIALIZATION_FAILED;
-    }
-    if (mode_is("seh")) {
-        RaiseException(0xE0421001, 0, 0, nullptr);
-        return XR_ERROR_RUNTIME_FAILURE;
-    }
-    request->layerInterfaceVersion = XR_CURRENT_LOADER_API_LAYER_VERSION;
+    auto downstream = *layers;
+    downstream.nextInfo = layers->nextInfo->next;
+    return layers->nextInfo->nextCreateApiLayerInstance(info, &downstream, instance);
+}
+}
+extern "C" __declspec(dllexport) int OFXR_OptiScalerProviderV2(xrfg::optiscaler_bootstrap::Identity* identity) {
+    *identity = {};
+    identity->capabilities = mode("no-capability") ? 0 : 1;
+    if (mode("incompatible")) identity->magic = 0;
+    if (mode("bad-size")) identity->struct_size = 0;
+    if (mode("bad-version")) identity->api_version = 1;
+    if (mode("identity-seh")) RaiseException(0xE0421001, 0, 0, nullptr);
+    return 1;
+}
+extern "C" __declspec(dllexport) int OFXR_SetEmbeddedLayerActiveV1(int value) {
+    active = value != 0;
+    if (mode("activation-seh") && value) RaiseException(0xE0421003, 0, 0, nullptr);
+    return mode("activation-failure") && value ? 0 : 1;
+}
+extern "C" __declspec(dllexport) int OFXR_GetEmbeddedLayerActiveV1() { return active; }
+extern "C" __declspec(dllexport) XrResult XRAPI_CALL xrNegotiateLoaderApiLayerInterface(
+    const XrNegotiateLoaderInfo*, const char* name, XrNegotiateApiLayerRequest* request) {
+    if (std::strcmp(name, xrfg::optiscaler_bootstrap::embedded_name)) return XR_ERROR_INITIALIZATION_FAILED;
+    if (mode("failure")) return XR_ERROR_INITIALIZATION_FAILED;
+    if (mode("seh")) RaiseException(0xE0421002, 0, 0, nullptr);
+    request->layerInterfaceVersion = mode("bad-interface") ? 2 : 1;
     request->layerApiVersion = XR_MAKE_VERSION(1, 0, 0);
-    request->getInstanceProcAddr = stub_get_instance_proc_addr;
-    request->createApiLayerInstance = stub_create_api_layer_instance;
+    request->getInstanceProcAddr = gipa;
+    request->createApiLayerInstance = mode("missing-callback") ? nullptr : create;
+    if (mode("foreign-callback")) request->createApiLayerInstance =
+        reinterpret_cast<PFN_xrCreateApiLayerInstance>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetTickCount"));
     return XR_SUCCESS;
 }

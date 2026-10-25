@@ -1,4 +1,7 @@
 #include "xrfg/d3d11_d3d12_interop.hpp"
+#include "xrfg/bridge_flight_logger.hpp"
+#include "xrfg/two_frame_capture.hpp"
+#include "xrfg/native_ingress/D3D_DeviceOwner.h"
 
 #include <windows.h>
 #include <dxgi1_2.h>
@@ -243,8 +246,16 @@ struct D3D11D3D12SwapchainInterop::Impl {
     ComPtr<ID3D11DeviceContext4> d3d11_context4;
     ComPtr<ID3D12Device> d3d12_device;
     ComPtr<ID3D12CommandQueue> d3d12_queue;
+    // Each timeline has one writer. A late signal from the other API can
+    // otherwise rewind an already completed publication and strand synthesis.
     ComPtr<ID3D12Fence> d3d12_fence;
     ComPtr<ID3D11Fence> d3d11_fence;
+    ComPtr<ID3D12Fence> native_fence12;
+    ComPtr<ID3D11Fence> native_fence11;
+    ComPtr<ID3D12CommandQueue> synthesis_queue;
+    ComPtr<ID3D12Fence> synthesis_fence12;
+    ComPtr<ID3D11Fence> synthesis_fence11;
+    std::uint64_t last_synthesis_signal_value{};
     HANDLE fence_event{};
     std::vector<ComPtr<ID3D11Texture2D>> source_images;
     std::vector<ComPtr<ID3D11Texture2D>> current_destination_images;
@@ -252,14 +263,18 @@ struct D3D11D3D12SwapchainInterop::Impl {
     std::vector<SharedImage> shared_sources;
     std::vector<SharedImage> shared_current_destinations;
     std::vector<SharedImage> shared_synthetic_destinations;
+    std::vector<std::uint64_t> current_d3d11_access;
+    std::vector<std::uint64_t> synthetic_d3d11_access;
     std::vector<ID3D12Resource*> source_d3d12_views;
     std::vector<ID3D12Resource*> current_d3d12_views;
     std::vector<ID3D12Resource*> synthetic_d3d12_views;
     D3D11_TEXTURE2D_DESC source_description{};
     std::uint64_t next_fence_value{1};
-    std::uint64_t last_fence_value{};
+    std::uint64_t last_d3d11_signal_value{};
+    std::uint64_t last_d3d12_signal_value{};
     std::uint64_t last_d3d12_access_value{};
     std::uint64_t last_d3d11_access_value{};
+    D3D11PublicationSnapshot last_publication{};
     bool enabled{};
 
     ~Impl() {
@@ -553,39 +568,47 @@ struct D3D11D3D12SwapchainInterop::Impl {
             return result;
         }
 
-        result = d3d12_device->CreateFence(
-            0,
-            D3D12_FENCE_FLAG_SHARED,
-            IID_PPV_ARGS(d3d12_fence.GetAddressOf()));
-        if (FAILED(result)) {
-            if (failure_stage != nullptr) {
-                *failure_stage = D3D11InteropInitializationStage::create_fence;
+        auto create_timeline = [&](ComPtr<ID3D12Fence>& fence12,
+                                   ComPtr<ID3D11Fence>& fence11) noexcept -> HRESULT {
+            HRESULT fence_result = d3d12_device->CreateFence(
+                0,
+                D3D12_FENCE_FLAG_SHARED,
+                IID_PPV_ARGS(fence12.GetAddressOf()));
+            if (FAILED(fence_result)) {
+                if (failure_stage != nullptr) {
+                    *failure_stage = D3D11InteropInitializationStage::create_fence;
+                }
+                return fence_result;
             }
-            return result;
-        }
-        UniqueHandle fence_handle;
-        result = d3d12_device->CreateSharedHandle(
-            d3d12_fence.Get(),
-            nullptr,
-            GENERIC_ALL,
-            nullptr,
-            &fence_handle.value);
-        if (FAILED(result)) {
-            if (failure_stage != nullptr) {
-                *failure_stage =
-                    D3D11InteropInitializationStage::create_fence_handle;
+            UniqueHandle fence_handle;
+            fence_result = d3d12_device->CreateSharedHandle(
+                fence12.Get(),
+                nullptr,
+                GENERIC_ALL,
+                nullptr,
+                &fence_handle.value);
+            if (FAILED(fence_result)) {
+                if (failure_stage != nullptr) {
+                    *failure_stage =
+                        D3D11InteropInitializationStage::create_fence_handle;
+                }
+                return fence_result;
             }
-            return result;
-        }
-        result = d3d11_device5->OpenSharedFence(
-            fence_handle.value,
-            IID_PPV_ARGS(d3d11_fence.GetAddressOf()));
-        if (FAILED(result)) {
-            if (failure_stage != nullptr) {
-                *failure_stage = D3D11InteropInitializationStage::open_d3d11_fence;
+            fence_result = d3d11_device5->OpenSharedFence(
+                fence_handle.value,
+                IID_PPV_ARGS(fence11.GetAddressOf()));
+            if (FAILED(fence_result)) {
+                if (failure_stage != nullptr) {
+                    *failure_stage = D3D11InteropInitializationStage::open_d3d11_fence;
+                }
+                return fence_result;
             }
-            return result;
-        }
+            return S_OK;
+        };
+        result = create_timeline(d3d12_fence, d3d11_fence);
+        if (FAILED(result)) return result;
+        result = create_timeline(native_fence12, native_fence11);
+        if (FAILED(result)) return result;
         fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (fence_event == nullptr) {
             if (failure_stage != nullptr) {
@@ -595,6 +618,8 @@ struct D3D11D3D12SwapchainInterop::Impl {
             return HRESULT_FROM_WIN32(
                 error == ERROR_SUCCESS ? ERROR_NOT_ENOUGH_MEMORY : error);
         }
+        current_d3d11_access.resize(shared_current_destinations.size());
+        synthetic_d3d11_access.resize(shared_synthetic_destinations.size());
         enabled = true;
         return S_OK;
     }
@@ -607,7 +632,7 @@ struct D3D11D3D12SwapchainInterop::Impl {
         HRESULT result = S_OK;
         if (last_d3d12_access_value != 0) {
             result = d3d11_context4->Wait(
-                d3d11_fence.Get(), last_d3d12_access_value);
+                native_fence11.Get(), last_d3d12_access_value);
             if (FAILED(result)) {
                 enabled = false;
                 return result;
@@ -630,13 +655,13 @@ struct D3D11D3D12SwapchainInterop::Impl {
             enabled = false;
             return result;
         }
+        last_d3d11_signal_value = value;
         d3d11_context4->Flush1(D3D11_CONTEXT_TYPE_ALL, nullptr);
         result = d3d12_queue->Wait(d3d12_fence.Get(), value);
         if (FAILED(result)) {
             enabled = false;
             return result;
         }
-        last_fence_value = value;
         return S_OK;
     }
 
@@ -649,24 +674,48 @@ struct D3D11D3D12SwapchainInterop::Impl {
         if (FAILED(result)) {
             return result;
         }
-        result = d3d12_queue->Signal(d3d12_fence.Get(), value);
+        result = d3d12_queue->Signal(native_fence12.Get(), value);
         if (FAILED(result)) {
             enabled = false;
             return result;
         }
         last_d3d12_access_value = value;
-        last_fence_value = value;
+        last_d3d12_signal_value = value;
         return S_OK;
     }
 
-    [[nodiscard]] HRESULT prepare_synthesis() noexcept {
+    [[nodiscard]] HRESULT configure_synthesis_queue(ID3D12CommandQueue* queue) noexcept {
+        if (!enabled || !queue) return E_INVALIDARG;
+        if (synthesis_queue) return queue == synthesis_queue.Get() ? S_OK : E_UNEXPECTED;
+        ComPtr<ID3D12Device> owner;
+        if (FAILED(queue->GetDevice(IID_PPV_ARGS(owner.GetAddressOf()))) ||
+            !d3d_owner::same(d3d12_device.Get(), owner.Get()) ||
+            queue == d3d12_queue.Get()) return E_INVALIDARG;
+        ComPtr<ID3D12Fence> fence12;
+        ComPtr<ID3D11Fence> fence11;
+        auto result = d3d12_device->CreateFence(0, D3D12_FENCE_FLAG_SHARED,
+            IID_PPV_ARGS(fence12.GetAddressOf()));
+        UniqueHandle handle;
+        if (SUCCEEDED(result)) result = d3d12_device->CreateSharedHandle(
+            fence12.Get(), nullptr, GENERIC_ALL, nullptr, &handle.value);
+        if (SUCCEEDED(result)) result = d3d11_device5->OpenSharedFence(
+            handle.value, IID_PPV_ARGS(fence11.GetAddressOf()));
+        if (FAILED(result)) return result;
+        synthesis_queue = queue;
+        synthesis_fence12 = std::move(fence12);
+        synthesis_fence11 = std::move(fence11);
+        return S_OK;
+    }
+
+    [[nodiscard]] HRESULT prepare_synthesis(bool isolated) noexcept {
         if (!enabled) {
             return E_UNEXPECTED;
         }
+        if (isolated && !synthesis_queue) return E_UNEXPECTED;
         if (last_d3d11_access_value == 0) {
             return S_OK;
         }
-        const HRESULT result = d3d12_queue->Wait(
+        const HRESULT result = (isolated ? synthesis_queue : d3d12_queue)->Wait(
             d3d12_fence.Get(), last_d3d11_access_value);
         if (FAILED(result)) {
             enabled = false;
@@ -676,12 +725,19 @@ struct D3D11D3D12SwapchainInterop::Impl {
 
     [[nodiscard]] HRESULT publish(
         std::uint32_t current_destination_index,
-        std::optional<std::uint32_t> synthetic_destination_index) noexcept {
+        std::optional<std::uint32_t> synthetic_destination_index,
+        bool source_completed = false,
+        std::optional<D3D11PublicationTargets> targets = {},
+        bool isolated = false) noexcept {
+        if (isolated && !synthesis_queue) return E_UNEXPECTED;
+        const auto current_target = targets ? targets->current_index : current_destination_index;
+        const auto synthetic_target = targets ? targets->synthetic_index : synthetic_destination_index;
         if (!enabled ||
-            current_destination_index >= current_destination_images.size() ||
+            current_target >= current_destination_images.size() ||
             current_destination_index >= shared_current_destinations.size() ||
+            synthetic_target.has_value() != synthetic_destination_index.has_value() ||
             (synthetic_destination_index &&
-             (*synthetic_destination_index >= synthetic_destination_images.size() ||
+             (*synthetic_target >= synthetic_destination_images.size() ||
               *synthetic_destination_index >=
                   shared_synthetic_destinations.size()))) {
             return E_INVALIDARG;
@@ -691,12 +747,19 @@ struct D3D11D3D12SwapchainInterop::Impl {
         if (FAILED(result)) {
             return result;
         }
-        result = d3d12_queue->Signal(d3d12_fence.Get(), ready_value);
+        result = source_completed
+            ? d3d11_context4->Signal(d3d11_fence.Get(), ready_value)
+            : (isolated ? synthesis_queue : d3d12_queue)->Signal(
+                isolated ? synthesis_fence12.Get() : native_fence12.Get(), ready_value);
         if (FAILED(result)) {
             enabled = false;
             return result;
         }
-        result = d3d11_context4->Wait(d3d11_fence.Get(), ready_value);
+        if (source_completed) last_d3d11_signal_value = ready_value;
+        else if (isolated) last_synthesis_signal_value = ready_value;
+        else last_d3d12_signal_value = ready_value;
+        result = source_completed ? S_OK :
+            d3d11_context4->Wait(isolated ? synthesis_fence11.Get() : native_fence11.Get(), ready_value);
         if (FAILED(result)) {
             enabled = false;
             return result;
@@ -704,13 +767,13 @@ struct D3D11D3D12SwapchainInterop::Impl {
 
         copy_mip_zero(
             d3d11_context.Get(),
-            current_destination_images[current_destination_index].Get(),
+            current_destination_images[current_target].Get(),
             shared_current_destinations[current_destination_index].d3d11.Get(),
             source_description.ArraySize,
             1,
             [&]() noexcept {
                 D3D11_TEXTURE2D_DESC description{};
-                current_destination_images[current_destination_index]->GetDesc(
+                current_destination_images[current_target]->GetDesc(
                     &description);
                 return description.MipLevels;
             }());
@@ -718,13 +781,13 @@ struct D3D11D3D12SwapchainInterop::Impl {
             const std::uint32_t index = *synthetic_destination_index;
             copy_mip_zero(
                 d3d11_context.Get(),
-                synthetic_destination_images[index].Get(),
+                synthetic_destination_images[*synthetic_target].Get(),
                 shared_synthetic_destinations[index].d3d11.Get(),
                 source_description.ArraySize,
                 1,
                 [&]() noexcept {
                     D3D11_TEXTURE2D_DESC description{};
-                    synthetic_destination_images[index]->GetDesc(&description);
+                    synthetic_destination_images[*synthetic_target]->GetDesc(&description);
                     return description.MipLevels;
                 }());
         }
@@ -741,41 +804,51 @@ struct D3D11D3D12SwapchainInterop::Impl {
         }
         d3d11_context4->Flush1(D3D11_CONTEXT_TYPE_ALL, nullptr);
         last_d3d11_access_value = complete_value;
-        last_fence_value = complete_value;
+        last_d3d11_signal_value = complete_value;
+        current_d3d11_access[current_destination_index] = complete_value;
+        if (synthetic_destination_index)
+            synthetic_d3d11_access[*synthetic_destination_index] = complete_value;
+        last_publication = {
+            static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(d3d12_fence.Get())),
+            ready_value, complete_value, 0, current_target,
+            synthetic_target.value_or(UINT32_MAX)};
         return S_OK;
     }
 
+
     [[nodiscard]] HRESULT wait_for_idle() noexcept {
-        if (last_fence_value == 0) {
+        if (last_d3d11_signal_value == 0 && last_d3d12_signal_value == 0 && last_synthesis_signal_value == 0) {
             return S_OK;
         }
-        if (d3d12_fence == nullptr || fence_event == nullptr) {
+        if (d3d12_fence == nullptr || native_fence12 == nullptr || fence_event == nullptr) {
             return E_UNEXPECTED;
         }
-        const std::uint64_t completed = d3d12_fence->GetCompletedValue();
-        if (completed == std::numeric_limits<std::uint64_t>::max()) {
-            enabled = false;
-            return E_FAIL;
-        }
-        if (completed >= last_fence_value) {
-            return S_OK;
-        }
-        HRESULT result = d3d12_fence->SetEventOnCompletion(
-            last_fence_value,
-            fence_event);
-        if (FAILED(result)) {
-            enabled = false;
-            return result;
-        }
-        if (WaitForSingleObject(fence_event, INFINITE) != WAIT_OBJECT_0) {
-            const DWORD error = GetLastError();
-            enabled = false;
-            return HRESULT_FROM_WIN32(
-                error == ERROR_SUCCESS ? ERROR_GEN_FAILURE : error);
-        }
-        return d3d12_fence->GetCompletedValue() >= last_fence_value
-            ? S_OK
-            : E_FAIL;
+        auto wait_timeline = [&](ID3D12Fence* fence, std::uint64_t target) noexcept -> HRESULT {
+            if (target == 0) return S_OK;
+            for (;;) {
+                const auto completed = fence->GetCompletedValue();
+                if (completed == std::numeric_limits<std::uint64_t>::max()) {
+                    enabled = false;
+                    return E_FAIL;
+                }
+                if (completed >= target) return S_OK;
+                const HRESULT result = fence->SetEventOnCompletion(target, fence_event);
+                if (FAILED(result)) {
+                    enabled = false;
+                    return result;
+                }
+                if (WaitForSingleObject(fence_event, INFINITE) != WAIT_OBJECT_0) {
+                    const DWORD error = GetLastError();
+                    enabled = false;
+                    return HRESULT_FROM_WIN32(
+                        error == ERROR_SUCCESS ? ERROR_GEN_FAILURE : error);
+                }
+            }
+        };
+        HRESULT result = wait_timeline(d3d12_fence.Get(), last_d3d11_signal_value);
+        if (SUCCEEDED(result)) result = wait_timeline(native_fence12.Get(), last_d3d12_signal_value);
+        if (SUCCEEDED(result)) result = wait_timeline(synthesis_fence12.Get(), last_synthesis_signal_value);
+        return result;
     }
 };
 
@@ -872,10 +945,99 @@ HRESULT D3D11D3D12SwapchainInterop::finish_capture() noexcept {
     }
 }
 
-HRESULT D3D11D3D12SwapchainInterop::prepare_synthesis() noexcept {
+HRESULT D3D11D3D12SwapchainInterop::configure_synthesis_queue(ID3D12CommandQueue* queue) noexcept {
     try {
         std::scoped_lock lock(mutex_);
-        return impl_ == nullptr ? E_UNEXPECTED : impl_->prepare_synthesis();
+        return impl_ ? impl_->configure_synthesis_queue(queue) : E_UNEXPECTED;
+    } catch (...) { return E_FAIL; }
+}
+
+HRESULT D3D11D3D12SwapchainInterop::prepare_synthesis(bool isolated) noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ == nullptr ? E_UNEXPECTED : impl_->prepare_synthesis(isolated);
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
+HRESULT D3D11D3D12SwapchainInterop::prepare_synthesis_targets(
+    std::uint32_t current_index,
+    std::optional<std::uint32_t> synthetic_index) noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if (!impl_ || !impl_->enabled || !impl_->synthesis_queue ||
+            current_index >= impl_->current_d3d11_access.size() ||
+            (synthetic_index && *synthetic_index >= impl_->synthetic_d3d11_access.size()))
+            return E_INVALIDARG;
+        const auto required = std::max(impl_->current_d3d11_access[current_index],
+            synthetic_index ? impl_->synthetic_d3d11_access[*synthetic_index] : 0);
+        const auto result = required ? impl_->synthesis_queue->Wait(
+            impl_->d3d12_fence.Get(), required) : S_OK;
+        if (FAILED(result)) impl_->enabled = false;
+        return result;
+    } catch (...) { return E_FAIL; }
+}
+
+HRESULT D3D11D3D12SwapchainInterop::capture_published_current(
+    const D3D11PublicationReceipt& receipt) noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if (!impl_ || !impl_->enabled || !receipt.fence ||
+            receipt.fence.Get() != impl_->d3d12_fence.Get() || !receipt.copy_complete_value ||
+            receipt.current_destination_index >= impl_->current_destination_images.size())
+            return E_INVALIDARG;
+        const auto index = receipt.current_destination_index;
+        const auto private_index = receipt.private_current_index == UINT32_MAX ? index : receipt.private_current_index;
+        if (private_index >= impl_->shared_current_destinations.size()) return E_INVALIDARG;
+        HRESULT result = impl_->d3d11_context4->Wait(impl_->d3d11_fence.Get(),
+            receipt.copy_complete_value);
+        if (FAILED(result)) return result;
+        copy_mip_zero(impl_->d3d11_context.Get(),
+            impl_->shared_current_destinations[private_index].d3d11.Get(),
+            impl_->current_destination_images[index].Get(),
+            impl_->source_description.ArraySize,
+            [&]() noexcept { D3D11_TEXTURE2D_DESC d{};
+                impl_->current_destination_images[index]->GetDesc(&d); return d.MipLevels; }(),
+            [&]() noexcept { D3D11_TEXTURE2D_DESC d{};
+                impl_->shared_current_destinations[private_index].d3d11->GetDesc(&d); return d.MipLevels; }());
+        std::uint64_t ready{};
+        result = impl_->allocate_fence_value(&ready);
+        if (FAILED(result)) return result;
+        result = impl_->d3d11_context4->Signal(impl_->d3d11_fence.Get(), ready);
+        if (FAILED(result)) return result;
+        impl_->last_d3d11_signal_value = ready;
+        impl_->current_d3d11_access[private_index] = ready;
+        impl_->d3d11_context4->Flush1(D3D11_CONTEXT_TYPE_ALL, nullptr);
+        impl_->last_d3d11_access_value = ready;
+        return impl_->d3d12_queue->Wait(impl_->d3d12_fence.Get(), ready);
+    } catch (...) { return E_FAIL; }
+}
+
+HRESULT D3D11D3D12SwapchainInterop::diagnostic_capture_published_current(
+    const D3D11PublicationReceipt& receipt,
+    const TwoFrameImageInfo& info) noexcept {
+    if (!two_frame_capture_images_active()) return S_FALSE;
+    try {
+        Microsoft::WRL::ComPtr<ID3D12Device> device;
+        Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
+        Microsoft::WRL::ComPtr<ID3D12Resource> mirror;
+        {
+            std::scoped_lock lock(mutex_);
+            const auto index = receipt.private_current_index == UINT32_MAX ? receipt.current_destination_index : receipt.private_current_index;
+            if (!impl_ || index >=
+                    impl_->shared_current_destinations.size()) return E_INVALIDARG;
+            device = impl_->d3d12_device;
+            queue = impl_->d3d12_queue;
+            mirror = impl_->shared_current_destinations[index].d3d12;
+        }
+        // Read the actual acquired D11 image, not the intermediate D12 mirror.
+        const HRESULT captured = capture_published_current(receipt);
+        if (FAILED(captured)) return captured;
+        const HRESULT recorded = two_frame_capture_record_queue(info,
+            device.Get(), queue.Get(), mirror.Get(), D3D12_RESOURCE_STATE_COMMON);
+        const HRESULT retired = finish_capture();
+        return FAILED(recorded) ? recorded : retired;
     } catch (...) {
         return E_FAIL;
     }
@@ -883,18 +1045,75 @@ HRESULT D3D11D3D12SwapchainInterop::prepare_synthesis() noexcept {
 
 HRESULT D3D11D3D12SwapchainInterop::publish(
     std::uint32_t current_destination_index,
-    std::optional<std::uint32_t> synthetic_destination_index) noexcept {
+    std::optional<std::uint32_t> synthetic_destination_index,
+    D3D11PublicationReceipt* receipt,
+    std::optional<D3D11PublicationTargets> targets, bool isolated) noexcept {
+    if (receipt) *receipt = {};
     try {
         std::scoped_lock lock(mutex_);
-        return impl_ == nullptr
-            ? E_UNEXPECTED
-            : impl_->publish(
-                  current_destination_index,
-                  synthetic_destination_index);
+        if (!impl_) return E_UNEXPECTED;
+        const HRESULT result = impl_->publish(
+            current_destination_index, synthetic_destination_index, false, targets, isolated);
+        if (SUCCEEDED(result) && receipt) {
+            receipt->fence = impl_->d3d12_fence;
+            receipt->copy_complete_value = impl_->last_publication.copy_complete_value;
+            receipt->current_destination_index = impl_->last_publication.current_index;
+            receipt->private_current_index = current_destination_index;
+            receipt->synthetic_destination_index = impl_->last_publication.synthetic_index;
+        }
+        return result;
     } catch (...) {
         return E_FAIL;
     }
 }
+
+HRESULT D3D11D3D12SwapchainInterop::publish_completed(
+    std::uint32_t current_destination_index,
+    std::optional<std::uint32_t> synthetic_destination_index,
+    ID3D12Fence* producer_fence, std::uint64_t producer_value,
+    D3D11PublicationReceipt* receipt,
+    std::optional<D3D11PublicationTargets> targets) noexcept {
+    if(receipt) *receipt={};
+    if(!producer_fence || !producer_value) return E_INVALIDARG;
+    const auto completed=producer_fence->GetCompletedValue();
+    if(completed==UINT64_MAX) return DXGI_ERROR_DEVICE_REMOVED;
+    if(completed<producer_value) return HRESULT_FROM_WIN32(ERROR_BUSY);
+    try {
+        std::scoped_lock lock(mutex_);
+        if(!impl_) return E_UNEXPECTED;
+        const auto result=impl_->publish(current_destination_index,synthetic_destination_index,true,targets);
+        if(SUCCEEDED(result) && receipt) {
+            receipt->fence=impl_->d3d12_fence;
+            receipt->copy_complete_value=impl_->last_publication.copy_complete_value;
+            receipt->current_destination_index=impl_->last_publication.current_index;
+            receipt->private_current_index=current_destination_index;
+            receipt->synthetic_destination_index=impl_->last_publication.synthetic_index;
+        }
+        return result;
+    } catch(...) { return E_FAIL; }
+}
+
+HRESULT wait_for_d3d11_publication(const D3D11PublicationReceipt& receipt) noexcept {
+    if (!receipt.fence || receipt.copy_complete_value == 0) return E_INVALIDARG;
+    UniqueHandle completion;
+    for (;;) {
+        const auto completed = receipt.fence->GetCompletedValue();
+        if (completed == std::numeric_limits<std::uint64_t>::max()) return E_FAIL;
+        if (completed >= receipt.copy_complete_value) return S_OK;
+        if (!completion.value) {
+            completion.value = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (!completion.value) return HRESULT_FROM_WIN32(GetLastError());
+        }
+        const HRESULT result = receipt.fence->SetEventOnCompletion(
+            receipt.copy_complete_value, completion.value);
+        if (FAILED(result)) return result;
+        if (WaitForSingleObject(completion.value, INFINITE) != WAIT_OBJECT_0) {
+            const auto error = GetLastError();
+            return HRESULT_FROM_WIN32(error == ERROR_SUCCESS ? ERROR_GEN_FAILURE : error);
+        }
+    }
+}
+
 
 HRESULT D3D11D3D12SwapchainInterop::wait_for_idle() noexcept {
     try {
@@ -905,6 +1124,18 @@ HRESULT D3D11D3D12SwapchainInterop::wait_for_idle() noexcept {
     }
 }
 
+D3D11PublicationSnapshot D3D11D3D12SwapchainInterop::publication_snapshot() const noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if (impl_ == nullptr || impl_->d3d12_fence == nullptr) return {};
+        auto snapshot = impl_->last_publication;
+        snapshot.completed_value = impl_->d3d12_fence->GetCompletedValue();
+        return snapshot;
+    } catch (...) {
+        return {};
+    }
+}
+
 bool D3D11D3D12SwapchainInterop::initialized() const noexcept {
     try {
         std::scoped_lock lock(mutex_);
@@ -912,6 +1143,19 @@ bool D3D11D3D12SwapchainInterop::initialized() const noexcept {
     } catch (...) {
         return false;
     }
+}
+
+Microsoft::WRL::ComPtr<ID3D11Texture2D> D3D11D3D12SwapchainInterop::published_current_image(std::uint32_t index) const noexcept {
+    return published_image(index,false);
+}
+Microsoft::WRL::ComPtr<ID3D11Texture2D> D3D11D3D12SwapchainInterop::published_image(std::uint32_t index,bool synthetic) const noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if(!impl_)return {};
+        const auto& images=synthetic?impl_->synthetic_destination_images:impl_->current_destination_images;
+        if(index>=images.size())return {};
+        return images[index];
+    }catch(...){return {};}
 }
 
 }  // namespace xrfg

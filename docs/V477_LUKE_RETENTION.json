@@ -1,0 +1,303 @@
+{
+  "accepted_optiscaler_commit": "6c36e598b9027a852ce2b759a1851378468a0938",
+  "rows": [
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_afw.hpp",
+      "autonomous": "include\\xrfg\\luke_afw.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "93e6804ee94ce14b3f2f77cfa1e23c3690e125cefeee70d5170a2821f132f81f",
+      "autonomous_sha256": "93e6804ee94ce14b3f2f77cfa1e23c3690e125cefeee70d5170a2821f132f81f"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_afw_startup.hpp",
+      "autonomous": "include\\xrfg\\luke_afw_startup.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "1086d2e49e259e1fdd0edd930999764423a272d84030493a8ae1f2e1d527911e",
+      "autonomous_sha256": "1086d2e49e259e1fdd0edd930999764423a272d84030493a8ae1f2e1d527911e"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_camera_origin.hpp",
+      "autonomous": "include\\xrfg\\luke_camera_origin.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "faf1d92067479ed794d119a5ab10c408c2d156a9c1f7fb625bf1ae8ea1dd360a",
+      "autonomous_sha256": "faf1d92067479ed794d119a5ab10c408c2d156a9c1f7fb625bf1ae8ea1dd360a"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_camera_units.hpp",
+      "autonomous": "include\\xrfg\\luke_camera_units.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "96099f80a981e00022a5e154e56cdc7568e81e0cae474a09273c42e20a88ee67",
+      "autonomous_sha256": "96099f80a981e00022a5e154e56cdc7568e81e0cae474a09273c42e20a88ee67"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_color_origin.hpp",
+      "autonomous": "include\\xrfg\\luke_color_origin.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "12f1bf5e572d3f6ff595e98f0af781229bd76e1940ede6f1fa53f7cdee0aad32",
+      "autonomous_sha256": "12f1bf5e572d3f6ff595e98f0af781229bd76e1940ede6f1fa53f7cdee0aad32"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_color_token.hpp",
+      "autonomous": "include\\xrfg\\luke_color_token.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "036573bdeb61a77f1869af6dcebeb8ec24c6c66bf90f182e095c1f993585e804",
+      "autonomous_sha256": "036573bdeb61a77f1869af6dcebeb8ec24c6c66bf90f182e095c1f993585e804"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_counter_probe.hpp",
+      "autonomous": "include\\xrfg\\luke_counter_probe.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "d9f774ee21c10034db720987157159057daa8f13087ed20543aae5b3d0f59c6c",
+      "autonomous_sha256": "d9f774ee21c10034db720987157159057daa8f13087ed20543aae5b3d0f59c6c"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_depth_format.hpp",
+      "autonomous": "include\\xrfg\\luke_depth_format.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "116cb4345b3d131e3f39be1534c2fb036621a20cdc00be63a9af27bb3c908a7a",
+      "autonomous_sha256": "116cb4345b3d131e3f39be1534c2fb036621a20cdc00be63a9af27bb3c908a7a"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_guide_eye.hpp",
+      "autonomous": "include\\xrfg\\luke_guide_eye.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "83a2eb83fa3d174d8dbba9288e713944d734abf1cb0eb3ef115072b770d5699d",
+      "autonomous_sha256": "83a2eb83fa3d174d8dbba9288e713944d734abf1cb0eb3ef115072b770d5699d"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_guide_window.hpp",
+      "autonomous": "include\\xrfg\\luke_guide_window.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "94a617965fb1059066e4eb3f5d291708c61adc47502cc1b4d5e0d724261d680b",
+      "autonomous_sha256": "94a617965fb1059066e4eb3f5d291708c61adc47502cc1b4d5e0d724261d680b"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_ingress_devices.hpp",
+      "autonomous": "include\\xrfg\\luke_ingress_devices.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "9c22af61d130fe8320caca8ba37e1361f0da7feaa93786057594a24092e18eda",
+      "autonomous_sha256": "9c22af61d130fe8320caca8ba37e1361f0da7feaa93786057594a24092e18eda"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_motion_format.hpp",
+      "autonomous": "include\\xrfg\\luke_motion_format.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "52a0c08007639565094be901d85974548a522395c190465713a9bf5d3583b1fe",
+      "autonomous_sha256": "52a0c08007639565094be901d85974548a522395c190465713a9bf5d3583b1fe"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_native_motion.hpp",
+      "autonomous": "include\\xrfg\\luke_native_motion.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "57c4c2bbfd3899753d952aa8354a741946f09737a896a09a497b30ca79c93378",
+      "autonomous_sha256": "57c4c2bbfd3899753d952aa8354a741946f09737a896a09a497b30ca79c93378"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_physical_projection.hpp",
+      "autonomous": "include\\xrfg\\luke_physical_projection.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "397d84ef0b074d54af46e76c68d57eb6f939c766e8e1969469b84dd581347839",
+      "autonomous_sha256": "397d84ef0b074d54af46e76c68d57eb6f939c766e8e1969469b84dd581347839"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_pose_camera.hpp",
+      "autonomous": "include\\xrfg\\luke_pose_camera.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "5707b413b6581e624e4c7d5e70d4bf41f820790694425c57053fff7040249023",
+      "autonomous_sha256": "5707b413b6581e624e4c7d5e70d4bf41f820790694425c57053fff7040249023"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_projection_ray.hpp",
+      "autonomous": "include\\xrfg\\luke_projection_ray.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "bb6870872870d08b7622952107bb34c4e5b0b3473b7e1ce1ae2d2b6c8e9fde05",
+      "autonomous_sha256": "bb6870872870d08b7622952107bb34c4e5b0b3473b7e1ce1ae2d2b6c8e9fde05"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_recording_scope.hpp",
+      "autonomous": "include\\xrfg\\luke_recording_scope.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "ed7bfb9c764094250b6080e6a05fdbabe73db1e94bed8f12ab90e05b4570226e",
+      "autonomous_sha256": "ed7bfb9c764094250b6080e6a05fdbabe73db1e94bed8f12ab90e05b4570226e"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_render_identity.hpp",
+      "autonomous": "include\\xrfg\\luke_render_identity.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "7fdec288dbc5f71d215ee44187a45862adb1b713349605946cb7a3dccf756394",
+      "autonomous_sha256": "7fdec288dbc5f71d215ee44187a45862adb1b713349605946cb7a3dccf756394"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_world_scale.hpp",
+      "autonomous": "include\\xrfg\\luke_world_scale.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "46f2b13891253c339fe570063b00388cc34d242168dfb2e95774c2e782faffe6",
+      "autonomous_sha256": "46f2b13891253c339fe570063b00388cc34d242168dfb2e95774c2e782faffe6"
+    },
+    {
+      "source": "third_party\\ofxr\\include\\xrfg\\luke_world_scale_config.hpp",
+      "autonomous": "include\\xrfg\\luke_world_scale_config.hpp",
+      "status": "exact-normalized",
+      "source_sha256": "9c98c5be2e65495856f5550d42cf8884474783140cd68b7316e2810be0fd5676",
+      "autonomous_sha256": "9c98c5be2e65495856f5550d42cf8884474783140cd68b7316e2810be0fd5676"
+    },
+    {
+      "source": "third_party\\ofxr\\src\\d3d12\\luke_afw.cpp",
+      "autonomous": "src/d3d12/luke_afw.cpp",
+      "status": "different"
+    },
+    {
+      "source": "third_party\\ofxr\\src\\d3d12\\luke_color_origin.cpp",
+      "autonomous": "src/d3d12/luke_color_origin.cpp",
+      "status": "exact-normalized"
+    },
+    {
+      "source": "third_party\\ofxr\\src\\d3d12\\luke_depth_convert.hlsl",
+      "autonomous": "src/d3d12/luke_depth_convert.hlsl",
+      "status": "exact-normalized"
+    },
+    {
+      "source": "third_party\\ofxr\\src\\d3d12\\luke_compose_motion.hlsl",
+      "autonomous": "src/d3d12/luke_compose_motion.hlsl",
+      "status": "exact-normalized"
+    },
+    {
+      "source": "third_party\\ofxr\\src\\layer\\luke_counter_probe.cpp",
+      "autonomous": "src/layer/luke_counter_probe.cpp",
+      "status": "exact-normalized"
+    },
+    {
+      "source": "OptiScaler/hooks/LukeNativeSceneCamera.h",
+      "autonomous": "include/xrfg/native_ingress/LukeNativeSceneCamera.h",
+      "status": "adapted",
+      "diff": [
+        "--- \n",
+        "+++ \n",
+        "@@ -2,10 +2,12 @@\n",
+        " #include <Windows.h>",
+        " #include <d3d12.h>",
+        "-#include <detours/detours.h>",
+        "+#include <safetyhook.hpp>",
+        "+#include <vector>",
+        " #include <array>",
+        " #include <cstdint>",
+        " #include <mutex>",
+        " #include <unordered_map>",
+        "-#include \"D3D_NativeInterface.h\"",
+        "+#include \"xrfg/d3d12_native_binding.hpp\"",
+        "+namespace d3d_native = xrfg::d3d_native;",
+        " #include \"D3D_DeviceOwner.h\"",
+        " #include \"KcdCameraPacket.h\"",
+        "@@ -36,4 +38,5 @@\n",
+        " inline LONG install_error{};",
+        " inline std::uint32_t evaluations{};",
+        "+inline std::vector<SafetyHookInline> hooks;",
+        " using Address=D3D12_GPU_VIRTUAL_ADDRESS(STDMETHODCALLTYPE*)(ID3D12Resource*);",
+        " using ResourceRelease=ULONG(STDMETHODCALLTYPE*)(ID3D12Resource*);",
+        "@@ -159,21 +162,25 @@\n",
+        "     detail::original_graphics = reinterpret_cast<detail::Bind>(list_vtable[38]);",
+        "     detail::shared_release = resource_vtable[2] == list_vtable[2];",
+        "-    LONG error = DetourTransactionBegin();",
+        "+    LONG error = NO_ERROR;",
+        "+    std::vector<SafetyHookInline> hooks;",
+        "+    const auto attach = [&](auto& original, auto callback) {",
+        "+        if (error != NO_ERROR) return;",
+        "+        auto hook = safetyhook::create_inline(reinterpret_cast<void*>(original),",
+        "+            reinterpret_cast<void*>(callback), SafetyHookInline::StartDisabled);",
+        "+        if (!hook) { error = ERROR_NOT_SUPPORTED; return; }",
+        "+        original = hook.template original<std::remove_reference_t<decltype(original)>>();",
+        "+        hooks.push_back(std::move(hook));",
+        "+    };",
+        "+    attach(detail::original_address, detail::address);",
+        "+    attach(detail::original_resource_release, detail::release_resource);",
+        "+    if (!detail::shared_release) attach(detail::original_list_release, detail::release_list);",
+        "+    attach(detail::original_reset, detail::reset);",
+        "+    attach(detail::original_compute_signature, detail::compute_signature);",
+        "+    attach(detail::original_graphics_signature, detail::graphics_signature);",
+        "+    attach(detail::original_compute, detail::compute);",
+        "+    attach(detail::original_graphics, detail::graphics);",
+        "     if (error == NO_ERROR) {",
+        "-        error = DetourUpdateThread(GetCurrentThread());",
+        "-        const auto attach = [&](auto& original, auto hook) {",
+        "-            if (error == NO_ERROR) error = DetourAttach(",
+        "-                reinterpret_cast<PVOID*>(&original), reinterpret_cast<PVOID>(hook));",
+        "-        };",
+        "-        attach(detail::original_address, detail::address);",
+        "-        attach(detail::original_resource_release, detail::release_resource);",
+        "-        if (!detail::shared_release) attach(detail::original_list_release, detail::release_list);",
+        "-        attach(detail::original_reset, detail::reset);",
+        "-        attach(detail::original_compute_signature, detail::compute_signature);",
+        "-        attach(detail::original_graphics_signature, detail::graphics_signature);",
+        "-        attach(detail::original_compute, detail::compute);",
+        "-        attach(detail::original_graphics, detail::graphics);",
+        "-        if (error == NO_ERROR) error = DetourTransactionCommit();",
+        "-        else DetourTransactionAbort();",
+        "+        detail::hooks = std::move(hooks);",
+        "+        for (auto& hook : detail::hooks) if (!hook.enable()) error = ERROR_NOT_SUPPORTED;",
+        "     }",
+        "     {",
+        "@@ -189,24 +196,7 @@\n",
+        "     std::scoped_lock installation(detail::install_mutex);",
+        "     if (!detail::installed) return true;",
+        "-    LONG error = DetourTransactionBegin();",
+        "-    if (error == NO_ERROR) {",
+        "-        error = DetourUpdateThread(GetCurrentThread());",
+        "-        const auto detach = [&](auto& original, auto hook) {",
+        "-            if (error == NO_ERROR) error = DetourDetach(",
+        "-                reinterpret_cast<PVOID*>(&original), reinterpret_cast<PVOID>(hook));",
+        "-        };",
+        "-        detach(detail::original_address, detail::address);",
+        "-        detach(detail::original_resource_release, detail::release_resource);",
+        "-        if (!detail::shared_release) detach(detail::original_list_release, detail::release_list);",
+        "-        detach(detail::original_reset, detail::reset);",
+        "-        detach(detail::original_compute_signature, detail::compute_signature);",
+        "-        detach(detail::original_graphics_signature, detail::graphics_signature);",
+        "-        detach(detail::original_compute, detail::compute);",
+        "-        detach(detail::original_graphics, detail::graphics);",
+        "-        if (error == NO_ERROR) error = DetourTransactionCommit();",
+        "-        else DetourTransactionAbort();",
+        "-    }",
+        "     std::scoped_lock lock(detail::mutex);",
+        "-    if (error != NO_ERROR) { detail::install_error = error; return false; }",
+        "+    // The standalone layer is process-pinned. Keep live trampolines outside the",
+        "+    // loader lock and clear observation state after renderer quiescence.",
+        "     detail::installed = false;",
+        "     detail::resources.clear();"
+      ]
+    },
+    {
+      "source": "OptiScaler/hooks/KcdCameraPacket.h",
+      "autonomous": "include/xrfg/native_ingress/KcdCameraPacket.h",
+      "status": "exact-normalized",
+      "diff": []
+    },
+    {
+      "source": "OptiScaler/hooks/D3D_DeviceOwner.h",
+      "autonomous": "include/xrfg/native_ingress/D3D_DeviceOwner.h",
+      "status": "exact-normalized",
+      "diff": []
+    },
+    {
+      "source": "OptiScaler/hooks/LukeAERMotionSnapshot.h",
+      "autonomous": "include/xrfg/native_ingress/contracts/LukeAERMotionSnapshot.h",
+      "status": "exact-normalized"
+    },
+    {
+      "source": "OptiScaler/hooks/LukeCaptureParameters.h",
+      "autonomous": "include/xrfg/native_ingress/contracts/LukeCaptureParameters.h",
+      "status": "exact-normalized"
+    },
+    {
+      "source": "OptiScaler/hooks/LukeVulkanProducer.h",
+      "autonomous": "include/xrfg/native_ingress/contracts/LukeVulkanProducer.h",
+      "status": "exact-normalized"
+    }
+  ],
+  "notes": {
+    "LukeNativeSceneCamera.h": "Existing Detours to SafetyHook adapter only; packet and math retained",
+    "luke_afw.cpp": "Existing game-directory RealVR.ini lookup; standalone provider is stored outside game directory",
+    "native_context": "Missing embedded host handoff implemented by exact original SR/RR command-list submission",
+    "vulkan": "Native Vulkan guide ingress remains suspended; no Vulkan host hooks enabled",
+    "scope": "Preserve Luke/AFW corrections, not arbitrary SR replacement quirks outside standalone scope"
+  }
+}

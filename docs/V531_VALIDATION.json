@@ -1,0 +1,331 @@
+{
+  "version": "V531",
+  "base": "71233ef12ab8448a3655816ace2a4d305d1a48ea",
+  "code_commit": "1958f7e8d811430e64a1b965083e035b6b171463",
+  "observed_utc": "2026-10-14T19:19:17.392717+00:00",
+  "status": "owner-rejected; C1/C2/C3 reopened as TODO; historical automated results retained",
+  "suites": [
+    {
+      "route": "new",
+      "passed": 88,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 77.94,
+      "log": "v531-tests.log",
+      "log_sha256": "2b784a8ccfcf1d9076ad092e2650887c7dcf25d38b47702f673868104c4f1339",
+      "tests": [
+        "xrfg_openxr_fps_overlay_d3d12",
+        "xrfg_openxr_fps_overlay_d3d11",
+        "xrfg_standalone_launcher_tests",
+        "xrfg_benchmark_log_tests",
+        "xrfg_tray_lifecycle_tests",
+        "xrfg_bridge_flight_logger_tests",
+        "xrfg_d3d12_invalid_redist_tests",
+        "xrfg_d3d12_healthy_redist_tests",
+        "xrfg_elliott_r26_release",
+        "xrfg_elliott_array_guides",
+        "xrfg_release_bound_guides",
+        "xrfg_v474_policy_lifecycle",
+        "xrfg_v474_d3d11_bridge",
+        "xrfg_v474_history_wait",
+        "xrfg_v474_vd_restore",
+        "xrfg_fsr_release_identity",
+        "xrfg_d3d11_dlss_guides_tests",
+        "xrfg_native_dx11_guide_session",
+        "xrfg_depth_history_routes",
+        "xrfg_pipelined_route_handoff",
+        "xrfg_pipelined_route_handoff_steamvr",
+        "xrfg_unified_route_policy",
+        "xrfg_unified_route_shapes_gpu",
+        "xrfg_steamvr_queue_choice_gpu",
+        "xrfg_steamvr_budget_recovery_gpu",
+        "xrfg_steamvr_djules_staged_gpu",
+        "xrfg_steamvr_djules_restart_gpu",
+        "xrfg_steamvr_new_bounded_outputs_gpu",
+        "xrfg_reference_gpu_readiness_gpu",
+        "xrfg_reference_capture_overlap_gpu",
+        "xrfg_reference_stall_exposure_gpu",
+        "xrfg_transport_ref_steam_00_gpu",
+        "xrfg_transport_ref_steam_10_gpu",
+        "xrfg_transport_ref_steam_11_gpu",
+        "xrfg_transport_ref_steam_01_gpu",
+        "xrfg_transport_ref_vdxr_00_gpu",
+        "xrfg_transport_ref_vdxr_10_gpu",
+        "xrfg_transport_ref_vdxr_11_gpu",
+        "xrfg_transport_ref_vdxr_01_gpu",
+        "xrfg_transport_new_steam_00_gpu",
+        "xrfg_transport_new_steam_10_gpu",
+        "xrfg_transport_new_steam_11_gpu",
+        "xrfg_transport_new_steam_01_gpu",
+        "xrfg_transport_new_vdxr_00_gpu",
+        "xrfg_transport_new_vdxr_10_gpu",
+        "xrfg_transport_new_vdxr_11_gpu",
+        "xrfg_transport_new_vdxr_01_gpu",
+        "xrfg_transport_djules_steam_00_gpu",
+        "xrfg_transport_djules_steam_10_gpu",
+        "xrfg_transport_djules_steam_11_gpu",
+        "xrfg_transport_djules_steam_01_gpu",
+        "xrfg_transport_djules_vdxr_00_gpu",
+        "xrfg_transport_djules_vdxr_10_gpu",
+        "xrfg_transport_djules_vdxr_11_gpu",
+        "xrfg_transport_djules_vdxr_01_gpu",
+        "xrfg_transport3_djules_steam_00_gpu",
+        "xrfg_transport3_djules_steam_10_gpu",
+        "xrfg_transport3_djules_steam_11_gpu",
+        "xrfg_transport3_djules_vdxr_00_gpu",
+        "xrfg_transport3_djules_vdxr_10_gpu",
+        "xrfg_transport3_djules_vdxr_11_gpu",
+        "xrfg_demand_triple_switch_gpu",
+        "xrfg_demand_triple_switch_lower_vram_gpu",
+        "xrfg_demand_deep_readiness_gpu",
+        "xrfg_demand_deep_switch_gpu",
+        "xrfg_paused_route_shapes_gpu",
+        "xrfg_native_provider_recovery_gpu",
+        "xrfg_legacy_nvidia_queue_gpu",
+        "xrfg_legacy_nvidia_queue_vdxr_gpu",
+        "xrfg_legacy_nvidia_queue_slow_gpu",
+        "xrfg_legacy_nvidia_early_current_gpu",
+        "xrfg_fsr_steamvr_queue_pending_gpu",
+        "xrfg_d3d12_history_tests",
+        "xrfg_packed_game_vectors_warp",
+        "xrfg_packed_game_vectors_nvidia",
+        "xrfg_luke_protected_guides",
+        "xrfg_dlssg_profile_tests",
+        "xrfg_settings_widgets_tests",
+        "xrfg_openxr_menu_overlay_d3d12",
+        "xrfg_openxr_menu_overlay_d3d11",
+        "xrfg_autonomous_control_live",
+        "xrfg_autonomous_control_tests",
+        "xrfg_interface_metrics_tests",
+        "xrfg_outlaws_startup",
+        "xrfg_luke_vulkan_bootstrap_DOOMTheDarkAges",
+        "xrfg_luke_vulkan_bootstrap_TheGreatCircle",
+        "xrfg_luke_kcd_quality_bundled",
+        "xrfg_luke_indiana_quality_bundled"
+      ]
+    },
+    {
+      "route": "djules",
+      "passed": 25,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 8.54,
+      "log": "v531-djules-tests.log",
+      "log_sha256": "43fdb1fae3f7697094340887e382eef5b81637c7524f735f589e3f4f3d139102",
+      "tests": [
+        "xrfg_elliott_r26_release",
+        "xrfg_elliott_array_guides",
+        "xrfg_release_bound_guides",
+        "xrfg_v474_policy_lifecycle",
+        "xrfg_v474_d3d11_bridge",
+        "xrfg_v474_history_wait",
+        "xrfg_v474_vd_restore",
+        "xrfg_fsr_release_identity",
+        "xrfg_djules_pipeline_preference",
+        "xrfg_djules_binding_queue",
+        "xrfg_djules_display_clock",
+        "xrfg_djules_absolute_grid",
+        "xrfg_djules_triple_buffer",
+        "xrfg_djules_triple_inline_gpu",
+        "xrfg_djules_triple_director_gpu",
+        "xrfg_djules_triple_switch_gpu",
+        "xrfg_djules_deep_readiness_gpu",
+        "xrfg_djules_deep_switch_gpu",
+        "xrfg_djules_deep_readiness",
+        "xrfg_djules_inline_policy",
+        "xrfg_djules_phase_acquisition",
+        "xrfg_djules_extra_output_gpu",
+        "xrfg_d3d12_history_tests",
+        "xrfg_djules_deep_readiness_direct_gpu",
+        "xrfg_djules_deep_switch_direct_gpu"
+      ]
+    }
+  ],
+  "total_test_executions": 113,
+  "test_route_shipping_dll_unchanged": true,
+  "shipping_dll_sha256": "2a98dd3e717e15a141e5ccc523112a71abdf8432d1ca2e94cabb6669d5f50404",
+  "shader_headers_unchanged": [
+    {
+      "file": "cinema_flatten_pixel_shader.hpp",
+      "sha256": "9fdbad8fbf21995814e82d5c5a2b912e1474a545288edd061d08aa77a4871456"
+    },
+    {
+      "file": "cinema_flatten_vertex_shader.hpp",
+      "sha256": "6d5e8cede9c0fc5f4f6e92cbe74604c541ae569c37217ffda517979f0354f122"
+    },
+    {
+      "file": "fsr_cinema_pixel_shader.hpp",
+      "sha256": "24221e247bb9ac2080dc3c23cd70480bfffcc3b06838b9f613932700f9a8af8c"
+    },
+    {
+      "file": "fsr_cinema_vertex_shader.hpp",
+      "sha256": "e7bb15db4037d8bed6dfbb70760f20730b11c9080a2e5bead3bb691d0cefeecf"
+    },
+    {
+      "file": "fullscreen_vertex_shader.hpp",
+      "sha256": "897cec96e9f33efa9be2c90b969e3fbebf498ecbd38367468ad05ad70ce408e5"
+    },
+    {
+      "file": "game_motion_synthesize_midpoint_pixel_shader.hpp",
+      "sha256": "7c5694414837396d21fbdabf55d4e1673990ea31919ac10f6b42e049f2083e46"
+    },
+    {
+      "file": "guide_composer_compose_shader.hpp",
+      "sha256": "ba33301a73b0c4d9e899dbf703ea1ede890cdf01b8a26d7155d38ff66c6564f3"
+    },
+    {
+      "file": "guide_composer_decide_shader.hpp",
+      "sha256": "0097f7aa8fba5fc5d365f154299fdf90cb830c8965f8318c00c23a941cbb39f1"
+    },
+    {
+      "file": "hybrid_pack_flow_input_shader.hpp",
+      "sha256": "5636bdf166360a27b9144747e472229df3fed24c1e5082f1e65eec7bb67d696a"
+    },
+    {
+      "file": "hybrid_synthesize_midpoint_pixel_shader.hpp",
+      "sha256": "4ec74b27d0c3093f1d165454551f592c9cd4613aeb0ad4ee6df22af4eebf13ba"
+    },
+    {
+      "file": "luke_compose_motion_shader.hpp",
+      "sha256": "f6a826aadff7c7ce9b74c66d48942ce37a328856fd4c8a4e69a7780638141aba"
+    },
+    {
+      "file": "luke_depth_calibrate_shader.hpp",
+      "sha256": "589791410942293d6af77374cff557d389d55a490994c6c6f90c58ad8b6cb852"
+    },
+    {
+      "file": "luke_depth_convert_shader.hpp",
+      "sha256": "34d0b02204093bbd12a5b65df83f24deb3dadd714e1d1c3676ed40efd355bcfe"
+    },
+    {
+      "file": "native_dlssg_pack_shader.hpp",
+      "sha256": "a510d1e2c4262fed2176685cc89ef65376cf2a4ab5dc8d7be5cdf1832d9541e4"
+    },
+    {
+      "file": "native_dlssg_pixel_shader.hpp",
+      "sha256": "8c4e41a3452ec3480553749cc5a175bacae9a8663b8b0848f7d81428cf61244e"
+    },
+    {
+      "file": "native_dlssg_seed_shader.hpp",
+      "sha256": "94a73cd1736c807744069b42ee7f8cc5a15a02390d0a9b4bdfa3797010b9889b"
+    },
+    {
+      "file": "native_dlssg_vertex_shader.hpp",
+      "sha256": "ea542db8ea60c631ec1192c50d6df9323857dd05abcbd917a8e38d124cf66df9"
+    },
+    {
+      "file": "nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp",
+      "sha256": "a6eae07c075edb7eb6a31ce072d9f578e83665eaced96dc3791e8e5f017deaa5"
+    },
+    {
+      "file": "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp",
+      "sha256": "7c3e0aa9856eda0288ca7e47a6db2299faa581e8c2c5048ace13db75eb27dd75"
+    },
+    {
+      "file": "nvidia_fast_synthesize_midpoint_pixel_shader.hpp",
+      "sha256": "16a653056b7af7815518354dba36e93b5d79ab66d3ab137609a99afe878ec781"
+    },
+    {
+      "file": "nvidia_pack_flow_input_shader.hpp",
+      "sha256": "8c6ea426a1aac934611f6ed3241bb3adaf922229837c8c8a9b8d850684efd599"
+    },
+    {
+      "file": "nvidia_pack_luma_input_shader.hpp",
+      "sha256": "88b5a1eee6ead3b2246ea3a1fc301af30c2dfe94a3f6508cbb70d616ccd2f39f"
+    },
+    {
+      "file": "nvidia_synthesize_midpoint_pixel_shader.hpp",
+      "sha256": "6c3b42f1185fd9d7eb48bf0d13bb1d5c6b6655cbd5bbc9abbb68f4cffb084cd1"
+    },
+    {
+      "file": "pack_flow_input_shader.hpp",
+      "sha256": "eedfbf65a4c2afb083fac9d0a7d74735d46a60a907b953caf7e3882c6dc64da4"
+    },
+    {
+      "file": "reproject_generated_pixel_shader.hpp",
+      "sha256": "864d7bc3ee3cb382aa5d52c96b1f0130b571a96544404892ccd547ea9cf9e758"
+    },
+    {
+      "file": "reproject_late_hud_pixel_shader.hpp",
+      "sha256": "38f9bab7f1469547acad544aaf50c429aa89ab12f006a3ffa2316dcda552eafc"
+    },
+    {
+      "file": "synthesize_midpoint_pixel_shader.hpp",
+      "sha256": "3c603141728ef80f29ed3659958cb903b0259f9aa9dc89f6f255da0dc4f4ec74"
+    },
+    {
+      "file": "vulkan_d24_decode_shader.hpp",
+      "sha256": "622c9f74fc71b64beb0d2f4765a39734d622d2f8a293ce4e218d829fafe0c0c7"
+    }
+  ],
+  "retained_ancillary_runtime_files": [
+    {
+      "path": "ofxr/OFXR_vulkan_queue_layer.dll",
+      "sha256": "a87d0115536e5d78f4a4bf1b4f2f7a3b6f969ee8442900344409dcea7084c4fa",
+      "source": "immutable V530 package"
+    },
+    {
+      "path": "ofxr/nvngx.dll_dlssnr.dll",
+      "sha256": "c4ed711a7342bc15999cdc8a1ccdf5e0fce029341ee90023c5afafc118e4ee92",
+      "source": "immutable V530 package"
+    },
+    {
+      "path": "ofxr/nvngx.dll_dlssg.dll",
+      "sha256": "bc904a8e6e20fc8249e823258fd09a24c3c7997c9276d771584e4fe756a5bbab",
+      "source": "immutable V530 package"
+    },
+    {
+      "path": "ofxr/ofxr_amd_fidelityfx_framegeneration_dx12.dll",
+      "sha256": "12a5081257ec95b0b53ad51b4a87fb3c03f97fe0bbb59f9496968f8d50ef93a6",
+      "source": "immutable V530 package"
+    },
+    {
+      "path": "ofxr/PDAFWPlugin.dll",
+      "sha256": "efc3dd3df78e5a0e487454e7098512514a65764d4479ae10a11f6f140fac1ef3",
+      "source": "immutable V530 package"
+    },
+    {
+      "path": "ofxr/nvngx_dlssg.dll",
+      "sha256": "ff6e90eb78b827927dff5b4ecc6b1c870c2e9bca29ed9f48c7d348cc9e170b82",
+      "source": "immutable V530 package"
+    },
+    {
+      "path": "ofxr/ofxr_bridge.ini",
+      "sha256": "9a51ab482bf9b319aa9585eff1ae0c26a81838bffa281d7799971e7ca5955376",
+      "source": "immutable V530 package"
+    }
+  ],
+  "ports": [
+    {
+      "port": "C1",
+      "commit": "5296cf61828ef155b101fb7594d32633c037ab8c",
+      "upstream": "0c994d780a601f4f833cca323652aebbf5f61baa"
+    },
+    {
+      "port": "C2",
+      "commit": "6b95e1bdca11770345e62312d43308596dbb99f4",
+      "upstream": "272a07bd5b8b06dde60361f5b092b90e3071b994"
+    },
+    {
+      "port": "C3",
+      "commit": "1958f7e8d811430e64a1b965083e035b6b171463",
+      "upstream": "2a3e600458c279f0e40c0a1b325238f77d366c74"
+    }
+  ],
+  "r26_negative": "Actual V530: exact native-D11 original1->1; unclaimed publication-based path original3->4. V531 original1/3/5 remain1/3/5 including a changed texture receipt. GPU runtime/history late-paint red127/128 retained.",
+  "c1_validation_limit": "This system cannot instantiate the system ID3D12DeviceFactory (E_NOINTERFACE). Clean unavailability is exercised; recovered-device GPU work is not locally exercised. Healthy same-adapter GPU readback and FidelityFX initialization pass.",
+  "game_validation": "No dedicated named-game run requested or performed. Do not claim Beat Saber/Control recovery.",
+  "pacing": "No scheduler, producer-delay policy, queue-choice or display-slot changes. C3 can enable an existing conditional GPU composer pass.",
+  "provider_abi": 45601,
+  "ipc_abi": 52601,
+  "live_installation": false,
+  "driver_profile_mutation": false,
+  "HUD_work_resumed": false,
+  "limitations": [
+    "Existing invalid unregistered-session mock director and environment-blocked interactive foreground-input fixture are excluded; production-path GPU/menu/transport fixtures are selected.",
+    "No motion-to-photon or FPS improvement claimed."
+  ],
+  "historical_automated_status": "automated-pass; named games not tested; owner-authorized private share",
+  "owner_verdict": "rejected",
+  "rejection_reason": "Not specified by owner"
+}

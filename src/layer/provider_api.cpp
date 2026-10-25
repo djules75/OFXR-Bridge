@@ -3,7 +3,7 @@
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/embedded_control.hpp"
 
-#include <atomic>
+#include <algorithm>
 #include <cstddef>
 
 namespace {
@@ -12,26 +12,12 @@ bool valid_size(std::uint32_t actual, std::size_t expected) noexcept {
     return actual >= expected;
 }
 
-std::atomic<std::uint32_t> g_registered_optiscaler_providers{};
-std::atomic_bool g_optiscaler_embedded_delegation{};
 
 }  // namespace
 
-namespace xrfg {
-
-void set_optiscaler_embedded_delegation(bool active) noexcept {
-    g_optiscaler_embedded_delegation.store(active, std::memory_order_release);
-}
-
-bool optiscaler_embedded_delegation() noexcept {
-    return g_optiscaler_embedded_delegation.load(std::memory_order_acquire);
-}
-
-}  // namespace xrfg
 
 extern "C" __declspec(dllexport) std::uint32_t
 OFXR_GetProviderApiVersionV1() noexcept {
-    if (xrfg::optiscaler_embedded_delegation()) return 0;
     return OFXR_PROVIDER_API_VERSION_V1;
 }
 
@@ -71,16 +57,14 @@ extern "C" __declspec(dllexport) int OFXR_RequestControlV1(
             !valid_size(input->struct_size, sizeof(OFXR_ControlSettingsV1))) {
             return 0;
         }
-        return xrfg::embedded::request({
-                   input->enabled != 0,
-                   input->backend,
-                   input->preset,
-                   input->scale,
-                   input->backward != 0,
-                   input->motion_vectors,
-               })
-            ? 1
-            : 0;
+        auto settings = xrfg::embedded::snapshot().desired;
+        settings.enabled = input->enabled != 0;
+        settings.backend = input->backend;
+        settings.preset = input->preset;
+        settings.scale = input->scale;
+        settings.backward = input->backward != 0;
+        settings.motion_vectors = input->motion_vectors;
+        return xrfg::embedded::request(settings) ? 1 : 0;
     } catch (...) {
         return 0;
     }
@@ -135,29 +119,28 @@ extern "C" __declspec(dllexport) int OFXR_PublishDlssMotionVectorsV1(
                 sizeof(OFXR_DlssMotionVectorPublicationV1))) {
             return 0;
         }
-        xrfg::publish_dlss_motion_vectors({
-            input->stream,
-            input->output,
-            input->motion_vectors,
-            input->producer_queue,
-            input->output_x,
-            input->output_y,
-            input->output_width,
-            input->output_height,
-            input->motion_x,
-            input->motion_y,
-            input->motion_width,
-            input->motion_height,
-            input->scale_x,
-            input->scale_y,
-            input->jitter_x,
-            input->jitter_y,
-            static_cast<D3D12_RESOURCE_STATES>(input->resource_state),
-            input->jittered != 0,
-            input->reset != 0,
-            input->producer_command_list,
-        });
-        return 1;
+        xrfg::DlssMotionVectorPublication pub{};
+        pub.stream = input->stream;
+        pub.output = input->output;
+        pub.motion_vectors = input->motion_vectors;
+        pub.producer_queue = input->producer_queue;
+        pub.producer_command_list = input->producer_command_list;
+        pub.output_x = input->output_x;
+        pub.output_y = input->output_y;
+        pub.output_width = input->output_width;
+        pub.output_height = input->output_height;
+        pub.motion_x = input->motion_x;
+        pub.motion_y = input->motion_y;
+        pub.motion_width = input->motion_width;
+        pub.motion_height = input->motion_height;
+        pub.scale_x = input->scale_x;
+        pub.scale_y = input->scale_y;
+        pub.jitter_x = input->jitter_x;
+        pub.jitter_y = input->jitter_y;
+        pub.resource_state = static_cast<D3D12_RESOURCE_STATES>(input->resource_state);
+        pub.jittered = input->jittered != 0;
+        pub.reset = input->reset != 0;
+        return xrfg::publish_dlss_motion_vectors(pub) ? 1 : 0;
     } catch (...) {
         return 0;
     }
@@ -202,33 +185,12 @@ extern "C" __declspec(dllexport) int OFXR_GetDlssMotionVectorStatisticsV1(
 
 extern "C" __declspec(dllexport) std::uint32_t
 OFXR_GetProviderApiVersionV2() noexcept {
-    if (xrfg::optiscaler_embedded_delegation()) return 0;
     return OFXR_PROVIDER_API_VERSION_V2;
 }
 
-extern "C" __declspec(dllexport) int OFXR_RegisterOptiScalerProviderV2(
-    const OFXR_OptiScalerProviderIdentityV2* identity) noexcept {
-    if (identity == nullptr ||
-        !valid_size(identity->struct_size,
-                    sizeof(OFXR_OptiScalerProviderIdentityV2)) ||
-        identity->api_version != OFXR_PROVIDER_API_VERSION_V2 ||
-        identity->magic != OFXR_OPTISCALER_PROVIDER_MAGIC_V2 ||
-        (identity->capabilities & OFXR_OPTISCALER_CAP_DLSS_GUIDES_V2) == 0) {
-        return 0;
-    }
-    g_registered_optiscaler_providers.fetch_add(1, std::memory_order_relaxed);
-    return 1;
-}
 
-extern "C" __declspec(dllexport) void
-OFXR_UnregisterOptiScalerProviderV2() noexcept {
-    std::uint32_t current =
-        g_registered_optiscaler_providers.load(std::memory_order_relaxed);
-    while (current != 0 &&
-           !g_registered_optiscaler_providers.compare_exchange_weak(
-               current, current - 1, std::memory_order_relaxed)) {
-    }
-}
+
+
 
 extern "C" __declspec(dllexport) int OFXR_GetControlSnapshotV2(
     OFXR_ControlSnapshotV2* output) noexcept {
@@ -253,8 +215,7 @@ extern "C" __declspec(dllexport) int OFXR_GetControlSnapshotV2(
         value.ready = source.ready;
         value.errors = source.errors;
         value.last_error = source.last_error;
-        value.providers =
-            g_registered_optiscaler_providers.load(std::memory_order_relaxed);
+        value.providers = 0;
         *output = value;
         return 1;
     } catch (...) {
@@ -266,21 +227,38 @@ extern "C" __declspec(dllexport) int OFXR_RequestControlV2(
     const OFXR_ControlSettingsV2* input) noexcept {
     try {
         if (input == nullptr ||
-            !valid_size(input->struct_size, sizeof(OFXR_ControlSettingsV2)) ||
-            input->frame_generation != 0) {
+            !valid_size(input->struct_size, sizeof(OFXR_ControlSettingsV2))) {
             return 0;
         }
-        return xrfg::embedded::request({
-                   input->enabled != 0,
-                   input->backend,
-                   input->preset,
-                   input->scale,
-                   input->backward != 0,
-                   input->motion_vectors,
-                   input->frame_generation,
-               })
-            ? 1
-            : 0;
+        auto settings = xrfg::embedded::snapshot().desired;
+        settings.enabled = input->enabled != 0;
+        settings.backend = input->backend;
+        settings.preset = input->preset;
+        settings.scale = input->scale;
+        settings.backward = input->backward != 0;
+        settings.motion_vectors = input->motion_vectors;
+        settings.frame_generation = input->frame_generation;
+        return xrfg::embedded::request(settings) ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+// Native DLSS Frame Generation's resolution, in percent of each eye's. Kept
+// apart from OFXR_ControlSettingsV2, whose size callers already compile in.
+extern "C" __declspec(dllexport) int OFXR_GetNativeDlssgScaleV2() noexcept {
+    try {
+        return xrfg::embedded::snapshot().desired.native_scale;
+    } catch (...) {
+        return 0;
+    }
+}
+
+extern "C" __declspec(dllexport) int OFXR_RequestNativeDlssgScaleV2(int percent) noexcept {
+    try {
+        auto settings = xrfg::embedded::snapshot().desired;
+        settings.native_scale = percent;
+        return xrfg::embedded::request(settings) ? 1 : 0;
     } catch (...) {
         return 0;
     }
@@ -294,53 +272,42 @@ extern "C" __declspec(dllexport) void OFXR_ConfigureDlssGuidesV2(
 extern "C" __declspec(dllexport) int OFXR_PublishDlssGuidesV2(
     const OFXR_DlssGuidePublicationV2* input) noexcept {
     try {
-        constexpr std::size_t legacy_size =
-            offsetof(OFXR_DlssGuidePublicationV2, verified_native_device);
-        if (input == nullptr ||
-            input->api_version != OFXR_PROVIDER_API_VERSION_V2 ||
-            !valid_size(input->struct_size, legacy_size)) {
-            return 0;
-        }
-        ID3D12Device* verified_native_device = nullptr;
-        if (valid_size(input->struct_size,
-                       sizeof(OFXR_DlssGuidePublicationV2))) {
-            verified_native_device = input->verified_native_device;
-        }
-        xrfg::publish_dlss_motion_vectors({
-            input->stream,
-            input->output,
-            input->motion_vectors,
-            input->producer_queue,
-            input->output_x,
-            input->output_y,
-            input->output_width,
-            input->output_height,
-            input->motion_x,
-            input->motion_y,
-            input->motion_width,
-            input->motion_height,
-            input->scale_x,
-            input->scale_y,
-            input->jitter_x,
-            input->jitter_y,
-            static_cast<D3D12_RESOURCE_STATES>(input->resource_state),
-            input->jittered != 0,
-            input->reset != 0,
-            input->producer_command_list,
-            input->depth,
-            input->depth_x,
-            input->depth_y,
-            input->depth_width,
-            input->depth_height,
-            static_cast<D3D12_RESOURCE_STATES>(input->depth_resource_state),
-            input->frame_time_delta_ms,
-            input->camera_near,
-            input->camera_far,
-            input->depth_inverted != 0,
-            input->depth_infinite != 0,
-            verified_native_device,
-        });
-        return 1;
+        if (!input || input->api_version != OFXR_PROVIDER_API_VERSION_V2 ||
+            !valid_size(input->struct_size, sizeof(*input))) return 0;
+        xrfg::DlssMotionVectorPublication pub{};
+                pub.stream = input->stream;
+        pub.output = input->output;
+        pub.motion_vectors = input->motion_vectors;
+        pub.producer_queue = input->producer_queue;
+        pub.producer_command_list = input->producer_command_list;
+        pub.output_x = input->output_x;
+        pub.output_y = input->output_y;
+        pub.output_width = input->output_width;
+        pub.output_height = input->output_height;
+        pub.motion_x = input->motion_x;
+        pub.motion_y = input->motion_y;
+        pub.motion_width = input->motion_width;
+        pub.motion_height = input->motion_height;
+        pub.scale_x = input->scale_x;
+        pub.scale_y = input->scale_y;
+        pub.jitter_x = input->jitter_x;
+        pub.jitter_y = input->jitter_y;
+        pub.resource_state = static_cast<D3D12_RESOURCE_STATES>(input->resource_state);
+        pub.jittered = input->jittered != 0;
+        pub.reset = input->reset != 0;
+        pub.depth = input->depth;
+        pub.depth_x = input->depth_x;
+        pub.depth_y = input->depth_y;
+        pub.depth_width = input->depth_width;
+        pub.depth_height = input->depth_height;
+        pub.depth_resource_state = static_cast<D3D12_RESOURCE_STATES>(input->depth_resource_state);
+        pub.frame_time_delta_ms = input->frame_time_delta_ms;
+        pub.camera_near = input->camera_near;
+        pub.camera_far = input->camera_far;
+        pub.depth_inverted = input->depth_inverted != 0;
+        pub.depth_infinite = input->depth_infinite != 0;
+        pub.verified_producer_device = input->verified_native_device;
+        return xrfg::publish_dlss_motion_vectors(pub) ? 1 : 0;
     } catch (...) {
         return 0;
     }

@@ -1,0 +1,33 @@
+{
+  "version": "V466",
+  "base_runtime": "V465",
+  "compile_target": "OFXRBridgeTray.vcxproj, Release x64, BuildProjectReferences=false",
+  "reused_static_libraries": {
+    "xrfg_standalone_core.lib": "0f2bf2a2d14877d21842e519119a09679676272be678451ebbf848030a2222c3",
+    "xrfg_autonomous_ui.lib": "02a3de58b771883243a384721d04bfb41c5180ba957bda9c18b3a1f485699199",
+    "xrfg_implicit_layer.lib": "dc7103f6345c45ac95c38226533de9c2a1594efc5bbe4864d8eb758fbfe5becb",
+    "xrfg_core.lib": "34fd294c96d8cbf716c25f754d03a1eba110f516f8c1437c77278844a1c61655",
+    "xrfg_settings_widgets.lib": "e1d2b9566fb830f704bb7a457bd830eff2f5d6d80d33fe2f25c18306095e9ca2",
+    "xrfg_autonomous_control.lib": "374ae2e277544c6f569c79ce2791ec875a226f4469a82b41c2e3a3a22e9fc942",
+    "xrfg_imgui.lib": "ce1753429e56607ef88a510be61c33cabdc2750cba67f3ba928643682a503a10"
+  },
+  "runtime_dlls_and_ini_identical_to_v465": true,
+  "tests_run": 0,
+  "reason": "Owner explicitly requests no unnecessary tests for menu-only change",
+  "live_activation": false,
+  "base_commit": "b16bcbb505021e192dc2e0e1e12033b89add4b9a",
+  "unchanged_production_files": 204,
+  "ipc": 46501,
+  "provider_abi": 45601,
+  "tray_labels": [
+    "Enable",
+    "Disable"
+  ],
+  "command": "both use existing toggle_arm",
+  "new_gpu_tests": 0,
+  "inherited_runtime_suites": {
+    "new": 143,
+    "djules": 160
+  },
+  "package_checks": "checksum/import review and runtime identity only; no loader/runtime test"
+}

@@ -1,0 +1,30 @@
+{
+  "version": "V565",
+  "base": "b28045fc6afaf314932505ec94ebdd1d43ff36ce",
+  "status": "runtime-pending",
+  "passed": 15,
+  "failed": 0,
+  "ctest_unique": 15,
+  "ctest_seconds": 24.08,
+  "ctest_runs": [
+    {
+      "passed": 14,
+      "seconds": 21.22,
+      "log": "v565-focused-final2-tests.log"
+    },
+    {
+      "passed": 2,
+      "overlap": 1,
+      "seconds": 2.86,
+      "log": "v565-packet-final-tests.log"
+    }
+  ],
+  "headset_validation": "Pending exact SteamVR record attribution; unknown source/current-record proof reports N/A. Raw AFW-off reader supported only on its previously pinned Crimson/HFW layout; no universal raw title measurement claim.",
+  "ipc_abi": 55801,
+  "provider_abi": 45601,
+  "luke_suite_trials": 18,
+  "presentation_pacing_changed": false,
+  "afw_math_changed": false,
+  "swapchain_counts_changed": false,
+  "internal_adapter_checks_passed": true
+}

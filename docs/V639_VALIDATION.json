@@ -1,0 +1,252 @@
+{
+  "product": "OFXR-BRIDGE 0.3.0 (v639)",
+  "status": "local laboratory / headset validation pending",
+  "base_source": "b336c261ad9a0573a2dc0cbe4b811471a91b6bc0",
+  "current_source_committed": false,
+  "passed": 58,
+  "failed_latest_outcomes": 0,
+  "single_clean_first_run": false,
+  "notes": [
+    "New controller fixtures initially used the non-telemetry reporter and a simulated timestamp outside the observation window; corrected to the real telemetry publisher.",
+    "The new persistence fixture initially held its INI read handle open across atomic replacement; closed the test handle.",
+    "Final chooser coverage includes VDXR, private optical/full and Luke; FidelityFX exclusions, measured failure exclusions, persistence and cancellation pass.",
+    "Earlier fixture-failure logs retained; no headset acceptance claimed."
+  ],
+  "checks": {
+    "xrfg_shipping_luke_bootstrap_DOOMTheDarkAges": {
+      "passed": true,
+      "seconds": 0.0532036
+    },
+    "xrfg_shipping_luke_bootstrap_TheGreatCircle": {
+      "passed": true,
+      "seconds": 0.0591706
+    },
+    "xrfg_crash_debug_config": {
+      "passed": true,
+      "seconds": 2.04809
+    },
+    "xrfg_standalone_launcher_tests": {
+      "passed": true,
+      "seconds": 0.091371
+    },
+    "xrfg_tray_lifecycle_tests": {
+      "passed": true,
+      "seconds": 0.135028
+    },
+    "xrfg_private_runtime_off-pacing-session_gpu": {
+      "passed": true,
+      "seconds": 1.00747
+    },
+    "xrfg_private_runtime_framework-session_gpu": {
+      "passed": true,
+      "seconds": 0.866131
+    },
+    "xrfg_private_runtime_scope_gpu": {
+      "passed": true,
+      "seconds": 0.213607
+    },
+    "xrfg_private_runtime_ref_gpu": {
+      "passed": true,
+      "seconds": 0.678865
+    },
+    "xrfg_private_runtime_new_gpu": {
+      "passed": true,
+      "seconds": 0.651479
+    },
+    "xrfg_private_runtime_djules_gpu": {
+      "passed": true,
+      "seconds": 0.654111
+    },
+    "xrfg_private_runtime_fidelity_gpu": {
+      "passed": true,
+      "seconds": 0.547846
+    },
+    "xrfg_private_runtime_fsr_gpu": {
+      "passed": true,
+      "seconds": 0.807146
+    },
+    "xrfg_private_runtime_hybrid_gpu": {
+      "passed": true,
+      "seconds": 0.703557
+    },
+    "xrfg_private_runtime_dlssg_gpu": {
+      "passed": true,
+      "seconds": 1.06132
+    },
+    "xrfg_private_runtime_djules3_gpu": {
+      "passed": true,
+      "seconds": 0.724849
+    },
+    "xrfg_private_runtime_dlssg3_gpu": {
+      "passed": true,
+      "seconds": 1.07392
+    },
+    "xrfg_private_runtime_session_gpu": {
+      "passed": true,
+      "seconds": 0.879561
+    },
+    "xrfg_private_runtime_memory_gpu": {
+      "passed": true,
+      "seconds": 0.224118
+    },
+    "xrfg_private_runtime_force-vdxr-steamvr-session_gpu": {
+      "passed": true,
+      "seconds": 0.795732
+    },
+    "xrfg_private_runtime_force-steamvr-vdxr-session_gpu": {
+      "passed": true,
+      "seconds": 0.90071
+    },
+    "xrfg_private_runtime_other-session_gpu": {
+      "passed": true,
+      "seconds": 0.854108
+    },
+    "xrfg_private_runtime_vdxr-legacy-session_gpu": {
+      "passed": true,
+      "seconds": 0.798637
+    },
+    "xrfg_private_runtime_vdxr-framework-session_gpu": {
+      "passed": true,
+      "seconds": 0.863425
+    },
+    "xrfg_private_runtime_vdxr-ref_gpu": {
+      "passed": true,
+      "seconds": 0.662509
+    },
+    "xrfg_private_runtime_vdxr-new_gpu": {
+      "passed": true,
+      "seconds": 0.614917
+    },
+    "xrfg_private_runtime_vdxr-djules_gpu": {
+      "passed": true,
+      "seconds": 0.609927
+    },
+    "xrfg_private_runtime_vdxr-fidelity_gpu": {
+      "passed": true,
+      "seconds": 0.506733
+    },
+    "xrfg_private_runtime_vdxr-fsr_gpu": {
+      "passed": true,
+      "seconds": 0.767479
+    },
+    "xrfg_private_runtime_vdxr-hybrid_gpu": {
+      "passed": true,
+      "seconds": 0.670977
+    },
+    "xrfg_private_runtime_vdxr-dlssg_gpu": {
+      "passed": true,
+      "seconds": 1.0313
+    },
+    "xrfg_private_runtime_vdxr-djules3_gpu": {
+      "passed": true,
+      "seconds": 0.659448
+    },
+    "xrfg_layer_call_chain": {
+      "passed": true,
+      "seconds": 0.596776
+    },
+    "xrfg_neural_device_removal_tests": {
+      "passed": true,
+      "seconds": 0.498319
+    },
+    "xrfg_single_configuration_tests": {
+      "passed": true,
+      "seconds": 0.0591503
+    },
+    "xrfg_benchmark_suite_tests": {
+      "passed": true,
+      "seconds": 5.12633
+    },
+    "xrfg_dlssg_profile_tests": {
+      "passed": true,
+      "seconds": 0.13031
+    },
+    "xrfg_settings_widgets_tests": {
+      "passed": true,
+      "seconds": 0.877326
+    },
+    "xrfg_game_profiles": {
+      "passed": true,
+      "seconds": 0.0969052
+    },
+    "xrfg_autonomous_control_tests": {
+      "passed": true,
+      "seconds": 0.049211
+    },
+    "xrfg_luke_shared_session_gpu": {
+      "passed": true,
+      "seconds": 0.84642
+    },
+    "xrfg_afw_only_session_gpu": {
+      "passed": true,
+      "seconds": 0.871968
+    },
+    "xrfg_afw_only_nonluke_gpu": {
+      "passed": true,
+      "seconds": 0.831312
+    },
+    "xrfg_afw_only_vdxr_gpu": {
+      "passed": true,
+      "seconds": 0.876323
+    },
+    "xrfg_optiscaler_bootstrap_success": {
+      "passed": true,
+      "seconds": 0.0199275
+    },
+    "xrfg_optiscaler_bootstrap_incompatible": {
+      "passed": true,
+      "seconds": 0.120982
+    },
+    "xrfg_optiscaler_bootstrap_no-capability": {
+      "passed": true,
+      "seconds": 0.119912
+    },
+    "xrfg_optiscaler_bootstrap_bad-size": {
+      "passed": true,
+      "seconds": 0.122941
+    },
+    "xrfg_optiscaler_bootstrap_bad-version": {
+      "passed": true,
+      "seconds": 0.118745
+    },
+    "xrfg_optiscaler_bootstrap_identity-seh": {
+      "passed": true,
+      "seconds": 0.120008
+    },
+    "xrfg_optiscaler_bootstrap_activation-failure": {
+      "passed": true,
+      "seconds": 0.118378
+    },
+    "xrfg_optiscaler_bootstrap_activation-seh": {
+      "passed": true,
+      "seconds": 0.120062
+    },
+    "xrfg_optiscaler_bootstrap_failure": {
+      "passed": true,
+      "seconds": 0.11969
+    },
+    "xrfg_optiscaler_bootstrap_seh": {
+      "passed": true,
+      "seconds": 0.120122
+    },
+    "xrfg_optiscaler_bootstrap_bad-interface": {
+      "passed": true,
+      "seconds": 0.118566
+    },
+    "xrfg_optiscaler_bootstrap_missing-callback": {
+      "passed": true,
+      "seconds": 0.120509
+    },
+    "xrfg_optiscaler_bootstrap_foreign-callback": {
+      "passed": true,
+      "seconds": 0.119496
+    },
+    "xrfg_optiscaler_bootstrap_process_exclusion": {
+      "passed": true,
+      "seconds": 0.0338164
+    }
+  },
+  "offline_preview": true,
+  "published": false,
+  "active_installation_changed": false
+}

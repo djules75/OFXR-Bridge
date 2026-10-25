@@ -1,0 +1,89 @@
+{
+  "version": "V596",
+  "base": "cb0544e54dbd95aee20cfa4ae8abb308dc7b3810",
+  "status": "runtime-pending",
+  "scope": "Release producer-source read leases after completed private copy; preserve native target lifetime, generation identity and FIFO retirement. Only the observed Valhalla producer stall is addressed.",
+  "passed": 33,
+  "failed": 0,
+  "ctest_seconds": 52.99189579999997,
+  "ctest_passed": [
+    "xrfg_private_output_distributor_tests",
+    "xrfg_private_openxr_runtime_gpu",
+    "xrfg_tray_lifecycle_tests",
+    "xrfg_private_runtime_ref_gpu",
+    "xrfg_private_runtime_new_gpu",
+    "xrfg_private_runtime_djules_gpu",
+    "xrfg_private_runtime_fidelity_gpu",
+    "xrfg_private_runtime_fsr_gpu",
+    "xrfg_private_runtime_hybrid_gpu",
+    "xrfg_private_runtime_dlssg_gpu",
+    "xrfg_private_runtime_djules3_gpu",
+    "xrfg_private_runtime_dlssg3_gpu",
+    "xrfg_private_runtime_d11-ref_gpu",
+    "xrfg_private_runtime_d11-new_gpu",
+    "xrfg_private_runtime_d11-djules_gpu",
+    "xrfg_private_runtime_d11-fidelity_gpu",
+    "xrfg_private_runtime_new-01_gpu",
+    "xrfg_private_runtime_new-10_gpu",
+    "xrfg_private_runtime_new-11_gpu",
+    "xrfg_private_runtime_switch_gpu",
+    "xrfg_private_runtime_separate-ref_gpu",
+    "xrfg_private_runtime_separate-new_gpu",
+    "xrfg_private_runtime_separate-fidelity_gpu",
+    "xrfg_private_runtime_separate-fsr_gpu",
+    "xrfg_private_runtime_separate-hybrid_gpu",
+    "xrfg_private_runtime_separate-dlssg_gpu",
+    "xrfg_private_runtime_session_gpu",
+    "xrfg_private_runtime_memory_gpu",
+    "xrfg_layer_call_chain",
+    "xrfg_single_configuration_tests",
+    "xrfg_benchmark_suite_tests",
+    "xrfg_dlssg_profile_tests",
+    "xrfg_settings_widgets_tests"
+  ],
+  "headset_validation": "Pending owner Valhalla check. No claim to fix residual SteamVR/MSFS presentation drops or general Lower VRAM/3X problems.",
+  "negative_control": "Exact V595 runtime fails the new completed-copy source progress assertion; V596 passes D3D12 and D3D11 cases with actual GPU copies and mocked downstream OpenXR.",
+  "unchanged": [
+    "Physical clock, renewal, cadence and latency policy",
+    "FIFO capacity and retirement after native End",
+    "Number of private images and real XR swapchains",
+    "AFW provider beta6, vectors/depth math and meter",
+    "VDXR path, INI and benchmark layout"
+  ],
+  "input_receipts": [
+    {
+      "source": "C:\\Users\\x4lch\\AppData\\Local\\OFXR Autonomous\\RuntimeLayer\\v595\\ofxr-benchmark-20261019-002257-440-pid40892-0.benchmark.log",
+      "file": "ofxr-benchmark-20261019-002257-440-pid40892-0.benchmark.log",
+      "bytes": 342249,
+      "sha256": "7d87c3131a9279e407a10448b8416ef52d76ff0d8a634d39197475aa62171a0e"
+    },
+    {
+      "source": "C:\\Users\\x4lch\\AppData\\Local\\OFXR Autonomous\\RuntimeLayer\\v595\\ofxr-bridge-flight-20261019-002257-440-pid40892-0.log",
+      "file": "ofxr-bridge-flight-20261019-002257-440-pid40892-0.log",
+      "bytes": 7037165,
+      "sha256": "ff0f18c1ebaf87dd9cce08e2c9229c63e696b7deddea06af0d7971c8210cb190"
+    },
+    {
+      "source": "C:\\Users\\x4lch\\AppData\\Local\\OFXR Autonomous\\RuntimeLayer\\v595\\ofxr-ngx-capture-pid40892.log",
+      "file": "ofxr-ngx-capture-pid40892.log",
+      "bytes": 259,
+      "sha256": "c7ef0a999d89ed832f7c65f633fd1c39d6e0e36549bdf1750e7b5f332a4fd580"
+    }
+  ],
+  "logs": [
+    "v596-build.log",
+    "v596-source-test-build.log",
+    "v596-final-tests.log",
+    "v596-final-junit.xml",
+    "v596-baseline-control/RESULTS.json",
+    "v596-first-tests.log",
+    "v596-first-junit.xml",
+    "v596-harness-progress.log",
+    "v596-harness-duration.json"
+  ],
+  "aggregate_timeout": {
+    "first_ctest": "Aggregate exceeded old30second timeout; all other32checks passed.",
+    "diagnostic_run": "All aggregate assertions PASS in31.6189876seconds with immediate progress output. No native/runtime scheduling change.",
+    "aggregate_timeout_change": "30->60seconds for expanded aggregate only. All per-case progress/cadence/pixel assertions unchanged."
+  }
+}

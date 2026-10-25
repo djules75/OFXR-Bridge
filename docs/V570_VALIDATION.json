@@ -1,0 +1,41 @@
+{
+  "version": "V570",
+  "base": "d3f8f2e1116e7280e0afe9f0b2179edda3829766",
+  "status": "runtime-pending",
+  "passed": 17,
+  "failed": 0,
+  "ctest_seconds": 55.62,
+  "ctest_passed": [
+    "xrfg_afw_terminal_capture",
+    "xrfg_benchmark_suite_tests",
+    "xrfg_compositor_presentation_rate_tests",
+    "xrfg_ghost_steamvr_capture",
+    "xrfg_ghost_vdxr_capture",
+    "xrfg_luke_beta6_shading_9",
+    "xrfg_luke_epoch_recovery_4",
+    "xrfg_luke_gap_recovery_0_1",
+    "xrfg_luke_gap_recovery_0_2",
+    "xrfg_luke_gap_recovery_4_1",
+    "xrfg_luke_gap_recovery_4_2",
+    "xrfg_luke_gap_recovery_8_1",
+    "xrfg_luke_gap_recovery_8_2",
+    "xrfg_luke_geometry_recovery_8",
+    "xrfg_luke_interleaved_gap_4",
+    "xrfg_luke_interleaved_gap_8",
+    "xrfg_luke_post_afw_director_packet"
+  ],
+  "test_logs": [
+    "v570-first-focused-tests.log",
+    "v570-full-rate-fixture-rerun.log"
+  ],
+  "fixture_rerun": "Initial run:15/17 pass; two full-rate control assertions expected four private replacements instead of zero. Fixture corrected to expect zero at1x1, rebuilt, both controls pass. Renderer unchanged between these test runs.",
+  "baseline_reproduction": "Unmodified V569 renderer plus added omitted-color fixture: actual beta6 Combined at both2x2/4x4 fails frame12 ClearRenderTargetView m_otherEyeLookupDesc shader-read0xC0 versus RTV0x4; same producer epoch/geometry. Not a pixel replay of the unlogged owner incident.",
+  "headset_validation": "Pending owner0.2.1 to0.2.13 transition at reduced Combined; visual corruption with unchanged performance reported. Offline fault corrected, exact live incident correlation still pending.",
+  "ipc_abi": 55801,
+  "provider_abi": 45601,
+  "luke_suite_trials": 18,
+  "presentation_pacing_changed": false,
+  "afw_shader_changed": false,
+  "swapchain_counts_changed": false,
+  "steady_extra_fence_wait": false
+}

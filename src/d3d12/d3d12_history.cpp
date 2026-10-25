@@ -1,11 +1,15 @@
 #include "xrfg/d3d12_history.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
+#include "xrfg/d3d12_ram_timing.hpp"
+#include "xrfg/gpu_flight_diagnostics.hpp"
+#include "xrfg/two_frame_capture.hpp"
 
 #include <windows.h>
 #include <wrl/client.h>
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -19,7 +23,7 @@ using Microsoft::WRL::ComPtr;
 
 void dred_marker(ID3D12GraphicsCommandList* command_list, const char* label) noexcept {
     if (command_list != nullptr && label != nullptr &&
-        bridge_flight_logger().enabled()) {
+        bridge_flight_logger().gpu_instrumentation_enabled()) {
         command_list->SetMarker(1U, label, static_cast<UINT>(std::strlen(label)));
     }
 }
@@ -93,6 +97,7 @@ void dred_marker(ID3D12GraphicsCommandList* command_list, const char* label) noe
 
 struct D3D12SwapchainHistory::Impl {
     struct HistorySlot {
+        D3D12RamTiming<2> ram_gpu;
         ComPtr<ID3D12Resource> resource;
         ComPtr<ID3D12CommandAllocator> capture_allocator;
         ComPtr<ID3D12GraphicsCommandList> capture_list;
@@ -109,6 +114,8 @@ struct D3D12SwapchainHistory::Impl {
     std::vector<ComPtr<ID3D12Resource>> source_images;
     ComPtr<ID3D12Fence> producer_fence;
     HANDLE fence_event{};
+    HANDLE busy_event{};
+    HANDLE busy_timer{};
     std::array<HistorySlot, D3D12SwapchainHistory::kSlotCount> slots;
     D3D12_RESOURCE_STATES release_state{};
     std::uint64_t next_serial{1};
@@ -125,6 +132,8 @@ struct D3D12SwapchainHistory::Impl {
         if (fence_event != nullptr) {
             CloseHandle(fence_event);
         }
+        if (busy_event) CloseHandle(busy_event);
+        if (busy_timer) CloseHandle(busy_timer);
     }
 
     [[nodiscard]] static bool matching_ticket(
@@ -178,6 +187,7 @@ struct D3D12SwapchainHistory::Impl {
         // DRED reports this stable name if a device removal stops inside the bridge's
         // history copy, distinguishing it from game, NGX and synthesis work.
         slot.capture_list->SetName(L"OFXR History Capture");
+        slot.ram_gpu.initialize(device.Get(),queue.Get(),BridgeFlightOperation::gpu_history);
         result = slot.capture_list->Close();
         if (FAILED(result) && failure_stage != nullptr) {
             *failure_stage =
@@ -340,6 +350,80 @@ struct D3D12SwapchainHistory::Impl {
         return fence_status(fence, value) == S_OK ? S_OK : E_FAIL;
     }
 
+    // Waits until `fence` reaches `value` or the timer armed by
+    // wait_for_busy_slot fires. ERROR_BUSY when the time ran out first.
+    [[nodiscard]] HRESULT wait_for_fence_bounded(
+        ID3D12Fence* fence,
+        std::uint64_t value) noexcept {
+        for (;;) {
+            const HRESULT status = fence_status(fence, value);
+            if (status != S_FALSE) {
+                return status;
+            }
+            const HRESULT event_result = fence->SetEventOnCompletion(value, busy_event);
+            if (FAILED(event_result)) {
+                return event_result;
+            }
+            const HANDLE handles[] = {busy_event, busy_timer};
+            const DWORD wait_result =
+                WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+            if (wait_result == WAIT_OBJECT_0 + 1) {
+                return fence_status(fence, value) == S_FALSE
+                    ? HRESULT_FROM_WIN32(ERROR_BUSY)
+                    : fence_status(fence, value);
+            }
+            if (wait_result != WAIT_OBJECT_0) {
+                const DWORD error = GetLastError();
+                return HRESULT_FROM_WIN32(error == ERROR_SUCCESS ? ERROR_GEN_FAILURE : error);
+            }
+            // The event may be a stale registration from an earlier wait that
+            // timed out: the loop checks the fence again before trusting it.
+        }
+    }
+
+    // The bounded wait for a slot whose last reader or writer is still on the
+    // GPU: the consumer's completion first, then the slot's own capture.
+    // Never for a lease, which is CPU state no fence will clear.
+    [[nodiscard]] HRESULT wait_for_busy_slot(
+        HistorySlot& slot,
+        std::uint32_t limit_us) noexcept {
+        if (slot.active_lease_serial != 0 || limit_us == 0) {
+            return HRESULT_FROM_WIN32(ERROR_BUSY);
+        }
+        if (busy_event == nullptr) {
+            busy_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (busy_event == nullptr) {
+                return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY);
+            }
+        }
+        if (busy_timer == nullptr) {
+            busy_timer = CreateWaitableTimerExW(
+                nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+            if (busy_timer == nullptr) {
+                busy_timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+            }
+            if (busy_timer == nullptr) {
+                return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY);
+            }
+        }
+        LARGE_INTEGER due{};
+        due.QuadPart = -static_cast<LONGLONG>(limit_us) * 10;
+        if (!SetWaitableTimer(busy_timer, &due, 0, nullptr, nullptr, FALSE)) {
+            const DWORD error = GetLastError();
+            return HRESULT_FROM_WIN32(error == ERROR_SUCCESS ? ERROR_GEN_FAILURE : error);
+        }
+        HRESULT result = S_OK;
+        if (slot.consumer_fence_value != 0) {
+            result = wait_for_fence_bounded(
+                slot.consumer_fence.Get(), slot.consumer_fence_value);
+        }
+        if (SUCCEEDED(result)) {
+            result = wait_for_fence_bounded(producer_fence.Get(), slot.capture_fence_value);
+        }
+        static_cast<void>(CancelWaitableTimer(busy_timer));
+        return result;
+    }
+
     [[nodiscard]] HRESULT prepare_slot_for_capture(HistorySlot& slot) noexcept {
         if (slot.active_lease_serial != 0) {
             return HRESULT_FROM_WIN32(ERROR_BUSY);
@@ -360,6 +444,7 @@ struct D3D12SwapchainHistory::Impl {
         if (producer_status == S_FALSE) {
             return HRESULT_FROM_WIN32(ERROR_BUSY);
         }
+        if (producer_status == S_OK) slot.ram_gpu.harvest();
         return producer_status;
     }
 
@@ -375,6 +460,7 @@ struct D3D12SwapchainHistory::Impl {
 
         ID3D12CommandList* command_lists[] = {command_list};
         queue->ExecuteCommandLists(1, command_lists);
+        two_frame_capture_submission(queue.Get(), 1, command_lists);
         completion_unknown = true;
 
         const std::uint64_t value = next_fence_value;
@@ -393,11 +479,13 @@ struct D3D12SwapchainHistory::Impl {
 
     [[nodiscard]] HRESULT capture(
         std::uint32_t source_index,
-        D3D12HistoryCaptureTicket* output_ticket) noexcept {
+        D3D12HistoryCaptureTicket* output_ticket,
+        const TwoFrameImageInfo* diagnostic_info, D3D12HistoryCaptureWait* wait) noexcept {
         if (output_ticket == nullptr) {
             return E_POINTER;
         }
         *output_ticket = {};
+        if (wait) { wait->slot_busy=false; wait->waited_us=0; }
 
         if (!capture_enabled || has_pending_capture) {
             return E_UNEXPECTED;
@@ -412,6 +500,15 @@ struct D3D12SwapchainHistory::Impl {
 
         HistorySlot& slot = slots[next_slot];
         HRESULT result = prepare_slot_for_capture(slot);
+        if (result == HRESULT_FROM_WIN32(ERROR_BUSY) && wait && wait->limit_us) {
+            wait->slot_busy = true;
+            const auto entered = std::chrono::steady_clock::now();
+            result = wait_for_busy_slot(slot, wait->limit_us);
+            wait->waited_us = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now()-entered).count());
+            if (SUCCEEDED(result)) result = prepare_slot_for_capture(slot);
+        }
         if (FAILED(result)) {
             return result;
         }
@@ -430,6 +527,7 @@ struct D3D12SwapchainHistory::Impl {
         }
 
         dred_marker(slot.capture_list.Get(), "OFXR history begin");
+        slot.ram_gpu.mark(slot.capture_list.Get(),0);
 
         ID3D12Resource* const source = source_images[source_index].Get();
         const std::array<D3D12_RESOURCE_BARRIER, 2> before_copy{
@@ -456,6 +554,14 @@ struct D3D12SwapchainHistory::Impl {
             static_cast<UINT>(after_copy.size()),
             after_copy.data());
         dred_marker(slot.capture_list.Get(), "OFXR history complete");
+        slot.ram_gpu.mark(slot.capture_list.Get(),1);
+        slot.ram_gpu.resolve(slot.capture_list.Get());
+        if (diagnostic_info != nullptr) {
+            TwoFrameImageInfo image = *diagnostic_info;
+            image.capture_serial = next_serial;
+            two_frame_capture_record_ng_x(image, device.Get(),
+                slot.capture_list.Get(), source, release_state);
+        }
 
         result = slot.capture_list->Close();
         if (FAILED(result)) {
@@ -464,6 +570,7 @@ struct D3D12SwapchainHistory::Impl {
         }
 
         std::uint64_t fence_value = 0;
+        slot.ram_gpu.submitted(reinterpret_cast<UINT64>(producer_fence.Get()),next_serial);
         result = execute_and_signal(slot.capture_list.Get(), &fence_value);
         if (FAILED(result)) {
             return result;
@@ -683,7 +790,8 @@ HRESULT D3D12SwapchainHistory::initialize(
 
 HRESULT D3D12SwapchainHistory::capture(
     std::uint32_t source_index,
-    D3D12HistoryCaptureTicket* ticket) noexcept {
+    D3D12HistoryCaptureTicket* ticket,
+    const TwoFrameImageInfo* diagnostic_info, D3D12HistoryCaptureWait* wait) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (impl_ == nullptr) {
@@ -692,7 +800,16 @@ HRESULT D3D12SwapchainHistory::capture(
             }
             return E_UNEXPECTED;
         }
-        return impl_->capture(source_index, ticket);
+        auto& log = bridge_flight_logger();
+        const auto token = log.begin(BridgeFlightOperation::history_capture,
+            reinterpret_cast<std::uintptr_t>(this), source_index);
+        const HRESULT result = impl_->capture(source_index, ticket,
+            diagnostic_info, wait);
+        log.end(token, BridgeFlightOperation::history_capture, result,
+            reinterpret_cast<std::uintptr_t>(this), ticket ? ticket->serial : 0,
+            ticket ? ticket->fence_value : 0);
+        log_gpu_failure(impl_->device.Get(), result, reinterpret_cast<std::uintptr_t>(this));
+        return result;
     } catch (const std::bad_alloc&) {
         if (ticket != nullptr) {
             *ticket = {};
@@ -804,6 +921,13 @@ HRESULT D3D12SwapchainHistory::invalidate() noexcept {
     } catch (...) {
         return E_FAIL;
     }
+}
+
+std::uint64_t D3D12SwapchainHistory::diagnostic_completed_value() const noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ && impl_->producer_fence ? impl_->producer_fence->GetCompletedValue() : 0;
+    } catch (...) { return 0; }
 }
 
 bool D3D12SwapchainHistory::initialized() const noexcept {

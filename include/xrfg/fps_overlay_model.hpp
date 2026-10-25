@@ -7,26 +7,34 @@
 
 namespace xrfg {
 
-enum class FpsOverlayPosition { off, upper_left, upper_right, lower_left, lower_right };
+enum class FpsOverlayPosition { off, upper_left, upper_right, lower_left, lower_right, elliott_controller, elliott_bottom };
 [[nodiscard]] FpsOverlayPosition parse_overlay_position(std::string_view value) noexcept;
 [[nodiscard]] const char* overlay_position_name(FpsOverlayPosition position) noexcept;
 
 struct FpsSnapshot {
     float submitted_fps{};
     bool active{};
+    bool afw_active{};
+    float delivered_fps{};
+    bool delivered_valid{};
+    float real_fps{}, generated_fps{};
+    bool sample_valid{};
 };
 
 // Caller serializes access. Fixed storage, monotonic wall-clock measurements;
 // successful downstream submissions are NOT evidence of physical scanout.
+[[nodiscard]] float displayed_rate(float rate, float refresh_hz) noexcept;
+
 class FpsCounter {
 public:
-    void submitted(std::int64_t now_ns, bool synthetic) noexcept;
+    void submitted(std::int64_t now_ns, bool synthetic, bool new_content = true) noexcept;
     [[nodiscard]] FpsSnapshot snapshot(std::int64_t now_ns) const noexcept;
     void reset() noexcept { *this = {}; }
 private:
     struct Bucket {
         std::int64_t epoch{-1};
         std::uint32_t output{};
+        std::uint32_t real{}, generated{};
     };
     Bucket& bucket(std::int64_t now_ns) noexcept;
     std::array<Bucket, 12> buckets_{};

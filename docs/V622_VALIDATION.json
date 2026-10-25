@@ -1,0 +1,53 @@
+{
+  "version": "V622",
+  "base": "91471645af2b3fc7b32ec46fbde629be30bfe021",
+  "status": "runtime-pending",
+  "scope": "Tray AFW only: native inline Luke delivery without OFXR endpoint/workers/temporal generator; preserve DLSS5 and actual-native-target latency meters. Tray Benchmark mode controls existing INI gate live.",
+  "passed": 13,
+  "failed": 0,
+  "ctest_seconds": 6.81,
+  "tests": [
+    "xrfg_standalone_launcher_tests",
+    "xrfg_tray_lifecycle_tests",
+    "xrfg_interface_cycle_layer",
+    "xrfg_luke_afw_output_slot",
+    "xrfg_luke_gpu_pipeline",
+    "xrfg_private_runtime_off-pacing-session_gpu",
+    "xrfg_private_runtime_metrics-toggle-solo-luke-d11-ref_gpu",
+    "xrfg_afw_terminal_capture",
+    "xrfg_benchmark_suite_tests",
+    "xrfg_elliott_meter_tests",
+    "xrfg_afw_only_session_gpu",
+    "xrfg_afw_only_nonluke_gpu",
+    "xrfg_afw_only_vdxr_gpu"
+  ],
+  "headset_validation": "Pending owner comparison of AFW-only OFF versus ON with matching scene, AFW quality, DLSS5 and refresh. No headset performance or physical scanout claim.",
+  "preserved": [
+    "V619 reduced-colour workaround",
+    "V620 Horizon native motion interval",
+    "V621 ordinary OFXR OFF pacing bypass",
+    "AFW mandatory depth/camera subtraction and provider beta6",
+    "DLSS5 independent configuration and hooks",
+    "Three existing latency definitions and on-demand sampling"
+  ],
+  "new_swapchains": false,
+  "new_waits": false,
+  "transport_restart_required": true,
+  "ini": "ofxr-bridge.ini",
+  "ipc_abi": 61101,
+  "provider_abi": 45601,
+  "live_installation": false,
+  "pushed": false,
+  "evidence": [
+    "GPU terminal output has distinct left/right native pixels",
+    "Native Wait/Begin/End balanced for original and filtered Luke clocks",
+    "Native-target meter oracle, including intentionally offset virtual prediction",
+    "AFW-only state is immutable across next-session flag change",
+    "Saved enabled DLSS-G/other OFXR requests cannot reactivate disconnected pipeline",
+    "DLSS5 enabled state survives all engine/pacing requests",
+    "Non-Luke retains original private endpoint",
+    "VDXR Luke uses existing native inline route without OFXR",
+    "Canonical tray persistence and runtime-shim preservation including DLSS5",
+    "Benchmark suite refuses AFW-only matrix labels"
+  ]
+}

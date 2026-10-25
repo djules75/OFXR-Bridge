@@ -3,6 +3,9 @@
 #undef main
 #include "xrfg/implicit_layer.hpp"
 #include <filesystem>
+#include <d3d12sdklayers.h>
+#include <dxgidebug.h>
+#include <memory>
 
 // Read the runtime-facing D3D11 textures, after publication/retirement, not the
 // D3D12 staging output or the independently submitted FPS quad.
@@ -38,17 +41,24 @@ std::array<std::size_t, 2> marker_pixels(
 int main(int argc, char** argv) {
     if (argc != 3 && argc != 4) return 1;
     const std::string mode = argv[2];
-    const std::string marker_mode = argc == 4 ? argv[3] : "";
+    const bool luke_no_guides=mode=="luke-no-guides" || mode=="luke-fsr-no-guides" || mode=="luke-dlssg-no-guides";
+    const bool luke_color=mode=="luke-color-only" || mode=="luke-color-afw-off" || mode=="luke-color-private";
+    const bool luke_fixture_mode=luke_no_guides || luke_color;
+    g_luke_scratch_mode=luke_fixture_mode;
+    const bool control_mode = argc == 4 && std::string_view(argv[3]) == "controls";
+    g_recycle_control_slots=control_mode;
+    const std::string marker_mode = argc == 4 && !control_mode && !luke_fixture_mode ? argv[3] : "";
     if (!marker_mode.empty() && (mode != "d3d11" ||
         (marker_mode != "on" && marker_mode != "off" && marker_mode != "hidden"))) return 1;
     g_flight_simulator_mode = mode == "flight";
     g_steamvr_runtime_mode = g_steamvr_presenter_mode = mode == "steamvr";
-    g_d3d11_interop_mode = mode == "d3d11";
+    g_d3d11_interop_mode = mode == "d3d11" || luke_fixture_mode;
     g_test_application_thread_id = GetCurrentThreadId();
     const auto root = std::filesystem::temp_directory_path() /
         (L"ofxr-disarm-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
     const auto manifest = root / L"XR_APILAYER_XRFrameBridge_manual-1-1.json";
     HMODULE module = nullptr;
+    HMODULE luke_fixture = nullptr;
     HANDLE signal = nullptr;
     XrInstance instance = XR_NULL_HANDLE;
     XrSession session = XR_NULL_HANDLE;
@@ -61,9 +71,15 @@ int main(int argc, char** argv) {
         if (!value) throw std::runtime_error(message);
     };
     int result = 1;
+    const bool retain_failure = std::getenv("XRFG_TEST_KEEP_FAILURE") != nullptr;
+    std::unique_ptr<xrfg_fixture::ExternalControlProfile> control_profile;
+    if (retain_failure) {
+        ComPtr<ID3D12Debug> debug;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) debug->EnableDebugLayer();
+    }
     try {
         std::filesystem::create_directories(root);
-        const auto dll = root / L"OptiScaler.dll";
+        const auto dll = root / L"XR_APILAYER_XRFrameBridge_diagnostic.dll";
         std::filesystem::copy_file(argv[1], dll);
         signal = xrfg::implicit_layer::create_arm_signal(manifest);
         require(signal != nullptr, "create isolated arm signal");
@@ -73,8 +89,21 @@ int main(int argc, char** argv) {
         {
             std::ofstream ini(root / L"ofxr_bridge.ini");
             ini << "[ofxr]\nbackend=fidelityfx\ncontrol_event=" << ascii_control
-                << "\n[diagnostics]\nlogging_enabled=" << (marker_mode == "on" || marker_mode == "hidden" ? 1 : 0)
+                << "\n[diagnostics]\nlogging_enabled=" << (retain_failure || marker_mode == "on" || marker_mode == "hidden" ? 1 : 0)
+                << "\nsynthetic_marker_enabled=" << (marker_mode == "on" || marker_mode == "hidden" ? 1 : 0)
+                << "\nflush_each_event=" << (luke_no_guides ? 1 : 0)
                 << "\n[overlay]\nposition=" << (!marker_mode.empty() && marker_mode != "hidden" ? "upper_right" : "off") << '\n';
+        }
+        control_profile = std::make_unique<xrfg_fixture::ExternalControlProfile>(root / L"ofxr_bridge.ini");
+        if(luke_fixture_mode) {
+            require(argc==4,"Luke runtime fixture path");
+            luke_fixture=LoadLibraryA(argv[3]);require(luke_fixture!=nullptr,"load Luke marker");
+            auto desired=xrfg::autonomous::snapshot().desired;
+            desired.afw_mode=mode=="luke-color-afw-off" ? 0 : 3;desired.motion_vectors=0;
+            desired.enabled=mode!="luke-no-guides";
+            desired.frame_generation=mode=="luke-fsr-no-guides" ? 1 : mode=="luke-dlssg-no-guides" ? 2 : 0;
+            desired.separate_synthesis=mode=="luke-color-private" ? 1 : 0;
+            require(xrfg::autonomous::request(desired),"request native-vector Luke route");
         }
         require(g_d3d11_interop_mode ? initialize_d3d11() : initialize_d3d12(), "initialize GPU fixture");
         if (!marker_mode.empty()) {
@@ -191,11 +220,19 @@ int main(int argc, char** argv) {
             XrFrameEndInfo e{XR_TYPE_FRAME_END_INFO};
             e.displayTime = time; e.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
             e.layerCount = 1; e.layers = &base;
-            require(XR_SUCCEEDED(end(session, &e)), "end frame");
+            // The layer runs its inline second cycle from inside this call;
+            // the fake runtime throttles that wait and not the application's.
+            g_application_in_end_frame.store(true, std::memory_order_release);
+            const XrResult end_result = end(session, &e);
+            g_application_in_end_frame.store(false, std::memory_order_release);
+            require(XR_SUCCEEDED(end_result), "end frame");
         };
         XrFrameState current{XR_TYPE_FRAME_STATE};
         require(XR_SUCCEEDED(wait(session, nullptr, &current)), "first wait");
-        for (int i = 0; i < 8; ++i) {
+        // One more warm-up frame than the promotion needs on its own: the frame
+        // that arms generation passes through, so the first pair - and the
+        // throttled inline cycle the promotion counts - is one frame later.
+        for (int i = 0; i < 9; ++i) {
             require(XR_SUCCEEDED(begin(session, nullptr)), "warmup begin");
             capture();
             XrFrameState next_frame{XR_TYPE_FRAME_STATE};
@@ -205,17 +242,47 @@ int main(int argc, char** argv) {
             if (g_flight_simulator_mode) current = next_frame;
             else require(XR_SUCCEEDED(wait(session, nullptr, &current)), "warmup wait");
         }
+        if(luke_no_guides) {
+            require(g_synthetic_release_calls.load()==0, "missing native producer generated synthetic frames");
+            require(g_create_swapchain_calls.load()==1, "missing native producer allocated private swapchains");
+            require(g_application_release_calls.load()==9 && g_end_frame_calls.load()>=9,
+                "missing native producer interrupted original XR frames");
+            require(XR_SUCCEEDED(end_session(session)), "end missing-producer session");
+            require(XR_SUCCEEDED(destroy_swapchain(swapchain)), "destroy missing-producer swapchain");
+            swapchain=XR_NULL_HANDLE;
+            require(XR_SUCCEEDED(destroy_session(session)), "destroy missing-producer session");
+            session=XR_NULL_HANDLE;
+            require(XR_SUCCEEDED(destroy_instance(instance)), "destroy missing-producer instance");
+            instance=XR_NULL_HANDLE;
+            FreeLibrary(module);module=nullptr;
+            control_profile.reset();
+            if(signal)CloseHandle(signal);
+            std::error_code ignored;std::filesystem::remove_all(root,ignored);
+            std::cout<<"Missing native producer: real frames progress, no generation or private swapchains PASS\n";
+            return 0;
+        }
+        if(luke_color) {
+            require(xrfg::autonomous::snapshot().runtime.afw_running==0,
+                "no AFW output may be reported without native guides");
+            require(g_application_release_calls.load()==9 && g_create_swapchain_calls.load()==6,
+                "color-only Luke captures and private outputs not initialized");
+        }
         require(g_synthetic_release_calls.load() > 0, "generation active before Disarm");
         if (g_steamvr_presenter_mode || g_flight_simulator_mode)
             require(current.predictedDisplayPeriod == kFakeDisplayPeriod * 2, "presenter active before Disarm");
-#ifdef XRFG_EMBEDDED_MENU_TEST
-        using Request = int (*)(int, int, int, int, int);
-        auto menu_request = reinterpret_cast<Request>(GetProcAddress(module, "OFXR_EmbeddedRequestV1"));
-        require(menu_request != nullptr, "embedded menu export");
-        require(menu_request(0, 0, 1, 2, 0) != 0, "request reversible bypass");
-#else
-        require(xrfg::implicit_layer::signal_arm_stop(manifest), "signal Disarm");
-#endif
+        const auto menu_request = [&](int enabled, int backend, int preset, int scale, int backward) {
+            auto desired = xrfg::autonomous::snapshot().desired;
+            desired.enabled = enabled != 0;
+            desired.backend = backend;
+            desired.preset = preset;
+            desired.scale = scale;
+            desired.backward = backward != 0;
+            return xrfg::autonomous::request(desired);
+        };
+        if (control_mode)
+            require(menu_request(0, 0, 1, 2, 0), "request reversible bypass through standalone IPC");
+        else
+            require(xrfg::implicit_layer::signal_arm_stop(manifest), "signal Disarm");
         // Begin/end the already-waited frame first. It may carry the old period,
         // but no new synthetic can be prepared after this stop boundary.
         require(XR_SUCCEEDED(begin(session, nullptr)), "stop boundary begin");
@@ -236,7 +303,7 @@ int main(int argc, char** argv) {
           for (std::size_t i = records_after_stop; i < g_end_records.size(); ++i)
               require(g_end_records[i].target == SubmittedTarget::original, "only originals after Disarm"); }
         require(wait_for_queue_idle(), "final GPU retirement");
-#ifdef XRFG_EMBEDDED_MENU_TEST
+        if (control_mode) {
         // Force context recreation with a different options tuple while keeping
         // FidelityFX so this same test runs on WARP and non-NVIDIA machines.
         require(menu_request(1, 0, 2, 1, 1) != 0, "request re-enable and options change");
@@ -247,8 +314,14 @@ int main(int argc, char** argv) {
             capture(); submit(frame.predictedDisplayTime);
             require(wait_for_queue_idle(), "re-enabled GPU retirement");
         }
+        if(g_synthetic_release_calls.load()<=synthetic_after_stop) {
+            const auto s=xrfg::autonomous::snapshot();
+            std::cerr<<"control receipt revision "<<s.revision<<" applied "<<s.runtime.applied_revision
+                <<" enabled "<<s.desired.enabled<<" backend "<<s.desired.backend
+                <<" preset "<<s.desired.preset<<" scale "<<s.desired.scale<<" state "
+                <<unsigned(s.runtime.generation_state)<<" pending "<<s.runtime.pending<<'\n';
+        }
         require(g_synthetic_release_calls.load() > synthetic_after_stop, "synthesis resumes in same XR session");
-        require(menu_request(1, 8, 2, 1, 1) == 0, "invalid backend rejected");
         const auto before_failure = g_synthetic_release_calls.load();
         require(menu_request(1, 1, 1, 2, 0) != 0, "request unavailable NVIDIA on WARP");
         for (int i = 0; i < 4; ++i) {
@@ -270,9 +343,64 @@ int main(int argc, char** argv) {
             require(wait_for_queue_idle(), "recovered GPU retirement");
         }
         require(g_synthetic_release_calls.load() > before_failure, "same-session recovery after backend failure");
-        require(GetPrivateProfileIntW(L"diagnostics", L"logging_enabled", 42, (root / L"ofxr_bridge.ini").c_str()) == 0,
+        const auto before_logging = g_synthetic_release_calls.load();
+        const auto logging_switch = [&](bool enabled) {
+            auto desired = xrfg::autonomous::snapshot().desired;
+            desired.diagnostics = enabled;
+            require(xrfg::autonomous::request(desired), "publish live logging switch");
+            const auto deadline = GetTickCount64() + 3000;
+            bool applied = false;
+            while (GetTickCount64() < deadline) {
+                XrFrameState frame{XR_TYPE_FRAME_STATE};
+                require(XR_SUCCEEDED(wait(session, nullptr, &frame)), "live logging wait");
+                require(XR_SUCCEEDED(begin(session, nullptr)), "live logging begin");
+                capture(); submit(frame.predictedDisplayTime);
+                require(wait_for_queue_idle(), "live logging GPU retirement");
+                const auto status = xrfg::autonomous::snapshot();
+                if (status.runtime.applied_revision == status.revision &&
+                    status.runtime.logging_active == enabled) { applied = true; break; }
+                Sleep(20);
+            }
+            require(applied, "loaded layer reports actual live logger state without session restart");
+        };
+        const auto log_paths = [&] {
+            std::vector<std::filesystem::path> paths;
+            for (const auto& entry : std::filesystem::directory_iterator(root))
+                if (entry.path().filename().wstring().starts_with(L"ofxr-bridge-flight-") &&
+                    entry.path().extension() == L".log") paths.push_back(entry.path());
+            return paths;
+        };
+        logging_switch(false);
+        const auto before_logs = log_paths().size();
+        logging_switch(true);
+        require(log_paths().size() == before_logs + 1, "late logging creates a new flight log");
+        logging_switch(false); // retiring the writer drains the first log
+        const auto first_logs = log_paths();
+        logging_switch(true);
+        require(log_paths().size() == first_logs.size() + 1, "logging restart preserves previous log and creates a distinct file");
+        logging_switch(false);
+        for (const auto& path : log_paths()) {
+            std::ifstream input(path);
+            const std::string contents{std::istreambuf_iterator<char>(input), {}};
+            // F9 off intentionally records no startup diagnostics. Every new
+            // file identifies its logger version/PID; an initially enabled
+            // run additionally retains the actually observed runtime identity.
+            require(contents.find("op=logger result=") != std::string::npos &&
+                (!retain_failure || contents.find("op=runtime_identity") != std::string::npos),
+                "late-started log identifies its build/process without inventing unobserved startup data");
+            require(contents.find("op=downstream_first_end_frame") != std::string::npos,
+                "live logging records frames from the existing loaded session");
+        }
+        require(g_synthetic_release_calls.load() > before_logging,
+            "generation continues while logging toggles in the same session");
+        logging_switch(retain_failure);
+        std::cout << "Live logging IPC: off/on/off/on/off, distinct files, retained startup metadata, no session restart\n";
+        require(GetPrivateProfileIntW(L"diagnostics", L"logging_enabled", 42, (root / L"ofxr_bridge.ini").c_str()) == (retain_failure ? 1 : 0),
             "menu preserves diagnostic flag");
-#endif
+        const auto reported = xrfg::autonomous::snapshot();
+        require(reported.connected && reported.runtime.applied_revision == reported.revision,
+            "real standalone IPC settings reached the loaded layer");
+        }
         if (!marker_mode.empty()) {
             const auto synthetic = marker_pixels(g_d3d11_synthetic_swapchain_images);
             for (const auto count : synthetic)
@@ -288,10 +416,29 @@ int main(int argc, char** argv) {
     if (swapchain && destroy_swapchain) destroy_swapchain(swapchain);
     if (session && destroy_session) destroy_session(session);
     if (instance && destroy_instance) destroy_instance(instance);
+    if(control_mode && result==0 && std::any_of(g_control_slot_live.begin()+1,g_control_slot_live.end(),[](bool live){return live;})) {
+        std::cerr<<"private control slots remain live after teardown\n";result=1;
+    }
     if (module) FreeLibrary(module);
+    // The production hook monitor outlives XR teardown. Keep the marker
+    // module loaded until process exit, just as the actual game injector is.
+    control_profile.reset();
     if (signal) CloseHandle(signal);
     std::error_code ignored;
-    if (root.is_absolute() && root.filename().wstring().starts_with(L"ofxr-disarm-")) std::filesystem::remove_all(root, ignored);
+    if (retain_failure && result) {
+        std::cerr << "Evidence: " << root.string() << '\n';
+        ComPtr<IDXGIInfoQueue> info;
+        const GUID all{0xe48ae283,0xda80,0x490b,{0x87,0xe6,0x43,0xe9,0xa9,0xcf,0xda,0x08}};
+        if (SUCCEEDED(DXGIGetDebugInterface1(0,IID_PPV_ARGS(&info)))) {
+            for(UINT64 i=0;i<info->GetNumStoredMessages(all);++i) {
+                SIZE_T bytes{}; info->GetMessage(all,i,nullptr,&bytes);
+                std::vector<unsigned char> data(bytes);auto* m=reinterpret_cast<DXGI_INFO_QUEUE_MESSAGE*>(data.data());
+                if(SUCCEEDED(info->GetMessage(all,i,m,&bytes)) && m->Severity<=DXGI_INFO_QUEUE_MESSAGE_SEVERITY_ERROR)
+                    std::cerr << m->pDescription << '\n';
+            }
+        }
+    }
+    else if (root.is_absolute() && root.filename().wstring().starts_with(L"ofxr-disarm-")) std::filesystem::remove_all(root, ignored);
     if (!result) std::cout << "Live Disarm: " << mode << " passed\n";
     return result;
 }

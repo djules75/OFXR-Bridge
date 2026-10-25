@@ -1,0 +1,13 @@
+{
+  "version": 661,
+  "kind": "Diagnostic only; not a claimed AFW fix",
+  "ctest_passed": 4,
+  "checks": [
+    "New initialization-failure fixture distinguishes five guard classes; valid three-current/two-synthetic transport accepted.",
+    "Deferred AFW copy pixels/fence/lease behavior passes unchanged.",
+    "F9 metadata logger and profile persistence pass.",
+    "Exact synth source normalization after removing F9 logger/return wrappers equals V660."
+  ],
+  "original_failure": "Both KCD color transports fail E_INVALIDARG before AFW source publication; no native budget refusal is logged.",
+  "next_run": "Matching661tray/game, budgetfixOFF before startup, F9ON from startup, reproduce15seconds then close. No F8 or benchmark."
+}

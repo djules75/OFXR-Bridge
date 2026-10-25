@@ -1,0 +1,18 @@
+{
+  "version": "V629",
+  "base": "1ad2e1efcd993965147486a239c43b4ed5258176",
+  "status": "runtime-pending",
+  "scope": "Correct Legacy VDXR benchmark Normal/Fast pairs for all optical engines: 11 optical/17 full, unchanged 15 Luke AFW qualities without 3X; matching local unbundled owner adapter.",
+  "passed": 2,
+  "failed": 0,
+  "ctest_seconds": 1.72,
+  "tests": [
+    "xrfg_benchmark_suite_tests",
+    "xrfg_settings_widgets_tests"
+  ],
+  "adapter_validation": "Current owner-sheet G:AC, synthetic distinct 17 Normal/Fast and15 Luke maps plus actual controller CSV CLI exports and unchanged modern adapter regressions; no Google Sheet write",
+  "headset_validation": "Owner V629 Legacy benchmark pending; rendering and all pacing unchanged",
+  "ipc_abi": 62701,
+  "provider_abi": 45601,
+  "pushed": false
+}
