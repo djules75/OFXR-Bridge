@@ -2893,7 +2893,9 @@ void drain_swapchain_gpu(const std::shared_ptr<SwapchainState>& state) noexcept 
 [[nodiscard]] bool release_private_image(
     SessionState* session,
     const std::shared_ptr<Dispatch>& dispatch,
-    PrivateSwapchainState& image) noexcept {
+    PrivateSwapchainState& image,
+    const xrfg::D3D11PublicationReceipt* completed_publication=nullptr,
+    ID3D11Texture2D* completed_texture=nullptr) noexcept {
     try {
         if (image.handle == XR_NULL_HANDLE || image.phase == PrivateOwnershipPhase::idle) {
             return true;
@@ -2932,7 +2934,13 @@ void drain_swapchain_gpu(const std::shared_ptr<SwapchainState>& state) noexcept 
             image.acquired_index,
             static_cast<std::uint64_t>(image.phase));
         const XrResult release_result = with_runtime_entry(session, [&] {
-            const auto released=dispatch->release_swapchain_image(image.handle, &release_info);
+            auto released=XR_ERROR_FUNCTION_UNSUPPORTED;
+            if(completed_publication && completed_texture && session && session->private_runtime)
+                released=session->private_runtime->release_completed_image(image.handle,&release_info,
+                    image.acquired_index,completed_texture,completed_publication->fence.Get(),
+                    completed_publication->copy_complete_value);
+            if(released==XR_ERROR_FUNCTION_UNSUPPORTED)
+                released=dispatch->release_swapchain_image(image.handle, &release_info);
             // Record inside the same runtime gate as actual xrEndFrame, so
             // cross-thread order reflects the runtime's last-released image.
             if(xrfg::bridge_flight_logger().ram_enabled())
@@ -12287,14 +12295,22 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
             success = SUCCEEDED(published) && success;
         }
         if (g.staging_generation) continue;
+        const bool private_ready=state->luke_afw_enabled && state->dispatch->steamvr_runtime &&
+            state->graphics_binding==SessionGraphicsBinding::d3d11 && state->private_runtime;
+        auto current_proof=private_ready && g.worker_generation->d3d11_interop && g.worker_publication.fence
+            ? g.worker_generation->d3d11_interop->published_image(g.worker_publication.current_destination_index,false)
+            : Microsoft::WRL::ComPtr<ID3D11Texture2D>{};
+        auto synthetic_proof=private_ready && g.worker_generation->d3d11_interop && g.worker_publication.fence
+            ? g.worker_generation->d3d11_interop->published_image(g.worker_publication.synthetic_destination_index,true)
+            : Microsoft::WRL::ComPtr<ID3D11Texture2D>{};
         if (g.kind == PreparedGenerationKind::pair)
             success = release_private_image(state.get(), state->dispatch,
-                g.worker_generation->synthetic[g.synthetic_slot]) && success;
+                g.worker_generation->synthetic[g.synthetic_slot],&g.worker_publication,synthetic_proof.Get()) && success;
         if (g.extra_handle != XR_NULL_HANDLE)
             success = release_private_image(state.get(), state->dispatch,
                 g.worker_generation->synthetic[(g.synthetic_slot+1)%g.worker_generation->synthetic_runtime_rings]) && success;
         success = release_private_image(state.get(), state->dispatch,
-            g.worker_generation->current[g.current_slot]) && success;
+            g.worker_generation->current[g.current_slot],&g.worker_publication,current_proof.Get()) && success;
     }
     return success;
 }

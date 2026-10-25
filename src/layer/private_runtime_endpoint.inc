@@ -70,6 +70,7 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
         options.producer_queue12=runtime_queue(*state);
         options.queue12=state->private_delivery_queue?state->private_delivery_queue.Get():options.producer_queue12;
     } else {options.device11=state->d3d11_device.Get();options.context11=state->d3d11_context.Get();}
+    options.d11_release_readiness=options.device11 && state->luke_afw_enabled && original->steamvr_runtime;
     const std::weak_ptr<SessionState> weak=state;
     options.physical_period=[weak]() -> std::int64_t {
         if(auto s=weak.lock())if(s->steamvr_delivery)if(auto p=s->steamvr_delivery->cached_display_period())return p->count();

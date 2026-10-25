@@ -1059,6 +1059,7 @@ HRESULT D3D11D3D12SwapchainInterop::publish(
             receipt->copy_complete_value = impl_->last_publication.copy_complete_value;
             receipt->current_destination_index = impl_->last_publication.current_index;
             receipt->private_current_index = current_destination_index;
+            receipt->synthetic_destination_index = impl_->last_publication.synthetic_index;
         }
         return result;
     } catch (...) {
@@ -1086,6 +1087,7 @@ HRESULT D3D11D3D12SwapchainInterop::publish_completed(
             receipt->copy_complete_value=impl_->last_publication.copy_complete_value;
             receipt->current_destination_index=impl_->last_publication.current_index;
             receipt->private_current_index=current_destination_index;
+            receipt->synthetic_destination_index=impl_->last_publication.synthetic_index;
         }
         return result;
     } catch(...) { return E_FAIL; }
@@ -1144,10 +1146,15 @@ bool D3D11D3D12SwapchainInterop::initialized() const noexcept {
 }
 
 Microsoft::WRL::ComPtr<ID3D11Texture2D> D3D11D3D12SwapchainInterop::published_current_image(std::uint32_t index) const noexcept {
+    return published_image(index,false);
+}
+Microsoft::WRL::ComPtr<ID3D11Texture2D> D3D11D3D12SwapchainInterop::published_image(std::uint32_t index,bool synthetic) const noexcept {
     try {
         std::scoped_lock lock(mutex_);
-        if(!impl_ || index>=impl_->current_destination_images.size())return {};
-        return impl_->current_destination_images[index];
+        if(!impl_)return {};
+        const auto& images=synthetic?impl_->synthetic_destination_images:impl_->current_destination_images;
+        if(index>=images.size())return {};
+        return images[index];
     }catch(...){return {};}
 }
 

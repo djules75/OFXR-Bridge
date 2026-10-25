@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.652.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.653.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -559,6 +559,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     target_link_libraries(xrfg_steamvr_delivery PUBLIC d3d11 d3d12 dxgi)
     if(XRFG_BUILD_TESTS)
         add_executable(xrfg_private_openxr_runtime_tests tests/private_openxr_runtime_tests.cpp)
+        add_executable(xrfg_private_release_readiness_tests tests/private_release_readiness_tests.cpp)
+        target_link_libraries(xrfg_private_release_readiness_tests PRIVATE xrfg_steamvr_delivery)
+        target_compile_features(xrfg_private_release_readiness_tests PRIVATE cxx_std_20)
+        add_test(NAME xrfg_private_d11_release_readiness COMMAND xrfg_private_release_readiness_tests)
+        set_tests_properties(xrfg_private_d11_release_readiness PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
         target_link_libraries(xrfg_private_openxr_runtime_tests PRIVATE xrfg_steamvr_delivery)
         target_compile_features(xrfg_private_openxr_runtime_tests PRIVATE cxx_std_20)
         add_test(NAME xrfg_private_openxr_runtime_gpu COMMAND xrfg_private_openxr_runtime_tests)

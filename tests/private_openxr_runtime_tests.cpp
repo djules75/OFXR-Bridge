@@ -90,10 +90,12 @@ struct Fixture {
     std::vector<std::int64_t> prediction_ages;
     std::vector<std::int64_t> refill_margins;
     std::vector<std::int64_t> native_margins;
+    std::vector<std::int64_t> work_margins;
+    std::atomic_uint source_ready_events{},pending_source_events{};
     std::int64_t physical_origin{};
     std::atomic_bool physical_clock_enabled{true};
     std::shared_ptr<xrfg::PrivateOpenXrRuntime> transport;
-    explicit Fixture(bool d12,bool split=true,std::function<int(unsigned)> variable_wait={},bool physical_clock=false,bool diagnostics=true):native12(d12),frame_wait_us(std::move(variable_wait)) {
+    explicit Fixture(bool d12,bool split=true,std::function<int(unsigned)> variable_wait={},bool physical_clock=false,bool diagnostics=true,bool release_readiness=false):native12(d12),frame_wait_us(std::move(variable_wait)) {
         current=this;
         if(d12) {
             ok(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device12)),"actual D3D12 device");
@@ -113,6 +115,7 @@ struct Fixture {
         xrfg::PrivateOpenXrRuntime::Options options;
         options.real={reinterpret_cast<XrInstance>(1),reinterpret_cast<XrSession>(2),wait,begin,end,create,destroy,enumerate,acquire,wait_image,release,to_qpc};
         options.device12=device12.Get();options.queue12=delivery_queue?delivery_queue.Get():queue.Get();options.producer_queue12=queue.Get();options.device11=device11.Get();options.context11=context.Get();
+        options.d11_release_readiness=release_readiness;
         options.physical_period=[]{return period;};options.capacity=3;
         if(physical_clock) {
             physical_origin=ns();
@@ -122,7 +125,7 @@ struct Fixture {
                 return xrfg::PrivatePhysicalClock{physical_origin+n*period,period,1000+static_cast<std::uint64_t>(n)};
             };
         }
-        options.trace=[this](int stage,std::uint64_t seq,std::int64_t,std::int64_t margin){if(stage==11)refill_margins.push_back(margin);if(stage==17)native_margins.push_back(margin);if(stage==18)wait_input_ordinal=seq;if(stage==25)++window_renewals[seq];if(stage==4) {preparation_thread=GetCurrentThreadId();if(after_head_ready)after_head_ready();if(preparation_callback)preparation_callback(seq);}if(stage==5 && prepared_callback)prepared_callback(seq);};
+        options.trace=[this](int stage,std::uint64_t seq,std::int64_t,std::int64_t margin){if(stage==10){if(margin)++pending_source_events;++source_ready_events;}if(stage==19)work_margins.push_back(margin);if(stage==11)refill_margins.push_back(margin);if(stage==17)native_margins.push_back(margin);if(stage==18)wait_input_ordinal=seq;if(stage==25)++window_renewals[seq];if(stage==4) {preparation_thread=GetCurrentThreadId();if(after_head_ready)after_head_ready();if(preparation_callback)preparation_callback(seq);}if(stage==5 && prepared_callback)prepared_callback(seq);};
         if(!diagnostics)options.trace_enabled=[]{return false;};
         transport=std::make_shared<xrfg::PrivateOpenXrRuntime>(std::move(options));
         ok(transport->initialize(),"initialize actual private endpoint");xr_ok(transport->start(),"start endpoint");

@@ -50,6 +50,7 @@ struct PrivateOpenXrRuntime::Impl {
         ComPtr<ID3D11Texture2D> d11;
         unsigned readers{};
         std::uint64_t generation{};
+        std::uint64_t ready11_value{};
         bool acquired{},waited{};
     };
     struct Chain {
@@ -212,6 +213,8 @@ struct PrivateOpenXrRuntime::Impl {
         auto& chain=*it->second;
         if(!chain.released || chain.images[*chain.released].acquired)return XR_ERROR_CALL_ORDER_INVALID;
         packet.leases.push_back({it->second,*chain.released,chain.images[*chain.released].generation});
+        if(options.d11_release_readiness && !d12())
+            packet.ready=std::max(packet.ready,chain.images[*chain.released].ready11_value);
         ++chain.consumers;
         ++chain.images[*chain.released].readers;return XR_SUCCESS;
     }
@@ -593,7 +596,8 @@ struct PrivateOpenXrRuntime::Impl {
                     if(diagnostic && margin)options.trace(17,packet->sequence,begun_at,margin);
                     if(slots.valid()) {
                         slots.adopt_handoff(last_handoff);
-                        const auto added=slots.observe_work(packet->work_ns,options.capacity);
+                        const auto added=slots.observe_work(packet->work_ns,
+                            options.d11_release_readiness && !d12()?std::min<std::size_t>(options.capacity,2):options.capacity);
                         deadline=slots.claim(packet->accepted_at,packet->prepared_at,begun_at,
                             clock_ns(),PrivateRuntimeBudget::presentation_margin);
                         if(diagnostic) {
@@ -888,11 +892,13 @@ XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info,const std::s
     packet->director=s.director_enabled.load();packet->policy_epoch=s.policy_epoch;XrResult result;
     {std::scoped_lock lock(s.mutex);result=s.own(*packet,*info);
      if(XR_FAILED(result))return result;
-     packet->sequence=++s.sequence;packet->ready=s.ready_serial+1;}
-    const auto ready=s.d12()?s.producer_queue12->Signal(s.ready12.Get(),packet->ready):s.context11->Signal(s.ready11.Get(),packet->ready);
-    if(!s.d12())s.context11->Flush();
-    if(FAILED(ready)) {s.fail(XR_ERROR_RUNTIME_FAILURE);return XR_ERROR_RUNTIME_FAILURE;}
-    s.ready_serial=packet->ready;
+     packet->sequence=++s.sequence;if(!s.options.d11_release_readiness || s.d12())packet->ready=s.ready_serial+1;}
+    if(!s.options.d11_release_readiness || s.d12()) {
+        const auto ready=s.d12()?s.producer_queue12->Signal(s.ready12.Get(),packet->ready):s.context11->Signal(s.ready11.Get(),packet->ready);
+        if(!s.d12())s.context11->Flush();
+        if(FAILED(ready)) {s.fail(XR_ERROR_RUNTIME_FAILURE);return XR_ERROR_RUNTIME_FAILURE;}
+        s.ready_serial=packet->ready;
+    }
     packet->accepted_at=clock_ns();
     {std::scoped_lock lock(s.mutex);++s.pending;reservation.counted=true;}
     if(!s.fifo->accept(packet))return XR_ERROR_SESSION_NOT_RUNNING;
@@ -1015,7 +1021,32 @@ XrResult PrivateOpenXrRuntime::release_image(XrSwapchain handle,const XrSwapchai
     if(!valid(info,XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO))return XR_ERROR_VALIDATION_FAILURE;
     auto& s=*impl_;std::scoped_lock lock(s.mutex);auto it=s.chains.find(handle);if(it==s.chains.end())return XR_ERROR_HANDLE_INVALID;auto& chain=*it->second;
     if(chain.acquired.empty() || !chain.images[chain.acquired.front()].waited)return XR_ERROR_CALL_ORDER_INVALID;
-    auto index=chain.acquired.front();chain.acquired.pop_front();chain.images[index].acquired=false;chain.images[index].waited=false;++chain.images[index].generation;chain.released=index;s.changed.notify_all();return XR_SUCCESS;
+    auto index=chain.acquired.front();
+    if(s.options.d11_release_readiness && !s.d12()) {
+        const auto value=s.ready_serial+1;
+        const auto result=s.context11->Signal(s.ready11.Get(),value);s.context11->Flush();
+        if(FAILED(result))return XR_ERROR_RUNTIME_FAILURE;
+        s.ready_serial=value;chain.images[index].ready11_value=value;
+    }
+    chain.acquired.pop_front();chain.images[index].acquired=false;chain.images[index].waited=false;++chain.images[index].generation;chain.released=index;s.changed.notify_all();return XR_SUCCESS;
+}
+XrResult PrivateOpenXrRuntime::release_completed_image(XrSwapchain handle,
+    const XrSwapchainImageReleaseInfo* info,std::uint32_t index,ID3D11Texture2D* published_image,
+    ID3D12Fence* fence,std::uint64_t value) {
+    if(!valid(info,XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO) || !published_image || !fence || !value)return XR_ERROR_VALIDATION_FAILURE;
+    auto& s=*impl_;std::scoped_lock lock(s.mutex);
+    if(!s.options.d11_release_readiness || s.d12())return XR_ERROR_FUNCTION_UNSUPPORTED;
+    auto it=s.chains.find(handle);if(it==s.chains.end())return XR_ERROR_HANDLE_INVALID;
+    auto& chain=*it->second;
+    if(chain.acquired.empty() || chain.acquired.front()!=index ||
+        !chain.images[index].waited || chain.images[index].d11.Get()!=published_image)return XR_ERROR_CALL_ORDER_INVALID;
+    const auto completed=fence->GetCompletedValue();
+    if(completed==UINT64_MAX)return XR_ERROR_RUNTIME_FAILURE;
+    if(completed<value)return XR_ERROR_CALL_ORDER_INVALID;
+    // Zero is an observed-complete proof, not a pending value to be signalled.
+    chain.images[index].ready11_value=0;chain.acquired.pop_front();
+    chain.images[index].acquired=false;chain.images[index].waited=false;
+    ++chain.images[index].generation;chain.released=index;s.changed.notify_all();return XR_SUCCESS;
 }
 std::optional<std::vector<PrivateOpenXrRuntime::SwapchainMapping>> PrivateOpenXrRuntime::native_swapchain_mapping() const {
     std::unique_lock lock(impl_->mutex,std::try_to_lock);

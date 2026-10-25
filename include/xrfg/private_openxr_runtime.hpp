@@ -97,6 +97,9 @@ public:
         std::function<void(int,std::uint64_t,std::int64_t,std::int64_t)> trace;
         std::function<void(std::int64_t)> accepted_output; // optional native End success, never enqueue
         bool director_enabled{true}; // false: ordered native-runtime paced bypass
+        // Luke D11/SteamVR only. Freeze image readiness at Release, not after
+        // newer game commands at End. Keep three credits but one work-margin P.
+        bool d11_release_readiness{};
     };
     explicit PrivateOpenXrRuntime(Options);
     ~PrivateOpenXrRuntime();
@@ -126,6 +129,11 @@ public:
     XrResult acquire_image(XrSwapchain,const XrSwapchainImageAcquireInfo*,std::uint32_t*);
     XrResult wait_image(XrSwapchain,const XrSwapchainImageWaitInfo*);
     XrResult release_image(XrSwapchain,const XrSwapchainImageReleaseInfo*);
+    // Completion proof for the EXACT acquired output; never a guessed serial.
+    // Caller already CPU-observed this publication's fence. Unproven/foreign
+    // images still go through release_image and its original-context marker.
+    XrResult release_completed_image(XrSwapchain,const XrSwapchainImageReleaseInfo*,
+        std::uint32_t index,ID3D11Texture2D* published_image,ID3D12Fence*,std::uint64_t value);
     [[nodiscard]] bool owns(XrSwapchain) const;
     struct SwapchainMapping { XrSwapchain handle{}, native{}; };
     // CPU-only inventory; busy transport returns no partial snapshot.

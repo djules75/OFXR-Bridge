@@ -60,6 +60,7 @@ struct D3D11PublicationReceipt {
     std::uint64_t copy_complete_value{};
     std::uint32_t current_destination_index{UINT32_MAX};
     std::uint32_t private_current_index{UINT32_MAX};
+    std::uint32_t synthetic_destination_index{UINT32_MAX};
 };
 
 struct D3D11PublicationTargets {
@@ -166,6 +167,8 @@ public:
     // Diagnostic-only retained reference; no wait, copy or GPU submission.
     [[nodiscard]] Microsoft::WRL::ComPtr<ID3D11Texture2D>
         published_current_image(std::uint32_t index) const noexcept;
+    [[nodiscard]] Microsoft::WRL::ComPtr<ID3D11Texture2D>
+        published_image(std::uint32_t index,bool synthetic) const noexcept;
     [[nodiscard]] bool initialized() const noexcept;
 
 private:
