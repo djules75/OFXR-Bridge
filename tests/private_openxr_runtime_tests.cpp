@@ -726,11 +726,10 @@ void nonrenderable_native_clock() {
 void bounded_native_window(bool d12) {
     Fixture f(d12,true,{},true);f.unblock();f.throttled=false;
     auto chain=f.make_chain();std::vector<unsigned> expected;
-    // This runtime returns now+P, so it cannot promise a whole refresh AFTER
-    // a later physical handoff even when its native cycle is still current.
+    // This runtime returns now+P. A current prediction need only cover the
+    // actual display edge, not another complete refresh after the handoff.
     for(unsigned n=0;n<6;++n){const auto color=50+n*9;f.write(chain,color);expected.push_back(color);f.begin_virtual();xr_ok(f.submit(chain,float(n)),"short-but-current native window input");}
     f.wait_count(6);xr_ok(f.transport->drain(),"bounded native-window drain");f.transport->stop();
-    check(!f.window_renewals.empty(),"a physical handoff needs one preventive attempt when the native window is short");
     for(auto [seq,count]:f.window_renewals)check(count==1,"preventive renewal is bounded to one attempt for each source packet");
     check(std::any_of(f.native_windows.begin(),f.native_windows.end(),[](auto window){return window>0 && window<period;}),"a runtime unable to extend its future window must still make progress");
     check(f.pixels==expected && f.real_ends==6,"preventive renewal preserves all exact FIFO images without extra content Ends");
@@ -740,7 +739,9 @@ void bounded_native_window(bool d12) {
 void quiet_native_clock(bool d12) {
     Fixture f(d12,true,{},true,false);f.unblock();f.throttled=false;
     auto chain=f.make_chain();std::vector<unsigned> expected;
-    for(unsigned n=0;n<6;++n){const auto color=60+n*7;f.write(chain,color);expected.push_back(color);f.begin_virtual();xr_ok(f.submit(chain,float(n)),"logging-off native input");}
+    for(unsigned n=0;n<6;++n){
+        if(n==2){f.wait_count(2);std::this_thread::sleep_for(65ms);f.stale_next_clock=true;}
+        const auto color=60+n*7;f.write(chain,color);expected.push_back(color);f.begin_virtual();xr_ok(f.submit(chain,float(n)),"logging-off native input");}
     f.wait_count(6);xr_ok(f.transport->drain(),"logging-off native drain");f.transport->stop();
     check(f.discarded_clocks>0,"native clock renewal must remain active without diagnostic callbacks");
     check(f.window_renewals.empty(),"disabled diagnostic logging must not emit preventive-window traces");

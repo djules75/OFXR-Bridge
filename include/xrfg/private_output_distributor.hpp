@@ -124,6 +124,13 @@ public:
     // Reapply this constant to each RAW clock sample, never to the period or
     // an already shifted deadline: the lead cannot accumulate across frames.
     static constexpr std::int64_t handoff_lead=1'000'000;
+    // End enters before this slot's physical vsync. A prediction covering
+    // that display edge is current; requiring another complete period here
+    // discards an otherwise valid native cycle and can stall Begin by 1P.
+    [[nodiscard]] static bool prediction_covers_display(
+        std::int64_t prediction,std::int64_t handoff) noexcept {
+        return prediction>handoff+handoff_lead+PrivateOutputSchedule::preparation_lead;
+    }
     bool clock(PrivatePhysicalClock value) noexcept {
         if(value.at<=handoff_lead || !value.counter || value.period<2'000'000 || value.period>50'000'000)return false;
         if(valid_ && value.counter<clock_.counter)return true; // retain the newer observation

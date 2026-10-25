@@ -618,16 +618,19 @@ struct PrivateOpenXrRuntime::Impl {
                         const auto target=std::max(clock_ns(),deadline);
                         bool window_renewal{};
                         if(*at>target+PrivateOutputSchedule::preparation_lead) {
-                            // A merely future prediction can still name the refresh
-                            // already closing at this handoff. With a physical clock,
-                            // request coverage through the following refresh once.
+                            // Cover the physical display edge targeted by this
+                            // early handoff, not a whole extra refresh after it.
+                            // Renewing a valid 9ms horizon at90Hz needlessly
+                            // discards its Begin and can consume an entire slot.
                             // Some runtimes cannot extend that horizon on demand:
                             // accept a still-current replacement instead of spinning.
-                            if(!slots.valid() || *at>target+physical || renewed_window)break;
+                            if(!slots.valid() ||
+                                PrivatePhysicalSchedule::prediction_covers_display(*at,target) || renewed_window)break;
                             renewed_window=window_renewal=true;
                         }
                         if(diagnostic)options.trace(window_renewal?25:23,packet->sequence,*at,
-                            window_renewal?target+physical:deadline);
+                            window_renewal?target+PrivatePhysicalSchedule::handoff_lead+
+                                PrivateOutputSchedule::preparation_lead:deadline);
                         if(renewed && renewed%8==0 && !sleep_until(clock_ns()+physical,1'250'000))break;
                         if(!post_wait(0,false)){result=XR_ERROR_CALL_ORDER_INVALID;break;}
                         auto fresh=take_wait();

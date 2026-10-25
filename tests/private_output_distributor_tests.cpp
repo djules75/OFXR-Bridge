@@ -32,6 +32,16 @@ int main(){try {
     require(margin.runtime_ready(40*ms,2*ms)==0 && margin.deadline()==43*ms,"retained native margin unnecessarily grew on early input");
     require(margin.delivered(43*ms) && margin.delay()==1*ms,"native margin was lost on the following cycle");
     xrfg::PrivatePhysicalSchedule grid;
+    // Captured V650 Horizon margins: 128 physical gaps all followed a
+    // preventive renewal although the native prediction covered the display.
+    // Keep the exact early-handoff phase and reject an actually short window.
+    for(const auto headroom:{9'226'011LL,9'249'954LL,9'260'488LL})
+        require(xrfg::PrivatePhysicalSchedule::prediction_covers_display(
+            100*ms+headroom,100*ms),"valid captured native window needlessly renewed");
+    require(!xrfg::PrivatePhysicalSchedule::prediction_covers_display(100*ms,100*ms),"expired native cycle accepted");
+    require(!xrfg::PrivatePhysicalSchedule::prediction_covers_display(101*ms,100*ms),"prediction before guarded display edge accepted");
+    require(!xrfg::PrivatePhysicalSchedule::prediction_covers_display(101'100'000,100*ms),"display boundary guard lost");
+    require(xrfg::PrivatePhysicalSchedule::prediction_covers_display(101'100'001,100*ms),"usable display edge rejected");
     require(grid.clock({20*ms,11*ms,100}),"physical anchor rejected");
     require(grid.observe_work(3*ms,3)==3*ms && grid.delay()==3*ms,"private latency is not applied as packet eligibility");
     require(grid.claim(24*ms,27*ms,25*ms,27*ms,1*ms)==30*ms && grid.slot()==101,"first physical slot not anchored to headset");

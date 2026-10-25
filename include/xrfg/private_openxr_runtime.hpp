@@ -86,8 +86,8 @@ public:
         // handoff QPC. Stage24: final raw prediction QPC and renewed-cycle count.
         // Renewals keep the same owned packet; only the old native Begin is
         // discarded through OpenXR's XR_FRAME_DISCARDED transition, without End.
-        // V594 stage25: one preventive native-window renewal, raw prediction QPC
-        // and requested handoff+physical-period coverage. This is bounded to one
+        // Stage25: one preventive native-window renewal, raw prediction QPC
+        // and required display-edge+guard coverage (V651). This is bounded to one
         // attempt per packet, separate from expired-cycle recovery. A still-current
         // replacement may retain a shorter horizon; never spin for that preference.
         // Stage27: allocation-only publication mapping; source handle in a,
