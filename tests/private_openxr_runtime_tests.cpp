@@ -830,18 +830,18 @@ void native_delivery_receipts(bool d12) {
     const auto started=ns();auto cycle=std::make_shared<xrfg::InterfaceCycle>(started);
     auto generated=std::make_shared<xrfg::InterfaceDeliveryReceipt>(true);generated->synthetic_confirmed=true;
     auto real=std::make_shared<xrfg::InterfaceDeliveryReceipt>(false);
-    cycle->attach_native_delivery(generated);cycle->attach_native_delivery(real);
+    cycle->synthetic_accepted(started,period);cycle->attach_native_delivery(generated);cycle->attach_native_delivery(real);
     f.begin_virtual();xr_ok(f.submit(chain,1,XR_NULL_HANDLE,generated),"observed synthetic accepted virtually");f.wait_entered();
     f.begin_virtual();xr_ok(f.submit(chain,2,XR_NULL_HANDLE,real),"observed real accepted while native End remains held");
     const auto producer_returned=ns();cycle->producer_returned(producer_returned);
     float cpu{},length{},estimated{};
-    check(!cycle->read(producer_returned,cpu,length) && !cycle->read_runtime_cycle(producer_returned,estimated),"real GPU endpoint never publishes virtual success as native timing");
+    check(!cycle->read(producer_returned,cpu,length) && !cycle->read_minimum_cycle(producer_returned,estimated),"real GPU endpoint never publishes virtual success as native timing");
     std::this_thread::sleep_for(30ms); // deliberate native delay; not a throughput assertion
     f.unblock();f.wait_count(2);xr_ok(f.transport->drain(),"native observed drain");
     check(generated->outcome.load()==1 && real->outcome.load()==1,"both native outcomes published after success");
     check(real->entered_ns>producer_returned && real->returned_ns>=real->entered_ns,"real receipt includes downstream queue wait after producer return");
     check(cycle->read(producer_returned,cpu,length) && length>=30,"measured complete cycle contains deliberate native hold");
-    check(cycle->read_runtime_cycle(producer_returned,estimated) && estimated<=length+.001F && estimated>=30,"actual native End completion drives runtime cycle");
+    check(cycle->read_minimum_cycle(producer_returned,estimated) && estimated<=length+.001F && estimated>=30,"actual native End completion drives runtime cycle");
     check(f.pixels==std::vector<unsigned>({88,88}) && f.chains.size()==1,"measurement leaves delivery pixels, count and resource ownership unchanged");
     xr_ok(f.transport->destroy_swapchain(chain),"observed chain cleanup");
     std::printf("%s native receipt: virtual return before physical delivery, held-End delay %.3fms, actual runtime completed cycle %.3fms PASS\n",d12?"D3D12":"D3D11",length,estimated);

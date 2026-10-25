@@ -336,7 +336,7 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
         {value(m.display_hz,current&&m.display_hz>0,true),"Display Hz",PanelTone::dim},
         {value(m.ofxr_time_ms,current&&m.ofxr_time_valid,false),"OFXR time",metric_tone(m.ofxr_time_valid)},
         {value(m.cycle_length_ms,current&&m.cycle_valid,false),"Cycle length",metric_tone(m.cycle_valid)},
-        {value(m.cycle_estimated_ms,current&&m.cycle_estimated_valid,false),"Cycle to runtime",metric_tone(m.cycle_estimated_valid)}};
+        {value(m.cycle_estimated_ms,current&&m.cycle_estimated_valid,false),"Cycle minimum",metric_tone(m.cycle_estimated_valid)}};
     const std::string vectors=std::string(autonomous::interface_vectors_text(state,now_ms));
     const std::string explanation=autonomous::interface_status_text(state);
     const auto vector_rows=wrap(vectors,51), status_rows=wrap(explanation,51);

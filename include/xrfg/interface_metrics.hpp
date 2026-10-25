@@ -40,7 +40,7 @@ class InterfaceCycle {
     std::size_t count_{};
     bool valid_{true};
     std::int64_t producer_returned_{},production_started_{};
-    struct SyntheticReceipt { std::int64_t accepted{}, period{}; };
+    struct SyntheticReceipt { std::int64_t accepted{}, period{}, entered{}; };
     std::array<SyntheticReceipt,4> synthetic_{};
     std::size_t synthetic_count_{};
     bool estimate_valid_{true};
@@ -103,28 +103,57 @@ public:
     }
     // Observation only: no sleep, queue operation or GPU synchronization.
     // Pending native results can confirm receipts later and out of order.
-    void synthetic_accepted(std::int64_t at, std::int64_t period) noexcept {
+    void synthetic_accepted(std::int64_t at, std::int64_t period,std::int64_t entered=0) noexcept {
         std::scoped_lock lock(mutex_);
-        if (at<started_ns || period<2'000'000 || period>50'000'000) return;
+        if (at<started_ns || period<2'000'000 || period>50'000'000 || entered>at ||
+            (entered>0 && entered<started_ns)) {estimate_valid_=false;return;}
         for(std::size_t i=0;i<synthetic_count_;++i) if(synthetic_[i].accepted==at)return;
         if(synthetic_count_==synthetic_.size()) {estimate_valid_=false;return;}
-        synthetic_[synthetic_count_++]={at,period};
+        synthetic_[synthetic_count_++]={at,period,entered>0?entered:at};
         std::sort(synthetic_.begin(),synthetic_.begin()+synthetic_count_,
             [](const auto& a,const auto& b){return a.accepted<b.accepted;});
     }
-    // Observed completion of this real frame's actual runtime xrEndFrame.
-    // Never substitute private virtual acceptance, a display prediction,
-    // synthetic-slot constants or an unrelated later producer return.
-    bool read_runtime_cycle(std::int64_t accepted_ns, float& runtime_ms) const noexcept {
+    // Minimum compatible with showing each confirmed synthetic before this real
+    // on distinct refreshes. Preserve actual runtime completion; add only an
+    // uncovered sequence floor, never a predicted display horizon or tail.
+    // This assumes those outputs are shown, not proof of compositor scanout.
+    bool read_minimum_cycle(std::int64_t accepted_ns, float& runtime_ms) const noexcept {
         std::scoped_lock lock(mutex_);
         if(!valid_ || started_ns<=0)return false;
         auto returned=accepted_ns;
+        std::array<std::int64_t,4> synthetic_entries{};std::size_t outputs{};
         if(native_required_) {
             InterfaceNativeTiming real;
             if(!native_real(real))return false;
             returned=real.returned_ns;
+            for(std::size_t i=0;i<native_count_;++i) {
+                const auto& r=native_[i];
+                if(!r->synthetic || r->outcome.load(std::memory_order_acquire)!=1 ||
+                    !r->synthetic_confirmed.load(std::memory_order_acquire))continue;
+                if(r->entered_ns<started_ns || r->entered_ns>=real.entered_ns ||
+                    outputs==synthetic_entries.size())return false;
+                synthetic_entries[outputs++]=r->entered_ns;
+            }
+        } else {
+            outputs=synthetic_count_;
+            for(std::size_t i=0;i<outputs;++i) {
+                if(synthetic_[i].accepted>returned)return false;
+                synthetic_entries[i]=synthetic_[i].entered;
+            }
         }
         if(returned<started_ns)return false;
+        if(!estimate_valid_)return false;
+        if(outputs) {
+            if(!synthetic_count_)return false; // no observed physical period
+            const auto period=synthetic_[0].period;
+            for(std::size_t i=1;i<synthetic_count_;++i)if(synthetic_[i].period!=period)return false;
+            std::sort(synthetic_entries.begin(),synthetic_entries.begin()+outputs);
+            // Use submission ENTRY, not return: a runtime may block End until
+            // after that image was already shown. Don't round late inputs onto
+            // a fabricated phase grid; each remaining output only supplies P.
+            for(std::size_t i=0;i<outputs;++i)
+                returned=std::max(returned,synthetic_entries[i]+static_cast<std::int64_t>(outputs-i)*period);
+        }
         runtime_ms=float(returned-started_ns)*1e-6F;
         return std::isfinite(runtime_ms);
     }
@@ -207,7 +236,7 @@ struct InterfaceFrameStamp {
     // Exact source identity, independent of XR calls/slots; zero is unknown.
     std::uint64_t scene_owner{},scene_serial{};
 };
-enum class InterfaceSource : std::uint32_t { none, steamvr_pre_submit_gpu, real_frame_qpc, predicted_display_qpc, application_cpu_qpc, steamvr_display, openxr_period, accepted_submissions, steamvr_delivery, producer_call_qpc, frame_cycle_qpc, frame_cycle_slot_estimate, steamvr_scene_delivery, accepted_scene_submissions, native_frame_cycle_qpc, native_predicted_display_qpc, runtime_accepted_delivery, runtime_return_cycle_qpc, native_runtime_return_cycle_qpc };
+enum class InterfaceSource : std::uint32_t { none, steamvr_pre_submit_gpu, real_frame_qpc, predicted_display_qpc, application_cpu_qpc, steamvr_display, openxr_period, accepted_submissions, steamvr_delivery, producer_call_qpc, frame_cycle_qpc, frame_cycle_slot_estimate, steamvr_scene_delivery, accepted_scene_submissions, native_frame_cycle_qpc, native_predicted_display_qpc, runtime_accepted_delivery, runtime_return_cycle_qpc, native_runtime_return_cycle_qpc, minimum_cycle_qpc, native_minimum_cycle_qpc };
 struct InterfaceTelemetry {
     std::uint64_t updated_ms{};
     float output_fps{}, game_fps{}, generated_fps{}, display_hz{};
@@ -274,10 +303,10 @@ public:
             if (s.cpu_valid) cpu[nc++] = s.cpu;
             if(s.cycle && s.cycle->read(s.accepted_ns,ofxr[nt],cycle[nt])){++nt;native_cycle|=delivered;}
             float raw_estimate{};
-            if(s.cycle && s.cycle->read_runtime_cycle(s.accepted_ns,raw_estimate)) {
-                // V655 shared OSD/CSV interval: Wait entry -> successful actual
-                // runtime End return. Legacy telemetry field names are retained
-                // for layout only; no predicted display horizon is included.
+            if(s.cycle && s.cycle->read_minimum_cycle(s.accepted_ns,raw_estimate)) {
+                // V656: actual runtime return, bounded below by the refresh
+                // spacing of confirmed synthetic(s) then real. No display
+                // prediction or later producer return is substituted.
                 estimated[ne++]=raw_estimate;native_estimate|=delivered;
                 float unused_game{};
                 if(s.cycle->stages(s.source_entered_ns,s.accepted_ns,raw_estimate,
@@ -301,8 +330,8 @@ public:
         out.cycle_source=nt?(native_cycle?InterfaceSource::native_frame_cycle_qpc:InterfaceSource::frame_cycle_qpc):InterfaceSource::none;
         out.cycle_estimated_valid=ne!=0;
         if(ne)out.cycle_estimated_ms=median(estimated,ne);
-        out.cycle_estimated_source=ne?(native_estimate?InterfaceSource::native_runtime_return_cycle_qpc:
-            InterfaceSource::runtime_return_cycle_qpc):InterfaceSource::none;
+        out.cycle_estimated_source=ne?(native_estimate?InterfaceSource::native_minimum_cycle_qpc:
+            InterfaceSource::minimum_cycle_qpc):InterfaceSource::none;
         out.stages_valid=ns!=0;
         out.game_time_valid=ng!=0;if(ng)out.game_time_ms=median(game_stage,ng);
         if(ns) {out.generation_time_ms=median(generation_stage,ns);

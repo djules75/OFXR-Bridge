@@ -78,7 +78,7 @@ Some external FPS counters measure application frames before OFXR-BRIDGE. During
 
 The bridge distinguishes real frames, generated frames and output delivery. Producing a frame does not guarantee that it is delivered as a distinct output frame. The output meter measures delivery as observed by the bridge/runtime path; it is not a direct measurement of the headset panel's scanout.
 
-**OFXR time** measures intercepted-call CPU wall time. **Cycle length** includes the same frame's runtime completion and any later producer return. **Cycle to runtime** measures from the application's WaitFrame entry through successful return of that real frame's actual runtime EndFrame. It includes blocking inside that call, but excludes future display predictions and work performed after its return, such as subsequent encoding. These are not complete input-to-photon or panel-scanout measurements.
+**OFXR time** measures intercepted-call CPU wall time. **Cycle length** includes the same frame's runtime completion and any later producer return. **Cycle minimum** uses the observed real runtime EndFrame completion, bounded below by one physical refresh per confirmed generated output before that real. Already-spaced delivery is not charged twice. This assumes the outputs are displayed distinctly; it is not confirmation that the compositor displayed them. The cycle starts at the application's WaitFrame entry and excludes future runtime display predictions and later producer returns. These are not complete input-to-photon or panel-scanout measurements.
 
 ## Luke Ross
 
@@ -183,7 +183,7 @@ Enable **Enable benchmarks** in the tray to make the benchmark controls availabl
 
 - Each test lasts **10 seconds**. The first **3 seconds** are excluded for settling; the remaining samples are used.
 - Diagnostic logging is not required. Benchmark CSV output is automatic.
-- Results include FPS and Cycle to runtime statistics. VRAM use is sampled near the end of each test.
+- Results include FPS and Cycle minimum statistics. VRAM use is sampled near the end of each test.
 - Results are saved under **`%LOCALAPPDATA%\ofxr-bridge\Benchmarks`**. Use **Open benchmark folder** to open it.
 - Luke Ross tests compare AFW 1x1, 2x2 and 4x4, including AFW alone. They do not test Fast mode or 3X.
 - The full SteamVR suite takes about six minutes. VDXR suites are shorter.
@@ -193,7 +193,7 @@ Benchmarks change the parameters covered by the selected suite. Other quality se
 
 ### Example configurations
 
-Test system: Intel 265K and RTX 4090. Quest 3 uses VDXR; its measured FPS are capped at 90 to simulate a 90 Hz headset, while latency values are kept as measured. MeganeX uses SteamVR at 90 Hz. The historical table below retains Cycle (estimated), in milliseconds, including the runtime's predicted display horizon. It is not directly comparable with the observed Cycle to runtime metric introduced in v655.
+Test system: Intel 265K and RTX 4090. Quest 3 uses VDXR; its measured FPS are capped at 90 to simulate a 90 Hz headset, while latency values are kept as measured. MeganeX uses SteamVR at 90 Hz. The historical table below retains Cycle (estimated), in milliseconds, including the runtime's predicted display horizon. It is not directly comparable with the Cycle minimum metric introduced in v656.
 
 | Game | Quest 3 — Godlike - VDXR - top 2, 90 Hz | MeganeX — 3700x3400 - sboys3 - steamvr - top 3, 90 Hz |
 | --- | --- | --- |

@@ -79,6 +79,7 @@ struct OpenXrFpsOverlay::Impl {
         std::int64_t accepted_qpc{}, period{};
         SceneIdentity scene;
         std::shared_ptr<InterfaceDeliveryReceipt> delivery;
+        std::int64_t entered_qpc{};
     };
     std::vector<PendingNativeCount> pending_native_counts;
     void poll_native_counts(std::int64_t now) noexcept {
@@ -89,7 +90,7 @@ struct OpenXrFpsOverlay::Impl {
             if(!pending && classify_native_frame_content(i->results,i->output,true,true).synthetic) {
                 counter.submitted(i->submitted_ns,true,true);
                 if(luke_scene_measurement)accepted_scenes.accepted(i->submitted_ns,i->scene);
-                if(i->cycle)i->cycle->synthetic_accepted(i->accepted_qpc,i->period);
+                if(i->cycle)i->cycle->synthetic_accepted(i->accepted_qpc,i->period,i->entered_qpc);
                 if(i->delivery)i->delivery->synthetic_confirmed.store(true,std::memory_order_release);
             }
             i=pending_native_counts.erase(i);
@@ -1178,7 +1179,7 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
             impl_->accepted_scenes.accepted(now,scene);
         impl_->counter.submitted(now,metrics.synthetic,metrics.new_content);
         if(measure && stamp.cycle && metrics.synthetic)
-            stamp.cycle->synthetic_accepted(accepted_clock,impl_->estimate_period());
+            stamp.cycle->synthetic_accepted(accepted_clock,impl_->estimate_period(),submit_clock);
         if(delivery && metrics.synthetic)delivery->synthetic_confirmed.store(true,std::memory_order_release);
         if(synthetic && new_content && !metrics.synthetic) {
             bool pending=false;
@@ -1186,7 +1187,7 @@ XrResult OpenXrFpsOverlay::end_frame(const XrFrameEndInfo* info, bool synthetic,
             if(pending && impl_->pending_native_counts.size()<64)
                 impl_->pending_native_counts.push_back({{native_results.begin(),native_results.end()},now,native_output,
                     measure ? stamp.cycle : nullptr,accepted_clock,impl_->estimate_period(),
-                    {stamp.scene_owner,stamp.scene_serial,native_output+1},delivery});
+                    {stamp.scene_owner,stamp.scene_serial,native_output+1},delivery,submit_clock});
         }
     }
     return result;

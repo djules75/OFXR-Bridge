@@ -116,7 +116,8 @@ def summarize(segment, settle, minimum, metric):
                 real_min=min(real), real_max=max(real), generated_min=min(generated), generated_max=max(generated),
                 cycle_min=min(cycles) if cycles else None, cycle_median=statistics.median(cycles) if cycles else None, cycle_max=max(cycles) if cycles else None,
                 metric=metric, metric_definition=('producer-inclusive cycle length' if metric=='length' else
-                    'observed native OpenXR End return (655+)' if (segment.get('version') or 0)>=655 else
+                    'minimum confirmed-output refresh sequence (656+)' if (segment.get('version') or 0)>=656 else
+                    'observed native OpenXR End return (655)' if (segment.get('version') or 0)==655 else
                     'predicted display estimate (pre-655)'),
                 sample_count=len(rates), start_s=lo / 1000, end_s=hi / 1000,
                 output_sources=sorted(set(x['source'] for x in rates)), file=segment['file'], version=segment['version'],
@@ -194,7 +195,7 @@ def main():
         raise SystemExit('No complete benchmark intervals. V529+ compact logs are required; no row fabricated.')
     a.out.mkdir(parents=True, exist_ok=True)
     report = dict(game=a.game, platform=a.platform, metric=a.metric, sync_mode=a.sync_mode, hags=a.hags,
-                  method='V558+: exclude first 3s only, retain samples until next command, >=5s useful; legacy builds retain first/last3s and >=10s. The legacy --metric estimated log slot means observed native End return from655, predicted display before655; each measurement records metric_definition. Ranges rounded for sheet. S for Meganex; R remains a separate run without OFXR loaded.',
+                  method='V558+: exclude first 3s only, retain samples until next command, >=5s useful; legacy builds retain first/last3s and >=10s. The legacy --metric estimated log slot means minimum refresh-sequence cycle from656, observed End return in655, predicted display before655; each measurement records metric_definition. Ranges rounded for sheet. S for Meganex; R remains a separate run without OFXR loaded.',
                   files=[dict(path=str(x), sha256=hashlib.sha256(x.read_bytes()).hexdigest()) for x in paths], rows=rows)
     (a.out / 'benchmark-results.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
     # Portable named measurements, independent of destination cell addresses.
