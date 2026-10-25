@@ -31,7 +31,7 @@ inline std::vector<BenchmarkStep> legacy_benchmark_plan(bool full,bool luke=fals
                 std::string(name)+(luke?" 00":fast?" Fast":" Normal")};
             s.pacing=0;if(luke){s.afw=3;s.shading=quality;}steps.push_back(std::move(s));
         };
-        for(auto [name,backend]:{std::pair{"Fidelity",0},std::pair{"0.2.1",1},std::pair{"Djules 2X",3}}) {
+        for(auto [name,backend]:{std::pair{"0.2.1",1},std::pair{"Djules 2X",3}}) {
             route(name,0,backend,false,false);
             if(!luke)route(name,0,backend,false,true);
         }
@@ -71,12 +71,23 @@ inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false,bool 
         if(!advanced)off.buffer=0; // one reference, never repeat it for buffer/fast/pacing
         if(luke) {off.afw=3;off.shading=quality;}
         steps.push_back(std::move(off));
-        route("Fidelity",0,0,false,quality);route("0.2.1",0,1,false,quality);
+        route("0.2.1",0,1,false,quality);
         route("Djules 2X",0,3,false,quality);
         if(!luke)route("Djules 3X",0,3,true,quality);
         route("0.3.0",0,2,false,quality);
         if(full && !luke) {route("Hybrid",3,0,false,quality);route("FSR",1,0,false,quality);route("DLSS-G",2,0,false,quality);}
     }
+    return steps;
+}
+inline bool benchmark_afw_quality_allowed(int shading,std::uint32_t eye_long_side) {
+    return shading==0 || (shading==4 && eye_long_side>=3000) || (shading==8 && eye_long_side>=4000);
+}
+inline std::vector<BenchmarkStep> benchmark_execution_plan(bool full,bool luke,bool steamvr,bool advanced,
+    std::uint32_t eye_long_side) {
+    auto steps=benchmark_plan(full,luke,steamvr,advanced);
+    if(luke)std::erase_if(steps,[&](const auto& step) {
+        return !benchmark_afw_quality_allowed(step.shading,eye_long_side);
+    });
     return steps;
 }
 inline std::vector<BenchmarkStep> benchmark_export_plan(bool full,bool luke,bool steamvr,bool advanced=false) {
@@ -157,7 +168,7 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
     std::vector<std::size_t> pool;
     for(std::size_t i=0;i<scores.size();++i) {
         const auto& s=scores[i];if(!s.valid)continue;
-        if(luke && ((s.shading==8 && s.eye_long_side<4000) || (s.shading==4 && s.eye_long_side<3000)))continue;
+        if(luke && !benchmark_afw_quality_allowed(s.shading,s.eye_long_side))continue;
         pool.push_back(i);
     }
     // 3X is a last resort, not a competitor to a sufficiently useful 2X/Off
@@ -214,6 +225,19 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
         if(!best || order(score)<order(scores[*best]))best=i;
     }
     return best;
+}
+// Skip only after a completed, measured 2X trial of one of the two early OFXR routes.
+inline bool benchmark_2x_sufficient(const Settings& settings,const BenchmarkScore& score) {
+    return score.valid && settings.enabled && settings.frame_generation==0 &&
+        (settings.backend==1 || settings.backend==3) && !settings.triple_frame_gen &&
+        score.display_hz>0 && score.fps+1e-3>=score.display_hz*.66;
+}
+inline bool benchmark_luke_early_complete(const std::vector<BenchmarkScore>& scores) {
+    const auto winner=benchmark_best(scores,true);
+    if(!winner)return false;
+    const auto& score=scores[*winner];
+    return score.display_hz>0 && (score.afw_only ? score.fps+1e-3>=score.display_hz*.8 :
+        score.fps+1e-3>=score.display_hz-1.0);
 }
 // UI commands; the tray/desktop timer drives the suite while menus are hidden.
 bool start_benchmark(bool full,bool luke=false) noexcept;

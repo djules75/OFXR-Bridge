@@ -80,7 +80,7 @@ struct Settings {
     float menu_offset_y{};
     std::array<GenerationPreferences, kGenerationProfileCount> generation_profiles{};
     bool profiles_initialized{}; // legacy flat profile migration
-    bool luke_shared_swapchains{}; // startup-only, compatible final native outputs; SteamVR
+    bool luke_shared_swapchains{true}; // INI-only startup policy: share compatible final native outputs
     bool operator==(const Settings&) const = default;
 };
 

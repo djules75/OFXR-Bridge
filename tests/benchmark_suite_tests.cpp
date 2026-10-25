@@ -131,8 +131,8 @@ void automatic_choice_controller() {
         check(request(saved),"save auto-pick game preference");saved=snapshot().desired;
         runtime.vdxr_runtime=!modern;runtime.steamvr_runtime=modern;runtime.vdxr_legacy=!modern;runtime.luke_detected=luke;
         runtime.pacing_mode=modern?1:0;runtime.applied_revision=snapshot().revision;report_test_runtime(runtime);
-        runtime.eye_long_side=scenario==4?2800:4100;
-        const auto plan=benchmark_plan(full,luke,modern,false);auto winner=plan.size()-1;
+        runtime.eye_long_side=scenario==4?2800:4100;report_test_runtime(runtime);
+        const auto plan=benchmark_execution_plan(full,luke,modern,false,runtime.eye_long_side);auto winner=plan.size()-1;
         if(scenario==4 || scenario==6) {
             winner=0;while(winner<plan.size() && (plan[winner].disabled || plan[winner].backend!=2 || plan[winner].shading!=0 || plan[winner].pacing!=1))++winner;
             check(winner<plan.size(),"full-quality OFXR candidate exists");
@@ -145,7 +145,7 @@ void automatic_choice_controller() {
             if(scenario==9)winner=plan.size()-1; // the eligible non-3X route must win
         }
         check(start_benchmark(full,luke) && snapshot().benchmark.auto_pick,"freeze auto-pick at suite start");
-        for(std::size_t i=0;i<plan.size();++i) {
+        for(std::size_t i=0;i<plan.size() && benchmark_active(snapshot().benchmark);++i) {
             // Telemetry is timestamped by the real reporter. Start this trial's
             // simulated clock in the past, then sample that public interface.
             const auto clock=GetTickCount64()-4000;
@@ -168,7 +168,7 @@ void automatic_choice_controller() {
                 t.generating=current.desired.enabled && i!=1;
                 t.output_fps=(i==1 || fidelity?120.F:i==0?70.F:i==winner?89.5F:90.F)+(float(sample)-1)*.5F;
                 t.cycle_estimated_valid=true;t.cycle_estimated_ms=(i==1 || fidelity?1.F:i==winner?40.F:60.F)+float(sample);
-                t.display_hz=120;
+                t.display_hz=(!luke && scenario<8)?180.F:120.F;
                 if(scenario==4 && current.desired.afw_shading_rate!=0)t.output_fps=120+float(sample)-1;
                 if(scenario==5)t.output_fps=(i==winner?96.F:current.desired.enabled?120.F:70.F)+(float(sample)-1)*.5F;
                 if(scenario==6) {
@@ -230,10 +230,10 @@ int main() {
         automatic_choice_rules();
         quality_choice_rules();
         const auto optical=benchmark_plan(false,false,true,true),full=benchmark_plan(true,false,true,true);
-        check(optical.size()==31 && full.size()==49,"SteamVR: three pacing modes, Normal/Fast, one Off reference");
+        check(optical.size()==25 && full.size()==43,"SteamVR: three pacing modes, Normal/Fast, one Off reference");
         for(const bool luke:{false,true}) for(const bool complete:{false,true}) {
             const auto legacy=benchmark_plan(complete,luke,false);
-            check(legacy.size()==(luke ? 15 : complete ? 17 : 11),"Legacy VDXR fits the dedicated spreadsheet columns");
+            check(legacy.size()==(luke ? 12 : complete ? 15 : 9),"Legacy VDXR fits the dedicated spreadsheet columns");
             std::set<std::tuple<bool,int,int,bool,int,int>> unique;
             for(const auto& step:legacy) {
                 Settings original;original.pacing_mode=2;
@@ -255,7 +255,7 @@ int main() {
         }
         for(const bool complete:{false,true})for(const bool luke:{false,true}) {
             const auto basic=benchmark_plan(complete,luke,true,false);
-            check(basic.size()==(luke?51:complete?65:41),"basic mode covers both buffer budgets and omits combined pacing");
+            check(basic.size()==(luke?39:complete?57:33),"basic mode covers both buffer budgets and omits combined pacing");
             check(std::none_of(basic.begin(),basic.end(),[](const auto& step){return step.pacing==2;}),"basic plan never selects hidden combined pacing");
             const auto exported=benchmark_export_plan(complete,luke,true,false);
             check(exported.size()==basic.size(),"reduced CSV has only actually tested columns");
@@ -265,7 +265,7 @@ int main() {
         RuntimeStatus vdxr{};vdxr.vdxr_runtime=true;
         check(!pacing_comparison_runtime(vdxr),"Legacy VDXR keeps its short suite");
         vdxr.vdxr_legacy=false;
-        check(pacing_comparison_runtime(vdxr) && benchmark_plan(true,false,pacing_comparison_runtime(vdxr),true).size()==49,
+        check(pacing_comparison_runtime(vdxr) && benchmark_plan(true,false,pacing_comparison_runtime(vdxr),true).size()==43,
             "VDXR opt-in uses all three pacing modes without a false SteamVR identity");
         std::set<std::tuple<bool,int,int,bool,int,int,int>> identities;
         std::set<std::string> names;
@@ -381,7 +381,7 @@ int main() {
         check(snapshot().benchmark.phase==BenchmarkPhase::stopped && !snapshot().desired.nr_enabled,"Manual changes cancel automation and are kept");
         runtime.applied_revision=snapshot().revision;report_test_runtime(runtime);check(start_benchmark(false),"Restart optical suite");stop_benchmark();tick_benchmark();
         check(snapshot().benchmark.phase==BenchmarkPhase::stopped,"Explicit Stop");
-        const auto luke=benchmark_plan(false,true,true,true);check(luke.size()==39,"Luke: AFW-only three qualities plus four routes times three pacing times three qualities");
+        const auto luke=benchmark_plan(false,true,true,true);check(luke.size()==30,"Luke: AFW-only three qualities plus four routes times three pacing times three qualities");
         identities.clear();
         for(const auto& step:luke) {
             check(!step.triple && !step.prefer,"Luke omits unsupported 3X and Prefer FPS");
@@ -395,7 +395,7 @@ int main() {
             if(step.disabled && step.afw==3)++afw_only;
         }
         check(afw_only==3,"AFW-only Full/Half/Quarter trials");
-        runtime.luke_detected=true;runtime.applied_revision=snapshot().revision;report_test_runtime(runtime);
+        runtime.luke_detected=true;runtime.eye_long_side=4100;runtime.applied_revision=snapshot().revision;report_test_runtime(runtime);
         check(start_benchmark(false,true),"Start Luke suite");clock=snapshot().benchmark.requested_ms+500;
         for(std::size_t i=0;i<luke.size();++i) {
             state=snapshot();runtime.applied_revision=state.revision;
@@ -408,7 +408,7 @@ int main() {
         state=snapshot();check(state.benchmark.phase==BenchmarkPhase::complete,"Luke completes");
         std::cout<<"LUKE_CSV="<<std::filesystem::u8path(state.benchmark.csv_path).string()<<'\n';
         std::ifstream layout(std::filesystem::u8path(state.benchmark.csv_path));std::string header;std::getline(layout,header);
-        const auto blank=header.find("Fidelity Framework / blank"),one=header.find("Fidelity Framework / 1x1"),two=header.find("Fidelity Framework / 2x2"),four=header.find("Fidelity Framework / 4x4");
+        const auto blank=header.find("0.2.1 Framework / blank"),one=header.find("0.2.1 Framework / 1x1"),two=header.find("0.2.1 Framework / 2x2"),four=header.find("0.2.1 Framework / 4x4");
         check(blank==std::string::npos && one<two && two<four && four!=std::string::npos,"Luke CSV groups only1x1/2x2/4x4; no disabled AFW tests");
         runtime.applied_revision=snapshot().revision;report_test_runtime(runtime);
         check(start_benchmark(false),"start trial before disabling flag");
@@ -467,14 +467,14 @@ int main() {
         }
         runtime.steamvr_runtime=false;runtime.vdxr_runtime=true;runtime.vdxr_legacy=true;runtime.luke_detected=false;
         runtime.applied_revision=snapshot().revision;report_test_runtime(runtime);
-        check(start_benchmark(false) && snapshot().benchmark.count==11,"VDXR controller selects the legacy optical suite");
+        check(start_benchmark(false) && snapshot().benchmark.count==9,"VDXR controller selects the legacy optical suite");
         stop_benchmark();tick_benchmark();
         for(bool legacy_luke:{false,true}) {
             runtime.luke_detected=legacy_luke;runtime.applied_revision=snapshot().revision;report_test_runtime(runtime);
-            check(start_benchmark(true,legacy_luke) && snapshot().benchmark.count==(legacy_luke?15:17),
+            check(start_benchmark(true,legacy_luke) && snapshot().benchmark.count==(legacy_luke?12:15),
                 "Legacy controller selects complete Normal/Fast or three-quality Luke matrix");
             clock=snapshot().benchmark.requested_ms+500;
-            for(unsigned i=0;i<(legacy_luke?15U:17U);++i) {
+            for(unsigned i=0;i<(legacy_luke?12U:15U);++i) {
                 state=snapshot();runtime.applied_revision=state.revision;runtime.pacing_mode=0;
                 runtime.afw_shading_rate=state.desired.afw_shading_rate;report_test_runtime(runtime);
                 tick_benchmark(clock);check(snapshot().benchmark.phase==BenchmarkPhase::running,"Legacy settings applied before timing");
@@ -485,7 +485,7 @@ int main() {
                 <<std::filesystem::u8path(snapshot().benchmark.csv_path).string()<<'\n';
         }
         runtime.vdxr_legacy=false;runtime.luke_detected=false;runtime.applied_revision=snapshot().revision;report_test_runtime(runtime);
-        check(start_benchmark(true) && snapshot().benchmark.count==65,"Forced private VDXR respects the current basic scope");
+        check(start_benchmark(true) && snapshot().benchmark.count==57,"Forced private VDXR respects the current basic scope");
         stop_benchmark();tick_benchmark();
         automatic_choice_controller();
         std::cout<<"Automatic suite: full/optical with A/C/default, no preset enforcement, truthful A CSV, hidden sampling without F9, timing, median, restore/manual cancellation PASS\n";

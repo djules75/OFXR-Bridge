@@ -360,15 +360,9 @@ void actual_widgets() {
     require(tray.rendered_text.find("OFXR: 11")!=std::string::npos &&
         tray.rendered_text.find("Game / Luke Ross: 3")!=std::string::npos &&
         tray.rendered_text.find("Counts cover")==std::string::npos,"concise owner split with no healthy boilerplate");
-    require(tray.rendered_text.find("Swapchain budget fix")<tray.rendered_text.find("Total swapchains:"),"startup flag is above Details");
-    tray.activate("/Framewarp_","Swapchain budget fix");tray.draw(true);
-    require(snapshot().desired.luke_shared_swapchains && !snapshot().runtime.luke_shared_swapchains &&
-        tray.rendered_text.find("Restart game to apply.")!=std::string::npos,"flag saves next startup without claiming a live change");
-    status.luke_shared_swapchains=true;status.luke_shared_swapchains_forced=true;report_runtime(status);tray.draw(true);
-    tray.activate("/Framewarp_","Swapchain budget fix");
-    require(snapshot().desired.luke_shared_swapchains,"required Outlaws publication cannot be disabled");
-    tray.draw(true);require(tray.rendered_text.find("Required for Outlaws.")!=std::string::npos,"forced Outlaws policy is explicit");
-    status.luke_shared_swapchains_forced=false;report_runtime(status);
+    require(tray.rendered_text.find("Swapchain budget fix")==std::string::npos &&
+        headset.rendered_text.find("Swapchain budget fix")==std::string::npos,
+        "INI-only startup sharing is absent from desktop and headset UI");
     auto quality_settings=snapshot().desired;quality_settings.afw_mode=3;
     require(request(quality_settings),"select Combined for live quality control");
     tray.draw();tray.draw();status.afw_shading_rate=0;report_runtime(status);
@@ -437,36 +431,36 @@ void automatic_buttons() {
     Context tray({690,900},false);tray.draw();tray.draw();tray.select_tab("Display");tray.draw(true);
     for(const auto label:{"Tests without vectors","Complete tests","Test Luke Ross","Open benchmark folder"})
         require(tray.rendered_text.find(label)!=std::string::npos,"All automatic controls are in Display");
-    require(tray.rendered_text.find("31 optical or 49 complete")!=std::string::npos &&
-        tray.rendered_text.find("Luke Ross: 39 tests")!=std::string::npos,
+    require(tray.rendered_text.find("25 optical or 43 complete")!=std::string::npos &&
+        tray.rendered_text.find("Luke Ross: up to 30 tests")!=std::string::npos,
         "SteamVR Display describes its actual pacing and AFW matrix");
     tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
-    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==31,
+    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==25,
         "Display button starts the actual SteamVR optical matrix");
     tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
     require(snapshot().benchmark.phase==BenchmarkPhase::stopped && snapshot().desired==prior,"Display Stop restores original settings");
     runtime.steamvr_runtime=false;runtime.vdxr_runtime=true;runtime.vdxr_legacy=true;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("Legacy VDXR: 11 optical or 17 complete")!=std::string::npos,
+    require(tray.rendered_text.find("Legacy VDXR: up to 9 optical or 15 complete")!=std::string::npos,
         "VDXR Display describes the Legacy spreadsheet suite");
     tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
-    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==11,
+    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==9,
         "Legacy Display starts Normal/Fast for every optical route");
     tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
     runtime.vdxr_legacy=false;runtime.applied_revision=snapshot().revision;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("31 optical or 49 complete")!=std::string::npos,
+    require(tray.rendered_text.find("25 optical or 43 complete")!=std::string::npos,
         "opt-in VDXR exposes the full comparison in the actual Display surface");
     tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
-    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==31,
+    require(benchmark_active(snapshot().benchmark) && snapshot().benchmark.count==25,
         "VDXR Display button starts all three pacing variants");
     tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
     auto simple=snapshot().desired;simple.advanced_mode=false;require(request(simple),"return to basic UI policy");
     runtime.applied_revision=snapshot().revision;runtime.pacing_mode=1;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("41 optical or 65 complete")!=std::string::npos && tray.rendered_text.find("Luke Ross: 51 tests")!=std::string::npos,"basic Display shows current two/three-buffer counts");
+    require(tray.rendered_text.find("33 optical or 57 complete")!=std::string::npos && tray.rendered_text.find("Luke Ross: up to 39 tests")!=std::string::npos,"basic Display shows current two/three-buffer counts");
     require(tray.rendered_text.find("7.5 seconds per configuration")!=std::string::npos &&
         tray.rendered_text.find("2.5 seconds settling, then 5 seconds measured")!=std::string::npos,
         "Display describes the actual shorter benchmark timing");
     tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
-    require(snapshot().benchmark.count==41 && !snapshot().benchmark.advanced,"basic Display starts current buffer matrix");
+    require(snapshot().benchmark.count==33 && !snapshot().benchmark.advanced,"basic Display starts current buffer matrix");
     tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
     require(tray.rendered_text.find("Auto pick best one")!=std::string::npos,"auto-pick checkbox is in Display");
     require(tray.rendered_text.find("On completion: within")==std::string::npos &&

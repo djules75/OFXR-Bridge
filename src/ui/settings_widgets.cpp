@@ -411,15 +411,16 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     if(state.benchmark.csv_path[0])ImGui::TextWrapped("CSV: %s",state.benchmark.csv_path);
     if(pacing_comparison_runtime(state.runtime)) {
         ImGui::TextWrapped(draft.advanced_mode
-            ? "Framework, Director, Framework+director for every route. Normal and Fast mode: 31 optical or 49 complete tests including one OFXR Off reference."
-            : "Framework and Director for every route, each with buffer 2 and 3. Normal and Fast mode: 41 optical or 65 complete tests including one OFXR Off reference.");
+            ? "Framework, Director, Framework+director for every route. Normal and Fast mode: up to 25 optical or 43 complete tests including one OFXR Off reference."
+            : "Framework and Director for every route, each with buffer 2 and 3. Normal and Fast mode: up to 33 optical or 57 complete tests including one OFXR Off reference.");
         ImGui::TextWrapped(draft.advanced_mode
-            ? "Luke Ross: 39 tests through OFXR 0.3.0, no 3X. Three AFW qualities: 1x1, 2x2, 4x4; each route with all three pacing modes."
-            : "Luke Ross: 51 tests through OFXR 0.3.0, no 3X. Three AFW qualities: 1x1, 2x2, 4x4; each route with Framework and Director, buffer 2 and 3.");
+            ? "Luke Ross: up to 30 tests through OFXR 0.3.0, no 3X. Three AFW qualities: 1x1, 2x2, 4x4; each route with all three pacing modes."
+            : "Luke Ross: up to 39 tests through OFXR 0.3.0, no 3X. Three AFW qualities: 1x1, 2x2, 4x4; each route with Framework and Director, buffer 2 and 3.");
         ImGui::TextWrapped("AFW alone once per quality, without a buffer comparison. Fast mode has no Luke effect. CSV groups each route/pacing/buffer's three qualities.");
     } else {
-        ImGui::TextWrapped("Legacy VDXR: 11 optical or 17 complete tests. Every route compares Normal/Fast. Luke: 15 tests, three AFW qualities through 0.3.0, no Fast or 3X.");
+        ImGui::TextWrapped("Legacy VDXR: up to 9 optical or 15 complete tests. Every route compares Normal/Fast. Luke: up to 12 tests, three AFW qualities through 0.3.0, no Fast or 3X.");
     }
+    ImGui::TextWrapped("Suite length adjusts to measured results and headset resolution. Skipped configurations remain n.a. in CSV.");
     ImGui::TextWrapped("Close the menu and keep the same test scene. Stop restores original settings. Completion restores them unless Auto pick best one selects a valid result. Memory is sampled once near the end of each trial. Tests keep the startup DLSS-G preset and never change its NVIDIA profile. A is the initial preference; changing presets requires restarting the game.");
     if(draft.advanced_mode && ImGui::CollapsingHeader("Experimental features")) {
         changed |= ImGui::Checkbox("Reduce black bars during headset rotation###R19 synthetic camera (experimental)", &draft.r19_camera);
@@ -534,24 +535,6 @@ bool render_settings_widgets(SettingsWidgetState& ui, const Snapshot& state,
             ImGui::BeginChild("Framewarp", ImVec2(0, 0));
             ImGui::PushItemWidth(std::clamp(ImGui::GetContentRegionAvail().x * .56F, 180.F, 580.F));
             changed |= framewarp(ui.draft, state);
-            const bool forced=state.connected && state.runtime.luke_shared_swapchains_forced;
-            const bool unavailable=state.connected && (!state.runtime.steamvr_runtime ||
-                state.runtime.pacing_mode==kAfwOnlyPacingMode || !state.runtime.luke_detected);
-            bool shared=forced || ui.draft.luke_shared_swapchains;
-            ImGui::BeginDisabled(forced || unavailable);
-            if(ImGui::Checkbox("Swapchain budget fix",&shared)) {
-                ui.draft.luke_shared_swapchains=shared;changed=true;
-            }
-            ImGui::EndDisabled();
-            if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("SteamVR: compatible outputs of each eye share their final swapchain. Private work images stay separate. Saved for the next game start.");
-            ImGui::SameLine();ImGui::PushStyleColor(ImGuiCol_Text,ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-            ImGui::TextWrapped("(required for some games, e.g. SW Outlaws)");ImGui::PopStyleColor();
-            ImGui::TextDisabled("Requires restarting the game.");
-            if(forced)ImGui::TextDisabled("Required for Outlaws.");
-            else if(!unavailable && state.connected && state.runtime.luke_detected &&
-                ui.draft.luke_shared_swapchains!=state.runtime.luke_shared_swapchains)
-                ImGui::TextDisabled("Restart game to apply.");
-            ImGui::Separator();
             if (ImGui::CollapsingHeader("Details",ImGuiTreeNodeFlags_NoAutoOpenOnLog)) luke_swapchain_budget(state);
             ImGui::PopItemWidth();
             ImGui::EndChild();

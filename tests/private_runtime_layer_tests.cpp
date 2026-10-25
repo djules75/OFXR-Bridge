@@ -27,8 +27,8 @@ int main(int argc,char** argv) {
     if(vdxr_probe)period=8'333'333; // 120Hz runtime predictions, no SteamVR timing API
     vdxr_legacy_probe=force_vdxr_steamvr || route=="legacy-session";if(vdxr_legacy_probe)route="session";
     if(route.starts_with("afw-only") || route=="luke-shared-session")return afw_only_session_test(route,argc>2?argv[2]:nullptr);
-    const bool shared_budget=route=="luke-shared-budget",unshared_budget=route=="luke-unshared-budget";
-    const bool outlaws_budget=route=="outlaws-budget";
+    const bool shared_budget=route=="luke-shared-budget",unshared_budget=route=="luke-unshared-budget" || route=="outlaws-unshared-budget";
+    const bool outlaws_budget=route=="outlaws-budget" || route=="outlaws-unshared-budget";
     const bool publication_budget=outlaws_budget || shared_budget || unshared_budget;
     if(publication_budget)route="d11-ref";
     const bool benchmark_sequence=route=="benchmark-sequence";
@@ -321,7 +321,7 @@ int main(int argc,char** argv) {
     if(route=="hybrid"){state->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::fidelity_fx;state->hybrid_requested=true;state->nvidia_options.hybrid=true;state->nvidia_new_route=false;}
     if(publication_budget) {
         state->luke_afw_enabled=true;state->luke_outlaws_preframe=outlaws_budget;
-        state->luke_shared_swapchains=shared_budget;
+        state->luke_shared_swapchains=shared_budget || (outlaws_budget && !unshared_budget);
         state->graphics_binding_capabilities|=8ULL;
     }
     if(sole)ok(apply_embedded_control(state),"initial settings match the real public route selection");
@@ -379,7 +379,7 @@ int main(int argc,char** argv) {
             XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO};frame.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
             frame.layerCount=1;frame.layers=&header;frame.displayTime=epoch+ns();
             std::array<std::shared_ptr<FrameGenerationSwapchainState>,3> warmed;
-            for(unsigned n=0;n<3;++n)warmed[n]=find_swapchain(app[n])->frame_generation;
+            for(unsigned n=0;n<source_count;++n)warmed[n]=find_swapchain(app[n])->frame_generation;
             for(const auto [on,afw]:{std::pair{false,0},std::pair{false,3},std::pair{true,3},
                                     std::pair{false,3},std::pair{false,0},std::pair{true,0},std::pair{true,3}}) {
                 auto desired=xrfg::autonomous::snapshot().desired;
@@ -387,7 +387,7 @@ int main(int argc,char** argv) {
                 check(xrfg::autonomous::request(desired),"Outlaws owner's Off/AFW/OFXR control sequence");
                 xrfg::autonomous::apply_runtime_settings();state->control_revision=0;
                 ok(apply_embedded_control(state,false,&frame),"actual sealed Outlaws control application");
-                for(unsigned n=0;n<3;++n)check(find_swapchain(app[n])->frame_generation==warmed[n],
+                for(unsigned n=0;n<source_count;++n)check(find_swapchain(app[n])->frame_generation==warmed[n],
                     "sealed Outlaws warm outputs were retired by an Off/AFW/OFXR switch and cannot be rearmed");
                 ProjectionSnapshot snapshot{};
                 check(capture_projection_snapshot(&frame,&snapshot),"Outlaws submitted stereo projection");

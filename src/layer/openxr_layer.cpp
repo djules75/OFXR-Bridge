@@ -3097,7 +3097,7 @@ struct CreatedPrivateSwapchain {
     // Other Luke games opt into generation-output sharing at session startup;
     // auxiliary outputs keep their existing independent publication contract.
     const bool luke_publication=state->session->private_runtime && state->session->luke_afw_enabled &&
-        (state->session->luke_outlaws_preframe || (generation_output && state->session->luke_shared_swapchains)) &&
+        state->session->luke_shared_swapchains && (state->session->luke_outlaws_preframe || generation_output) &&
         !create_info.next && !create_info.createFlags && create_info.arraySize==1 && create_info.faceCount==1 &&
         (create_info.usageFlags&XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) &&
         !(create_info.usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
@@ -5986,8 +5986,8 @@ XrResult layer_create_session_impl(
     xrfg::autonomous::publish_runtime_status(state->native_dlss_generated_frames,
         xrfg::autonomous::GenerationState::waiting, S_OK, state->vulkan_binding.device != VK_NULL_HANDLE,0,nullptr,
         state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only,
-        state->private_runtime && state->luke_afw_enabled && (state->luke_shared_swapchains || state->luke_outlaws_preframe),
-        state->private_runtime && state->luke_outlaws_preframe,
+        state->private_runtime && state->luke_afw_enabled && state->luke_shared_swapchains,
+        false, // no title forces the INI-only sharing policy
         state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,0,session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0);
     return result;
 }
@@ -15080,8 +15080,8 @@ XrResult layer_end_frame_impl(
             state->vulkan_binding.device != VK_NULL_HANDLE,
             state->interface_provider_error.load(std::memory_order_relaxed),&budget,
             state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only,
-        state->private_runtime && state->luke_afw_enabled && (state->luke_shared_swapchains || state->luke_outlaws_preframe),
-        state->private_runtime && state->luke_outlaws_preframe,
+        state->private_runtime && state->luke_afw_enabled && state->luke_shared_swapchains,
+        false, // no title forces the INI-only sharing policy
         state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,xrfg::benchmark_eye_long_side(frame),session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0); }
     } runtime_report_scope{state,end_info};
     configure_session_guide_capture(*state);

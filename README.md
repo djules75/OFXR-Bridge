@@ -68,7 +68,7 @@ For supported NVIDIA GPUs, start with **OFXR 0.3.0 / Medium / 50% flow resolutio
 
 Some combinations, particularly Luke Ross AFW and UEVR Synced Sequential, can approach SteamVR's OpenXR swapchain limit. The number used depends on the game, mod, route and enabled overlays; Luke Ross does not universally require exactly 16 swapchains.
 
-If allocation fails, disable unnecessary **OpenXR overlays** and inspect the swapchain details in the **Luke Ross** tab where available. The **Swapchain budget fix** option can help affected Luke Ross games, such as Star Wars Outlaws, and requires a game restart. fpsVR uses a SteamVR overlay rather than an additional OpenXR swapchain.
+If allocation fails, disable unnecessary **OpenXR overlays** and inspect the swapchain details in the **Luke Ross** tab where available. Compatible Luke Ross outputs share final native swapchains by default. This startup policy is INI-only: `[ofxr] luke_shared_swapchains=0` disables it after a game restart, including in Star Wars Outlaws. fpsVR uses a SteamVR overlay rather than an additional OpenXR swapchain.
 
 Other graphics injectors can also affect compatibility and resource use. When troubleshooting, first test with only the components required for the game.
 
@@ -192,7 +192,7 @@ Enable **Enable benchmarks** in the tray to make the benchmark controls availabl
 - Results are saved under **`%LOCALAPPDATA%\ofxr-bridge\Benchmarks`**. Use **Open benchmark folder** to open it.
 - Luke Ross tests compare AFW 1x1, 2x2 and 4x4, including AFW alone. They do not test Fast mode or 3X.
 - Non-Legacy suites compare Framework and Director with both buffer budgets. Other games test Normal and Fast; Luke Ross tests each AFW quality. AFW-only references run once per quality, without a separate buffer trial.
-- Non-Legacy suites contain 41 optical-flow tests, 65 complete tests or 51 Luke Ross tests: about 5:08, 8:08 or 6:23 minutes respectively, plus configuration changes. Legacy VDXR suites remain shorter.
+- Suites adapt to measured results and headset resolution. Non-Legacy suites have at most 33 optical-flow tests, 57 complete tests or 39 Luke Ross tests; unnecessary configurations are skipped. Legacy VDXR suites remain shorter. Omitted tests remain n.a. in CSV exports.
 - At completion, the suite restores the previous settings unless **Auto pick best one** is enabled. Stopping restores them too; manually changing a tested setting cancels the automation and keeps that edit. If AFW alone wins, the per-game **AFW Only** option is enabled and the result asks you to restart the game.
 
 Benchmarks change the parameters covered by the selected suite. Other quality settings, such as your chosen flow resolution, are retained.

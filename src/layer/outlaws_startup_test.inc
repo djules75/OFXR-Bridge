@@ -94,7 +94,7 @@ void outlaws_startup_test(const wchar_t* marker_path,const wchar_t* provider_pat
         const bool budget=scenario==1,missing=scenario==2;
         OutlawsStartupRuntime runtime;outlaws_runtime=&runtime;runtime.state=session();auto& s=runtime.state;
         s->presenter_active=false;s->three_slot_director=false;s->single_threaded_d3d11=true;
-        s->luke_afw_enabled=true;s->luke_outlaws_preframe=true;s->graphics_binding_capabilities=7|32;
+        s->luke_afw_enabled=true;s->luke_outlaws_preframe=true;s->luke_shared_swapchains=true;s->graphics_binding_capabilities=7|32;
         s->d3d11_device=d11;s->d3d11_context=c11;s->d3d12_device=d12;s->d3d12_queue=fallback;
         s->dispatch->create_swapchain=outlaws_create;s->dispatch->enumerate_swapchain_images=outlaws_enumerate;
         s->dispatch->destroy_swapchain=outlaws_destroy;s->dispatch->wait_frame=outlaws_wait;

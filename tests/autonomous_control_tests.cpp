@@ -43,7 +43,9 @@ void codec() {
     auto concurrent_automatic=desired;concurrent_automatic.nr_enabled=true;
     const auto merged_automatic=xrfg::autonomous::merge_changes(concurrent_automatic,desired,automatic);
     require(merged_automatic.benchmark_auto_pick && merged_automatic.nr_enabled,"automatic choice edit preserves concurrent render preferences");
-    require(!desired.luke_shared_swapchains,"Luke shared publication is opt-in");
+    require(desired.luke_shared_swapchains,"Luke compatible publication sharing defaults on");
+    require(!xrfg::autonomous::parse_settings("[ofxr]\nluke_shared_swapchains=0\n").luke_shared_swapchains,
+        "INI-only sharing can be explicitly disabled");
     auto shared=desired;shared.luke_shared_swapchains=true;
     auto shared_saved=xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(shared));
     require(shared_saved.luke_shared_swapchains,"Luke startup choice roundtrips in canonical INI");
