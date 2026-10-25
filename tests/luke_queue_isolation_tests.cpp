@@ -128,11 +128,45 @@ int main() {
             ok(xrfg::wait_for_d3d11_publication(receipt),"inline completion");
             pixels_equal(current0.Get(),i%2?second:first);
         }
+        // A newer disjoint AFW scratch readback must not become a dependency of an
+        // already frozen post-AFW history. The same output slot's pending
+        // publication, however, MUST delay its reuse.
+        const auto frozen=capture(first);
+        ok(history->wait_for_idle(),"frozen history ready");
+        ComPtr<ID3D12Fence> input_gate;ComPtr<ID3D11Fence> input_gate11;
+        ok(d12->CreateFence(0,D3D12_FENCE_FLAG_SHARED,IID_PPV_ARGS(&input_gate)),"D11 input gate");
+        ReleaseGate release_input{input_gate};
+        HANDLE shared{};ok(d12->CreateSharedHandle(input_gate.Get(),nullptr,GENERIC_ALL,nullptr,&shared),"shared input gate");
+        ComPtr<ID3D11Device5> device5;ComPtr<ID3D11DeviceContext4> context4;
+        ok(d11.As(&device5),"D11 fence owner");ok(context.As(&context4),"D11 fence context");
+        const auto opened=device5->OpenSharedFence(shared,IID_PPV_ARGS(&input_gate11));CloseHandle(shared);ok(opened,"open input gate");
+        ok(context4->Wait(input_gate11.Get(),1),"park next AFW scratch publication");
+        xrfg::D3D11PublicationReceipt scratch_receipt;
+        const auto ingress_fence=afw_ingress.submission_fence(ingress);
+        ok(interop.publish_completed(1,{},ingress_fence.Get(),ingress.fence_value,&scratch_receipt),"pending disjoint AFW scratch");
+        ok(interop.capture_published_current(scratch_receipt),"pending scratch terminal readback");
+        ok(interop.prepare_synthesis_targets(0,{}),"exact worker output dependencies");
+        xrfg::D3D12FrameSynthesisTicket independent;
+        ok(ofxr.submit_copy(frozen,views,0,&independent),"frozen input bypasses disjoint scratch readback");
+        const auto independent_fence=ofxr.submission_fence(independent);
+        require(completed(independent_fence.Get(),independent.fence_value,300),"scratch cursor parked immutable OFXR job");
+        ok(interop.prepare_synthesis(true),"legacy conservative dependency control");
+        ok(synthesis->Signal(progress.Get(),3),"legacy wait witness");
+        require(!completed(progress.Get(),3,30),"legacy cursor control did not block");
+        ok(input_gate->Signal(1),"release scratch readback");require(completed(progress.Get(),3),"legacy cursor drain");
+        ok(context4->Wait(input_gate11.Get(),2),"park actual output publication");context->Flush();
+        ok(interop.publish_completed(0,{},independent_fence.Get(),independent.fence_value,&receipt),"pending same-slot D11 read");
+        ok(interop.prepare_synthesis_targets(0,{}),"wait for reused output slot");
+        ok(synthesis->Signal(progress.Get(),4),"reuse witness");
+        require(!completed(progress.Get(),4,30),"output slot overwritten before its D11 read retired");
+        ok(input_gate->Signal(2),"release output read");require(completed(progress.Get(),4),"slot ownership drain");
+        pixels_equal(current0.Get(),first);
+        require(FAILED(interop.prepare_synthesis_targets(99,{})),"invalid output accepted");
         // Control: gating the shared lane really does block producer progress.
         ok(producer->Wait(gate.Get(),2),"shared queue control gate");
-        ok(producer->Signal(progress.Get(),2),"shared queue control signal");
-        require(!completed(progress.Get(),2,30),"shared queue control did not block");
-        ok(gate->Signal(2),"release shared control");require(completed(progress.Get(),2),"control drain");
+        ok(producer->Signal(progress.Get(),5),"shared queue control signal");
+        require(!completed(progress.Get(),5,30),"shared queue control did not block");
+        ok(gate->Signal(2),"release shared control");require(completed(progress.Get(),5),"control drain");
         ok(afw_ingress.wait_for_idle(),"ingress drain");ok(ofxr.wait_for_idle(),"synthesis drain");
         ok(interop.wait_for_idle(),"both publication timelines drained");ok(history->invalidate(),"history retirement");
         std::cout<<"PASS: blocked OFXR leaves capture/AFW progressing; both eyes exact; inline/completed publication and drain\n";

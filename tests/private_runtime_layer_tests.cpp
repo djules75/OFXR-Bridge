@@ -417,6 +417,37 @@ int main(int argc,char** argv) {
         std::puts("Outlaws actual D11/private endpoint startup under16: three app sources, six native handles, preserved independent output storage and full cleanup PASS");return 0;
     }
     xr_ok(f.transport->start(),"start common consumer");
+    if(route=="entry-gate") {
+        check(!native12,"entry gate probe requires D11");f.expected_views=1;
+        auto chain=f.make_chain(),spare=f.make_chain();f.write(chain,77);
+        unsigned spare_index{};XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wait.timeout=XR_INFINITE_DURATION;
+        xr_ok(f.transport->acquire_image(spare,&acquire,&spare_index),"spare virtual acquire");
+        xr_ok(f.transport->wait_image(spare,&wait),"spare virtual wait");
+        f.block_end=true;f.end_entered=false;
+        for(unsigned i=1;i<=3;++i){f.begin_virtual();xr_ok(with_runtime_entry(state,[&]{return f.submit(chain,float(i));}),"fill bounded private FIFO");}
+        f.wait_entered();f.begin_virtual();
+        auto blocked=std::async(std::launch::async,[&]{return with_runtime_entry(state,[&]{return f.submit(chain,4);});});
+        check(blocked.wait_for(30ms)==std::future_status::timeout,"full FIFO must retain backpressure");
+        auto release=std::async(std::launch::async,[&]{return with_runtime_entry(state,[&]{
+            XrSwapchainImageReleaseInfo info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};return f.transport->release_image(spare,&info);});});
+        const bool independent=release.wait_for(100ms)==std::future_status::ready;
+        f.unblock();xr_ok(blocked.get(),"queued packet accepted after retirement");xr_ok(release.get(),"spare release");
+        check(independent,"private EndFrame FIFO credit blocked unrelated D11 producer release");
+        f.wait_count(4);xr_ok(f.transport->drain(),"gate fixture drain");
+        check(f.positions==std::vector<float>{1,2,3,4} && f.pixels==std::vector<unsigned>{77,77,77,77},"gate fix changed FIFO ownership/order/pixels");
+        // Native/non-private entries still serialize. The private exception
+        // must not remove the protection required by inline D11 runtimes.
+        auto native=std::make_shared<SessionState>(dispatch);native->d3d11_device=f.device11;
+        std::promise<void> entered,leave;auto leave_future=leave.get_future();
+        auto holder=std::async(std::launch::async,[&]{with_runtime_entry(native,[&]{entered.set_value();leave_future.wait();});});
+        entered.get_future().wait();auto contender=std::async(std::launch::async,[&]{with_runtime_entry(native,[]{});});
+        const bool serialized=contender.wait_for(30ms)==std::future_status::timeout;
+        leave.set_value();holder.get();contender.get();check(serialized,"native D11 gate protection lost");
+        xr_ok(f.transport->destroy_swapchain(chain),"gate source cleanup");xr_ok(f.transport->destroy_swapchain(spare),"gate spare cleanup");
+        {std::scoped_lock lock(g_state_mutex);g_sessions.clear();g_instances.clear();}
+        std::puts("Private D11 full FIFO does not block producer release; native gate retained; exact ordered GPU pixels PASS");return 0;
+    }
     if(measured) {
         state->fps_overlay=std::make_unique<xrfg::OpenXrFpsOverlay>(dispatch->instance,state->handle,0,
             state->dispatch->get_instance_proc_addr,content_end_frame,f.device12.Get(),f.queue.Get(),f.device11.Get(),

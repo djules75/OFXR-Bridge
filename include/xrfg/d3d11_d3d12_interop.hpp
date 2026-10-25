@@ -122,6 +122,12 @@ public:
     [[nodiscard]] HRESULT configure_synthesis_queue(ID3D12CommandQueue* queue) noexcept;
     [[nodiscard]] HRESULT prepare_synthesis(bool isolated = false) noexcept;
 
+    // Isolated worker with an independently fenced immutable input history.
+    // Wait only for D11 accesses to the exact output slots being overwritten.
+    // Raw/mutable source callers must keep prepare_synthesis instead.
+    [[nodiscard]] HRESULT prepare_synthesis_targets(std::uint32_t current_index,
+        std::optional<std::uint32_t> synthetic_index) noexcept;
+
     // Read the actual acquired OpenXR D3D11 output named by this immutable
     // publication receipt back into its shared D3D12 mirror. Call before XR
     // release, then capture history and finish_capture. GPU ordering only.

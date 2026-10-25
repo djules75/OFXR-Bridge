@@ -1254,8 +1254,13 @@ void blackbar_unpaired(SessionState& state,bool presenter,bool cooldown=false) {
 thread_local int runtime_entry_depth = 0;
 
 struct RuntimeEntry {
+    // The private endpoint owns its handle/image locks and native consumer.
+    // Its EndFrame can wait for bounded FIFO credit without doing runtime D11
+    // work. Holding the old native-entry gate there stalls unrelated producer
+    // releases until a physical display slot retires.
     explicit RuntimeEntry(SessionState* session) noexcept
-        : session_(session != nullptr && session->d3d11_device != nullptr
+        : session_(session != nullptr && session->d3d11_device != nullptr &&
+                       !session->private_runtime
                        ? session
                        : nullptr) {
         if (session_ == nullptr) {
@@ -11785,8 +11790,18 @@ HRESULT submit_luke_worker_generation(const std::shared_ptr<SessionState>& sessi
         submit_result=submit_luke_worker_generation(state->session,generation,synthesizer,worker_submission,[&] {
             log_completed_nvidia_gpu_timings(synthesizer);
             if (generation->d3d11_interop) {
-                submit_result =
-                    generation->d3d11_interop->prepare_synthesis(generation->isolated_luke_synthesis && !afw_source);
+                // The frozen post-AFW history ticket carries its own producer
+                // fence. Only these output slots need D11 reuse protection;
+                // the mutable publication cursor may already name disjoint
+                // AFW scratch from the NEXT frame, particularly for eye two.
+                submit_result = post_afw_input && worker_submission &&
+                        generation->isolated_luke_synthesis
+                    ? generation->d3d11_interop->prepare_synthesis_targets(
+                        current_destination_index, request_pair
+                            ? std::optional<std::uint32_t>{synthetic_destination_index}
+                            : std::nullopt)
+                    : generation->d3d11_interop->prepare_synthesis(
+                        generation->isolated_luke_synthesis && !afw_source);
             }
             // Deferring the current copy keeps a full-resolution copy the
             // synthetic never reads off its critical path, but it only works

@@ -263,6 +263,8 @@ struct D3D11D3D12SwapchainInterop::Impl {
     std::vector<SharedImage> shared_sources;
     std::vector<SharedImage> shared_current_destinations;
     std::vector<SharedImage> shared_synthetic_destinations;
+    std::vector<std::uint64_t> current_d3d11_access;
+    std::vector<std::uint64_t> synthetic_d3d11_access;
     std::vector<ID3D12Resource*> source_d3d12_views;
     std::vector<ID3D12Resource*> current_d3d12_views;
     std::vector<ID3D12Resource*> synthetic_d3d12_views;
@@ -616,6 +618,8 @@ struct D3D11D3D12SwapchainInterop::Impl {
             return HRESULT_FROM_WIN32(
                 error == ERROR_SUCCESS ? ERROR_NOT_ENOUGH_MEMORY : error);
         }
+        current_d3d11_access.resize(shared_current_destinations.size());
+        synthetic_d3d11_access.resize(shared_synthetic_destinations.size());
         enabled = true;
         return S_OK;
     }
@@ -801,6 +805,9 @@ struct D3D11D3D12SwapchainInterop::Impl {
         d3d11_context4->Flush1(D3D11_CONTEXT_TYPE_ALL, nullptr);
         last_d3d11_access_value = complete_value;
         last_d3d11_signal_value = complete_value;
+        current_d3d11_access[current_destination_index] = complete_value;
+        if (synthetic_destination_index)
+            synthetic_d3d11_access[*synthetic_destination_index] = complete_value;
         last_publication = {
             static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(d3d12_fence.Get())),
             ready_value, complete_value, 0, current_target,
@@ -954,6 +961,24 @@ HRESULT D3D11D3D12SwapchainInterop::prepare_synthesis(bool isolated) noexcept {
     }
 }
 
+HRESULT D3D11D3D12SwapchainInterop::prepare_synthesis_targets(
+    std::uint32_t current_index,
+    std::optional<std::uint32_t> synthetic_index) noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if (!impl_ || !impl_->enabled || !impl_->synthesis_queue ||
+            current_index >= impl_->current_d3d11_access.size() ||
+            (synthetic_index && *synthetic_index >= impl_->synthetic_d3d11_access.size()))
+            return E_INVALIDARG;
+        const auto required = std::max(impl_->current_d3d11_access[current_index],
+            synthetic_index ? impl_->synthetic_d3d11_access[*synthetic_index] : 0);
+        const auto result = required ? impl_->synthesis_queue->Wait(
+            impl_->d3d12_fence.Get(), required) : S_OK;
+        if (FAILED(result)) impl_->enabled = false;
+        return result;
+    } catch (...) { return E_FAIL; }
+}
+
 HRESULT D3D11D3D12SwapchainInterop::capture_published_current(
     const D3D11PublicationReceipt& receipt) noexcept {
     try {
@@ -982,6 +1007,7 @@ HRESULT D3D11D3D12SwapchainInterop::capture_published_current(
         result = impl_->d3d11_context4->Signal(impl_->d3d11_fence.Get(), ready);
         if (FAILED(result)) return result;
         impl_->last_d3d11_signal_value = ready;
+        impl_->current_d3d11_access[private_index] = ready;
         impl_->d3d11_context4->Flush1(D3D11_CONTEXT_TYPE_ALL, nullptr);
         impl_->last_d3d11_access_value = ready;
         return impl_->d3d12_queue->Wait(impl_->d3d12_fence.Get(), ready);

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.649.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.650.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1047,6 +1047,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_executable(xrfg_three_slot_d3d12_tests tests/three_slot_d3d12_tests.cpp
             src/common/embedded_control.cpp)
         add_executable(xrfg_private_runtime_layer_tests tests/private_runtime_layer_tests.cpp src/common/embedded_control.cpp)
+        add_test(NAME xrfg_private_d11_entry_gate COMMAND xrfg_private_runtime_layer_tests d11-entry-gate)
+        set_tests_properties(xrfg_private_d11_entry_gate PROPERTIES TIMEOUT 15 RUN_SERIAL TRUE)
         target_include_directories(xrfg_private_runtime_layer_tests PRIVATE include "${XRFG_OPENXR_SDK_ROOT}/include")
         target_compile_features(xrfg_private_runtime_layer_tests PRIVATE cxx_std_20)
         target_compile_definitions(xrfg_private_runtime_layer_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_PLATFORM_WIN32 OFXR_PROVIDER_API_EXPORTS)
