@@ -68,7 +68,7 @@ For supported NVIDIA GPUs, start with **OFXR 0.3.0 / Medium / 50% flow resolutio
 
 Some combinations, particularly Luke Ross AFW and UEVR Synced Sequential, can approach SteamVR's OpenXR swapchain limit. The number used depends on the game, mod, route and enabled overlays; Luke Ross does not universally require exactly 16 swapchains.
 
-If allocation fails, disable unnecessary **OpenXR overlays** and inspect the swapchain details in the **Luke Ross** tab where available. Compatible Luke Ross outputs share final native swapchains by default. This startup policy is INI-only: `[ofxr] luke_shared_swapchains=0` disables it after a game restart, including in Star Wars Outlaws. fpsVR uses a SteamVR overlay rather than an additional OpenXR swapchain.
+If allocation fails, disable unnecessary **OpenXR overlays** and inspect the swapchain details in the **Luke Ross** tab where available. Compatible Luke Ross outputs share final native swapchains by default. This startup option is INI-only: [ofxr] luke_shared_swapchains=0 disables it after restarting the game. fpsVR uses a SteamVR overlay rather than an additional OpenXR swapchain.
 
 Other graphics injectors can also affect compatibility and resource use. When troubleshooting, first test with only the components required for the game.
 
@@ -78,7 +78,7 @@ Some external FPS counters measure application frames before OFXR-BRIDGE. During
 
 The bridge distinguishes real frames, generated frames and output delivery. Producing a frame does not guarantee that it is delivered as a distinct output frame. The output meter measures delivery as observed by the bridge/runtime path; it is not a direct measurement of the headset panel's scanout.
 
-**OFXR time** measures intercepted-call CPU wall time. **Cycle length** includes the same frame's runtime completion and any later producer return. **Cycle minimum** uses the observed real runtime EndFrame completion, bounded below by one physical refresh per confirmed generated output before that real. Already-spaced delivery is not charged twice. This assumes the outputs are displayed distinctly; it is not confirmation that the compositor displayed them. The cycle starts at the application's WaitFrame entry and excludes future runtime display predictions and later producer returns. These are not complete input-to-photon or panel-scanout measurements.
+**Generation**, **Delivery** and **Cycle minimum** describe the bridge's processing and delivery path. Cycle minimum covers the observed bridge/runtime delivery cycle; it is not complete input-to-photon latency.
 
 ## Luke Ross
 
@@ -106,13 +106,13 @@ Many Luke Ross games have HUD doubling during movement or rotation with AFW. Its
 
 | Game | HUD observations |
 | --- | --- |
-| Crimson Desert | Main HUD generally looks correct; overlay icons can double. |
-| DOOM: The Dark Ages | HUD doubling can be particularly distracting. |
-| Ghost of Tsushima | HUD can double during movement. |
-| Horizon Forbidden West | HUD can double, particularly while aiming or moving. |
-| Indiana Jones and the Great Circle | HUD can double during movement. |
-| Kingdom Come: Deliverance II | HUD looked correct in testing. |
-| Star Wars Outlaws | HUD can double during movement. |
+| Crimson Desert | HUD correct; overlay icons double. |
+| DOOM: The Dark Ages | HUD doubling when moving, rotating, or strafing. |
+| Ghost of Tsushima | HUD doubling when moving, rotating, or strafing. |
+| Horizon Forbidden West | HUD doubling when moving, rotating, or strafing. |
+| Indiana Jones and the Great Circle | HUD doubling when moving, rotating, or strafing. |
+| Kingdom Come: Deliverance II | HUD correct |
+| Star Wars Outlaws | HUD doubling when moving, rotating, or strafing. |
 
 These are observations from tested builds, not guarantees for every configuration. Other titles may work, but can require additional capture support or fixes.
 
@@ -150,14 +150,10 @@ When a game has no profile, the bridge creates one from the current main **`ofxr
 
 There are two different controls:
 
-- **Tray / Pacing (restart game)** selects the transport path. **Auto** selects VDXR for the VDXR runtime and SteamVR preparation for other runtimes. **Force VDXR** and **Force SteamVR** override that choice for comparisons. Restart the game after changing it.
+- **Tray / Pacing (restart game)** selects the transport path. **Auto** is the recommended setting: it uses the VDXR path with VDXR and the SteamVR path otherwise. **Force VDXR** and **Force SteamVR** are compatibility overrides for other OpenXR runtimes that have not yet been tested. Restart the game after changing it.
 - **Settings / Pacing** selects scheduling on the SteamVR-prepared path. **Framework** uses framework pacing with the director in bypass. **Director** delegates pacing to the common director.
 
-The native VDXR path uses its existing framework behavior, so the scheduling dropdown is unavailable there. Forcing the other transport is experimental and can change performance, latency and compatibility.
-
-**Increase buffer** controls the non-Legacy output buffer: off allows two frames in flight (default), on allows three. It applies to both Framework and Director on that transport, independently of Fast mode. Changes apply live after queued frames finish, without resetting the generation framework. A larger buffer may help stability at the cost of latency. Legacy Framework and direct AFW Only are unaffected. The active count is shown below the checkbox; non-Legacy benchmarks compare both budgets.
-
-The buffer limit changes admission only. Director selects the first usable headset slot after the current image copies and native frame cycle are ready; past GPU stalls do not impose an additional minimum residence on a completed frame.
+The native VDXR path uses its existing framework behavior, so the scheduling dropdown is unavailable there.
 
 ### Frameworks
 
@@ -185,48 +181,45 @@ Fast mode has **no effect on the Luke Ross path**. For other paths, benchmark bo
 
 Enable **Enable benchmarks** in the tray to make the benchmark controls available under **Display**. Choose the optical-flow, complete or Luke Ross suite, then remain in the same representative scene throughout the run.
 
-- Each test lasts **7.5 seconds** after its settings are applied: **2.5 seconds** for settling, followed by **5 seconds** of measurement. VRAM is sampled near the end, before switching configurations.
+- Each test lasts **7.5 seconds**: **2.5 seconds** settling, then **5 seconds** measured.
 - Diagnostic logging is not required. Benchmark CSV output is automatic.
-- Elliottate's meter shows the current test number, settling/measuring phase and remaining seconds. An AFW Only automatic choice also shows its restart reminder there.
 - Results include FPS and Cycle minimum statistics. VRAM use is sampled near the end of each test.
 - Results are saved under **`%LOCALAPPDATA%\ofxr-bridge\Benchmarks`**. Use **Open benchmark folder** to open it.
-- Luke Ross tests compare AFW 1x1, 2x2 and 4x4, including AFW alone. They do not test Fast mode or 3X.
-- Non-Legacy suites compare Framework and Director with both buffer budgets. Other games test Normal and Fast; Luke Ross tests each AFW quality. AFW-only references run once per quality, without a separate buffer trial.
-- Suites adapt to measured results and headset resolution. Non-Legacy suites have at most 33 optical-flow tests, 57 complete tests or 39 Luke Ross tests; unnecessary configurations are skipped. Legacy VDXR suites remain shorter. Omitted tests remain n.a. in CSV exports.
-- At completion, the suite restores the previous settings unless **Auto pick best one** is enabled. Stopping restores them too; manually changing a tested setting cancels the automation and keeps that edit. If AFW alone wins, the per-game **AFW Only** option is enabled and the result asks you to restart the game.
+- Luke Ross tests compare suitable AFW qualities for the headset resolution, including AFW alone. They do not test Fast mode or 3X.
+- Suite length adapts to measured results and headset resolution. Skipped tests remain n.a. in the CSV.
+- At completion, the suite restores the previous settings unless **Auto pick best one** is enabled. Stopping restores them too; manually changing a tested setting cancels the automation and keeps that edit.
 
 Benchmarks change the parameters covered by the selected suite. Other quality settings, such as your chosen flow resolution, are retained.
 
 ### Example configurations
 
-Test system: Intel 265K and RTX 4090. Quest 3 uses VDXR; its measured FPS are capped at 90 to simulate a 90 Hz headset, while latency values are kept as measured. MeganeX uses SteamVR at 90 Hz. Updated MeganeX entries for Valhalla, Crimson Desert, DOOM and both Ghostwire runs use v659; Horizon uses v658. These six entries show Cycle minimum in milliseconds and offer different frame-generation families as alternatives. Buffer 2 is the default; Buffer 3 means Increase buffer enabled. The other entries, including Quest 3, retain historical Cycle (estimated) values and are not directly comparable with Cycle minimum.
+Test system: Intel 265K and RTX 4090. Quest 3 uses VDXR; MeganeX uses SteamVR. Latency is shown only for runs measured with the current Cycle minimum meter, in milliseconds. **+ Buffer** means Increase buffer is enabled.
 
-| Game | Quest 3 — Godlike - VDXR - top 2, 90 Hz | MeganeX — 3700x3400 - sboys3 - steamvr - top 3, 90 Hz |
+| Game | Quest 3 - Godlike / VDXR - top 2 | MeganeX - sboys3 / SteamVR - top 3 |
 | --- | --- | --- |
-| Assassin's Creed Valhalla | 1. 0.3.0 Fast 70 fps 100 ms<br>2. 0.3.0 71 fps 98 ms | 1. Director 0.2.13 Fast Buffer 3 74.6 fps 65.1 ms<br>2. Framework 0.3.0 Fast Buffer 3 74.4 fps 61.9 ms<br>3. Framework 0.2.1 Fast Buffer 2 73.2 fps 61.5 ms |
-| Crimson Desert (RT, no RR) | 1. 0.2.13 AFW 1x1 81 fps 87 ms<br>2. 0.3.0 AFW 1x1 82 fps 86 ms | 1. Director 0.3.0 AFW 1x1 Buffer 2 84.0 fps 67.3 ms<br>2. Director 0.2.13 AFW 1x1 Buffer 3 85.0 fps 68.0 ms<br>3. Framework 0.2.1 AFW 1x1 Buffer 2 74.0 fps 39.4 ms |
-| DOOM: The Dark Ages | 1. 0.3.0 AFW 1x1 90 fps 71 ms<br>2. 0.2.13 AFW 1x1 90 fps 72 ms | 1. AFW only 2x2 73.0 fps 20.1 ms<br>2. Director 0.2.1 AFW 1x1 Buffer 2 90.0 fps 35.1 ms<br>3. Framework 0.3.0 AFW 1x1 Buffer 2 90.0 fps 55.9 ms |
-| Ghost of Tsushima | 1. AFW only 2x2 74 fps 38 ms<br>2. 0.2.1 AFW 1x1 90 fps 57 ms | 1. AFW only 2x2 89 fps 35 ms<br>2. AFW only 1x1 75 fps 34 ms<br>3. Director 0.2.1 AFW 1x1 90 fps 66 ms |
-| Ghost of Tsushima (DLSS5) | 1. 0.2.13 AFW 1x1 84 fps 86 ms<br>2. 0.3.0 AFW 1x1 84 fps 85 ms | 1. Director 0.2.1 AFW 1x1 90 fps 66 ms<br>2. Framework 0.3.0 AFW 1x1 90 fps 77 ms<br>3. Framework 0.2.13 AFW 1x1 90 fps 77 ms |
-| Ghostwire Tokyo (Native + DLSS5) | 1. Hybrid 77 fps 54 ms<br>2. Hybrid Fast 77 fps 52 ms | 1. Framework Hybrid Buffer 3 70.9 fps 46.7 ms<br>2. Framework 0.3.0 Fast Buffer 3 73.6 fps 51.5 ms<br>3. Framework 0.2.13 Fast Buffer 3 71.8 fps 52.4 ms |
-| Ghostwire Tokyo (Native) | 1. Hybrid Fast 90 fps 44 ms<br>2. FSR 90 fps 48 ms | 1. Director Hybrid Buffer 2 90.0 fps 35.3 ms<br>2. Framework FSR Fast Buffer 3 90.0 fps 45.8 ms<br>3. Director 0.2.1 Buffer 2 90.0 fps 35.9 ms |
-| High on Life 2 (Native Joe) | 1. Hybrid 90 fps 52 ms<br>2. Hybrid Fast 90 fps 53 ms | 1. Framework 0.2.1 90 fps 64 ms<br>2. Framework 0.2.13 Fast 90 fps 65 ms<br>3. Framework 0.2.1 Fast 90 fps 65 ms |
-| Horizon Forbidden West | 1. 0.3.0 AFW 1x1 82 fps 53 ms<br>2. 0.2.13 AFW 1x1 82 fps 54 ms | 1. AFW only 2x2 74.0 fps 18.6 ms<br>2. Director 0.2.1 AFW 1x1 Buffer 2 90.0 fps 66.6 ms<br>3. Director 0.2.13 AFW 1x1 Buffer 2 90.0 fps 66.6 ms |
-| Indiana Jones and the Great Circle | 1. 0.2.13 AFW 1x1 90 fps 77 ms<br>2. 0.3.0 AFW 1x1 90 fps 77 ms | 1. Framework 0.3.0 AFW 1x1 90 fps 77 ms<br>2. Framework 0.2.13 AFW 1x1 90 fps 77 ms<br>3. Framework 0.2.13 AFW 2x2 90 fps 77 ms |
-| Kingdom Come: Deliverance II | 1. AFW only 1x1 87 fps 35 ms<br>2. AFW only 2x2 90 fps 34 ms | AFW only 1x1 81 fps 35 ms<br>AFW only 2x2 90 fps 26 ms |
-| Kingdom Come: Deliverance II (DLSS5) | 1. 0.2.13 AFW 1x1 90 fps 75 ms<br>2. 0.3.0 AFW 1x1 90 fps 75 ms | 1. Framework 0.3.0 AFW 1x1 90 fps 77 ms<br>2. Framework 0.2.13 AFW 1x1 90 fps 77 ms<br>3. Director 0.2.1 AFW 2x2 90 fps 66 ms |
-| MSFS2024 (fly) | 1. Hybrid Fast 90 fps 68 ms<br>2. Hybrid 90 fps 68 ms | 1. Director Hybrid 90 fps 96 ms<br>2. Director Hybrid Fast 90 fps 96 ms<br>3. Framework Hybrid Fast 90 fps 97 ms |
-| MSFS2024 (ground) | 1. Hybrid Fast 90 fps 68 ms<br>2. FSR 90 fps 69 ms | 1. Framework FSR Fast 89 fps 93 ms<br>2. Framework Hybrid Fast 90 fps 97 ms<br>3. Director Hybrid 90 fps 96 ms |
-| No Man's Sky VR | 1. 0.2.1 90 fps 74 ms<br>2. 0.2.1 Fast 90 fps 72 ms | 1. Framework 0.3.0 Fast 90 fps 72 ms<br>2. Framework 0.2.13 Fast 90 fps 72 ms<br>3. Director 0.2.13 90 fps 96 ms |
-| Nobody Wants to Die (Native) | 1. Hybrid 75 fps 64 ms<br>2. 0.2.13 Fast 76 fps 88 ms | 1. Director 0.3.0 Fast 68 fps 79 ms<br>2. Director 0.2.13 Fast 68 fps 79 ms<br>3. Framework 0.3.0 69 fps 88 ms |
-| Resident Evil Village | Not needed — 90 fps | Not needed — 90 fps |
-| Returnal (Synced Sequential) | 1. Hybrid 90 fps 73 ms<br>2. Hybrid Fast 90 fps 72 ms | 1. Director Hybrid 90 fps 74 ms<br>2. Director Hybrid Fast 90 fps 74 ms<br>3. Framework FSR Fast 90 fps 73 ms |
-| Returnal (Synced Sequential + DLSS5) | 1. 0.2.1 Fast 74 fps 78 ms<br>2. 0.2.1 72 fps 78 ms | 1. Director Hybrid Fast 66 fps 93 ms<br>2. Director 0.3.0 Fast 69 fps 85 ms<br>3. Framework Hybrid 65 fps 86 ms |
-| Skyrim VR | 1. 0.2.13 Fast 90 fps 71 ms<br>2. 0.3.0 Fast 90 fps 71 ms | 1. Framework 0.3.0 90 fps 88 ms<br>2. Framework 0.2.13 90 fps 88 ms<br>3. Framework 0.2.1 86 fps 75 ms |
-| Star Wars Outlaws (RT+RR) | 1. 0.3.0 AFW 1x1 90 fps 81 ms<br>2. 0.2.13 AFW 1x1 90 fps 80 ms | 1. Framework 0.3.0 AFW 1x1 90 fps 77 ms<br>2. Framework 0.2.13 AFW 1x1 90 fps 77 ms<br>3. Director 0.3.0 AFW 1x1 90 fps 98 ms |
-| Stellar Blade (Native) | 1. FSR 90 fps 61 ms<br>2. FSR Fast 90 fps 62 ms | 1. Director Hybrid 90 fps 75 ms<br>2. Framework FSR 89 fps 75 ms<br>3. Director Hybrid Fast 90 fps 75 ms |
-| The Callisto Protocol (Native) | 1. 0.2.13 89 fps 80 ms<br>2. 0.3.0 89 fps 80 ms | 1. Framework 0.3.0 Fast 89 fps 73 ms<br>2. Framework 0.2.13 90 fps 98 ms<br>3. Framework 0.3.0 89 fps 97 ms |
-| The Planet Crafter | 1. 0.2.1 90 fps 70 ms<br>2. 0.2.1 Fast 90 fps 70 ms | 1. Framework 0.2.1 Fast 90 fps 77 ms<br>2. Framework 0.3.0 Fast 90 fps 76 ms<br>3. Director 0.3.0 Fast 90 fps 75 ms |
+| Assassin's Creed Valhalla | 1. 0.3.0 Fast 70 fps<br>2. 0.3.0 71 fps | 1. Director 0.2.13 Fast + Buffer 75 fps 65 ms<br>2. Framework 0.3.0 Fast + Buffer 74 fps 62 ms<br>3. Framework 0.2.1 Fast 73 fps 62 ms |
+| Crimson Desert (RT, no RR) | 1. 0.2.13 AFW 1x1 81 fps<br>2. 0.3.0 AFW 1x1 82 fps | 1. Director 0.3.0 + AFW 1x1 84 fps 67 ms<br>2. Director 0.2.13 + Buffer + AFW 1x1 85 fps 68 ms<br>3. Framework 0.2.1 + AFW 1x1 74 fps 39 ms |
+| Doom The Dark Ages | 1. 0.3.0 AFW 1x1 90 fps<br>2. 0.2.13 AFW 1x1 90 fps | 1. AFW only 2x2 73 fps 20 ms<br>2. Director 0.2.1 + AFW 1x1 90 fps 35 ms<br>3. Framework 0.3.0 + AFW 1x1 90 fps 56 ms |
+| Ghosts of Tsushima | 1. AFW only 2x2 74 fps<br>2. 0.2.1 AFW 1x1 90 fps | 1. AFW only 2x2 86 fps 19 ms<br>2. Director 0.2.1 + AFW 1x1 90 fps 35 ms<br>3. Framework 0.2.13 + Buffer + AFW 1x1 90 fps 56 ms |
+| Ghosts of Tsushima (dlss5) | 1. 0.2.13 AFW 1x1 84 fps<br>2. 0.3.0 AFW 1x1 84 fps | 1. Director 0.2.1 + AFW 1x1 90 fps 35 ms<br>2. Framework 0.2.13 + AFW 1x1 90 fps 56 ms<br>3. Framework 0.3.0 + AFW 1x1 90 fps 56 ms |
+| Ghostwire Tokyo (Native + dlss5) | 1. Hybrid 77 fps<br>2. Hybrid Fast 77 fps | 1. Framework Hybrid + Buffer 71 fps 47 ms<br>2. Framework 0.3.0 Fast + Buffer 74 fps 52 ms<br>3. Framework 0.2.13 Fast + Buffer 72 fps 52 ms |
+| Ghostwire Tokyo (Native) | 1. Hybrid Fast 90 fps<br>2. FSR 90 fps | 1. Director Hybrid 90 fps 35 ms<br>2. Framework FSR Fast + Buffer 90 fps 46 ms<br>3. Director 0.2.1 90 fps 36 ms |
+| High on Life 2 (Native Joe) | 1. Hybrid 90 fps<br>2. Hybrid Fast 90 fps | 1. Framework Hybrid Fast + Buffer 90 fps 40 ms<br>2. Framework 0.3.0 Fast + Buffer 90 fps 41 ms<br>3. Framework 0.2.1 + Buffer 90 fps 41 ms |
+| Horizon Forbidden West | 1. 0.3.0 AFW 1x1 82 fps<br>2. 0.2.13 AFW 1x1 82 fps | 1. AFW only 2x2 73 fps 18 ms<br>2. Director 0.3.0 + AFW 1x1 90 fps 67 ms<br>3. Director 0.2.13 + AFW 1x1 90 fps 67 ms |
+| Indiana Jones and the Great Circle | 1. 0.2.13 AFW 1x1 90 fps<br>2. 0.3.0 AFW 1x1 90 fps | 1. AFW only 1x1 78 fps 21 ms<br>2. Director 0.2.1 + Buffer + AFW 1x1 90 fps 46 ms<br>3. Framework 0.3.0 + AFW 1x1 90 fps 56 ms |
+| Kingdom Come Deliverance II | 1. AFW only 1x1 87 fps<br>2. AFW only 2x2 90 fps | AFW only 1x1 81 fps<br>AFW only 2x2 90 fps |
+| Kingdom Come Deliverance II (dlss5) | 1. 0.2.13 AFW 1x1 90 fps<br>2. 0.3.0 AFW 1x1 90 fps | 1. Framework 0.2.13 + AFW 1x1 90 fps 56 ms<br>2. Framework 0.3.0 + Buffer + AFW 1x1 90 fps 56 ms<br>3. Director 0.2.1 + Buffer + AFW 1x1 88 fps 46 ms |
+| MSFS2024 (fly, VR ultra, foveated) | 1. 0.2.13 Fast 89 fps 63 ms<br>2. 0.3.0 87 fps 45 ms | 1. Framework 0.3.0 85 fps 83 ms<br>2. Framework 0.2.13 85 fps 84 ms<br>3. Framework 0.2.1 Fast 83 fps 77 ms |
+| MSFS2024 (ground, VR very high) | 1. Hybrid Fast 90 fps 57 ms<br>2. FSR 88 fps 40 ms | 1. Framework Hybrid Fast 90 fps 74 ms<br>2. Framework 0.3.0 Fast 90 fps 74 ms<br>3. Framework 0.2.1 Fast + Buffer 90 fps 74 ms |
+| No man's sky VR | 1. 0.2.1 90 fps<br>2. 0.2.1 Fast 90 fps | 1. Director 0.3.0 Fast + Buffer 90 fps 55 ms<br>2. Director 0.2.13 Fast + Buffer 90 fps 55 ms<br>3. Framework 0.2.1 90 fps 65 ms |
+| Nobody Wants to Die (Native) | 1. Hybrid 75 fps<br>2. 0.2.13 Fast 76 fps | 1. Director 0.3.0 Fast + Buffer 69 fps 59 ms<br>2. Framework 0.2.13 Fast 69 fps 58 ms<br>3. Director Hybrid 65 fps 54 ms |
+| Returnal (syncseq) | 1. Hybrid 90 fps<br>2. Hybrid Fast 90 fps | 1. Framework Hybrid Fast 90 fps 51 ms<br>2. Framework FSR Fast 89 fps 52 ms<br>3. Framework 0.3.0 Fast 90 fps 54 ms |
+| Returnal (syncseq+dlss5) | 1. 0.2.1 Fast 74 fps<br>2. 0.2.1 72 fps | 1. Director 0.2.13 70 fps 66 ms<br>2. Framework 0.3.0 Fast 69 fps 63 ms<br>3. Director Hybrid Fast 66 fps 55 ms |
+| Skyrim VR | 1. 0.2.13 Fast 90 fps<br>2. 0.3.0 Fast 90 fps | 1. Framework 0.3.0 Fast 90 fps 46 ms<br>2. Framework 0.2.13 Fast + Buffer 90 fps 45 ms<br>3. Framework 0.2.1 90 fps 55 ms |
+| Star Wars Outlaws (RT+RR) | 1. 0.3.0 AFW 1x1 90 fps<br>2. 0.2.13 AFW 1x1 90 fps | 1. Director 0.2.1 + Buffer + AFW 1x1 90 fps 46 ms<br>2. Framework 0.2.13 + Buffer + AFW 1x1 90 fps 56 ms<br>3. Framework 0.3.0 + Buffer + AFW 1x1 90 fps 56 ms |
+| Stellar Blade (Native) | 1. FSR 90 fps<br>2. FSR Fast 90 fps | 1. Director Hybrid 90 fps 44 ms<br>2. Director 0.2.1 Fast 90 fps 37 ms<br>3. Framework FSR 90 fps 54 ms |
+| The Callisto Protocol (Native) | 1. 0.2.13 89 fps<br>2. 0.3.0 89 fps | 1. Framework 0.2.13 + Buffer 87 fps 67 ms<br>2. Framework 0.3.0 86 fps 65 ms<br>3. Framework 0.2.1 + Buffer 83 fps 55 ms |
+| The Planet Crafter | 1. 0.2.1 90 fps<br>2. 0.2.1 Fast 90 fps | 1. Framework 0.2.13 Fast 90 fps 52 ms<br>2. Framework 0.3.0 Fast 90 fps 52 ms<br>3. Framework 0.2.1 Fast 90 fps 54 ms |
 
 ## What the tray changes on your PC
 
@@ -246,7 +239,6 @@ Selecting a DLSS-G preset can update the game's NVIDIA driver profile. **Crash d
 - Many Luke Ross games have HUD doubling during movement with AFW.
 - DLSS 5 Neural Rendering can cause instability or device-hung crashes in some games.
 - Extra OpenXR layers or overlays can exhaust the available swapchain budget.
-- Some UEVR Synced Sequential configurations can show misplaced ghosting with vector-based routes.
 - Vulkan support remains experimental.
 
 ## Reporting problems
