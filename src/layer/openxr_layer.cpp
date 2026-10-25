@@ -3818,9 +3818,21 @@ void initialize_late_luke_context(const std::shared_ptr<SessionState>& session) 
         // Active color history may retain a REAL VR device alias. The backing
         // challenge above proves the same owner; keep its queue/resources but
         // use the confirmed native allocation identity for strict AFW guides.
-        if (!active_history && session->luke_synthesis_queue &&
-            !d3d_owner::same(session->d3d12_device.Get(),device.Get()))
-            session->luke_synthesis_queue.Reset();
+        if (!active_history && session->luke_synthesis_queue) {
+            // The old device may be a verified REAL VR alias of the native
+            // allocation device, while its queue still reports that alias.
+            // Synthesis requires exact COM ownership, not shared backing.
+            Microsoft::WRL::ComPtr<IUnknown> target_identity, queue_identity;
+            Microsoft::WRL::ComPtr<ID3D12Device> queue_owner;
+            const bool compatible = SUCCEEDED(device.As(&target_identity)) &&
+                SUCCEEDED(session->luke_synthesis_queue->GetDevice(IID_PPV_ARGS(&queue_owner))) &&
+                SUCCEEDED(queue_owner.As(&queue_identity)) && target_identity == queue_identity;
+            if (!compatible) {
+                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                    0,959,handle_value(session->luke_synthesis_queue.Get()),handle_value(device.Get()));
+                session->luke_synthesis_queue.Reset();
+            }
+        }
         session->d3d12_device=std::move(device);
         if(auto monitor=xrfg::neural_rendering::observe_device_removal(session->d3d12_device.Get()))
             session->gpu_crash_monitors.push_back(std::move(monitor));

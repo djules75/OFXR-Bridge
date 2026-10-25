@@ -1,0 +1,24 @@
+{
+  "implementation": 662,
+  "ipc_abi": 66201,
+  "provider_abi": 45601,
+  "ctest_passed": [
+    "xrfg_benchmark_log_tests",
+    "xrfg_bridge_flight_logger_tests",
+    "xrfg_synthesis_init_diagnostics",
+    "xrfg_luke_deferred_flow_copy",
+    "xrfg_luke_queue_isolation",
+    "xrfg_single_configuration_tests",
+    "xrfg_luke_standalone_context",
+    "xrfg_luke_queue_policy",
+    "xrfg_luke_no_helper_context",
+    "xrfg_luke_stale_synthesis_context",
+    "xrfg_luke_late_alias_context"
+  ],
+  "regression_before_fix": "expected failed assertion: stale queue retained; V661 production branch",
+  "first_fixture_build": "missing qualified test-only ComPtr corrected; original failure log retained",
+  "strict_validation_unchanged": true,
+  "generation_math_pacing_fences_unchanged": true,
+  "hardware_acceptance": "pending KCD OFF and Horizon ON",
+  "published": false
+}

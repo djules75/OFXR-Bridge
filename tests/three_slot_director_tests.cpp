@@ -2177,6 +2177,7 @@ void refused_frame_recovery_test() {
 #include "djules_v474_layer_tests.inc"
 
 #include "d3d12_reported_device_alias.hpp"
+#include "luke_stale_queue_fixture.hpp"
 #include "v477_luke_context.inc"
 #include "../src/layer/outlaws_startup_test.inc"
 
@@ -2267,6 +2268,10 @@ int main(int argc, char** argv) {
     }
     if(argc>1 && std::string_view(argv[1])=="luke-fresh-pacing") {
         try {luke_fresh_pacing_test();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
+    }
+    if(argc>1 && std::string_view(argv[1])=="luke-stale-synthesis-context") {
+        try {luke_standalone_context_test(false,false,true);return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
     }
     if(argc>1 && std::string_view(argv[1])=="luke-no-helper-context") {

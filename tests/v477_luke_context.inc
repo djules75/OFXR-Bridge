@@ -1,5 +1,5 @@
 // Real original D12 Execute hook, COM ownership, and production layer bootstrap.
-void luke_standalone_context_test(bool active_alias_history=false, bool no_helper_context=false) {
+void luke_standalone_context_test(bool active_alias_history=false, bool no_helper_context=false, bool stale_synthesis=false) {
     using Microsoft::WRL::ComPtr;
     ComPtr<ID3D11Device> d11;ComPtr<ID3D11DeviceContext> c11;
     check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,
@@ -19,6 +19,17 @@ void luke_standalone_context_test(bool active_alias_history=false, bool no_helpe
     state->d3d11_device=d11;state->d3d11_context=c11;
     if (!no_helper_context) {state->d3d12_device=d12;state->d3d12_queue=private_queue;}
     initialize_luke_synthesis_queue(*state);
+    ComPtr<ReportedDeviceAlias> startup_alias;
+    if(stale_synthesis) {
+        startup_alias.Attach(new ReportedDeviceAlias(d12.Get(),false,true));
+        state->d3d12_device=startup_alias;
+        ComPtr<QueueWithReportedDeviceAlias> startup_queue;
+        startup_queue.Attach(new QueueWithReportedDeviceAlias(
+            state->luke_synthesis_queue.Get(),startup_alias.Get()));
+        state->luke_synthesis_queue=startup_queue;
+        check(d3d_owner::same(startup_alias.Get(),d12.Get()),
+            "regression requires verified alias backing, not a foreign adapter");
+    }
     auto early_synthesis=state->luke_synthesis_queue;
     check(bool(early_synthesis)==!no_helper_context && !state->luke_afw &&
         !(state->graphics_binding_capabilities&8),"early OFXR lane must not confer native AFW authority");
@@ -84,8 +95,13 @@ void luke_standalone_context_test(bool active_alias_history=false, bool no_helpe
     check(state->luke_synthesis_queue && state->luke_synthesis_queue!=state->d3d12_queue &&
         state->luke_synthesis_queue!=original_queue && !session_uses_shared_queue(*state),
         "late Luke OFXR must have a separate lane without moving producer/AFW ownership");
-    if(early_synthesis)check(state->luke_synthesis_queue==early_synthesis,
-        "late native/alias confirmation discarded the compatible early OFXR lane");
+    if(early_synthesis)check(stale_synthesis ? state->luke_synthesis_queue!=early_synthesis :
+        state->luke_synthesis_queue==early_synthesis,
+        "late native handoff must retire a stale queue while preserving a compatible lane");
+    ComPtr<ID3D12Device> synthesis_owner;
+    check(SUCCEEDED(state->luke_synthesis_queue->GetDevice(IID_PPV_ARGS(&synthesis_owner))) &&
+        synthesis_owner==state->d3d12_device,
+        "late synthesis queue must report the exact allocation device");
     if(active_alias_history) {
         xrfg::configure_dlss_motion_vector_tracking(true);
         std::shared_ptr<const xrfg::DlssMotionVectorFrame> frame;

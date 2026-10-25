@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.661.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.662.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -1585,6 +1585,8 @@ if(XRFG_BUILD_TESTS AND TARGET xrfg_three_slot_director_tests)
         add_test(NAME xrfg_luke_queue_policy COMMAND xrfg_three_slot_director_tests luke-queue-policy)
         set_tests_properties(xrfg_luke_queue_policy PROPERTIES TIMEOUT 20)
     add_test(NAME xrfg_luke_no_helper_context COMMAND xrfg_three_slot_director_tests luke-no-helper-context)
+    add_test(NAME xrfg_luke_stale_synthesis_context COMMAND xrfg_three_slot_director_tests luke-stale-synthesis-context)
+    set_tests_properties(xrfg_luke_stale_synthesis_context PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
     add_test(NAME xrfg_luke_late_alias_context COMMAND xrfg_three_slot_director_tests luke-late-alias-context)
     set_tests_properties(xrfg_luke_late_alias_context PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
     add_test(NAME xrfg_outlaws_startup COMMAND xrfg_three_slot_director_tests outlaws-startup

@@ -66,6 +66,8 @@ void concurrent_records(const fs::path& directory, bool wrap, bool flush) {
     const auto path = logger.log_path();
     logger.event(xrfg::BridgeFlightOperation::runtime_identity, 999, 42, 7, 3);
     if (wrap) {
+        logger.event(xrfg::BridgeFlightOperation::synthesis_initialize,
+            E_INVALIDARG, 0x661D0069ULL, 256, 3);
         logger.event(xrfg::BridgeFlightOperation::benchmark_configuration, 0, 42, 33, 100);
         logger.event(xrfg::BridgeFlightOperation::benchmark_rates, 1, 42, 43, 42);
         logger.flush();
@@ -135,6 +137,10 @@ void concurrent_records(const fs::path& directory, bool wrap, bool flush) {
         "non-wrapping logger lost records without reporting bounded queue pressure");
     if (wrap) {
         require(identities.size() < threads * iterations, "wrap fixture did not exercise truncation");
+        require(contents.find("phase=M op=synthesis_initialize result=" +
+            std::to_string(static_cast<std::int64_t>(E_INVALIDARG)) +
+            " dur_us=0 a=" + std::to_string(0x661D0069ULL) + " b=256 c=3") != std::string::npos,
+            "rotation lost the initialization failure guard needed for late F9 inspection");
         require(contents.find("phase=M op=runtime_identity result=999") != std::string::npos &&
             contents.find("phase=M op=logger result=") != std::string::npos,
             "rotation lost startup identity or implementation metadata");
