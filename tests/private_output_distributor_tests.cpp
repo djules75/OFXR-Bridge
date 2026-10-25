@@ -7,6 +7,7 @@
 #include <vector>
 
 static void require(bool v,const char* what){if(!v)throw std::runtime_error(what);}
+#include "ready_slot_witnesses.inc"
 int main(){try {
     constexpr std::int64_t ms=1'000'000;
     xrfg::PrivateRuntimeBudget budget;
@@ -32,6 +33,19 @@ int main(){try {
     require(margin.runtime_ready(40*ms,2*ms)==0 && margin.deadline()==43*ms,"retained native margin unnecessarily grew on early input");
     require(margin.delivered(43*ms) && margin.delay()==1*ms,"native margin was lost on the following cycle");
     xrfg::PrivatePhysicalSchedule grid;
+    for(const auto& w:ready_slot_witnesses) {
+        constexpr std::int64_t p=11'111'111,base=1'000'000'000;
+        xrfg::PrivatePhysicalSchedule ready;
+        require(ready.clock({base+ms,p,1000}),"captured physical clock");
+        require(ready.claim(base-2*p,base-2*p,base-2*p,base-2*p,1'100'000)==base,"captured prior slot");
+        require(ready.delivered(base+w.prior_handoff),"captured prior handoff");
+        require(w.accepted+w.old_floor>p,"witness no longer reproduces the old eligibility exclusion");
+        const auto next=ready.claim(base+w.accepted,base+w.prepared,base+w.native_ready,base+w.now,1'100'000);
+        require(next==base+p && ready.slot()==1001,"ready captured packet missed a usable headset slot because of past work");
+        require(!ready.delivered(next-1) && ready.delivered(next+2'000),"witness bypassed physical deadline or lost its packet");
+        require(ready.claim(next-10*ms,next-9*ms,next-10*ms,next-9*ms,1'100'000)>=base+2*p,
+            "ready packet enabled a catch-up burst or slot reuse");
+    }
     // Captured V650 Horizon margins: 128 physical gaps all followed a
     // preventive renewal although the native prediction covered the display.
     // Keep the exact early-handoff phase and reject an actually short window.
@@ -43,18 +57,16 @@ int main(){try {
     require(!xrfg::PrivatePhysicalSchedule::prediction_covers_display(101'100'000,100*ms),"display boundary guard lost");
     require(xrfg::PrivatePhysicalSchedule::prediction_covers_display(101'100'001,100*ms),"usable display edge rejected");
     require(grid.clock({20*ms,11*ms,100}),"physical anchor rejected");
-    require(grid.observe_work(3*ms,3)==3*ms && grid.delay()==3*ms,"private latency is not applied as packet eligibility");
+    require(grid.delay()==0,"fresh physical schedule adds historical packet latency");
     require(grid.claim(24*ms,27*ms,25*ms,27*ms,1*ms)==30*ms && grid.slot()==101,"first physical slot not anchored to headset");
     require(grid.delivered(30*ms+20'000),"physical first output");
     require(grid.claim(27*ms,30*ms,39*ms,40*ms,1*ms)==41*ms && grid.slot()==102,"late CPU entry permanently moved the physical phase");
     require(grid.delivered(41*ms),"next absolute slot did not recover the same clock phase");
-    require(grid.observe_work(8*ms,3)==5*ms && grid.delay()==8*ms,"late GPU work did not add only its exact missing buffered time");
     require(grid.claim(47*ms,55*ms,50*ms,55*ms,1*ms)==63*ms && grid.slot()==104,"late prepared packet moved phase instead of skipping an expired display slot");
     require(grid.delivered(63*ms),"late GPU packet was discarded");
-    require(grid.observe_work(2*ms,3)==0 && grid.delay()==8*ms,"buffered GPU time was lost or charged again");
+    require(grid.delay()==0,"late completed GPU packet imposed another floor on subsequent work");
     require(grid.claim(57*ms,60*ms,65*ms,65*ms,1*ms)==74*ms && grid.slot()==105,"retained buffer did not apply to next packet on the same grid");
     require(grid.delivered(74*ms),"buffered following output");
-    require(grid.observe_work(10'000*ms,3)==14*ms && grid.delay()==22*ms,"pause created unbounded replay latency");
     for(const auto p:{8'333'333LL,11'111'111LL,13'333'333LL}) {
         xrfg::PrivatePhysicalSchedule c;const std::int64_t base=1'000'000'000;
         require(c.clock({base,p,1000}),"variable physical clock");
@@ -63,8 +75,8 @@ int main(){try {
             // Irregular75fps input, bounded late-copy service, no assumed90fps.
             const auto source=base+std::int64_t(n)*13'333'333;
             const auto work=(n%17==0?7:2)*ms;
-            c.observe_work(work,3);const auto at=c.claim(source,source+work,source,source+work,100'000);
-            require((at+ms-base)%p==0 && c.slot()>slot && at>=source+c.delay(),"output left physical grid, reused a slot or bypassed held packet latency");
+            const auto at=c.claim(source,source+work,source,source+work,100'000);
+            require((at+ms-base)%p==0 && c.slot()>slot && at>=source+work,"output left physical grid, reused a slot or bypassed actual GPU readiness");
             if(n)require(at-last>=p,"fixed slots ran faster than headset");
             require(c.delivered(at),"finite irregular input was lost");last=at;slot=c.slot();
         }

@@ -157,6 +157,8 @@ The native VDXR path uses its existing framework behavior, so the scheduling dro
 
 **Increase buffer** controls the non-Legacy output buffer: off allows two frames in flight (default), on allows three. It applies to both Framework and Director on that transport, independently of Fast mode. Changes apply live after queued frames finish, without resetting the generation framework. A larger buffer may help stability at the cost of latency. Legacy Framework and direct AFW Only are unaffected. The active count is shown below the checkbox; non-Legacy benchmarks compare both budgets.
 
+The buffer limit changes admission only. Director selects the first usable headset slot after the current image copies and native frame cycle are ready; past GPU stalls do not impose an additional minimum residence on a completed frame.
+
 ### Frameworks
 
 | Framework | Starting considerations |

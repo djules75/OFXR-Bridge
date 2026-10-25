@@ -525,6 +525,7 @@ int main(int argc,char** argv) {
     unsigned phase_outputs{};
     const unsigned trial_frames=16;
     const unsigned input_count=benchmark_sequence?7*trial_frames:8;
+    std::vector<std::shared_ptr<xrfg::InterfaceCycle>> measured_cycles;
     bool hfw_gate_proven=false;
     for(unsigned n=1;n<=input_count;++n) {
         if(hfw_early && n==4) {
@@ -596,6 +597,7 @@ int main(int argc,char** argv) {
         if(vectors && !split_eyes){auto c=find_swapchain(chain);auto guides=std::make_shared<xrfg::DlssMotionVectorSet>();guides->eye_count=2;
             for(unsigned eye=0;eye<2;++eye){auto g=std::make_shared<xrfg::DlssMotionVectorFrame>();g->stream=eye+1;g->epoch=1;g->serial=n;g->previous_serial=n-1;g->publication=2*n+eye;g->producer_queue=f.queue;g->output=images[*c->last_released_index].texture;g->output_slice=eye;g->depth=depth;g->motion_vectors=motion;g->motion_slice=eye;g->output_width=g->depth_width=g->motion_width=256;g->output_height=g->depth_height=g->motion_height=128;guides->eyes[eye]=g;}c->last_released_motion_vectors=guides;}
         XrFrameState prediction{XR_TYPE_FRAME_STATE};xr_ok(layer_wait_frame_impl(state->handle,nullptr,&prediction),"shipping virtual Wait");xr_ok(layer_begin_frame_impl(state->handle,nullptr),"shipping virtual Begin");
+        if(measured)if(auto cycle=state->interface_waited_cycle.load())measured_cycles.push_back(std::move(cycle));
         std::array<XrCompositionLayerProjectionView,2> views;
         for(unsigned eye=0;eye<2;++eye){auto& v=views[eye];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};v.pose.orientation.w=1;v.pose.position.x=(sole?float(n):0.F)+(eye?.032F:-.032F);v.pose.position.y=float(n);v.fov={-.7F,.7F,.7F,-.7F};v.subImage.swapchain=split_eyes && eye?right:chain;v.subImage.imageArrayIndex=split_eyes?0:eye;v.subImage.imageRect.extent={256,128};}
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};projection.space=reinterpret_cast<XrSpace>(9);projection.viewCount=2;projection.views=views.data();auto* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
@@ -683,8 +685,14 @@ int main(int argc,char** argv) {
     check(f.director_policies.size()==f.handoffs.size(),"native handoffs record their effective delivery policy");
     for(unsigned i=1;i<f.handoffs.size();++i) {
         if(!f.director_policies[i])continue; // Framework explicitly bypasses the final cadence.
-        if(f.handoffs[i]-f.handoffs[i-1]<period)std::fprintf(stderr,"handoff interval%lldns required%lldns\n",f.handoffs[i]-f.handoffs[i-1],period);
-        check(f.handoffs[i]-f.handoffs[i-1]>=period,"all director-paced route outputs obey common physical cadence");
+        // The deadline uses the consumer's pre-call QPC stamp; this fixture
+        // samples after the indirect native call enters. Allow5us variation
+        // in that sampling boundary, not a shorter scheduled display period.
+        // Exact slot/period/no-catch-up policy is checked by the clock tests.
+        constexpr std::int64_t native_entry_sampling_slop=5'000;
+        const auto elapsed=f.handoffs[i]-f.handoffs[i-1];
+        if(elapsed+native_entry_sampling_slop<period)std::fprintf(stderr,"handoff interval%lldns required%lldns (native entry sampling5us)\n",elapsed,period);
+        check(elapsed+native_entry_sampling_slop>=period,"native callback cadence exceeds5us pre-call sampling uncertainty");
     }
     if(measured) {
         // Refresh observations after physical FIFO drain. This is test-only CPU
@@ -695,10 +703,31 @@ int main(int argc,char** argv) {
         XrFrameEndInfo sample{XR_TYPE_FRAME_END_INFO};sample.layerCount=1;sample.layers=&header;
         state->fps_overlay->application_frame(&sample);
         const auto m=xrfg::autonomous::snapshot().runtime.telemetry;
+        std::fprintf(stderr,"Measured scalar check: minimum=%.9f delay=%.9f producer=%.9f cycle=%.9f ms\n",
+            m.cycle_estimated_ms,m.ofxr_delay_ms,m.ofxr_time_ms,m.cycle_length_ms);
         check(m.cycle_valid && m.cycle_estimated_valid,"shipping generator publishes XR interval and runtime completion independently of engine origin");
         check(!m.game_time_valid,"abandoned Game timing stays absent without hiding the corrected Excel estimate");
         check(m.cycle_source==xrfg::InterfaceSource::native_frame_cycle_qpc && m.cycle_estimated_source==xrfg::InterfaceSource::native_minimum_cycle_qpc,"all shipping route measurements reach native director endpoint");
-        check(m.cycle_estimated_ms>=m.ofxr_delay_ms && m.ofxr_time_ms<=m.cycle_length_ms,"same physical frame has consistent complete-cycle values");
+        // These aggregate medians can cover different samples: missing native
+        // synthetic-period metadata excludes Minimum, but not native delay.
+        // Validate the actual same-cycle bounds instead of ordering medians
+        // from different cohorts (which hid behind V658's longer residence).
+        unsigned native_samples{},minimum_samples{};
+        for(const auto& cycle:measured_cycles) {
+            bool required{};xrfg::InterfaceNativeTiming native;
+            if(!cycle->native_timing(required,native))continue;
+            ++native_samples;float minimum{},producer{},complete{};
+            if(cycle->read_minimum_cycle(native.returned_ns,minimum)) {
+                ++minimum_samples;
+                check(minimum+.001F>=float(native.returned_ns-cycle->started_ns)*1e-6F,
+                    "same-cycle minimum cannot omit observed runtime completion");
+            }
+            if(cycle->read(native.returned_ns,producer,complete))
+                check(producer<=complete+.001F,"same-cycle producer interval exceeds its complete cycle");
+        }
+        std::fprintf(stderr,"Measured sample cohorts: native=%u minimum=%u\n",native_samples,minimum_samples);
+        check(native_samples && minimum_samples,"shipping measurement lacks native same-source cycle samples");
+        check(m.ofxr_time_ms<=m.cycle_length_ms+.001F,"producer and complete medians use the same valid cycle samples");
         check(m.stages_valid && m.game_time_ms>=0 && m.generation_time_ms>=0 && m.delivery_time_ms>=0,
             "all shipping frameworks expose same-source production, preparation and delivery stages");
         std::printf("Native measured cycle %.3fms, runtime completed %.3fms, producer calls %.3fms\n",m.cycle_length_ms,m.cycle_estimated_ms,m.ofxr_time_ms);

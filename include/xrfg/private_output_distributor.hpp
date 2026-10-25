@@ -116,7 +116,7 @@ struct PrivatePhysicalClock {
 // move the headset clock or discard the FIFO head.
 class PrivatePhysicalSchedule {
     PrivatePhysicalClock clock_{};
-    std::int64_t latency_{},due_{},last_at_{};
+    std::int64_t due_{},last_at_{};
     std::uint64_t slot_{},last_slot_{};
     bool valid_{},delivered_{};
 public:
@@ -137,22 +137,16 @@ public:
         clock_=value;clock_.at-=handoff_lead;valid_=true;return true;
     }
     [[nodiscard]] bool valid() const noexcept {return valid_;}
-    [[nodiscard]] std::int64_t delay() const noexcept {return latency_;}
+    // No service-history floor after preparation: its exact fences are already
+    // complete. Admission capacity must not postpone a usable physical slot.
+    [[nodiscard]] std::int64_t delay() const noexcept {return 0;}
     [[nodiscard]] std::int64_t deadline() const noexcept {return due_;}
     [[nodiscard]] std::uint64_t slot() const noexcept {return slot_;}
     void adopt_handoff(std::int64_t at) noexcept {if(!delivered_)last_at_=std::max(last_at_,at);}
-    // Only unfinished-source work and actual private-copy service enter here.
-    // FIFO/real-image lease waits are not GPU service and cannot inflate hold.
-    std::int64_t observe_work(std::int64_t work,std::size_t capacity) noexcept {
-        if(!valid_)return 0;
-        const auto limit=clock_.period*static_cast<std::int64_t>(capacity?capacity-1:0);
-        const auto next=std::max(latency_,std::clamp(work,std::int64_t{},limit));
-        const auto added=next-latency_;latency_=next;return added;
-    }
     std::int64_t claim(std::int64_t accepted,std::int64_t available,std::int64_t native_ready,
                        std::int64_t now,std::int64_t native_margin) noexcept {
         if(!valid_)return 0;
-        auto earliest=std::max({accepted+latency_,available,native_ready+native_margin,
+        auto earliest=std::max({accepted,available,native_ready+native_margin,
             now+PrivateOutputSchedule::preparation_lead});
         if(!delivered_ && last_at_)earliest=std::max(earliest,last_at_+clock_.period);
         auto steps=std::max(std::int64_t{},earliest-clock_.at);

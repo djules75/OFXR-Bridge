@@ -54,11 +54,11 @@ void release_readiness_test(bool enabled) {
     std::this_thread::sleep_for(15ms);const bool rewrite_waited=f.source_ready_events==before_rewrite;
     gate->Signal(3);xr_ok(rewritten,"rewritten source accepted");f.wait_count(3);xr_ok(f.transport->drain(),"rewrite drain");
     check(rewrite_waited && f.pixels.back()==99,"new source reused old proof");
-    if(enabled)check(!f.work_margins.empty() && std::all_of(f.work_margins.begin(),f.work_margins.end(),[](auto margin){return margin<=period;}),"work margin exceeded one refresh");
-    else check(std::any_of(f.work_margins.begin(),f.work_margins.end(),[](auto margin){return margin==2*period;}),"old work-margin control did not retain two refreshes");
+    check(!f.work_margins.empty() && std::all_of(f.work_margins.begin(),f.work_margins.end(),[](auto margin){return margin==0;}),
+        "completed packet inherited a past GPU-service eligibility floor");
     check(f.positions==std::vector<float>({1,2,3}),"readiness path reordered native packets");
     for(unsigned i=1;i<f.handoffs.size();++i)check(f.handoffs[i]-f.handoffs[i-1]>=period-100'000,"readiness path shortened physical cadence");
     xr_ok(f.transport->destroy_swapchain(chain),"proof cleanup");xr_ok(f.transport->destroy_swapchain(overlay),"overlay cleanup");
     f.transport->stop();check(f.real_begins==f.real_ends+f.empty_ends+f.discarded_clocks,"native protocol unbalanced");
-    std::puts(enabled?"D11 exact release readiness, pending overlay/rewrite, pixels/order and one-P margin PASS":"D11 original End-marker future-work control PASS");
+    std::puts(enabled?"D11 exact release readiness, pending overlay/rewrite, pixels/order and no held service floor PASS":"D11 original End-marker future-work control PASS");
 }

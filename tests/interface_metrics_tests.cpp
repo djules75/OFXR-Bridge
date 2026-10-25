@@ -15,6 +15,7 @@ using namespace xrfg::autonomous;
 namespace {
 unsigned checks{};
 void check(bool pass, const char* text) { ++checks; if (!pass) throw std::runtime_error(text); }
+#include "timing_cohorts_test.inc"
 void buffer_preferences() {
     check(!Settings{}.increase_buffer,"new profiles default to two private deliveries");
     auto base=snapshot().desired;auto larger=base;larger.increase_buffer=true;
@@ -297,6 +298,7 @@ int main() {
         const auto fixture=std::filesystem::temp_directory_path()/(L"ofxr-v460-timing-"+std::to_wstring(GetCurrentProcessId()));
         std::filesystem::create_directories(fixture);
         SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",fixture.c_str());
+        timing_sample_cohorts();
         buffer_preferences();minimum_spacing_rules();production_boundaries();timing();complete_cycle();estimated_cycle();native_delivery_cycle();stage_partition_and_baseline();wording();
         const auto before=snapshot();
         check(!interface_telemetry_requested(), "hidden by default");

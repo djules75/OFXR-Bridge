@@ -586,7 +586,9 @@ struct PrivateOpenXrRuntime::Impl {
                     if(diagnostic)options.trace(15,packet->sequence,release_enter,release_leave-release_enter);
                     // Only fully prepared packets reach this thread. Arrival time,
                     // not a rounded refresh slot, supplies the exact late hold.
-                    const auto refill=slots.valid()?0:schedule.input_ready(packet->source_ready_at,options.capacity);
+                    // Fallback keeps its existing bounded pair refill. Buffer
+                    // capacity changes admission, never the temporal policy.
+                    const auto refill=slots.valid()?0:schedule.input_ready(packet->source_ready_at,2);
                     if(diagnostic && refill)options.trace(11,packet->sequence,packet->source_ready_at,refill);
                     if(!slots.valid())schedule.ready(packet->prepared_at);
                     // Reserve headroom for native Wait/Begin, not for a later GPU
@@ -596,13 +598,12 @@ struct PrivateOpenXrRuntime::Impl {
                     if(diagnostic && margin)options.trace(17,packet->sequence,begun_at,margin);
                     if(slots.valid()) {
                         slots.adopt_handoff(last_handoff);
-                        const auto added=slots.observe_work(packet->work_ns,options.capacity);
                         deadline=slots.claim(packet->accepted_at,packet->prepared_at,begun_at,
                             clock_ns(),PrivateRuntimeBudget::presentation_margin);
                         if(diagnostic) {
                             options.trace(19,packet->sequence,packet->accepted_at+slots.delay(),slots.delay());
                             options.trace(20,packet->sequence,deadline,static_cast<std::int64_t>(slots.slot()));
-                            options.trace(21,packet->sequence,packet->work_ns,added);
+                            options.trace(21,packet->sequence,packet->work_ns,0);
                         }
                     } else deadline=schedule.deadline();
                     // After sparse inputs SteamVR can complete Wait with an already

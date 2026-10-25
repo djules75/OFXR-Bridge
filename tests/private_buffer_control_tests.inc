@@ -47,11 +47,16 @@ void buffer_margin_reset_test() {
     f.begin_virtual();xr_ok(f.submit(chain,1),"old larger buffer accepts pending GPU source");
     std::this_thread::sleep_for(35ms);ok(f.gate->Signal(1),"release controlled source wait");
     f.wait_count(1);xr_ok(f.transport->drain(),"large-margin packet retired");
-    check(!f.work_margins.empty() && f.work_margins.back()==2*period,"large buffer must learn its two-period work margin");
+    check(!f.work_margins.empty() && f.work_margins.back()==0,"completed stalled packet cannot impose historical work on later ready packets");
+    for(unsigned n=0;n<3;++n) {
+        f.write(chain,72+n);f.begin_virtual();xr_ok(f.submit(chain,2+n),"fresh ready packet after stalled source, same three-credit capacity");
+        f.wait_count(2+n);xr_ok(f.transport->drain(),"fresh post-stall retirement");
+        check(f.work_margins.back()==0,"completed source stall survived as eligibility floor on a fresh ready packet");
+    }
     xr_ok(f.transport->set_buffer_capacity(2),"reduce work budget without retaining old margin");
-    f.write(chain,72);f.begin_virtual();xr_ok(f.submit(chain,2),"fresh small-buffer packet");
-    f.wait_count(2);xr_ok(f.transport->drain(),"small-buffer packet retired");
-    check(f.work_margins.back()<=period,"old three-credit work margin survived return to two");
-    check(f.pixels==std::vector<unsigned>({71,72}),"work budget reset changed pixels");
+    f.write(chain,75);f.begin_virtual();xr_ok(f.submit(chain,5),"fresh small-buffer packet");
+    f.wait_count(5);xr_ok(f.transport->drain(),"small-buffer packet retired");
+    check(f.work_margins.back()==0,"capacity change introduced a GPU-service eligibility floor");
+    check(f.pixels==std::vector<unsigned>({71,72,73,74,75}),"post-stall delivery or capacity change altered pixels");
     xr_ok(f.transport->destroy_swapchain(chain),"margin test cleanup");f.transport->stop();
 }
