@@ -22,10 +22,11 @@ int main() {
         check(configuration_path().filename()==L"ofxr-bridge.ini","single public INI name");
         auto state=snapshot();
         check(state.desired==sanitize(Settings{}),"fresh defaults must ignore old autonomous/tray files entirely");
-        check(!benchmark_enabled(),"benchmarks default off");
-        check(write_configuration_sections(configuration_path(),"[benchmark]\nenabled=1\n"),"enable benchmarks in existing INI");
+        check(benchmark_enabled(),"benchmarks default on");
+        check(write_configuration_sections(configuration_path(),"[benchmark]\nenabled=0\n"),"disable benchmarks in existing INI");
         auto changed=state.desired;changed.overlay_position=0;
-        check(request(changed) && benchmark_enabled(),"UI saves must preserve manually enabled benchmarks");
+        check(request(changed) && !benchmark_enabled(),"UI saves must preserve explicitly disabled benchmarks");
+        check(write_configuration_sections(configuration_path(),"[benchmark]\nenabled=1\n"),"enable benchmarks in existing INI");
         wchar_t hotkey[128]{};GetPrivateProfileStringW(L"tray",L"pause_hotkey",L"",hotkey,128,configuration_path().c_str());
         check(std::wstring(hotkey).empty(),"old tray preferences must not be imported");
         check(write_configuration_sections(configuration_path(),"[tray]\npause_hotkey=ctrl+alt+f7\n"),"new tray preferences");

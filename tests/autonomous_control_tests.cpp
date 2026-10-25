@@ -36,7 +36,7 @@ void codec() {
         passive.motion && !passive.depth && passive.last_seen_ms!=0,
         "passive observation distinguishes motion from depth without activating guide capture");
     xrfg::autonomous::Settings desired;
-    require(!desired.benchmark_auto_pick,"automatic benchmark choice defaults off");
+    require(desired.benchmark_auto_pick,"automatic benchmark choice defaults on");
     auto automatic=desired;automatic.benchmark_auto_pick=true;
     require(xrfg::autonomous::parse_settings(xrfg::autonomous::serialize_settings(automatic)).benchmark_auto_pick,
         "automatic benchmark preference roundtrips in the existing game INI");

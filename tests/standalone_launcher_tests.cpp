@@ -98,8 +98,8 @@ int main() {
     if (parse_settings(serialize_settings(reduced_settings)).native_scale != 67 ||
         !contains(build_runtime_ini(reduced_settings), "dlssg_resolution=67") ||
         parse_settings("[tray]\ndlssg_resolution=7\n").native_scale != 100) return 1;
-    if (release_defaults.overlay_position != xrfg::FpsOverlayPosition::upper_right ||
-        !contains(default_runtime_ini, "[overlay]\r\nposition=upper_right")) return 1;
+    if (release_defaults.overlay_position != xrfg::FpsOverlayPosition::elliott_bottom ||
+        !contains(default_runtime_ini, "[overlay]\r\nposition=elliott_bottom")) return 1;
     for (auto position : {xrfg::FpsOverlayPosition::off, xrfg::FpsOverlayPosition::upper_left,
         xrfg::FpsOverlayPosition::upper_right, xrfg::FpsOverlayPosition::lower_left, xrfg::FpsOverlayPosition::lower_right}) {
         LauncherSettings option;

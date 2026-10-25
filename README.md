@@ -179,7 +179,7 @@ Fast mode has **no effect on the Luke Ross path**. For other paths, benchmark bo
 
 ### Benchmarks
 
-Enable **Enable benchmarks** in the tray to make the benchmark controls available under **Display**. Choose the optical-flow, complete or Luke Ross suite, then remain in the same representative scene throughout the run.
+**Enable benchmarks** is on by default in the tray, making the benchmark controls available under **Display**. Choose the optical-flow, complete or Luke Ross suite, then remain in the same representative scene throughout the run. **Auto pick best one** is enabled by default; no benchmark starts automatically.
 
 - Each test lasts **7.5 seconds**: **2.5 seconds** settling, then **5 seconds** measured.
 - Diagnostic logging is not required. Benchmark CSV output is automatic.

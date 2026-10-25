@@ -577,13 +577,13 @@ bool initialize_user_configuration() noexcept {
         if(std::filesystem::exists(file))return std::filesystem::is_regular_file(file);
         const auto defaults=sanitize(Settings{});
         const auto settings=serialize_settings(defaults);
-        if(!save_sections(file,settings+"\n[benchmark]\nenabled=0\n"))return false;
+        if(!save_sections(file,settings+"\n[benchmark]\nenabled=1\n"))return false;
         return true;
     } catch (...) {return false;}
 }
 bool benchmark_enabled() noexcept {
 #ifdef _WIN32
-    try {return GetPrivateProfileIntW(L"benchmark",L"enabled",0,global_configuration_path().c_str())!=0;}
+    try {return GetPrivateProfileIntW(L"benchmark",L"enabled",1,global_configuration_path().c_str())!=0;}
     catch (...) {}
 #endif
     return false;

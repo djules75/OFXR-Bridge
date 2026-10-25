@@ -49,7 +49,7 @@ struct Settings {
     bool afw_debug{};
     bool afw_clear_before_warping{};
     float afw_ignore_motion_threshold{2.5F};
-    int afw_depth_dilate_mode{1};
+    int afw_depth_dilate_mode{};
     int afw_shading_rate{}; // beta6 Combined; 0 full resolution, 4=2x2, 8=4x4
     bool nr_enabled{};
     bool nr_before_sr{true};
@@ -73,8 +73,8 @@ struct Settings {
     bool r19_camera{}; // opt-in own camera for every FG route; live pair snapshot
     bool diagnostics{};
     bool benchmark_csv{true}; // automatic suite CSV; independent of the flight log
-    bool benchmark_auto_pick{}; // per-profile, apply a measured winner only on completion
-    int overlay_position{2}; // 0 off, 1 upper-left, 2 upper-right, 3 lower-left, 4 lower-right, 5 Elliott controller, 6 Elliott bottom
+    bool benchmark_auto_pick{true}; // per-profile, apply a measured winner only on completion
+    int overlay_position{6}; // 0 off, 1 upper-left, 2 upper-right, 3 lower-left, 4 lower-right, 5 Elliott controller, 6 Elliott bottom
     float menu_scale{1.F}; // physical headset interface multiplier, 0.5 to 1.25
     float menu_offset_x{}; // common-FOV centre offset, normalized -1 to 1
     float menu_offset_y{};

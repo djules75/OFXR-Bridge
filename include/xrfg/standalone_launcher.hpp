@@ -96,7 +96,7 @@ struct LauncherSettings {
     // copy at release, for comparing the two on one build.
     bool capture_at_end_frame{true};
     bool diagnostics{};
-    FpsOverlayPosition overlay_position{FpsOverlayPosition::upper_right};
+    FpsOverlayPosition overlay_position{FpsOverlayPosition::elliott_bottom};
     // The system-wide key for "Pause frame generation" while armed, in
     // parse_hotkey's form. No menu entry; edit tray.ini. Empty, "off" or
     // anything parse_hotkey refuses means no key.

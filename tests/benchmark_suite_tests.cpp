@@ -277,7 +277,7 @@ int main() {
         }
         for(const auto& step:optical)check(step.generation==0,"Optical suite must never request vector-only generators");
         unsigned dlssg_steps=0,prefer=0;
-        Settings baseline;baseline.advanced_mode=true;baseline.diagnostics=false;baseline.nr_enabled=true;baseline.afw_mode=2;baseline.pacing_mode=1;
+        Settings baseline;baseline.advanced_mode=true;baseline.diagnostics=false;baseline.nr_enabled=true;baseline.afw_mode=2;baseline.pacing_mode=1;baseline.benchmark_auto_pick=false;
         for(const auto& step:full) {
             auto s=benchmark_settings(baseline,step);
             check(!s.diagnostics && s.nr_enabled && s.afw_mode==2,"Keep diagnostics, Neural and AFW choices");
@@ -319,7 +319,9 @@ int main() {
         baseline.benchmark_csv=true;check(request(baseline),"Save isolated test profile");baseline=snapshot().desired;
         RuntimeStatus runtime{};runtime.sessions=1;runtime.steamvr_runtime=true;runtime.vdxr_legacy=false;runtime.dlssg_preset_request=1;
         runtime.applied_revision=snapshot().revision;report_test_runtime(runtime);
-        check(!benchmark_enabled() && !start_benchmark(true),"INI flag defaults off and blocks suite commands");
+        check(benchmark_enabled(),"INI flag defaults on");
+        check(WritePrivateProfileStringW(L"benchmark",L"enabled",L"0",configuration_path().c_str()),"disable isolated benchmarks");
+        check(!benchmark_enabled() && !start_benchmark(true),"explicit INI disable blocks suite commands");
         check(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable isolated benchmarks in the single INI");
         runtime.pacing_mode=kAfwOnlyPacingMode;report_test_runtime(runtime);
         check(!start_benchmark(true) && snapshot().benchmark.phase==BenchmarkPhase::error,
