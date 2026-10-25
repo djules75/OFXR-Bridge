@@ -127,3 +127,22 @@ with tempfile.TemporaryDirectory() as directory:
     assert len(result)==4 and {(g['pacing'],g['bridge_buffer']) for g in result}=={(p,c) for p in (0,1) for c in (2,3)}
     assert all(g['measurements'][0]['config']['suite_step']==64 for g in result)
 print('V658 index64 preserved; Framework/Director and two/three-credit measurements never merge PASS')
+
+# V660's shorter automatic suite retains exactly 2.5s settling plus 5s measured.
+with tempfile.TemporaryDirectory() as directory:
+    path=Path(directory)/'short-automatic.benchmark.log'
+    events=[event('logger',0,0,0,0,660),event('benchmark_command',0,1,1,99,558),
+            event('benchmark_configuration',0,1,1|(1<<1)|(1<<24),0)]
+    for ms in range(0,7500,250):
+        fps=999 if ms<2500 else 42 if ms<7250 else 84
+        latency=999 if ms<2500 else 44 if ms<7250 else 66
+        events += [event('benchmark_rates',ms,(fps*1000<<32)|21000,(21000<<32)|90000,1,2049),
+                   event('benchmark_cycles',ms,(1000<<32)|55000,latency*1000,1,7)]
+    events.append(event('benchmark_command',7500,2,0,99,558))
+    path.write_text(''.join(events),encoding='utf-8')
+    result=m.export([path],'meganex','estimated')[0]['cells']['Reference:00']
+    assert result['start_s']==2.5 and result['end_s']==7.5 and result['sample_count']==20
+    assert result['fps_median']==42 and result['cycle_median']==44 and result['fps_max']==84
+    assert result['cycle_max']==66
+    assert not m.export([path],'meganex','estimated',settle=3), 'explicit historical trim cannot fabricate five useful seconds'
+print('V660 7.5-second suite: 2.5s settle, all5s measured, tail retained; historical defaults remain unchanged PASS')

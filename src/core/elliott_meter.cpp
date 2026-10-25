@@ -1,5 +1,6 @@
 #include "xrfg/presented_output_rate.hpp"
 #include "xrfg/elliott_meter.hpp"
+#include "xrfg/benchmark_suite.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -307,6 +308,27 @@ private:
 }  // namespace
 
 
+std::string elliott_benchmark_text(const autonomous::Snapshot& state,std::uint64_t now_ms) {
+    const auto& b=state.benchmark;
+    if(!state.connected || !b.game_pid || b.game_pid!=state.runtime.process_id)return {};
+    if(b.phase==autonomous::BenchmarkPhase::complete) {
+        if(state.desired.afw_only && state.runtime.pacing_mode!=autonomous::kAfwOnlyPacingMode)
+            return "Tests complete | restart game: AFW Only";
+        return "Tests complete";
+    }
+    if(!autonomous::benchmark_active(b) || !b.count || b.index>=b.count)return {};
+    char text[96]{};
+    if(b.phase==autonomous::BenchmarkPhase::applying) {
+        std::snprintf(text,sizeof(text),"Test %u/%u | applying settings",b.index+1,b.count);
+    } else {
+        const auto elapsed=now_ms>=b.started_ms ? now_ms-b.started_ms : 0;
+        const double left=double(autonomous::kBenchmarkDurationMs-std::min(elapsed,autonomous::kBenchmarkDurationMs))/1000.0;
+        std::snprintf(text,sizeof(text),"Test %u/%u | %s | %.1fs left",b.index+1,b.count,
+            elapsed<autonomous::kBenchmarkSettleMs ? "settling" : "measuring",left);
+    }
+    return text;
+}
+
 std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& state,
     std::uint64_t now_ms, bool bgra, bool linear, std::uint32_t* used_height) {
     constexpr int unit=2, body=2, big=4, margin=24, w=kElliottMeterWidth, h=kElliottMeterHeight;
@@ -340,7 +362,8 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
     const std::string vectors=std::string(autonomous::interface_vectors_text(state,now_ms));
     const std::string explanation=autonomous::interface_status_text(state);
     const auto vector_rows=wrap(vectors,51), status_rows=wrap(explanation,51);
-    const int rows_top=214, line_height=22;
+    const auto benchmark=elliott_benchmark_text(state,now_ms);
+    const int rows_top=214+(benchmark.empty()?0:28), line_height=22;
     const int count=std::min<int>(int(vector_rows.size()+status_rows.size()),(h-rows_top-8)/line_height);
     const int used=rows_top+count*line_height+8;
     if(used_height)*used_height=unsigned(used);
@@ -365,6 +388,7 @@ std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot& s
         c.text(centre-8*label_scale*int(std::string_view(n.label).size())/2,i<4?100:184,n.label,label_scale,PanelTone::dim);
     }
     c.rule(margin,w-margin,124,2);c.rule(margin,w-margin,206,2);
+    if(!benchmark.empty())c.text(margin,214,benchmark,body,PanelTone::accent);
     int y=rows_top, drawn=0;
     const auto rows=[&](const char* label,const auto& pieces){
         if(drawn>=count)return;

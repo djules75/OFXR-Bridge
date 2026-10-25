@@ -185,32 +185,33 @@ Fast mode has **no effect on the Luke Ross path**. For other paths, benchmark bo
 
 Enable **Enable benchmarks** in the tray to make the benchmark controls available under **Display**. Choose the optical-flow, complete or Luke Ross suite, then remain in the same representative scene throughout the run.
 
-- Each test lasts **10 seconds**. The first **3 seconds** are excluded for settling; the remaining samples are used.
+- Each test lasts **7.5 seconds** after its settings are applied: **2.5 seconds** for settling, followed by **5 seconds** of measurement. VRAM is sampled near the end, before switching configurations.
 - Diagnostic logging is not required. Benchmark CSV output is automatic.
+- Elliottate's meter shows the current test number, settling/measuring phase and remaining seconds. An AFW Only automatic choice also shows its restart reminder there.
 - Results include FPS and Cycle minimum statistics. VRAM use is sampled near the end of each test.
 - Results are saved under **`%LOCALAPPDATA%\ofxr-bridge\Benchmarks`**. Use **Open benchmark folder** to open it.
 - Luke Ross tests compare AFW 1x1, 2x2 and 4x4, including AFW alone. They do not test Fast mode or 3X.
 - Non-Legacy suites compare Framework and Director with both buffer budgets. Other games test Normal and Fast; Luke Ross tests each AFW quality. AFW-only references run once per quality, without a separate buffer trial.
-- Non-Legacy suites contain 41 optical-flow tests, 65 complete tests or 51 Luke Ross tests: about 7, 11 or 9 minutes, plus configuration changes. Legacy VDXR suites remain shorter.
-- At completion, the suite restores the previous settings unless **Auto pick best one** is enabled. Stopping restores them too; manually changing a tested setting cancels the automation and keeps that edit.
+- Non-Legacy suites contain 41 optical-flow tests, 65 complete tests or 51 Luke Ross tests: about 5:08, 8:08 or 6:23 minutes respectively, plus configuration changes. Legacy VDXR suites remain shorter.
+- At completion, the suite restores the previous settings unless **Auto pick best one** is enabled. Stopping restores them too; manually changing a tested setting cancels the automation and keeps that edit. If AFW alone wins, the per-game **AFW Only** option is enabled and the result asks you to restart the game.
 
 Benchmarks change the parameters covered by the selected suite. Other quality settings, such as your chosen flow resolution, are retained.
 
 ### Example configurations
 
-Test system: Intel 265K and RTX 4090. Quest 3 uses VDXR; its measured FPS are capped at 90 to simulate a 90 Hz headset, while latency values are kept as measured. MeganeX uses SteamVR at 90 Hz. The historical table below retains Cycle (estimated), in milliseconds, including the runtime's predicted display horizon. It is not directly comparable with the Cycle minimum metric introduced in v656.
+Test system: Intel 265K and RTX 4090. Quest 3 uses VDXR; its measured FPS are capped at 90 to simulate a 90 Hz headset, while latency values are kept as measured. MeganeX uses SteamVR at 90 Hz. Updated MeganeX entries for Valhalla, Crimson Desert, DOOM and both Ghostwire runs use v659; Horizon uses v658. These six entries show Cycle minimum in milliseconds and offer different frame-generation families as alternatives. Buffer 2 is the default; Buffer 3 means Increase buffer enabled. The other entries, including Quest 3, retain historical Cycle (estimated) values and are not directly comparable with Cycle minimum.
 
 | Game | Quest 3 — Godlike - VDXR - top 2, 90 Hz | MeganeX — 3700x3400 - sboys3 - steamvr - top 3, 90 Hz |
 | --- | --- | --- |
-| Assassin's Creed Valhalla | 1. 0.3.0 Fast 70 fps 100 ms<br>2. 0.3.0 71 fps 98 ms | 1. Director 0.3.0 Fast 76 fps 85 ms<br>2. Framework 0.2.13 Fast 76 fps 83 ms<br>3. Director 0.2.13 Fast 76 fps 85 ms |
-| Crimson Desert (RT, no RR) | 1. 0.2.13 AFW 1x1 81 fps 87 ms<br>2. 0.3.0 AFW 1x1 82 fps 86 ms | 1. Director 0.2.13 AFW 1x1 86 fps 98 ms<br>2. Director 0.3.0 AFW 1x1 86 fps 98 ms<br>3. Director 0.3.0 AFW 2x2 90 fps 95 ms |
-| DOOM: The Dark Ages | 1. 0.3.0 AFW 1x1 90 fps 71 ms<br>2. 0.2.13 AFW 1x1 90 fps 72 ms | 1. AFW only 2x2 72 fps 41 ms<br>2. Director 0.2.1 AFW 1x1 90 fps 66 ms<br>3. Framework 0.2.13 AFW 1x1 90 fps 77 ms |
+| Assassin's Creed Valhalla | 1. 0.3.0 Fast 70 fps 100 ms<br>2. 0.3.0 71 fps 98 ms | 1. Director 0.2.13 Fast Buffer 3 74.6 fps 65.1 ms<br>2. Framework 0.3.0 Fast Buffer 3 74.4 fps 61.9 ms<br>3. Framework 0.2.1 Fast Buffer 2 73.2 fps 61.5 ms |
+| Crimson Desert (RT, no RR) | 1. 0.2.13 AFW 1x1 81 fps 87 ms<br>2. 0.3.0 AFW 1x1 82 fps 86 ms | 1. Director 0.3.0 AFW 1x1 Buffer 2 84.0 fps 67.3 ms<br>2. Director 0.2.13 AFW 1x1 Buffer 3 85.0 fps 68.0 ms<br>3. Framework 0.2.1 AFW 1x1 Buffer 2 74.0 fps 39.4 ms |
+| DOOM: The Dark Ages | 1. 0.3.0 AFW 1x1 90 fps 71 ms<br>2. 0.2.13 AFW 1x1 90 fps 72 ms | 1. AFW only 2x2 73.0 fps 20.1 ms<br>2. Director 0.2.1 AFW 1x1 Buffer 2 90.0 fps 35.1 ms<br>3. Framework 0.3.0 AFW 1x1 Buffer 2 90.0 fps 55.9 ms |
 | Ghost of Tsushima | 1. AFW only 2x2 74 fps 38 ms<br>2. 0.2.1 AFW 1x1 90 fps 57 ms | 1. AFW only 2x2 89 fps 35 ms<br>2. AFW only 1x1 75 fps 34 ms<br>3. Director 0.2.1 AFW 1x1 90 fps 66 ms |
 | Ghost of Tsushima (DLSS5) | 1. 0.2.13 AFW 1x1 84 fps 86 ms<br>2. 0.3.0 AFW 1x1 84 fps 85 ms | 1. Director 0.2.1 AFW 1x1 90 fps 66 ms<br>2. Framework 0.3.0 AFW 1x1 90 fps 77 ms<br>3. Framework 0.2.13 AFW 1x1 90 fps 77 ms |
-| Ghostwire Tokyo (Native + DLSS5) | 1. Hybrid 77 fps 54 ms<br>2. Hybrid Fast 77 fps 52 ms | 1. Director 0.3.0 Fast 71 fps 76 ms<br>2. Framework 0.2.13 72 fps 77 ms<br>3. Director Hybrid 68 fps 73 ms |
-| Ghostwire Tokyo (Native) | 1. Hybrid Fast 90 fps 44 ms<br>2. FSR 90 fps 48 ms | 1. Director Hybrid 90 fps 66 ms<br>2. Director Hybrid Fast 90 fps 66 ms<br>3. Director FSR 90 fps 66 ms |
+| Ghostwire Tokyo (Native + DLSS5) | 1. Hybrid 77 fps 54 ms<br>2. Hybrid Fast 77 fps 52 ms | 1. Framework Hybrid Buffer 3 70.9 fps 46.7 ms<br>2. Framework 0.3.0 Fast Buffer 3 73.6 fps 51.5 ms<br>3. Framework 0.2.13 Fast Buffer 3 71.8 fps 52.4 ms |
+| Ghostwire Tokyo (Native) | 1. Hybrid Fast 90 fps 44 ms<br>2. FSR 90 fps 48 ms | 1. Director Hybrid Buffer 2 90.0 fps 35.3 ms<br>2. Framework FSR Fast Buffer 3 90.0 fps 45.8 ms<br>3. Director 0.2.1 Buffer 2 90.0 fps 35.9 ms |
 | High on Life 2 (Native Joe) | 1. Hybrid 90 fps 52 ms<br>2. Hybrid Fast 90 fps 53 ms | 1. Framework 0.2.1 90 fps 64 ms<br>2. Framework 0.2.13 Fast 90 fps 65 ms<br>3. Framework 0.2.1 Fast 90 fps 65 ms |
-| Horizon Forbidden West | 1. 0.3.0 AFW 1x1 82 fps 53 ms<br>2. 0.2.13 AFW 1x1 82 fps 54 ms | 1. Director 0.3.0 AFW 1x1 90 fps 66 ms<br>2. Director 0.2.13 AFW 1x1 88 fps 66 ms<br>3. Director 0.2.1 AFW 1x1 86 fps 66 ms |
+| Horizon Forbidden West | 1. 0.3.0 AFW 1x1 82 fps 53 ms<br>2. 0.2.13 AFW 1x1 82 fps 54 ms | 1. AFW only 2x2 74.0 fps 18.6 ms<br>2. Director 0.2.1 AFW 1x1 Buffer 2 90.0 fps 66.6 ms<br>3. Director 0.2.13 AFW 1x1 Buffer 2 90.0 fps 66.6 ms |
 | Indiana Jones and the Great Circle | 1. 0.2.13 AFW 1x1 90 fps 77 ms<br>2. 0.3.0 AFW 1x1 90 fps 77 ms | 1. Framework 0.3.0 AFW 1x1 90 fps 77 ms<br>2. Framework 0.2.13 AFW 1x1 90 fps 77 ms<br>3. Framework 0.2.13 AFW 2x2 90 fps 77 ms |
 | Kingdom Come: Deliverance II | 1. AFW only 1x1 87 fps 35 ms<br>2. AFW only 2x2 90 fps 34 ms | AFW only 1x1 81 fps 35 ms<br>AFW only 2x2 90 fps 26 ms |
 | Kingdom Come: Deliverance II (DLSS5) | 1. 0.2.13 AFW 1x1 90 fps 75 ms<br>2. 0.3.0 AFW 1x1 90 fps 75 ms | 1. Framework 0.3.0 AFW 1x1 90 fps 77 ms<br>2. Framework 0.2.13 AFW 1x1 90 fps 77 ms<br>3. Director 0.2.1 AFW 2x2 90 fps 66 ms |

@@ -461,9 +461,12 @@ void automatic_buttons() {
     tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
     auto simple=snapshot().desired;simple.advanced_mode=false;require(request(simple),"return to basic UI policy");
     runtime.applied_revision=snapshot().revision;runtime.pacing_mode=1;report_runtime(runtime);tray.draw(true);
-    require(tray.rendered_text.find("21 optical or 33 complete")!=std::string::npos && tray.rendered_text.find("Luke Ross: 27 tests")!=std::string::npos,"basic Display shows reduced counts");
+    require(tray.rendered_text.find("41 optical or 65 complete")!=std::string::npos && tray.rendered_text.find("Luke Ross: 51 tests")!=std::string::npos,"basic Display shows current two/three-buffer counts");
+    require(tray.rendered_text.find("7.5 seconds per configuration")!=std::string::npos &&
+        tray.rendered_text.find("2.5 seconds settling, then 5 seconds measured")!=std::string::npos,
+        "Display describes the actual shorter benchmark timing");
     tray.activate("/Display_","Tests without vectors");tray.draw();tray.draw();
-    require(snapshot().benchmark.count==21 && !snapshot().benchmark.advanced,"basic Display starts reduced matrix");
+    require(snapshot().benchmark.count==41 && !snapshot().benchmark.advanced,"basic Display starts current buffer matrix");
     tray.activate("/Display_","Stop tests");tray.draw();tray.draw();
     require(tray.rendered_text.find("Auto pick best one")!=std::string::npos,"auto-pick checkbox is in Display");
     require(tray.rendered_text.find("On completion: within")==std::string::npos &&

@@ -41,6 +41,24 @@ int main(int argc,char** argv){try{
     }
     auto stale=rasterize_elliott_meter(s,4000,false,false);
     check(stale!=pixels,"stale metrics show unavailable");
+    auto bench=s;bench.runtime.process_id=7;auto& b=bench.benchmark;
+    b.game_pid=7;b.count=51;b.index=0;b.phase=autonomous::BenchmarkPhase::applying;
+    check(elliott_benchmark_text(bench,1000)=="Test 1/51 | applying settings","applying settings has progress without a fictitious countdown");
+    b.phase=autonomous::BenchmarkPhase::running;b.started_ms=1000;
+    check(elliott_benchmark_text(bench,2000)=="Test 1/51 | settling | 6.5s left","settling countdown uses the applied trial start");
+    check(elliott_benchmark_text(bench,3500)=="Test 1/51 | measuring | 5.0s left","measuring phase starts exactly at 2.5 seconds");
+    check(elliott_benchmark_text(bench,9500)=="Test 1/51 | measuring | 0.0s left","late controller never produces negative remaining time");
+    unsigned bench_rows{};auto bench_pixels=rasterize_elliott_meter(bench,1000,false,false,&bench_rows);
+    check(bench_rows>rows && bench_rows<=512 && bench_pixels!=pixels,"benchmark progress adds a visible row inside the existing surface");
+    b.index=64;b.count=65;
+    check(elliott_benchmark_text(bench,3500)=="Test 65/65 | measuring | 5.0s left","full matrix index64 is displayed as test65");
+    b.phase=autonomous::BenchmarkPhase::complete;bench.desired.afw_only=true;
+    check(elliott_benchmark_text(bench,3500)=="Tests complete | restart game: AFW Only","AFW-only restart warning remains visible in the headset meter");
+    b.phase=autonomous::BenchmarkPhase::stopped;
+    check(elliott_benchmark_text(bench,3500).empty(),"Stop removes the progress row");
+    b.phase=autonomous::BenchmarkPhase::running;b.game_pid=8;
+    check(elliott_benchmark_text(bench,3500).empty(),"another game cannot show stale benchmark progress");
+    bench.desired.afw_only=false;b.game_pid=7;b.index=0;b.count=51;
     auto active=s;
     const auto now=GetTickCount64();
     active.runtime.telemetry.updated_ms=active.runtime.heartbeat_ms=now;
@@ -83,7 +101,8 @@ int main(int argc,char** argv){try{
     check(count(rasterize_elliott_meter(active,now+2100,false,false),green)==0,"stale meter not green");
     check(rasterize_elliott_meter(s,1000,false,true)!=pixels,"UNORM linear palette conversion");
     check(rasterize_elliott_meter(s,1000,true,false)!=pixels,"BGRA channels supported");
-    if(argc>1){std::ofstream out(argv[1],std::ios::binary);out<<"P6\n1024 "<<rows<<"\n255\n";
-        for(unsigned i=0;i<1024*rows;++i){char rgb[]{char(pixels[i]),char(pixels[i]>>8),char(pixels[i]>>16)};out.write(rgb,3);}}
+    if(argc>1){auto preview=rasterize_elliott_meter(bench,1000,false,false,&bench_rows);
+        std::ofstream out(argv[1],std::ios::binary);out<<"P6\n1024 "<<bench_rows<<"\n255\n";
+        for(unsigned i=0;i<1024*bench_rows;++i){char rgb[]{char(preview[i]),char(preview[i]>>8),char(preview[i]>>16)};out.write(rgb,3);}}
     std::cout<<"Meter supplied metrics, palette, persistence, gesture and placement passed\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

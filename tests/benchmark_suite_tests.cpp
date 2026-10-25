@@ -64,6 +64,26 @@ void quality_choice_rules() {
     check(benchmark_best({score(71.99,90,0,4100,90,true),score(90,20)},true)==1,"AFW alone below 80 percent uses ordinary comparison");
     check(benchmark_best({score(72,90,4,3100,90,true),score(81,20)},true)==0,"AFW-only priority precedes OFXR full-quality preference");
     check(benchmark_best({score(81,90,0,4100,90,true),score(90,20,4,4100,90,true)},true)==0,"within AFW-only group prefer full quality near refresh");
+    check(benchmark_best({score(72,90,0,4100,90,true),score(79.199,20,4,4100,90,true)},true)==0,
+        "both AFW qualities at eighty percent retain 1x1 below ten percent gain despite lower half-quality latency");
+    check(benchmark_best({score(72,90,0,4100,90,true),score(79.2,20,4,4100,90,true)},true)==1,
+        "2x2 is eligible at exactly ten percent more FPS than sufficient AFW 1x1");
+    check(benchmark_best({score(73,90,0,4100,90,true),score(80.31,20,4,4100,90,true)},true)==1,
+        "2x2 above ten percent can beat sufficient AFW 1x1");
+    check(benchmark_best({score(71.99,90,0,4100,90,true),score(73,20,4,4100,90,true)},true)==1,
+        "1x1 below eighty percent cannot veto sufficient AFW 2x2");
+    check(benchmark_best({score(72,90,0,4100,90,true),score(79,20,4,4100,90,true)},false)==1,
+        "AFW quality gain preference is Luke-only");
+    check(benchmark_best({score(96,90,0,4100,120,true),score(105.599,20,4,4100,120,true)},true)==0 &&
+          benchmark_best({score(96,90,0,4100,120,true),score(105.6,20,4,4100,120,true)},true)==1,
+        "AFW ten-percent rule also respects the eighty-percent gate at 120 Hz");
+    check(benchmark_best({score(81,90,0,4100,90,true),score(90,20,4,4100,90,true)},true)==0,
+        "existing ninety-percent full-quality preference still applies after ten-percent eligibility");
+    auto invalid_full=score(72,90,0,4100,90,true);invalid_full.valid=false;
+    check(benchmark_best({invalid_full,score(73,20,4,4100,90,true)},true)==1,
+        "an invalid 1x1 result cannot veto sufficient AFW 2x2");
+    check(benchmark_best({score(72,90,0,4100,90,true),score(79,20,4,4100,90,true),score(90,10)},true)==0,
+        "AFW-only priority is retained when 2x2 is excluded for insufficient quality gain");
     check(benchmark_best({score(90,40),score(89.5,52,0,4100,90,false,true)})==1,"vectors may cost twelve ms at equivalent FPS");
     check(benchmark_best({score(90,40),score(89.5,52.01,0,4100,90,false,true)})==0,"vector preference cannot exceed twelve ms");
     check(benchmark_best({score(90,40),score(87,52,0,4100,90,false,true)})==1,"vectors can lose exactly three FPS with twelve extra ms");
@@ -107,6 +127,7 @@ void automatic_choice_controller() {
         const bool modern=scenario!=0,luke=scenario>=3 && scenario<=6,full=scenario==2 || scenario==7;
         auto saved=snapshot().desired;saved.advanced_mode=false;saved.pacing_mode=1;
         saved.benchmark_auto_pick=true;saved.nr_enabled=true;saved.afw_mode=3;saved.afw_shading_rate=0;
+        saved.afw_only=scenario==6; // also test clearing an unapplied direct-AFW request when OFXR wins
         check(request(saved),"save auto-pick game preference");saved=snapshot().desired;
         runtime.vdxr_runtime=!modern;runtime.steamvr_runtime=modern;runtime.vdxr_legacy=!modern;runtime.luke_detected=luke;
         runtime.pacing_mode=modern?1:0;runtime.applied_revision=snapshot().revision;report_test_runtime(runtime);
@@ -129,6 +150,7 @@ void automatic_choice_controller() {
             // simulated clock in the past, then sample that public interface.
             const auto clock=GetTickCount64()-4000;
             const auto current=snapshot();runtime.applied_revision=current.revision;
+            check(current.desired.afw_only==saved.afw_only,"benchmark trials never toggle the startup-only AFW flag");
             runtime.pacing_mode=current.desired.pacing_mode;runtime.afw_shading_rate=current.desired.afw_shading_rate;
             runtime.motion_source=current.desired.frame_generation?1:0;runtime.generation_state=GenerationState::ready;
             runtime.afw_running=luke;runtime.telemetry={};report_test_runtime(runtime);report_interface_telemetry({});tick_benchmark(clock);
@@ -164,14 +186,17 @@ void automatic_choice_controller() {
                 }
                 report_test_runtime(runtime);report_interface_telemetry(t);tick_benchmark(GetTickCount64()+sample*300);
             }
-            tick_benchmark(clock+10000);
+            tick_benchmark(clock+kBenchmarkDurationMs);
         }
-        const auto result=snapshot();const auto expected=benchmark_settings(saved,plan[winner]);
+        const auto result=snapshot();auto expected=benchmark_settings(saved,plan[winner]);
+        if(luke)expected.afw_only=plan[winner].disabled && plan[winner].afw!=0;
         check(result.benchmark.phase==BenchmarkPhase::complete && result.desired==expected,
             "completion saves exact route, Fast, multiplier, pacing and AFW quality of the valid winner");
         check(std::string(result.benchmark.message).find("Selected "+plan[winner].label)!=std::string::npos,
             "result identifies the selected route with measured FPS and ms");
         if(luke)check(std::string(result.benchmark.message).find(plan[winner].shading==8?"4x4":"1x1")!=std::string::npos,"Luke result names selected AFW quality");
+        check((std::string(result.benchmark.message).find("Restart the game to activate AFW Only.")!=std::string::npos)==(luke && expected.afw_only),
+            "AFW-only completion explicitly requests restart; OFXR winners do not");
         check(parse_settings(serialize_settings(result.desired))==expected,"automatic choice persists with route preferences");
         std::ifstream file(configuration_path());std::stringstream contents;contents<<file.rdbuf();
         check(parse_settings(contents.str())==expected,"on-disk game configuration contains the selected settings");
@@ -191,7 +216,7 @@ void automatic_choice_controller() {
     const auto count=snapshot().benchmark.count;
     for(unsigned i=0;i<count;++i) {
         const auto current=snapshot();runtime.applied_revision=current.revision;runtime.pacing_mode=current.desired.pacing_mode;
-        runtime.telemetry={};report_test_runtime(runtime);report_interface_telemetry({});tick_benchmark(clock);tick_benchmark(clock+10000);clock+=12000;
+        runtime.telemetry={};report_test_runtime(runtime);report_interface_telemetry({});tick_benchmark(clock);tick_benchmark(clock+kBenchmarkDurationMs);clock+=12000;
     }
     check(snapshot().benchmark.phase==BenchmarkPhase::complete && snapshot().desired==saved &&
         std::string(snapshot().benchmark.message).find("No valid automatic choice")!=std::string::npos,
@@ -277,20 +302,20 @@ int main() {
         BenchmarkSamples samples;xrfg::InterfaceTelemetry m{};
         m.rates_valid=true;m.output_source=xrfg::InterfaceSource::steamvr_delivery;
         m.cycle_estimated_valid=true;m.generating=true;
-        for(const auto time:{3999ULL,4000ULL,5000ULL,6000ULL,10999ULL,11000ULL}) {
-            m.updated_ms=time;m.output_fps=time==3999 ? 999.F : time==4000 ? 40.F : time==5000 ? 60.F : time==6000 ? 80.F : 100.F;
+        for(const auto time:{3499ULL,3500ULL,4000ULL,5000ULL,8499ULL,8500ULL}) {
+            m.updated_ms=time;m.output_fps=time==3499 ? 999.F : time==3500 ? 40.F : time==4000 ? 60.F : time==5000 ? 80.F : 100.F;
             m.cycle_estimated_ms=m.output_fps/2;
-            samples.observe(m,1000,11000);
+            samples.observe(m,1000,8500);
         }
-        check(samples.fps.size()==4 && benchmark_median(samples.fps)==70 && benchmark_median(samples.latency)==35,"Discard leading 3s only; include final samples and correct even median");
-        m.updated_ms=10999;samples.observe(m,1000,11000);check(samples.fps.size()==4,"Repeated telemetry cannot overweight the median");
+        check(samples.fps.size()==4 && benchmark_median(samples.fps)==70 && benchmark_median(samples.latency)==35,"Discard leading 2.5s only; measure five seconds including the last pre-deadline sample");
+        m.updated_ms=8499;samples.observe(m,1000,8500);check(samples.fps.size()==4,"Repeated telemetry cannot overweight the median");
         BenchmarkSamples unknown;m.updated_ms=5000;m.output_source=xrfg::InterfaceSource::accepted_submissions;
-        unknown.observe(m,1000,11000);check(unknown.fps.empty(),"Submitted rate is never a presentation measurement");
+        unknown.observe(m,1000,8500);check(unknown.fps.empty(),"Submitted rate is never a presentation measurement");
         m.output_source=xrfg::InterfaceSource::steamvr_scene_delivery;
         ++m.updated_ms;
-        unknown.observe(m,1000,11000);check(unknown.fps.size()==1,"Measured distinct Luke scene FPS enters benchmark");
+        unknown.observe(m,1000,8500);check(unknown.fps.size()==1,"Measured distinct Luke scene FPS enters benchmark");
         ++m.updated_ms;m.output_source=xrfg::InterfaceSource::accepted_scene_submissions;
-        unknown.observe(m,1000,11000);check(unknown.fps.size()==2,"Distinct accepted Luke total enters benchmark with explicit source");
+        unknown.observe(m,1000,8500);check(unknown.fps.size()==2,"Distinct accepted Luke total enters benchmark with explicit source");
         baseline.benchmark_csv=true;check(request(baseline),"Save isolated test profile");baseline=snapshot().desired;
         RuntimeStatus runtime{};runtime.sessions=1;runtime.steamvr_runtime=true;runtime.vdxr_legacy=false;runtime.dlssg_preset_request=1;
         runtime.applied_revision=snapshot().revision;report_test_runtime(runtime);
@@ -304,7 +329,7 @@ int main() {
         auto state=snapshot();check(!start_benchmark(false),"A second UI cannot start a competing suite");
         const auto first_requested=state.benchmark.requested_ms;
         tick_benchmark(first_requested+250);
-        check(snapshot().benchmark.phase==BenchmarkPhase::applying,"Do not start the ten-second clock before settings apply");
+        check(snapshot().benchmark.phase==BenchmarkPhase::applying,"Do not start the 7.5-second clock before settings apply");
         runtime.applied_revision=state.revision;report_test_runtime(runtime);
         auto clock=first_requested+500;
         for(std::size_t i=0;i<full.size();++i) {
@@ -318,16 +343,19 @@ int main() {
             tick_benchmark(clock);state=snapshot();
             check(state.benchmark.phase==BenchmarkPhase::running && state.benchmark.index==i,"Advance after actual application without an open menu");
             check(interface_telemetry_requested(),"Hidden suite requests metrics even with diagnostics off");
-            tick_benchmark(clock+9999);
+            tick_benchmark(clock+kBenchmarkMemoryRequestMs-1);
+            check(!take_benchmark_memory_request(),"VRAM is not requested before seven seconds");
+            tick_benchmark(clock+kBenchmarkMemoryRequestMs);
             const auto request_revision=take_benchmark_memory_request();
             check(request_revision==state.benchmark.revision,"End-of-test memory request targets this applied revision");
             check(!take_benchmark_memory_request(),"Memory request is claimed only once");
-            BenchmarkMemory memory{};memory.revision=request_revision;memory.updated_ms=clock+9999;
+            BenchmarkMemory memory{};memory.revision=request_revision;memory.updated_ms=clock+kBenchmarkMemoryRequestMs;
             memory.vram_valid=true;memory.vram_bytes=1048576ULL*(i+100);
             memory.ram_valid=true;memory.ram_working_set_bytes=2097152;
             report_benchmark_memory(memory);
-            check(snapshot().benchmark.index==i,"Never shorten a configuration below ten seconds");
-            tick_benchmark(clock+10000);clock+=10200;
+            tick_benchmark(clock+kBenchmarkDurationMs-1);
+            check(snapshot().benchmark.index==i,"Never shorten a configuration below 7.5 seconds");
+            tick_benchmark(clock+kBenchmarkDurationMs);clock+=kBenchmarkDurationMs+200;
         }
         state=snapshot();check(state.benchmark.phase==BenchmarkPhase::complete && state.desired==baseline,"Completion restores every original setting/profile");
         std::ifstream csv(std::filesystem::u8path(state.benchmark.csv_path));std::stringstream text;text<<csv.rdbuf();
@@ -341,6 +369,8 @@ int main() {
             "details CSV identifies the requested pacing of every trial");
         check(details_text.str().find(",A startup request,")!=std::string::npos &&
             details_text.str().find("C startup request")==std::string::npos,"CSV records A receipt instead of inventing C");
+        check(details_text.str().find(",2.500,5.000,")!=std::string::npos,
+            "CSV truthfully records the 2.5-second exclusion and five-second measurement window");
         check(csv_text.find("VRAM end MiB,100.000,101.000")!=std::string::npos,"Memory belongs to the trial that just finished, before the next switch");
         check(!take_benchmark_memory_request(),"Completed suite leaves no outstanding sample request");
         check(std::count(csv_text.begin(),csv_text.end(),'\n')==11,"Layout CSV: headers, six statistics rows and four memory rows");
@@ -373,7 +403,7 @@ int main() {
             runtime.afw_shading_rate=state.desired.afw_shading_rate;
             runtime.afw_running=state.desired.afw_mode!=0;report_test_runtime(runtime);
             tick_benchmark(clock);check(snapshot().benchmark.phase==BenchmarkPhase::running,"Luke quality applied before timing");
-            tick_benchmark(clock+10000);clock+=10200;
+            tick_benchmark(clock+kBenchmarkDurationMs);clock+=kBenchmarkDurationMs+200;
         }
         state=snapshot();check(state.benchmark.phase==BenchmarkPhase::complete,"Luke completes");
         std::cout<<"LUKE_CSV="<<std::filesystem::u8path(state.benchmark.csv_path).string()<<'\n';
@@ -394,7 +424,7 @@ int main() {
             for(std::size_t i=0;i<full.size();++i) {
                 runtime.applied_revision=snapshot().revision;runtime.pacing_mode=snapshot().desired.pacing_mode;report_test_runtime(runtime);tick_benchmark(clock);
                 check(snapshot().benchmark.phase==BenchmarkPhase::running,"A/C/default use the same uninterrupted suite");
-                tick_benchmark(clock+10000);clock+=10200;
+                tick_benchmark(clock+kBenchmarkDurationMs);clock+=kBenchmarkDurationMs+200;
             }
             check(snapshot().benchmark.phase==BenchmarkPhase::complete,"Full suite completes without a forced preset restart");
             const auto path=std::filesystem::u8path(snapshot().benchmark.csv_path);
@@ -421,11 +451,11 @@ int main() {
                 }
                 tick_benchmark(clock);check(snapshot().benchmark.phase==BenchmarkPhase::running,"reduced quality/pacing/buffer applied");
                 check(snapshot().desired.increase_buffer==(step.buffer==1),"basic suite actually changes buffer instead of relabelling it");
-                tick_benchmark(clock+9999);
-                BenchmarkMemory memory{};memory.revision=take_benchmark_memory_request();memory.updated_ms=clock+9999;
+                tick_benchmark(clock+kBenchmarkDurationMs-1);
+                BenchmarkMemory memory{};memory.revision=take_benchmark_memory_request();memory.updated_ms=clock+kBenchmarkDurationMs-1;
                 memory.vram_valid=true;memory.vram_bytes=1048576ULL*(700+snapshot().benchmark.index);
                 report_benchmark_memory(memory);
-                tick_benchmark(clock+10000);clock+=10200;
+                tick_benchmark(clock+kBenchmarkDurationMs);clock+=kBenchmarkDurationMs+200;
             }
             check(snapshot().benchmark.phase==BenchmarkPhase::complete && snapshot().desired==sanitize(simple),"reduced completion restores original basic settings");
             std::ifstream csv(std::filesystem::u8path(snapshot().benchmark.csv_path));std::string header;std::getline(csv,header);
@@ -448,7 +478,7 @@ int main() {
                 state=snapshot();runtime.applied_revision=state.revision;runtime.pacing_mode=0;
                 runtime.afw_shading_rate=state.desired.afw_shading_rate;report_test_runtime(runtime);
                 tick_benchmark(clock);check(snapshot().benchmark.phase==BenchmarkPhase::running,"Legacy settings applied before timing");
-                tick_benchmark(clock+4000);tick_benchmark(clock+10000);clock+=10200;
+                tick_benchmark(clock+4000);tick_benchmark(clock+kBenchmarkDurationMs);clock+=kBenchmarkDurationMs+200;
             }
             check(snapshot().benchmark.phase==BenchmarkPhase::complete,"Every Legacy trial completes");
             std::cout<<(legacy_luke?"LEGACY_LUKE_CSV=":"LEGACY_FULL_CSV=")

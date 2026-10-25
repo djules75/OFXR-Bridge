@@ -128,7 +128,7 @@ def summarize(segment, settle, minimum, metric):
                 else 'No confirmed generated output' if config['route'] != 'Disabled' and max(generated) == 0
                 else 'DLSS-G preset is a startup driver-profile request; active NVIDIA model is not independently verified' if config['route'].startswith('DLSS-G') else None)
 
-def export(paths, platform, metric, settle=3, minimum=None):
+def export(paths, platform, metric, settle=None, minimum=None):
     groups = {}
     measurements = {}
     attempted = {}
@@ -144,7 +144,9 @@ def export(paths, platform, metric, settle=3, minimum=None):
         key = cfg['cell'] if platform == 'meganex' else cfg['route']
         attempted.setdefault(group, set()).add(key)
         useful_minimum = minimum if minimum is not None else (5 if (segment.get('version') or 0) >= 558 else 10)
-        result = summarize(segment, settle, useful_minimum, metric)
+        # Preserve historical trimming; only the V660+ automatic suite changed.
+        settling = settle if settle is not None else (2.5 if cfg.get('automatic') and (segment.get('version') or 0)>=660 else 3)
+        result = summarize(segment, settling, useful_minimum, metric)
         if result is None:
             continue
         cfg = result['config']

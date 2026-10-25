@@ -374,7 +374,7 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     const bool permitted=benchmark_enabled();
     if (!permitted) ImGui::TextWrapped("Benchmarks disabled. Enable benchmarks in the tray to enable sampling and these buttons.");
     const bool active=benchmark_active(state.benchmark);
-    ImGui::TextWrapped("10 seconds per configuration; discard only the first 3 seconds. CSV: min / median / max Output FPS and Cycle minimum. Works with diagnostic logging off. Neural and AFW choices are kept.");
+    ImGui::TextWrapped("7.5 seconds per configuration: 2.5 seconds settling, then 5 seconds measured. CSV: min / median / max Output FPS and Cycle minimum. Works with diagnostic logging off. Neural and AFW choices are kept.");
     ImGui::BeginDisabled(active);
     changed |= ImGui::Checkbox("Auto pick best one", &draft.benchmark_auto_pick);
     ImGui::EndDisabled();
@@ -402,7 +402,8 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
         if(ImGui::Button("Stop tests"))stop_benchmark();
         const auto& b=state.benchmark;
         const auto remaining=b.started_ms && GetTickCount64()>=b.started_ms
-            ? std::max(0.0,10.0-double(GetTickCount64()-b.started_ms)/1000.0) : 10.0;
+            ? std::max(0.0,double(kBenchmarkDurationMs)/1000.0-double(GetTickCount64()-b.started_ms)/1000.0)
+            : double(kBenchmarkDurationMs)/1000.0;
         ImGui::TextWrapped("%u / %u: %s (%s, %.1f s)",b.index+1,b.count,b.label,
             b.phase==BenchmarkPhase::applying ? "applying" : "running",remaining);
     }

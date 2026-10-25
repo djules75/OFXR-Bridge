@@ -78,7 +78,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 65901;
+constexpr std::uint32_t kAbi = 66001;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -192,7 +192,7 @@ class Discovery {
     DiscoveryState* data{};
 public:
     Discovery() {
-        const auto prefix=L"Local\\OFXRBridgeV659-discovery-"+std::to_wstring(path_identity(global_configuration_path()));
+        const auto prefix=L"Local\\OFXRBridgeV660-discovery-"+std::to_wstring(path_identity(global_configuration_path()));
         mutex=CreateMutexW(nullptr,FALSE,(prefix+L"-mutex").c_str());
         mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(DiscoveryState),(prefix+L"-data").c_str());
         if(mapping)data=static_cast<DiscoveryState*>(MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(DiscoveryState)));
@@ -241,7 +241,7 @@ public:
         // Profile identity is part of the mapping name, so fixture profiles
         // and future concurrent candidates cannot modify the user's settings.
         const auto identity=path_identity(file);
-        const auto prefix = L"Local\\OFXRBridgeV659-" + std::to_wstring(identity);
+        const auto prefix = L"Local\\OFXRBridgeV660-" + std::to_wstring(identity);
         mutex = CreateMutexW(nullptr, FALSE, (prefix + L"-mutex").c_str());
         if (!mutex) return;
         const DWORD waited = WaitForSingleObject(mutex, 2000);
@@ -529,7 +529,7 @@ bool initialize_game_configuration(const std::filesystem::path& executable) noex
         // A dedicated creation mutex prevents two simultaneous first launches
         // overwriting one another's freshly created profile.
 #ifdef _WIN32
-        const auto name=L"Local\\OFXRBridgeV659-create-"+std::to_wstring(path_identity(file));
+        const auto name=L"Local\\OFXRBridgeV660-create-"+std::to_wstring(path_identity(file));
         HANDLE mutex=CreateMutexW(nullptr,FALSE,name.c_str());if(!mutex)return false;
         struct CreationGuard {HANDLE handle;bool locked{};~CreationGuard(){if(locked)ReleaseMutex(handle);CloseHandle(handle);}} guard{mutex};
         const auto waited=WaitForSingleObject(mutex,2000);
@@ -805,7 +805,9 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
             <<s.separate_synthesis<<','<<s.lower_vram<<','<<(s.triple_frame_gen ? 3 : 2)<<','<<s.prefer_fps<<','
             <<s.nr_enabled<<','<<s.afw_mode<<','<<s.afw_shading_rate<<','<<(s.frame_generation!=2 ? "N/A" :
                 rec.dlssg_preset==1 ? "A startup request" : rec.dlssg_preset==3 ? "C startup request" : "Game default / unverified")
-            <<",3,"<<std::max(0.0,(double(ended)-double(rec.started)-3000.0)/1000.0)<<',';
+            <<','<<double(kBenchmarkSettleMs)/1000.0<<','
+            <<std::clamp((double(ended)-double(rec.started)-double(kBenchmarkSettleMs))/1000.0,
+                0.0,double(kBenchmarkMeasureMs)/1000.0)<<',';
         csv_stat(rec.stream,rec.samples.fps);rec.stream<<','<<rec.samples.fps.size()<<',';
         csv_stat(rec.stream,rec.samples.latency);rec.stream<<','<<rec.samples.latency.size()<<','
             <<rec.memory.updated_ms<<',';
@@ -863,7 +865,13 @@ void suite_complete(Shared& shared,const SuiteRecorder& rec,std::uint64_t now) {
         suite_restore(shared,BenchmarkPhase::complete,"Complete. No valid automatic choice; original settings restored.",now);return;
     }
     const auto& result=rec.results[*best];const auto& score=scores[*best];
-    if(!suite_publish(shared,result.settings,now)) {
+    auto selected=result.settings;
+    // AFW-only trials run through the ordinary bridge to keep the matrix live.
+    // Only the completed winner arms the direct AFW startup path for next launch.
+    if(b.luke)selected.afw_only=score.afw_only;
+    const bool restart_afw_only=b.luke && selected.afw_only &&
+        shared.snapshot.runtime.pacing_mode!=kAfwOnlyPacingMode;
+    if(!suite_publish(shared,selected,now)) {
         suite_restore(shared,BenchmarkPhase::error,"Could not save automatic choice; original settings restored.",now);return;
     }
     b.phase=BenchmarkPhase::complete;
@@ -872,8 +880,9 @@ void suite_complete(Shared& shared,const SuiteRecorder& rec,std::uint64_t now) {
     if(b.luke)label+=" / "+std::string(result.settings.afw_shading_rate==0?"1x1":result.settings.afw_shading_rate==4?"2x2":"4x4");
     const auto fps=std::minmax_element(result.samples.fps.begin(),result.samples.fps.end());
     const auto latency=std::minmax_element(result.samples.latency.begin(),result.samples.latency.end());
-    std::snprintf(b.message,sizeof(b.message),"Complete. Selected %s: %.1f FPS (%.1f-%.1f), %.1f ms (%.1f-%.1f).",
-        label.c_str(),score.fps,*fps.first,*fps.second,score.latency,*latency.first,*latency.second);
+    std::snprintf(b.message,sizeof(b.message),"Complete. Selected %s: %.1f FPS (%.1f-%.1f), %.1f ms (%.1f-%.1f).%s",
+        label.c_str(),score.fps,*fps.first,*fps.second,score.latency,*latency.first,*latency.second,
+        restart_afw_only ? " Restart the game to activate AFW Only." : "");
 }
 } // namespace
 
@@ -971,7 +980,7 @@ void tick_benchmark(std::uint64_t now) noexcept {
                 rec.next_sample=now+250;
                 if(s.runtime.applied_revision==b.revision && s.runtime.telemetry.updated_ms<=GetTickCount64()) {
                     const auto previous=rec.samples.last_ms;
-                    rec.samples.observe(s.runtime.telemetry,b.started_ms,now+1);
+                    rec.samples.observe(s.runtime.telemetry,b.started_ms,std::min(now+1,b.started_ms+kBenchmarkDurationMs));
                     if(rec.samples.last_ms!=previous) {
                         if(const auto side=s.runtime.eye_long_side)rec.eye_long_side=rec.eye_long_side?std::min(rec.eye_long_side,side):side;
                         rec.vector_success |= s.desired.enabled && s.runtime.telemetry.generating && s.runtime.motion_source==1 &&
@@ -980,14 +989,14 @@ void tick_benchmark(std::uint64_t now) noexcept {
                 }
                 rec.afw_success |= s.runtime.afw_running;
             }
-            if(!rec.memory_requested && now>=b.started_ms+9500) {
+            if(!rec.memory_requested && now>=b.started_ms+kBenchmarkMemoryRequestMs) {
                 shared.benchmark_memory={};
                 std::atomic_ref<std::uint64_t>(shared.benchmark_memory_request).store(b.revision,std::memory_order_release);
                 rec.memory_requested=true;
             }
             if(shared.benchmark_memory.revision==b.revision && shared.benchmark_memory.updated_ms>=rec.started)
                 rec.memory=shared.benchmark_memory;
-            if(now<b.started_ms+10000)return;
+            if(now<b.started_ms+kBenchmarkDurationMs)return;
             csv_finish(rec,b,now,b.luke && s.desired.afw_mode && !rec.afw_success ? "no confirmed AFW output" : rec.samples.fps.empty() ? "no measured presentation rate" :
                 s.desired.enabled && !rec.samples.generated ? "no confirmed generation" : "complete");
             const auto plan=benchmark_plan(b.full,b.luke,rec.steamvr,b.advanced);

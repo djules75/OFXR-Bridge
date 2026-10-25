@@ -1,0 +1,16 @@
+{
+  "version": 660,
+  "checks": [
+    "complete controller: 7.5s deadline, 2.5s exclusion, 5s measured, memory at7s, applied gates, AFW quality/pacing/buffer labels, flag persistence/restart/Stop",
+    "actual ImGui controls: timing text and current41/65/51 counts",
+    "single-configuration persistence",
+    "Python log exporter with V660 fixture and historical compatibility",
+    "private historical and buffer83-column adapters plus actual new65/51 controller CSVs",
+    "Elliott current test/count/phase/countdown and AFW restart reminder: pure raster checks, D11/D12 upload/placement checks, PNG preview reviewed"
+  ],
+  "timing_hardware_scope": "Historical V615/V617 paired sensitivity:100/108 noncombined nonFidelity median FPS within1;107/108 latency within2ms. Not a new V660 headset validation. Min/max weaker in short samples.",
+  "rounds": "Initial controller/single pass; stale widget fixture failed identically on originalV659. Test-only21/33/27 expectations changed to41/65/51, then widget pass. Raw evidence retained.",
+  "render_changes": false,
+  "hardware_acceptance": "Pending; earlier owner V65990FPS confirmation does not validate new benchmark sample length on all games.",
+  "ctest_distinct_passed": 6
+}

@@ -45,6 +45,7 @@ private:
 
 enum class PanelTone : std::uint8_t { normal, dim, good, warn, bad, accent };
 inline constexpr unsigned kElliottMeterWidth=1024, kElliottMeterHeight=512;
+[[nodiscard]] std::string elliott_benchmark_text(const autonomous::Snapshot&,std::uint64_t now_ms);
 std::vector<std::uint32_t> rasterize_elliott_meter(const autonomous::Snapshot&, std::uint64_t now_ms,
     bool bgra, bool linear, std::uint32_t* used_height=nullptr);
 } // namespace xrfg

@@ -9,6 +9,10 @@
 #include <tuple>
 
 namespace xrfg::autonomous {
+inline constexpr std::uint64_t kBenchmarkSettleMs=2500;
+inline constexpr std::uint64_t kBenchmarkMeasureMs=5000;
+inline constexpr std::uint64_t kBenchmarkDurationMs=kBenchmarkSettleMs+kBenchmarkMeasureMs;
+inline constexpr std::uint64_t kBenchmarkMemoryRequestMs=kBenchmarkDurationMs-500;
 struct BenchmarkStep {
     int generation{}, backend{}, a{}, b{};
     bool triple{}, prefer{}, disabled{};
@@ -110,7 +114,7 @@ struct BenchmarkSamples {
     std::uint64_t last_ms{};
     bool generated{};
     void observe(const InterfaceTelemetry& m,std::uint64_t started,std::uint64_t end) {
-        if(!m.updated_ms || m.updated_ms==last_ms || m.updated_ms<started+3000 || m.updated_ms>=end) return;
+        if(!m.updated_ms || m.updated_ms==last_ms || m.updated_ms<started+kBenchmarkSettleMs || m.updated_ms>=end) return;
         last_ms=m.updated_ms;
         if((m.output_source==InterfaceSource::steamvr_delivery ||
             m.output_source==InterfaceSource::steamvr_scene_delivery ||
@@ -166,7 +170,16 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
         std::vector<std::size_t> afw;
         for(const auto i:pool)if(scores[i].afw_only && scores[i].display_hz>0 &&
             scores[i].fps+1e-3>=scores[i].display_hz*.8)afw.push_back(i);
-        if(!afw.empty())pool=std::move(afw);
+        if(!afw.empty()) {
+            // Both qualities must independently pass the 80%-of-refresh gate.
+            // Keep full-resolution AFW unless 2x2 buys at least 10% more FPS.
+            double full_fps=0;
+            for(const auto i:afw)if(scores[i].shading==0)full_fps=std::max(full_fps,scores[i].fps);
+            if(full_fps>0)std::erase_if(afw,[&](auto i) {
+                return scores[i].shading==4 && scores[i].fps+epsilon<full_fps*1.10;
+            });
+            pool=std::move(afw);
+        }
         const bool full_quality=std::any_of(pool.begin(),pool.end(),[&](auto i) {
             return scores[i].shading==0 && scores[i].display_hz>0 && scores[i].fps+1e-3>=scores[i].display_hz*.9;
         });
