@@ -67,6 +67,7 @@ struct Fixture {
     std::atomic_uint discarded_clocks{};
     std::atomic_bool stale_next_clock{};
     std::atomic_bool native_should_render{true};
+    std::atomic<std::int64_t> prediction_horizon_ns{};
     std::unordered_map<std::uint64_t,unsigned> window_renewals;
     std::vector<std::int64_t> native_windows;
     unsigned expected_views{1};
@@ -95,7 +96,7 @@ struct Fixture {
     std::int64_t physical_origin{};
     std::atomic_bool physical_clock_enabled{true};
     std::shared_ptr<xrfg::PrivateOpenXrRuntime> transport;
-    explicit Fixture(bool d12,bool split=true,std::function<int(unsigned)> variable_wait={},bool physical_clock=false,bool diagnostics=true,bool release_readiness=false):native12(d12),frame_wait_us(std::move(variable_wait)) {
+    explicit Fixture(bool d12,bool split=true,std::function<int(unsigned)> variable_wait={},bool physical_clock=false,bool diagnostics=true,bool release_readiness=false,std::size_t capacity=3):native12(d12),frame_wait_us(std::move(variable_wait)) {
         current=this;
         if(d12) {
             ok(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device12)),"actual D3D12 device");
@@ -116,7 +117,7 @@ struct Fixture {
         options.real={reinterpret_cast<XrInstance>(1),reinterpret_cast<XrSession>(2),wait,begin,end,create,destroy,enumerate,acquire,wait_image,release,to_qpc};
         options.device12=device12.Get();options.queue12=delivery_queue?delivery_queue.Get():queue.Get();options.producer_queue12=queue.Get();options.device11=device11.Get();options.context11=context.Get();
         options.d11_release_readiness=release_readiness;
-        options.physical_period=[]{return period;};options.capacity=3;
+        options.physical_period=[]{return period;};options.capacity=capacity;
         if(physical_clock) {
             physical_origin=ns();
             options.physical_clock=[this]() -> std::optional<xrfg::PrivatePhysicalClock> {
@@ -179,7 +180,7 @@ struct Fixture {
         // Vary the runtime horizon while retaining the monotonic prediction
         // required by OpenXR. XR time deliberately has another epoch than QPC.
         if(n>1 && f.stale_next_clock.exchange(false))f.raw_prediction+=period;
-        else f.raw_prediction=std::max(f.raw_prediction+1,epoch+ns()+((!f.throttled || n%2)?period:period*3));
+        else f.raw_prediction=std::max(f.raw_prediction+1,epoch+ns()+(f.prediction_horizon_ns?f.prediction_horizon_ns.load():((!f.throttled || n%2)?period:period*3)));
         output->predictedDisplayTime=f.raw_prediction;output->predictedDisplayPeriod=(!f.throttled || n%2)?period:period*2;output->shouldRender=f.native_should_render?XR_TRUE:XR_FALSE;f.wait_return=ns();return XR_SUCCESS;
     }
     static XrResult XRAPI_CALL begin(XrSession,const XrFrameBeginInfo*){auto& f=*current;std::scoped_lock protocol(f.protocol);check(f.cycle_waited,"real Begin follows exactly one successful Wait");const bool discarded=f.cycle_begun;if(discarded)++f.discarded_clocks;f.cycle_waited=false;f.cycle_begun=true;f.begun_prediction=f.raw_prediction;f.begun_wait_return=f.wait_return;f.begun_input_ordinal=std::max(f.begun_input_ordinal.load(),f.wait_input_ordinal.load());++f.real_begins;return discarded?XR_FRAME_DISCARDED:XR_SUCCESS;}
