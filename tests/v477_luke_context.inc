@@ -18,6 +18,10 @@ void luke_standalone_context_test(bool active_alias_history=false, bool no_helpe
     state->luke_afw_enabled=true;state->graphics_binding_capabilities=no_helper_context?3:7;
     state->d3d11_device=d11;state->d3d11_context=c11;
     if (!no_helper_context) {state->d3d12_device=d12;state->d3d12_queue=private_queue;}
+    initialize_luke_synthesis_queue(*state);
+    auto early_synthesis=state->luke_synthesis_queue;
+    check(bool(early_synthesis)==!no_helper_context && !state->luke_afw &&
+        !(state->graphics_binding_capabilities&8),"early OFXR lane must not confer native AFW authority");
     initialize_late_luke_context(state);
     check(!state->luke_afw && state->d3d12_queue.Get()==(no_helper_context?nullptr:private_queue.Get()),"cold bootstrap stays bypass");
     auto pending=std::make_shared<SwapchainState>(state,XrSwapchainCreateInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO});
@@ -80,6 +84,8 @@ void luke_standalone_context_test(bool active_alias_history=false, bool no_helpe
     check(state->luke_synthesis_queue && state->luke_synthesis_queue!=state->d3d12_queue &&
         state->luke_synthesis_queue!=original_queue && !session_uses_shared_queue(*state),
         "late Luke OFXR must have a separate lane without moving producer/AFW ownership");
+    if(early_synthesis)check(state->luke_synthesis_queue==early_synthesis,
+        "late native/alias confirmation discarded the compatible early OFXR lane");
     if(active_alias_history) {
         xrfg::configure_dlss_motion_vector_tracking(true);
         std::shared_ptr<const xrfg::DlssMotionVectorFrame> frame;

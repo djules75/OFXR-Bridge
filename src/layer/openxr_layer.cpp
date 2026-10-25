@@ -2374,8 +2374,11 @@ HRESULT select_luke_execution_queue(bool native_luke, ID3D12Device* device,
 void initialize_luke_synthesis_queue(SessionState& state) noexcept {
     if (!state.luke_afw_enabled || state.afw_only ||
         state.graphics_binding != SessionGraphicsBinding::d3d11 ||
-        (state.graphics_binding_capabilities & 8ULL) == 0 ||
         !state.d3d12_device || !state.d3d12_queue || state.luke_synthesis_queue) return;
+    // OFXR works on the D12 owner already validated by the D11 interop.
+    // Do not wait for native AFW provenance (capability8): projection engines
+    // created during loading would otherwise keep the shared lane forever.
+    // This grants no native-guide authority and does not bootstrap AFW.
     D3D12_COMMAND_QUEUE_DESC description{};
     description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     description.NodeMask = state.d3d12_queue->GetDesc().NodeMask;
@@ -3806,6 +3809,9 @@ void initialize_late_luke_context(const std::shared_ptr<SessionState>& session) 
         // Active color history may retain a REAL VR device alias. The backing
         // challenge above proves the same owner; keep its queue/resources but
         // use the confirmed native allocation identity for strict AFW guides.
+        if (!active_history && session->luke_synthesis_queue &&
+            !d3d_owner::same(session->d3d12_device.Get(),device.Get()))
+            session->luke_synthesis_queue.Reset();
         session->d3d12_device=std::move(device);
         if(auto monitor=xrfg::neural_rendering::observe_device_removal(session->d3d12_device.Get()))
             session->gpu_crash_monitors.push_back(std::move(monitor));

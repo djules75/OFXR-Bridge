@@ -14,6 +14,7 @@ static bool framework_session_probe{},vdxr_legacy_probe{};
 int main(int argc,char** argv) {
     std::string route=argc>1?argv[1]:"new";
     const bool hfw=route.starts_with("hfw-");if(hfw)route=route.substr(4);
+    const bool hfw_early=hfw && route.starts_with("early-");if(hfw_early)route=route.substr(6);
     const bool hfw_offon=hfw && route.starts_with("offon-");if(hfw_offon)route=route.substr(6);
     const bool force_vdxr_steamvr=route=="force-vdxr-steamvr-session";
     const bool force_steamvr_vdxr=route=="force-steamvr-vdxr-session";
@@ -221,7 +222,7 @@ int main(int argc,char** argv) {
     if(hfw) {
         check(luke && !native12 && sole,"HFW fixture requires Luke D11 Director");
         state->luke_fresh_only=true;state->luke_source_filter_armed=true;
-        state->graphics_binding_capabilities|=8ULL;
+        state->graphics_binding_capabilities|=hfw_early?4ULL:8ULL;
         initialize_luke_synthesis_queue(*state);
         check(state->luke_synthesis_queue!=nullptr,"HFW separate lane");
         auto afw=xrfg::embedded::afw_snapshot().desired;afw.mode=0;
@@ -515,6 +516,18 @@ int main(int argc,char** argv) {
     const unsigned input_count=benchmark_sequence?7*trial_frames:8;
     bool hfw_gate_proven=false;
     for(unsigned n=1;n<=input_count;++n) {
+        if(hfw_early && n==4) {
+            auto app=find_swapchain(chain);check(bool(app),"cold projection owner");
+            const auto cold_generation=app->frame_generation;
+            const auto cold_queue=state->luke_synthesis_queue;
+            check(cold_generation && cold_generation->isolated_luke_synthesis &&
+                !state->luke_shared_generation_count && !(state->graphics_binding_capabilities&8),
+                "loading-screen projection was initialized on shared queue before AFW");
+            state->graphics_binding_capabilities=(state->graphics_binding_capabilities&~4ULL)|8ULL;
+            initialize_luke_synthesis_queue(*state);
+            check(state->luke_synthesis_queue==cold_queue && app->frame_generation==cold_generation &&
+                !session_uses_shared_queue(*state),"AFW readiness replaced early lane/history or exposed shared projection");
+        }
         if(hfw_offon && (n==6 || n==7)) {
             auto desired=xrfg::autonomous::snapshot().desired;desired.enabled=n==7;
             check(xrfg::autonomous::request(desired),"HFW actual OFXR off/on control");

@@ -2198,7 +2198,14 @@ void luke_queue_policy_test() {
         check(SUCCEEDED(xrfg::create_d3d12_device_for_d3d11(device.Get(),&state->d3d12_device,
             &state->d3d12_queue)),"queue policy capture lane");
         check(session_uses_shared_queue(*state)==!only,"actual unsplit queue state");
+        state->graphics_binding_capabilities=4; // real loading-screen order: no native SR/RR yet
         initialize_luke_synthesis_queue(*state);
+        check(bool(state->luke_synthesis_queue)==!only,
+            "OFXR must isolate before AFW provenance becomes available");
+        auto cold_queue=state->luke_synthesis_queue;
+        state->graphics_binding_capabilities=8;initialize_luke_synthesis_queue(*state);
+        check(state->luke_synthesis_queue==cold_queue,
+            "native AFW confirmation must preserve the already-isolated OFXR lane");
         check(bool(state->luke_synthesis_queue)==!only && !session_uses_shared_queue(*state),
             "SteamVR/VDXR/Legacy isolate OFXR; AFW-only allocates no OFXR lane");
         auto before=state->luke_synthesis_queue;initialize_luke_synthesis_queue(*state);
