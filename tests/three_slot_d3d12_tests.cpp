@@ -432,9 +432,11 @@ int main(int argc,char** argv) {
             log_benchmark_configuration(*s);logger.flush();text=contents();
             require(text.find(marker)!=std::string::npos,"applied 3X lost its configuration label");
             desired.separate_synthesis=1;
+            desired.lower_vram=1; // Unified Fast mode; A alone is normalized off.
             require(xrfg::autonomous::request(desired),"transport UI preference");
             xrfg::autonomous::apply_runtime_settings();
             const auto transport_revision=xrfg::autonomous::snapshot().revision;
+            require(transport_revision!=triple_revision,"transport test must request an actual Fast-mode change");
             const auto transport_marker="op=benchmark_configuration result=0 dur_us=0 a="+std::to_string(transport_revision)+" ";
             log_benchmark_configuration(*s);logger.flush();text=contents();
             require(text.find(transport_marker)==std::string::npos,"pending renderer transport was labelled active");

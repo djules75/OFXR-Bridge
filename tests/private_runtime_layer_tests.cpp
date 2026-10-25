@@ -671,13 +671,13 @@ int main(int argc,char** argv) {
         XrFrameEndInfo sample{XR_TYPE_FRAME_END_INFO};sample.layerCount=1;sample.layers=&header;
         state->fps_overlay->application_frame(&sample);
         const auto m=xrfg::autonomous::snapshot().runtime.telemetry;
-        check(m.cycle_valid && m.cycle_estimated_valid,"shipping generator publishes XR interval and predicted display independently of engine origin");
+        check(m.cycle_valid && m.cycle_estimated_valid,"shipping generator publishes XR interval and runtime completion independently of engine origin");
         check(!m.game_time_valid,"abandoned Game timing stays absent without hiding the corrected Excel estimate");
-        check(m.cycle_source==xrfg::InterfaceSource::native_frame_cycle_qpc && m.cycle_estimated_source==xrfg::InterfaceSource::native_predicted_display_qpc,"all shipping route measurements reach native director endpoint");
-        check(m.cycle_estimated_ms>=m.cycle_length_ms && m.ofxr_time_ms<=m.cycle_length_ms,"same physical frame has consistent complete-cycle values");
+        check(m.cycle_source==xrfg::InterfaceSource::native_frame_cycle_qpc && m.cycle_estimated_source==xrfg::InterfaceSource::native_runtime_return_cycle_qpc,"all shipping route measurements reach native director endpoint");
+        check(m.cycle_estimated_ms<=m.cycle_length_ms+.001F && m.ofxr_time_ms<=m.cycle_length_ms,"same physical frame has consistent complete-cycle values");
         check(m.stages_valid && m.game_time_ms>=0 && m.generation_time_ms>=0 && m.delivery_time_ms>=0,
             "all shipping frameworks expose same-source production, preparation and delivery stages");
-        std::printf("Native measured cycle %.3fms, predicted display %.3fms, producer calls %.3fms\n",m.cycle_length_ms,m.cycle_estimated_ms,m.ofxr_time_ms);
+        std::printf("Native measured cycle %.3fms, runtime completed %.3fms, producer calls %.3fms\n",m.cycle_length_ms,m.cycle_estimated_ms,m.ofxr_time_ms);
         xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,false);
     }
     if(split_eyes) {

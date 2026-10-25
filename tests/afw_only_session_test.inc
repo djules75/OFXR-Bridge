@@ -110,9 +110,12 @@ int afw_only_session_test(std::string_view route,const char* fixture) {
             xrfg::InterfaceFrameStamp stamp{};stamp.serial=fresh_filter?2:1;stamp.entered_ns=started;stamp.cycle=cycle;
             xr_ok(state->fps_overlay->end_frame(&end,false,true,{},0,stamp),"shipping AFW terminal directly to native OpenXR");
             const auto returned=xrfg::interface_clock_ns();cycle->producer_returned(returned);
-            float estimate{};check(cycle->read_estimated(returned,estimate) && std::isfinite(estimate) && estimate>0,"direct delivery retains native cycle estimate");
-            const float expected=float(std::max(f.targets.back()-epoch,returned)-started)*1e-6F;
-            check(std::abs(estimate-expected)<0.01f,"estimated cycle uses actual native target, not virtual Luke prediction or an added refresh");
+            float estimate{};check(cycle->read_runtime_cycle(returned,estimate) && std::isfinite(estimate) && estimate>0,"direct delivery retains native cycle estimate");
+            bool native_required{};xrfg::InterfaceNativeTiming native;
+            check(cycle->native_timing(native_required,native) && native_required,"direct AFW retains actual native End completion receipt");
+            check(native.returned_ns<=returned,"native completion precedes outer wrapper bookkeeping");
+            const float expected=float(native.returned_ns-started)*1e-6F;
+            check(std::abs(estimate-expected)<0.01f,"AFW-only cycle uses observed native return, not a display target or added refresh");
             check(f.pixels.back()==80 && f.right_pixels.back()==160 && f.delivery_thread==GetCurrentThreadId(),"both AFW eye pixels directly delivered on app thread");
             check(f.successful_waits==f.real_begins && f.real_begins==f.real_ends && !f.empty_ends && !f.cycle_begun,"balanced native Wait/Begin/End, one output per AFW pair");
         }

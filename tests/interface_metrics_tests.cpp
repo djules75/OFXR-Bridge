@@ -84,7 +84,7 @@ void native_delivery_cycle() {
     c->call(100'000'000,103'000'000);c->producer_returned(109'000'000);
     c->synthetic_accepted(103'500'000,11'111'111);
     float ms{},calls{};
-    check(c->read_estimated(109'000'000,ms) && ms<15,"reproduce old virtual15ms estimate");
+    check(c->read_runtime_cycle(109'000'000,ms) && ms<15,"reproduce old virtual15ms estimate");
     auto generated=std::make_shared<InterfaceDeliveryReceipt>(true);
     auto real=std::make_shared<InterfaceDeliveryReceipt>(false);
     c->attach_native_delivery(generated);c->attach_native_delivery(real);
@@ -95,11 +95,11 @@ void native_delivery_cycle() {
     generated->completed(true,145'000'000,146'000'000,155'000'000);
     real->completed(true,156'111'111,157'000'000,166'111'111);
     check(c->read(109'000'000,calls,ms) && calls==3 && ms==57,"native full cycle includes47ms beyond virtual return, producer call total unchanged");
-    check(c->read_estimated(109'000'000,ms),"actual real prediction is valid independently of generation confirmation");
+    check(c->read_runtime_cycle(109'000'000,ms),"actual real prediction is valid independently of generation confirmation");
     generated->synthetic_confirmed=true;
-    check(c->read_estimated(109'000'000,ms) && std::abs(ms-66.111111F)<.001F,"native predicted real slot counted once, no additional refresh");
+    check(c->read_runtime_cycle(109'000'000,ms) && ms==57,"native predicted real slot counted once, no additional refresh");
     InterfaceTelemetry actual;window.snapshot(160'000'000,actual);
-    check(actual.cycle_source==InterfaceSource::native_frame_cycle_qpc && actual.cycle_estimated_source==InterfaceSource::native_predicted_display_qpc,"physical observations have distinct source labels");
+    check(actual.cycle_source==InterfaceSource::native_frame_cycle_qpc && actual.cycle_estimated_source==InterfaceSource::native_runtime_return_cycle_qpc,"physical observations have distinct source labels");
     check(std::abs(actual.ofxr_delay_ms-51.111111F)<.001F && std::abs(actual.presentation_ms-10.F)<.001F,"delay and presentation use real native handoff rather than virtual submission");
     auto failed=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);failed->producer_returned(109'000'000);
     auto rejected=std::make_shared<InterfaceDeliveryReceipt>(false);failed->attach_native_delivery(rejected);
@@ -108,12 +108,12 @@ void native_delivery_cycle() {
     auto no_clock=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);no_clock->producer_returned(109'000'000);
     auto no_clock_real=std::make_shared<InterfaceDeliveryReceipt>(false);no_clock->attach_native_delivery(generated);no_clock->attach_native_delivery(no_clock_real);
     no_clock_real->completed(true,156'111'111,157'000'000,0);
-    check(no_clock->read(109'000'000,calls,ms) && ms==57 && !no_clock->read_estimated(109'000'000,ms),"native handoff remains measurable without inventing an unknown display target");
+    check(no_clock->read(109'000'000,calls,ms) && ms==57 && no_clock->read_runtime_cycle(109'000'000,ms) && ms==57,"native handoff remains measurable without inventing an unknown display target");
     auto triple=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);triple->producer_returned(109'000'000);
     auto second=std::make_shared<InterfaceDeliveryReceipt>(true);second->synthetic_confirmed=true;second->completed(true,156'111'111,157'000'000,166'111'111);
     auto triple_real=std::make_shared<InterfaceDeliveryReceipt>(false);triple_real->completed(true,167'222'222,168'000'000,177'222'222);
     triple->attach_native_delivery(generated);triple->attach_native_delivery(second);triple->attach_native_delivery(triple_real);
-    check(triple->read_estimated(109'000'000,ms) && std::abs(ms-77.222222F)<.001F,"3X uses actual real target, two delivered synthetic slots are not added twice");
+    check(triple->read_runtime_cycle(109'000'000,ms) && ms==68,"3X uses actual real target, two delivered synthetic slots are not added twice");
     window.snapshot(1'200'000'000,actual);check(!actual.cycle_valid,"native observations expire normally");
 }
 void stage_partition_and_baseline() {
@@ -126,94 +126,69 @@ void stage_partition_and_baseline() {
     InterfaceTimingWindow window;
     check(window.submitted({608,120'000'000,105'000'000,c},123'000'000,true,true,false,true,0,125'000'000),"disabled baseline source identity");
     InterfaceTelemetry m;window.snapshot(150'000'000,m);
-    check(m.cycle_estimated_valid && m.cycle_estimated_ms==45 && m.stages_valid,"baseline cycle needs no synthetic frame");
-    check(m.game_time_valid && m.game_time_ms==20 && m.generation_time_ms==0 && m.delivery_time_ms==25,"disabled baseline partitions the engine source handoff without relabeling pre-handoff waits");
+    check(m.cycle_estimated_valid && m.cycle_estimated_ms==31 && m.stages_valid,"baseline cycle needs no synthetic frame");
+    check(m.game_time_valid && m.game_time_ms==20 && m.generation_time_ms==0 && m.delivery_time_ms==11,"disabled baseline partitions the engine source handoff without relabeling pre-handoff waits");
     auto generated=std::make_shared<InterfaceDeliveryReceipt>(true);c->attach_native_delivery(generated);
     generated->completed(true,127'000'000,128'000'000,138'000'000,126'000'000);
     window.snapshot(150'000'000,m);check(!m.stages_valid && m.cycle_estimated_valid,"unconfirmed generated pixels cannot supply a preparation boundary");
     generated->synthetic_confirmed=true;window.snapshot(150'000'000,m);
-    check(m.stages_valid && m.game_time_ms==20 && m.generation_time_ms==6 && m.delivery_time_ms==19,"native preparation and delivery partition one exact real cycle");
+    check(m.stages_valid && m.game_time_ms==20 && m.generation_time_ms==6 && m.delivery_time_ms==5,"native preparation and delivery partition one exact real cycle");
     auto extra=std::make_shared<InterfaceDeliveryReceipt>(true);extra->synthetic_confirmed=true;
     extra->completed(true,129'000'000,130'000'000,140'000'000,128'000'000);c->attach_native_delivery(extra);
     window.snapshot(150'000'000,m);
-    check(m.stages_valid && m.generation_time_ms==6 && m.cycle_estimated_ms==45,"3X first-output preparation and actual real target are not added twice");
+    check(m.stages_valid && m.generation_time_ms==6 && m.cycle_estimated_ms==31,"3X first-output preparation and actual real target are not added twice");
     auto legacy=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);legacy->producer_returned(125'000'000);legacy->real_prediction(140'000'000);
     float estimated{},game{},gen{},delivery{};
-    check(legacy->read_estimated(125'000'000,estimated) && estimated==40 &&
-        legacy->stages(120'000'000,125'000'000,estimated,game,gen,delivery) && game==20 && gen==0 && delivery==20,
+    check(legacy->read_runtime_cycle(125'000'000,estimated) && estimated==25 &&
+        legacy->stages(120'000'000,125'000'000,estimated,game,gen,delivery) && game==20 && gen==0 && delivery==5,
         "nonprivate baseline uses a converted actual real prediction, not a synthetic slot constant");
-    legacy->real_prediction(0);check(!legacy->read_estimated(125'000'000,estimated),"unknown baseline display clock stays N/A");
+    legacy->real_prediction(0);check(legacy->read_runtime_cycle(125'000'000,estimated) && estimated==25,"runtime completion needs no display prediction");
     generated->prepared_ns=0;window.snapshot(150'000'000,m);
     check(!m.stages_valid && m.cycle_estimated_valid,"missing readiness cannot fabricate generation duration");
     window.snapshot(1'200'000'000,m);check(!m.stages_valid && !m.cycle_estimated_valid,"all four measurements expire");
 }
 void estimated_cycle() {
-    auto make=[](std::int64_t returned=125'000'000,std::int64_t wait_ended=105'000'000) {
-        auto c=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);
-        c->call(100'000'000,wait_ended);c->producer_returned(returned);return c;
-    };
-    float ms{};
-    auto c=make();
-    check(!c->read_estimated(121'000'000,ms),"without a synthetic receipt estimated cycle is N/A");
-    c->synthetic_accepted(120'000'000,10'000'000);
-    check(c->read_estimated(120'100'000,ms) && ms==30,"inline S/B receives one display slot, not just delivery age");
-    check(c->read_estimated(130'000'000,ms) && ms==30,"real at inclusive first-slot boundary needs only one period");
-    check(c->read_estimated(130'000'001,ms) && ms==40,"late real advances to next display slot");
-    check(c->read_estimated(139'000'000,ms) && ms==40,"queue wait is included without adding another full period");
-    auto tail=make(150'000'000);tail->synthetic_accepted(120'000'000,10'000'000);
-    check(tail->read_estimated(121'000'000,ms) && ms==50,"producer tail remains part of the complete cycle");
-    auto triple=make();triple->synthetic_accepted(120'100'000,10'000'000);
-    triple->synthetic_accepted(120'000'000,10'000'000); // Native confirmation out of order.
-    triple->synthetic_accepted(120'100'000,10'000'000); // Duplicate confirmation.
-    check(triple->read_estimated(120'200'000,ms) && ms==40,"two distinct synthetics count two slots, confirmations may arrive out of order");
-    auto unknown=make();unknown->synthetic_accepted(120'000'000,0);
-    check(!unknown->read_estimated(125'000'000,ms),"unknown display period is N/A");
-    auto changed=make();changed->synthetic_accepted(120'000'000,10'000'000);changed->synthetic_accepted(120'100'000,8'333'333);
-    check(!changed->read_estimated(125'000'000,ms),"refresh change within pair cannot fabricate a slot estimate");
-    check(!c->read_estimated(119'000'000,ms),"real receipt earlier than generated is invalid");
-    auto unfinished=std::make_shared<InterfaceCycle>(100'000'000,100'000'000);unfinished->synthetic_accepted(120'000'000,10'000'000);
-    check(!unfinished->read_estimated(121'000'000,ms),"estimate waits for producer completion");
-    // V631 Ghostwire/VDXR: CPU S acceptance +8.33ms read about10ms,
-    // discarding the later real runtime target and its outstanding GPU work.
-    auto predicted=make(106'500'000,100'500'000);
-    predicted->synthetic_accepted(101'666'667,8'333'333);
-    predicted->real_prediction(134'814'000);
-    check(predicted->read_estimated(102'000'000,ms) && std::abs(ms-34.814F)<.001F,
-        "VDXR generated estimate must retain the converted real target, not just CPU acceptance plus one slot");
-    auto predicted_triple=make(106'500'000,100'500'000);
-    predicted_triple->synthetic_accepted(101'666'667,8'333'333);
-    predicted_triple->synthetic_accepted(102'000'000,8'333'333);
-    predicted_triple->real_prediction(151'500'000);
-    check(predicted_triple->read_estimated(102'500'000,ms) && std::abs(ms-51.5F)<.001F,
-        "3X real target includes its slots; merge by max, never add those slots again");
-    predicted->real_prediction(101'000'000);
-    check(predicted->read_estimated(102'000'000,ms) && std::abs(ms-10.F)<.001F,
-        "an unpaced early runtime target cannot undercut the existing pair-slot bound");
+    auto c=std::make_shared<InterfaceCycle>(100'000'000);
+    float ms{};c->producer_returned(180'000'000);c->real_prediction(220'000'000);
+    check(c->read_runtime_cycle(125'000'000,ms) && ms==25,"direct runtime return ignores80ms producer tail and120ms display prediction");
+    c->synthetic_accepted(120'000'000,11'111'111);
+    c->synthetic_accepted(121'000'000,11'111'111);
+    check(c->read_runtime_cycle(125'000'000,ms) && ms==25,"two generated submissions do not add fictional slots");
+    c->real_prediction(0);
+    check(c->read_runtime_cycle(125'000'000,ms) && ms==25,"no display clock still has an observed runtime return");
+    check(!c->read_runtime_cycle(99'000'000,ms),"regressed runtime clock rejected");
+    auto pending=std::make_shared<InterfaceCycle>(100'000'000);
+    auto real=std::make_shared<InterfaceDeliveryReceipt>(false);pending->attach_native_delivery(real);
+    check(!pending->read_runtime_cycle(125'000'000,ms),"private virtual return never substitutes native return");
+    real->completed(true,144'000'000,145'000'000,200'000'000);
+    check(pending->read_runtime_cycle(125'000'000,ms) && ms==45,"native return is sufficient before producer tail completes");
+    pending->producer_returned(250'000'000);
+    check(pending->read_runtime_cycle(125'000'000,ms) && ms==45,"later producer tail cannot inflate native return cycle");
     InterfaceTimingWindow window;
-    check(window.submitted({50,120'000'000,0,c},120'050'000,true,true,false,true,0,120'100'000),"estimated cycle needs no XrTime conversion");
+    check(window.submitted({50,120'000'000,0,c},120'050'000,true,true,false,true,0,125'000'000),"same real runtime completion recorded");
     InterfaceTelemetry m{};window.snapshot(130'000'000,m);
-    check(m.cycle_valid && m.cycle_length_ms==25 && m.cycle_estimated_valid && m.cycle_estimated_ms==30 &&
-        m.cycle_estimated_source==InterfaceSource::frame_cycle_slot_estimate,"measured and estimated cycles remain distinct and independently labeled");
+    check(m.cycle_valid && m.cycle_length_ms==80 && m.cycle_estimated_valid && m.cycle_estimated_ms==25 &&
+        m.cycle_estimated_source==InterfaceSource::runtime_return_cycle_qpc,"runtime cycle remains independent of producer-inclusive Cycle length");
     window.snapshot(1'130'000'001,m);
-    check(!m.cycle_estimated_valid && !m.cycle_valid,"both counters expire with the same one-second sample window");
+    check(!m.cycle_estimated_valid && !m.cycle_valid,"runtime counters expire with observed samples");
 }
 void production_boundaries() {
     auto c=std::make_shared<InterfaceCycle>(120'000'000);
     c->producer_returned(125'000'000);c->real_prediction(150'000'000);
     InterfaceTimingWindow w;check(w.submitted({201,121'000'000,0,c},125'000'000,true,true,false,true,150'000'000,125'000'000),"source handoff recorded");
     InterfaceTelemetry m{};w.snapshot(140'000'000,m);
-    check(!m.game_time_valid && m.cycle_estimated_valid && m.cycle_estimated_ms==30 && m.stages_valid && m.generation_time_ms==0 && m.delivery_time_ms==29,"missing engine origin preserves the exact XR baseline estimate and independent delivery, without fake Game time");
+    check(!m.game_time_valid && m.cycle_estimated_valid && m.cycle_estimated_ms==5 && m.stages_valid && m.generation_time_ms==0 && m.delivery_time_ms==4,"missing engine origin preserves the exact XR baseline estimate and independent delivery, without fake Game time");
     c->production_started(100'000'000);w.snapshot(140'000'000,m);
-    check(m.game_time_valid && m.game_time_ms==21 && m.cycle_estimated_valid && m.cycle_estimated_ms==30 && m.delivery_time_ms==29,"Game includes pre-Wait production while Excel keeps its established Wait-origin interval");
+    check(m.game_time_valid && m.game_time_ms==21 && m.cycle_estimated_valid && m.cycle_estimated_ms==5 && m.delivery_time_ms==4,"Game includes pre-Wait production while Excel keeps its established Wait-origin interval");
     BenchmarkSamples excel;
     m.updated_ms=5000;excel.observe(m,1000,11000);
     c->production_started(0);w.snapshot(140'000'000,m);
     m.updated_ms=6000;excel.observe(m,1000,11000);
-    check(excel.latency.size()==2 && excel.latency[0]==30 && excel.latency[1]==30,
+    check(excel.latency.size()==2 && excel.latency[0]==5 && excel.latency[1]==5,
         "benchmark receives the same value before and after loss of engine association");
     c->production_started(100'000'000);
     c->call(120'000'000,120'700'000);w.snapshot(140'000'000,m);
-    check(m.game_time_ms==21 && m.delivery_time_ms==29,"pre-handoff calls remain inside chronological game interval");
+    check(m.game_time_ms==21 && m.delivery_time_ms==4,"pre-handoff calls remain inside chronological game interval");
     FrameProductionTracker tracker;
     XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};locate.displayTime=500;locate.space=reinterpret_cast<XrSpace>(10);
     XrView views[2]{{XR_TYPE_VIEW},{XR_TYPE_VIEW}};views[0].pose.orientation.w=views[1].pose.orientation.w=1;

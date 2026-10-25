@@ -382,7 +382,7 @@ int main(int argc, char** argv) {
             fail_end=true;check(XR_FAILED(overlay.end_frame(&info,true,true,{},0,stamp)),"failed synthetic has no slot receipt");
             check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS,"real without successful synthetic remains valid");
             estimate_cycle->producer_returned(xrfg::interface_clock_ns());
-            float estimate{};check(!estimate_cycle->read_estimated(xrfg::interface_clock_ns(),estimate),"failed synthetic cannot enable estimated cycle");
+            float estimate{};check(estimate_cycle->read_runtime_cycle(xrfg::interface_clock_ns(),estimate),"successful real runtime return is observable without a generated frame");
             overlay.reset_metrics();estimate_start=xrfg::interface_clock_ns()-5'000'000;
             estimate_cycle=std::make_shared<xrfg::InterfaceCycle>(estimate_start);stamp={404,estimate_start,0,estimate_cycle};
             conversions=clock_conversions;
@@ -392,8 +392,8 @@ int main(int argc, char** argv) {
             estimate_cycle->producer_returned(xrfg::interface_clock_ns());
             std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&info);
             measured=snapshot().runtime.telemetry;
-            check(measured.cycle_valid && measured.cycle_estimated_valid && measured.cycle_estimated_ms>=14 &&
-                measured.cycle_estimated_ms>measured.cycle_length_ms+5 && !measured.presentation_valid,
+            check(measured.cycle_valid && measured.cycle_estimated_valid && measured.cycle_estimated_ms>=5 &&
+                measured.cycle_estimated_ms<=measured.cycle_length_ms+.001F && !measured.presentation_valid,
                 "real composition path publishes measured plus estimated cycle without clock extension");
             // A pending NGX decision contributes only after existing nonblocking
             // content polling confirms actual generation; a native copy never does.
@@ -405,7 +405,7 @@ int main(int argc, char** argv) {
             const auto real_clock=xrfg::interface_clock_ns();
             check(overlay.end_frame(&info,false,true,{},0,stamp)==XR_SUCCESS,"native real receipt");
             estimate_cycle->producer_returned(xrfg::interface_clock_ns());
-            check(!estimate_cycle->read_estimated(real_clock,estimate),"unconfirmed native cannot invent display slots");
+            check(estimate_cycle->read_runtime_cycle(real_clock,estimate),"real runtime completion does not depend on confirming unrelated synthetic pixels");
             pending->mask.store(1);
             std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&info);
             check(snapshot().runtime.telemetry.cycle_estimated_valid,"native confirmation retains original acceptance receipt for slot estimate");
@@ -422,9 +422,9 @@ int main(int argc, char** argv) {
             estimate_cycle->producer_returned(xrfg::interface_clock_ns());
             std::this_thread::sleep_for(std::chrono::milliseconds(260));overlay.application_frame(&info);
             measured=snapshot().runtime.telemetry;
-            check(measured.cycle_estimated_valid && std::abs(measured.cycle_estimated_ms-42.F)<.001F &&
-                measured.cycle_estimated_source==xrfg::InterfaceSource::predicted_display_qpc,
-                "overlay/benchmark preserve real42ms target instead of ~12ms CPU-slot estimate or double-added52ms");
+            check(measured.cycle_estimated_valid && measured.cycle_estimated_ms>=2 && measured.cycle_estimated_ms<42.F &&
+                measured.cycle_estimated_source==xrfg::InterfaceSource::runtime_return_cycle_qpc,
+                "overlay/benchmark exclude the42ms predicted target and report actual runtime return");
             fixed_display_clock=0;overlay.reset_metrics();
             set_interface_visible(InterfaceSurface::desktop,false);conversions=clock_conversions;
             stamp={402,xrfg::interface_clock_ns(),0};

@@ -324,7 +324,7 @@ int main() {
         }
         state=snapshot();check(state.benchmark.phase==BenchmarkPhase::complete && state.desired==baseline,"Completion restores every original setting/profile");
         std::ifstream csv(std::filesystem::u8path(state.benchmark.csv_path));std::stringstream text;text<<csv.rdbuf();
-        check(text.str().find("Output FPS median")!=std::string::npos && text.str().find("Cycle estimated median ms")!=std::string::npos,"CSV has both medians");
+        check(text.str().find("Output FPS median")!=std::string::npos && text.str().find("Cycle to runtime median ms")!=std::string::npos,"CSV has both medians");
         const auto csv_text=text.str();
         std::cout<<"FULL_CSV="<<std::filesystem::u8path(state.benchmark.csv_path).string()<<'\n';
         const auto details_path=std::filesystem::u8path(state.benchmark.csv_path);

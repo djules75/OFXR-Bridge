@@ -68,8 +68,8 @@ void status(const Snapshot& state) {
                 "CPU wall time inside the intercepted application OpenXR calls, including their waits. Overlapping calls are counted once. Not GPU synthesis time.");
             value("Cycle length",m.cycle_length_ms,current && m.cycle_valid,false,
                 "Application WaitFrame entry through completion of the same real frame at the native runtime or a later producer return. Includes the private delivery path; not engine-start or panel latency.");
-            value("Cycle (estimated)",m.cycle_estimated_ms,current && m.cycle_estimated_valid,false,
-                "Benchmark/Excel interval: app WaitFrame entry to the same real frame's confirmed predicted display target, or later native/producer return. Includes native delivery and prediction horizon, including generation Off. Not physical panel scanout or complete game latency.");
+            value("Cycle to runtime",m.cycle_estimated_ms,current && m.cycle_estimated_valid,false,
+                "Observed interval: app WaitFrame entry through successful return of the same real frame's actual runtime xrEndFrame. Includes runtime call blocking. Excludes predicted display, later producer tail and any subsequent compositor/encoding work. Not panel or complete game latency.");
             ImGui::EndTable();
         }
         const auto text = interface_state_text(state);
@@ -368,7 +368,7 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     const bool permitted=benchmark_enabled();
     if (!permitted) ImGui::TextWrapped("Benchmarks disabled. Enable benchmarks in the tray to enable sampling and these buttons.");
     const bool active=benchmark_active(state.benchmark);
-    ImGui::TextWrapped("10 seconds per configuration; discard only the first 3 seconds. CSV: min / median / max Output FPS and Cycle estimated. Works with diagnostic logging off. Neural and AFW choices are kept.");
+    ImGui::TextWrapped("10 seconds per configuration; discard only the first 3 seconds. CSV: min / median / max Output FPS and Cycle to runtime. Works with diagnostic logging off. Neural and AFW choices are kept.");
     ImGui::BeginDisabled(active);
     changed |= ImGui::Checkbox("Auto pick best one", &draft.benchmark_auto_pick);
     ImGui::EndDisabled();

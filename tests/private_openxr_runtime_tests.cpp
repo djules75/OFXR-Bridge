@@ -835,16 +835,16 @@ void native_delivery_receipts(bool d12) {
     f.begin_virtual();xr_ok(f.submit(chain,2,XR_NULL_HANDLE,real),"observed real accepted while native End remains held");
     const auto producer_returned=ns();cycle->producer_returned(producer_returned);
     float cpu{},length{},estimated{};
-    check(!cycle->read(producer_returned,cpu,length) && !cycle->read_estimated(producer_returned,estimated),"real GPU endpoint never publishes virtual success as native timing");
+    check(!cycle->read(producer_returned,cpu,length) && !cycle->read_runtime_cycle(producer_returned,estimated),"real GPU endpoint never publishes virtual success as native timing");
     std::this_thread::sleep_for(30ms); // deliberate native delay; not a throughput assertion
     f.unblock();f.wait_count(2);xr_ok(f.transport->drain(),"native observed drain");
     check(generated->outcome.load()==1 && real->outcome.load()==1,"both native outcomes published after success");
     check(real->entered_ns>producer_returned && real->returned_ns>=real->entered_ns,"real receipt includes downstream queue wait after producer return");
     check(cycle->read(producer_returned,cpu,length) && length>=30,"measured complete cycle contains deliberate native hold");
-    check(cycle->read_estimated(producer_returned,estimated) && estimated>=length,"actual director display target drives estimate");
+    check(cycle->read_runtime_cycle(producer_returned,estimated) && estimated<=length+.001F && estimated>=30,"actual native End completion drives runtime cycle");
     check(f.pixels==std::vector<unsigned>({88,88}) && f.chains.size()==1,"measurement leaves delivery pixels, count and resource ownership unchanged");
     xr_ok(f.transport->destroy_swapchain(chain),"observed chain cleanup");
-    std::printf("%s native receipt: virtual return before physical delivery, held-End delay %.3fms, actual predicted cycle %.3fms PASS\n",d12?"D3D12":"D3D11",length,estimated);
+    std::printf("%s native receipt: virtual return before physical delivery, held-End delay %.3fms, actual runtime completed cycle %.3fms PASS\n",d12?"D3D12":"D3D11",length,estimated);
 }
 void pooled_publication(bool reuse=false,bool d12=true) {
     Fixture f(d12);f.expected_views=2;f.native_chain_limit=2;f.throttled=false;f.reuse_current_real_image=reuse;
