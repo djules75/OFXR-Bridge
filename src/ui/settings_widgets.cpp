@@ -176,6 +176,12 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
     ImGui::TextWrapped(framework_only ? "VDXR transport uses Framework pacing. Change Pacing in the tray and restart the game to use director pacing."
         : draft.advanced_mode ? "Framework bypasses director pacing; Director uses only the final director; Framework+director combines both. Changes apply live after queued frames complete."
         : "Framework bypasses director pacing; Director uses only the final director. Changes apply live after queued frames complete.");
+    ImGui::BeginDisabled(framework_only || (state.connected && state.runtime.pacing_mode==kAfwOnlyPacingMode));
+    if(ImGui::Checkbox("Increase buffer",&draft.increase_buffer))changed=true;
+    ImGui::EndDisabled();
+    if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("Off: 2 frames in flight. On: 3, allowing more buffering at the cost of latency. Independent of Fast mode and the pacing choice. No effect on Legacy or direct AFW Only. Changes finish queued frames first; no game restart needed.");
+    if(state.connected && state.runtime.buffer_capacity)
+        ImGui::Text("Active bridge buffer: %u deliveries",state.runtime.buffer_capacity);
     if(state.connected && state.runtime.pacing_mode==kAfwOnlyPacingMode) {
         ImGui::TextWrapped("AFW Only: direct OpenXR delivery. Disable AFW Only in the Luke Ross tab and restart the game to restore OFXR. Neural Rendering remains available.");
         return changed;

@@ -9,6 +9,7 @@ bool layer_active() noexcept;
 // CPU-only interface: no NGX/FFX structures cross the host/backend ABI boundary.
 struct Settings {
     bool enabled{true};
+    bool increase_buffer{};
     int pacing_mode{2}; // 0 framework, 1 sole director, 2 framework + director
     int backend{}; // 0 FidelityFX, 1 NVIDIA legacy, 2 NVIDIA new, 3 NVIDIA djules
     int preset{1}; // 0 slow, 1 medium, 2 fast

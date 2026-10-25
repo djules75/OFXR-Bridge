@@ -154,6 +154,26 @@ int main(){try {
     require(fifo.reserve(2),"stop control reserve");
     auto blocked=std::async(std::launch::async,[&]{return fifo.reserve();});
     fifo.stop();require(!blocked.get() && !fifo.pop(),"stop did not release producer/consumer");
-    std::cout<<"Private distributor: fixed1ms End phase and100us preparation without drift over10000refreshes; exact held lateness; strict90/120/75Hz; FIFO ownership; backpressure; stop PASS\n";
+    xrfg::PrivateOutputFifo<unsigned> resize(3);
+    require(resize.reserve(3) && resize.accept(1) && resize.accept(2) && resize.accept(3),"old three-credit ownership");
+    require(resize.set_capacity(2),"reduce admission without eviction");
+    auto next=std::async(std::launch::async,[&]{return resize.reserve() && resize.accept(4);});
+    const bool full=next.wait_for(std::chrono::milliseconds(10))==std::future_status::timeout;
+    auto first=resize.pop();resize.retire();
+    const bool still_full=next.wait_for(std::chrono::milliseconds(10))==std::future_status::timeout;
+    auto second=resize.pop();resize.retire();
+    const bool resumed=next.wait_for(std::chrono::seconds(1))==std::future_status::ready;
+    if(!resumed)resize.stop();const bool admitted=next.get();
+    require(full && still_full && resumed && admitted && first==1 && second==2,"reduced limit freed occupied entries early");
+    require(resize.pop()==3 && resize.pop()==4,"resizing lost/reordered old entries");resize.retire(2);
+    require(resize.reserve(2) && resize.accept(5) && resize.accept(6),"fill two-credit limit");
+    auto grow=std::async(std::launch::async,[&]{return resize.reserve() && resize.accept(7);});
+    const bool growth_wait=grow.wait_for(std::chrono::milliseconds(10))==std::future_status::timeout;
+    require(resize.set_capacity(3),"increase admission");const bool growth_ready=grow.wait_for(std::chrono::seconds(1))==std::future_status::ready;
+    if(!growth_ready)resize.stop();const bool grew=grow.get();
+    require(growth_wait && growth_ready && grew,"larger limit did not wake producer");
+    require(resize.pop()==5 && resize.pop()==6 && resize.pop()==7,"growth order");resize.retire(3);
+    require(!resize.set_capacity(0),"zero limit accepted");resize.stop();
+    std::cout<<"Private distributor: exact cadence, ownership, live2/3limits without eviction, growth wake and stop PASS\n";
     return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

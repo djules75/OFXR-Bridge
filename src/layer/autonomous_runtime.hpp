@@ -34,6 +34,7 @@ inline void apply_runtime_settings() {
     const auto& s=incoming.desired;
     embedded::Settings e{};
     e.pacing_mode=s.pacing_mode;
+    e.increase_buffer=s.increase_buffer;
     e.enabled=s.enabled; e.backend=s.backend; e.preset=s.preset; e.scale=s.scale;
     e.backward=s.backward; e.separate_synthesis=s.separate_synthesis; e.lower_vram=s.lower_vram;
     e.motion_vectors=s.motion_vectors; e.frame_generation=s.frame_generation==3 ? 0 : s.frame_generation;
@@ -76,13 +77,14 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     GenerationState generation=GenerationState::waiting, HRESULT initialization_result=S_OK,
     bool vulkan_detected=false, std::uint32_t provider_error=0,
     const SwapchainBudgetStatus* swapchains=nullptr,int pacing_mode=-1,bool steamvr=false,bool afw_only=false,
-    bool luke_shared=false,bool luke_shared_forced=false,bool vdxr=false,bool legacy_vdxr=true,unsigned eye_long_side=0,bool shared_queue=false) {
+    bool luke_shared=false,bool luke_shared_forced=false,bool vdxr=false,bool legacy_vdxr=true,unsigned eye_long_side=0,bool shared_queue=false,unsigned buffer_capacity=0) {
     const auto control=embedded::snapshot();
     const auto afw=embedded::afw_snapshot();
     const auto nr=neural_rendering::status();
     RuntimeStatus out{};
     out.pacing_mode=afw_only?kAfwOnlyPacingMode:pacing_mode;out.steamvr_runtime=steamvr;
     out.vdxr_runtime=vdxr;out.vdxr_legacy=legacy_vdxr;
+    out.buffer_capacity=buffer_capacity;
     out.eye_long_side=eye_long_side;
     out.shared_queue=shared_queue;
     out.luke_shared_swapchains=luke_shared;out.luke_shared_swapchains_forced=luke_shared_forced;

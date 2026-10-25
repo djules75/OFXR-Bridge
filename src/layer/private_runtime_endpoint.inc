@@ -61,6 +61,7 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
     auto original=state->dispatch;
     xrfg::PrivateOpenXrRuntime::Options options;
     options.director_enabled=state->menu_enabled && xrfg::embedded::snapshot().desired.pacing_mode!=0;
+    options.capacity=xrfg::embedded::snapshot().desired.increase_buffer?3:2;
     options.real={original->instance,state->handle,original->wait_frame,original->begin_frame,original->end_frame,
         original->create_swapchain,original->destroy_swapchain,original->enumerate_swapchain_images,
         original->acquire_swapchain_image,original->wait_swapchain_image,original->release_swapchain_image,
@@ -71,11 +72,8 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
         options.queue12=state->private_delivery_queue?state->private_delivery_queue.Get():options.producer_queue12;
     } else {options.device11=state->d3d11_device.Get();options.context11=state->d3d11_context.Get();}
     options.d11_release_readiness=options.device11 && state->luke_afw_enabled && original->steamvr_runtime;
-    // A full three-credit FIFO kept V653 at the same three-refresh residence
-    // despite its smaller work margin. Retain all three image slots, but bound
-    // accepted Luke/D11/SteamVR deliveries to the presenting and preparing pair.
-    // A producer waits for a real retirement; never drop/replace an owned packet.
-    if(options.d11_release_readiness)options.capacity=2;
+    // Common private admission, independent of pacing. Image storage is
+    // unchanged; Legacy/AFW-only bypass installation of this endpoint.
     const std::weak_ptr<SessionState> weak=state;
     options.physical_period=[weak]() -> std::int64_t {
         if(auto s=weak.lock())if(s->steamvr_delivery)if(auto p=s->steamvr_delivery->cached_display_period())return p->count();

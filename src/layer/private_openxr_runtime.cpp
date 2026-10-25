@@ -596,8 +596,7 @@ struct PrivateOpenXrRuntime::Impl {
                     if(diagnostic && margin)options.trace(17,packet->sequence,begun_at,margin);
                     if(slots.valid()) {
                         slots.adopt_handoff(last_handoff);
-                        const auto added=slots.observe_work(packet->work_ns,
-                            options.d11_release_readiness && !d12()?std::min<std::size_t>(options.capacity,2):options.capacity);
+                        const auto added=slots.observe_work(packet->work_ns,options.capacity);
                         deadline=slots.claim(packet->accepted_at,packet->prepared_at,begun_at,
                             clock_ns(),PrivateRuntimeBudget::presentation_margin);
                         if(diagnostic) {
@@ -849,6 +848,28 @@ XrResult PrivateOpenXrRuntime::set_director_enabled(bool enabled) {
 }
 bool PrivateOpenXrRuntime::director_enabled() const noexcept {
     return impl_->director_enabled.load(std::memory_order_relaxed);
+}
+XrResult PrivateOpenXrRuntime::set_buffer_capacity(std::size_t capacity) {
+    if(capacity!=2 && capacity!=3)return XR_ERROR_VALIDATION_FAILURE;
+    auto& s=*impl_;std::scoped_lock accept(s.accept_mutex);
+    std::unique_lock lock(s.mutex);
+    if(s.options.capacity==capacity)return s.failure;
+    if(!s.running) {
+        if(XR_FAILED(s.failure))return s.failure;
+        s.options.capacity=capacity;++s.policy_epoch;return XR_SUCCESS;
+    }
+    // Let the ordinary consumer finish every accepted image. Keep the FIFO
+    // object and all GPU resources; only reset future admission and learning.
+    s.changed.wait(lock,[&]{return s.stopping || !s.pending;});
+    if(XR_FAILED(s.failure))return s.failure;
+    if(s.stopping)return XR_ERROR_SESSION_NOT_RUNNING;
+    if(!s.fifo || !s.fifo->set_capacity(capacity))return XR_ERROR_RUNTIME_FAILURE;
+    s.options.capacity=capacity;++s.policy_epoch;
+    if(s.wait_job)s.wait_job->target=0;
+    lock.unlock();s.changed.notify_all();return XR_SUCCESS;
+}
+std::size_t PrivateOpenXrRuntime::buffer_capacity() const noexcept {
+    std::scoped_lock lock(impl_->mutex);return impl_->options.capacity;
 }
 XrResult PrivateOpenXrRuntime::wait_frame(const XrFrameWaitInfo* info,XrFrameState* output) {
     if(!valid(info,XR_TYPE_FRAME_WAIT_INFO) || !output || output->type!=XR_TYPE_FRAME_STATE || output->next)return XR_ERROR_VALIDATION_FAILURE;

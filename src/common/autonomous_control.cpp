@@ -78,7 +78,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465852;
-constexpr std::uint32_t kAbi = 65601;
+constexpr std::uint32_t kAbi = 65701;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -180,7 +180,7 @@ bool save(const Shared& shared, const Settings& value) {
 std::filesystem::path process_profile;
 std::atomic_bool process_profile_bound{};
 std::uint64_t path_identity(const std::filesystem::path& path) {
-    std::uint64_t identity=14695981039346656037ULL;
+    std::uint64_t identity=14695981039346657037ULL;
     for (const auto c:path.wstring()) {identity^=static_cast<std::uint64_t>(std::towlower(c));identity*=1099511628211ULL;}
     return identity;
 }
@@ -192,7 +192,7 @@ class Discovery {
     DiscoveryState* data{};
 public:
     Discovery() {
-        const auto prefix=L"Local\\OFXRBridgeV656-discovery-"+std::to_wstring(path_identity(global_configuration_path()));
+        const auto prefix=L"Local\\OFXRBridgeV657-discovery-"+std::to_wstring(path_identity(global_configuration_path()));
         mutex=CreateMutexW(nullptr,FALSE,(prefix+L"-mutex").c_str());
         mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(DiscoveryState),(prefix+L"-data").c_str());
         if(mapping)data=static_cast<DiscoveryState*>(MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(DiscoveryState)));
@@ -241,7 +241,7 @@ public:
         // Profile identity is part of the mapping name, so fixture profiles
         // and future concurrent candidates cannot modify the user's settings.
         const auto identity=path_identity(file);
-        const auto prefix = L"Local\\OFXRBridgeV656-" + std::to_wstring(identity);
+        const auto prefix = L"Local\\OFXRBridgeV657-" + std::to_wstring(identity);
         mutex = CreateMutexW(nullptr, FALSE, (prefix + L"-mutex").c_str());
         if (!mutex) return;
         const DWORD waited = WaitForSingleObject(mutex, 2000);
@@ -417,7 +417,7 @@ Settings parse_settings(std::string_view text) {
         if(key=="AdvancedMode")value.advanced_mode=number!=0;
         if(key=="single_director") legacy_single_director=number!=0;
 #define READ_FIELD(name) if (key == #name) value.name = static_cast<decltype(value.name)>(number);
-        READ_FIELD(enabled) READ_FIELD(afw_only) READ_FIELD(backend) READ_FIELD(motion_vectors)
+        READ_FIELD(increase_buffer) READ_FIELD(enabled) READ_FIELD(afw_only) READ_FIELD(backend) READ_FIELD(motion_vectors)
         READ_FIELD(frame_generation) READ_FIELD(hybrid_backend) READ_FIELD(preset) READ_FIELD(scale)
         READ_FIELD(pacing_mode) READ_FIELD(backward) READ_FIELD(separate_synthesis) READ_FIELD(lower_vram) READ_FIELD(prefer_fps)
         READ_FIELD(triple_frame_gen) READ_FIELD(native_scale) READ_FIELD(r19_camera)
@@ -454,7 +454,7 @@ std::string serialize_settings(const Settings& settings) {
     std::ostringstream output;
     output << "[ofxr]\nAdvancedMode=" << value.advanced_mode << '\n' << std::setprecision(9);
 #define WRITE_FIELD(name) output << #name << '=' << value.name << '\n';
-    WRITE_FIELD(enabled) WRITE_FIELD(afw_only) WRITE_FIELD(backend) WRITE_FIELD(motion_vectors)
+    WRITE_FIELD(increase_buffer) WRITE_FIELD(enabled) WRITE_FIELD(afw_only) WRITE_FIELD(backend) WRITE_FIELD(motion_vectors)
     WRITE_FIELD(frame_generation) WRITE_FIELD(hybrid_backend) WRITE_FIELD(preset) WRITE_FIELD(scale)
     WRITE_FIELD(pacing_mode) WRITE_FIELD(backward) WRITE_FIELD(separate_synthesis) WRITE_FIELD(lower_vram) WRITE_FIELD(prefer_fps)
     WRITE_FIELD(triple_frame_gen) WRITE_FIELD(native_scale) WRITE_FIELD(r19_camera)
@@ -529,7 +529,7 @@ bool initialize_game_configuration(const std::filesystem::path& executable) noex
         // A dedicated creation mutex prevents two simultaneous first launches
         // overwriting one another's freshly created profile.
 #ifdef _WIN32
-        const auto name=L"Local\\OFXRBridgeV656-create-"+std::to_wstring(path_identity(file));
+        const auto name=L"Local\\OFXRBridgeV657-create-"+std::to_wstring(path_identity(file));
         HANDLE mutex=CreateMutexW(nullptr,FALSE,name.c_str());if(!mutex)return false;
         struct CreationGuard {HANDLE handle;bool locked{};~CreationGuard(){if(locked)ReleaseMutex(handle);CloseHandle(handle);}} guard{mutex};
         const auto waited=WaitForSingleObject(mutex,2000);
@@ -642,7 +642,7 @@ Settings merge_changes(Settings current, const Settings& prior, const Settings& 
 #undef MERGE_PROFILE
     }
 #define MERGE_FIELD(name) if (base.name != desired.name) current.name = desired.name;
-    MERGE_FIELD(afw_only) MERGE_FIELD(pacing_mode) MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(hybrid_backend) MERGE_FIELD(r19_camera)
+    MERGE_FIELD(increase_buffer) MERGE_FIELD(afw_only) MERGE_FIELD(pacing_mode) MERGE_FIELD(enabled) MERGE_FIELD(backend) MERGE_FIELD(frame_generation) MERGE_FIELD(hybrid_backend) MERGE_FIELD(r19_camera)
     MERGE_FIELD(afw_mode) MERGE_FIELD(afw_debug) MERGE_FIELD(afw_clear_before_warping)
     MERGE_FIELD(afw_ignore_motion_threshold) MERGE_FIELD(afw_depth_dilate_mode) MERGE_FIELD(afw_shading_rate)
     MERGE_FIELD(nr_enabled) MERGE_FIELD(nr_before_sr) MERGE_FIELD(nr_intensity)
@@ -756,7 +756,7 @@ void csv_mib(std::ostream& stream,bool valid,std::uint64_t bytes) {
     else stream<<"N/A";
 }
 bool same_trial(const Settings& a,const Settings& b) {
-    return a.pacing_mode==b.pacing_mode && a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation &&
+    return a.increase_buffer==b.increase_buffer && a.pacing_mode==b.pacing_mode && a.enabled==b.enabled && a.backend==b.backend && a.frame_generation==b.frame_generation &&
         a.triple_frame_gen==b.triple_frame_gen && a.prefer_fps==b.prefer_fps &&
         a.separate_synthesis==b.separate_synthesis && a.lower_vram==b.lower_vram &&
         a.afw_mode==b.afw_mode && (!a.afw_mode || a.afw_shading_rate==b.afw_shading_rate);
@@ -814,7 +814,7 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
         csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_working_set_bytes);rec.stream<<',';
         csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_private_commit_bytes);rec.stream<<','<<quoted(verdict)<<','<<s.pacing_mode<<','<<rec.runtime<<','<<rec.legacy_vdxr<<','<<rec.eye_long_side<<',';
         if(rec.samples.refresh_hz.empty())rec.stream<<"N/A";else rec.stream<<benchmark_median(rec.samples.refresh_hz);
-        rec.stream<<','<<rec.vector_success<<'\n';
+        rec.stream<<','<<rec.vector_success<<','<<(rec.steamvr?(s.increase_buffer?3:2):0)<<'\n';
         rec.stream.flush();
         if(!rec.stream)throw std::runtime_error("CSV write failed");
         rec.results.push_back({rec.settings,rec.samples,rec.memory,rec.label,std::string_view(verdict)=="complete",rec.eye_long_side,rec.vector_success});csv_layout(rec,b);
@@ -837,7 +837,7 @@ void csv_open(SuiteRecorder& rec,BenchmarkStatus& b,unsigned preset,const Runtim
     rec.stream.open(path,std::ios::out|std::ios::trunc);
     rec.stream.imbue(std::locale::classic());rec.stream<<std::fixed<<std::setprecision(3);
     if(!rec.stream)throw std::runtime_error("Cannot create benchmark CSV");
-    rec.stream<<"Build,Run,GamePID,Game,Step,Route,SeparateA,ReduceB,Multiplier,PreferFPS,Neural,AFWMode,AFWShadingRate,DLSSGPreset,SettleSeconds,UsefulSeconds,OutputFPSMin,OutputFPSMedian,OutputFPSMax,FPSSamples,CycleEstimatedMinMs,CycleEstimatedMedianMs,CycleEstimatedMaxMs,CycleSamples,MemorySnapshotMs,VRAMEndMiB,SharedGPUEndMiB,RAMWorkingSetEndMiB,RAMPrivateCommitEndMiB,Status,PacingMode,Runtime,LegacyVDXR,EyeLongSide,DisplayHz,NativeVectors\n";
+    rec.stream<<"Build,Run,GamePID,Game,Step,Route,SeparateA,ReduceB,Multiplier,PreferFPS,Neural,AFWMode,AFWShadingRate,DLSSGPreset,SettleSeconds,UsefulSeconds,OutputFPSMin,OutputFPSMedian,OutputFPSMax,FPSSamples,CycleMinimumMinMs,CycleMinimumMedianMs,CycleMinimumMaxMs,CycleSamples,MemorySnapshotMs,VRAMEndMiB,SharedGPUEndMiB,RAMWorkingSetEndMiB,RAMPrivateCommitEndMiB,Status,PacingMode,Runtime,LegacyVDXR,EyeLongSide,DisplayHz,NativeVectors,BridgeBuffer\n";
     rec.stream.flush();if(!rec.stream)throw std::runtime_error("Cannot write benchmark CSV header");
     std::snprintf(b.csv_path,sizeof(b.csv_path),"%s",utf8_path(rec.layout_path).c_str());
 }

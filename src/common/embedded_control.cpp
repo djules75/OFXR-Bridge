@@ -47,6 +47,7 @@ struct Control {
         settings.separate_synthesis = std::clamp(static_cast<int>(GetPrivateProfileIntW(
             L"ofxr", L"separate_synthesis", settings.lower_vram, ini().c_str())), 0, 1);
         settings.pacing_mode = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ofxr", L"pacing_mode", 2, ini().c_str())),0,2);
+        settings.increase_buffer=GetPrivateProfileIntW(L"ofxr",L"increase_buffer",0,ini().c_str())!=0;
         settings.enabled = GetPrivateProfileIntW(L"ofxr", L"enabled", 1, ini().c_str()) != 0;
         wchar_t motion[16]{};
         GetPrivateProfileStringW(L"ofxr", L"motion_vectors", L"off", motion, 16, ini().c_str());
@@ -128,6 +129,7 @@ bool request(Settings s) {
         ok &= write(L"ofxr", L"pacing_mode", mode);
     }
     if (old.enabled != s.enabled) ok &= write(L"ofxr", L"enabled", s.enabled ? L"1" : L"0");
+    if(old.increase_buffer!=s.increase_buffer)ok &=write(L"ofxr",L"increase_buffer",s.increase_buffer?L"1":L"0");
     if (old.backend != s.backend) ok &= write(L"ofxr", L"backend", s.backend ? L"nvidia" : L"fidelityfx");
     if (old.backend != s.backend) ok &= write(L"ofxr", L"nvidia_route", s.backend == 3 ? L"djules" : s.backend == 2 ? L"new" : L"legacy");
     const wchar_t* presets[]{L"slow", L"medium", L"fast"};

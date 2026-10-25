@@ -1780,6 +1780,7 @@ void log_benchmark_configuration(SessionState& state) noexcept {
         (std::uint64_t(xrfg::standalone::process_dlssg_preset()) << 17) |
         (std::uint64_t(std::max(0,xrfg::embedded::afw_snapshot().active_shading_rate)) << 20) |
         (s.pacing_mode==1 ? 1ULL << 40 : 0ULL) | (std::uint64_t(s.pacing_mode)<<42) | (single_director_pacing(state) ? 1ULL << 41 : 0ULL) |
+        (state.private_runtime ? (1ULL<<45) | (state.private_runtime->buffer_capacity()==3 ? 1ULL<<44:0ULL):0ULL) |
         (xrfg::autonomous::benchmark_active(control.benchmark) ? (1ULL<<24) | (std::uint64_t(control.benchmark.index)<<25) : 0ULL);
     logger.event(xrfg::BridgeFlightOperation::benchmark_configuration, 0, control.revision, bits,
         std::uint64_t(s.preset) | (std::uint64_t(s.scale) << 8) | (std::uint64_t(s.native_scale) << 16));
@@ -5975,7 +5976,7 @@ XrResult layer_create_session_impl(
         state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only,
         state->private_runtime && state->luke_afw_enabled && (state->luke_shared_swapchains || state->luke_outlaws_preframe),
         state->private_runtime && state->luke_outlaws_preframe,
-        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,0,session_uses_shared_queue(*state));
+        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,0,session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0);
     return result;
 }
 
@@ -14333,8 +14334,10 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
         hybrid_ready == state->nvidia_options.hybrid && state->applied_generation_settings) {
         auto prior=*state->applied_generation_settings;
         const bool pacing_changed=prior.pacing_mode!=control.desired.pacing_mode;
+        const bool buffer_changed=prior.increase_buffer!=control.desired.increase_buffer;
         prior.pacing_mode=control.desired.pacing_mode;
-        if (pacing_changed && prior==control.desired) {
+        prior.increase_buffer=control.desired.increase_buffer;
+        if ((pacing_changed || buffer_changed) && prior==control.desired) {
             // A presentation-policy toggle is not a generator reset. In
             // particular do not re-prime an existing FidelityFX packed input
             // as though it were a newly allocated UAV. Keep its history/state.
@@ -14344,11 +14347,13 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
             if(state->private_runtime) {
                 const auto policy=state->private_runtime->set_director_enabled(state->menu_enabled && control.desired.pacing_mode!=0);
                 if(XR_FAILED(policy))return E_FAIL;
+                const auto buffer=state->private_runtime->set_buffer_capacity(control.desired.increase_buffer?3:2);
+                if(XR_FAILED(buffer))return E_FAIL;
                 state->single_director_requested=control.desired.pacing_mode==1;
             }
             state->applied_generation_settings=control.desired;
             state->control_revision=control.revision;
-            ++state->djules_configuration_epoch;
+            if(pacing_changed)++state->djules_configuration_epoch;
             if (state->fps_overlay) state->fps_overlay->reset_metrics();
             xrfg::embedded::applied(state->control_id,control.revision,state->menu_enabled,S_OK);
             xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::embedded_configuration,
@@ -14641,6 +14646,8 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     // held phase or sole-director framework policy may remain effective OFF.
     state->menu_enabled = SUCCEEDED(result) && control.desired.enabled;
     if(state->private_runtime) {
+        const auto buffer=state->private_runtime->set_buffer_capacity(control.desired.increase_buffer?3:2);
+        if(XR_FAILED(buffer)) {result=E_FAIL;state->menu_enabled=false;}
         const auto policy=state->private_runtime->set_director_enabled(
             state->menu_enabled && control.desired.pacing_mode!=0);
         if(XR_FAILED(policy)) {result=E_FAIL;state->menu_enabled=false;}
@@ -15063,7 +15070,7 @@ XrResult layer_end_frame_impl(
             state->private_runtime?(state->private_runtime->director_enabled()?(single_director_pacing(*state)?1:2):0):0,state->dispatch->steamvr_runtime,state->afw_only,
         state->private_runtime && state->luke_afw_enabled && (state->luke_shared_swapchains || state->luke_outlaws_preframe),
         state->private_runtime && state->luke_outlaws_preframe,
-        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,xrfg::benchmark_eye_long_side(frame),session_uses_shared_queue(*state)); }
+        state->dispatch->virtual_desktop_runtime,state->vdxr_legacy,xrfg::benchmark_eye_long_side(frame),session_uses_shared_queue(*state),state->private_runtime?static_cast<unsigned>(state->private_runtime->buffer_capacity()):0); }
     } runtime_report_scope{state,end_info};
     configure_session_guide_capture(*state);
     const std::uint32_t diagnostic_capture_frame =

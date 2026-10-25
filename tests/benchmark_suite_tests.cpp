@@ -330,7 +330,7 @@ int main() {
         const auto details_path=std::filesystem::u8path(state.benchmark.csv_path);
         std::ifstream details(details_path.parent_path()/(details_path.stem().wstring()+L"-details.csv"));
         std::stringstream details_text;details_text<<details.rdbuf();
-        check(details_text.str().find("Status,PacingMode,Runtime,LegacyVDXR,EyeLongSide,DisplayHz,NativeVectors\n")!=std::string::npos,
+        check(details_text.str().find("Status,PacingMode,Runtime,LegacyVDXR,EyeLongSide,DisplayHz,NativeVectors,BridgeBuffer\n")!=std::string::npos,
             "details CSV identifies the requested pacing of every trial");
         check(details_text.str().find(",A startup request,")!=std::string::npos &&
             details_text.str().find("C startup request")==std::string::npos,"CSV records A receipt instead of inventing C");

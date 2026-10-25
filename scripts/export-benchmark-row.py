@@ -42,6 +42,7 @@ def decode(bits, quality):
         cell += ':prefer'
     return dict(route=route, cell=cell, flags=flags, dlssg_preset_request=dlssg_preset,
                 automatic=bool(bits & (1 << 24)), suite_step=(bits >> 25) & 63,
+                bridge_buffer=(3 if bits & (1<<44) else 2) if bits & (1<<45) else None,
                 prefer_fps=bool(bits & (1 << 9)), triple=triple,
                 nr=bool(bits & (1 << 14)), separate_queue=bool(bits & (1 << 15)),
                 luke=bool(bits & (1 << 16)), afw_mode=(bits >> 12) & 3, afw_shading_rate=(bits >> 20) & 15,

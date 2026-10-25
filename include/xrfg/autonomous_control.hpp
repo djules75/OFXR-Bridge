@@ -31,6 +31,7 @@ struct Settings {
     bool enabled{true};
     bool advanced_mode{}; // INI-only AdvancedMode; simplified UI by default
     bool afw_only{}; // per-game startup choice, independent of Neural Rendering
+    bool increase_buffer{}; // common private endpoint: off2 deliveries, on3; Legacy ignores it
     int pacing_mode{1}; // 0 framework, 1 sole director, 2 framework + director
     int backend{2}; // 0 FidelityFX, 1 NVIDIA reference, 2 NVIDIA new, 3 NVIDIA djules
     int motion_vectors{}; // 0 optical flow, 1 native game guides
@@ -142,6 +143,7 @@ struct RuntimeStatus {
     VideoMemoryStatus video_memory{};
     bool luke_shared_swapchains{}, luke_shared_swapchains_forced{}; // active session, not requested next launch
     bool vdxr_runtime{}, vdxr_legacy{true}; // active startup transport, not next-launch preference
+    std::uint32_t buffer_capacity{}; // active admission; zero for Legacy/AFW-only
     std::uint32_t eye_long_side{}; // minimum per-eye longest side of the submitted stereo scene
     bool shared_queue{}; // actual capture/OFXR queue fallback, not the requested pacing
 };

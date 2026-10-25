@@ -9,11 +9,22 @@
 #include <iostream>
 #include <stdexcept>
 #include <cstring>
+#include <fstream>
 using namespace xrfg;
 using namespace xrfg::autonomous;
 namespace {
 unsigned checks{};
 void check(bool pass, const char* text) { ++checks; if (!pass) throw std::runtime_error(text); }
+void buffer_preferences() {
+    check(!Settings{}.increase_buffer,"new profiles default to two private deliveries");
+    auto base=snapshot().desired;auto larger=base;larger.increase_buffer=true;
+    check(request(larger) && snapshot().desired.increase_buffer,"larger buffer is a normal per-game preference");
+    std::ifstream file(configuration_path());const std::string text(std::istreambuf_iterator<char>(file),{});
+    file.close(); // Windows atomic profile replacement needs the reader closed.
+    check(text.find("increase_buffer=1")!=std::string::npos,"buffer preference persists in existing INI");
+    select_generation(larger,0,1);check(larger.increase_buffer,"changing framework does not replace buffer preference");
+    check(request(base) && snapshot().desired.increase_buffer==base.increase_buffer,"buffer preference restores without touching other settings");
+}
 void timing() {
     InterfaceTimingWindow window;
     const InterfaceFrameStamp frame{1, 100'000'000, 80'000'000};
@@ -286,7 +297,7 @@ int main() {
         const auto fixture=std::filesystem::temp_directory_path()/(L"ofxr-v460-timing-"+std::to_wstring(GetCurrentProcessId()));
         std::filesystem::create_directories(fixture);
         SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",fixture.c_str());
-        minimum_spacing_rules();production_boundaries();timing();complete_cycle();estimated_cycle();native_delivery_cycle();stage_partition_and_baseline();wording();
+        buffer_preferences();minimum_spacing_rules();production_boundaries();timing();complete_cycle();estimated_cycle();native_delivery_cycle();stage_partition_and_baseline();wording();
         const auto before=snapshot();
         check(!interface_telemetry_requested(), "hidden by default");
         set_interface_visible(InterfaceSurface::desktop,true);

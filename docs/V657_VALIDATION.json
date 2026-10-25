@@ -1,0 +1,13 @@
+{
+  "version": 657,
+  "base": 656,
+  "checks_passed": 131,
+  "seconds": 180.36984479999998,
+  "live_buffer_controls": "D11/D12, Framework/Director,2->3->2, exact pixels/poses/FIFO, unchanged image count, pending drain, stop cancellation, learned-margin reset",
+  "integration": "Actual Djules3X hot toggles with engine/publication/history retained, pre-start 2/3, Legacy and AFWOnly exclusion, forced VDXR/SteamVR transports, common generation backends",
+  "metric": "V656 Cycle minimum unchanged",
+  "hardware_game_performance_acceptance": "PENDING",
+  "initial_fixture_failures": "Shared fixture initially omitted new control field and inherited the previous test buffer in build-local INI. Initialize its defaultfalse and publish explicitly. Old gate fixture also assumed3 blocked credits: fill active budget, test one additional blocked delivery. No product workaround. Initial failures kept in diagnostic history; final full131 checks clean.",
+  "git_mutation": false,
+  "live_installation_changed": false
+}

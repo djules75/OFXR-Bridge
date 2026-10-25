@@ -16,6 +16,8 @@ int main(int argc,char** argv) {
     const bool hfw=route.starts_with("hfw-");if(hfw)route=route.substr(4);
     const bool hfw_early=hfw && route.starts_with("early-");if(hfw_early)route=route.substr(6);
     const bool hfw_offon=hfw && route.starts_with("offon-");if(hfw_offon)route=route.substr(6);
+    const bool buffer_toggling=route.starts_with("buffer-");if(buffer_toggling)route=route.substr(7);
+    const bool large_buffer=route.starts_with("large-");if(large_buffer)route=route.substr(6);
     const bool force_vdxr_steamvr=route=="force-vdxr-steamvr-session";
     const bool force_steamvr_vdxr=route=="force-steamvr-vdxr-session";
     const bool unknown_session=route=="other-session";
@@ -50,6 +52,10 @@ int main(int argc,char** argv) {
     const bool native12=!route.starts_with("d11-");if(!native12)route=route.substr(4);
     const bool triple=route.ends_with('3');if(triple)route.pop_back();
     xrfg_fixture::ControlProfile profile;
+    if(large_buffer) {
+        auto desired=xrfg::autonomous::snapshot().desired;desired.increase_buffer=true;
+        check(xrfg::autonomous::request(desired),"saved larger buffer before session");xrfg::autonomous::apply_runtime_settings();
+    }
     const auto startup_ini=current_layer_directory()/L"ofxr_bridge.ini";
     struct StartupRestore {
         std::filesystem::path p;bool existed{};std::string bytes;
@@ -116,10 +122,12 @@ int main(int argc,char** argv) {
         XrSessionCreateInfo info{XR_TYPE_SESSION_CREATE_INFO};info.next=&binding;info.systemId=1;
         XrSession handle{};xr_ok(layer_create_session_impl(dispatch->instance,&info,&handle),"shipping session creates private delivery binding");
         auto created=find_session(handle);
+        if(!vdxr_legacy_probe)check(created && created->private_runtime && created->private_runtime->buffer_capacity()==(large_buffer?3:2),"session uses default2 or saved3 private deliveries");
         if(vdxr_legacy_probe) {
             check(created && created->vdxr_legacy && !created->private_runtime && !created->private_delivery_queue,
                 "Legacy VDXR keeps original native binding without a private director");
             check(f.delivery_queue==f.queue,"Legacy keeps the exact application runtime queue");
+            check(!xrfg::autonomous::snapshot().runtime.buffer_capacity,"Legacy never reports or creates a bridge buffer even when requested");
             if(force_vdxr_steamvr)check(created->dispatch->steamvr_runtime && !created->dispatch->virtual_desktop_runtime,"forcing transport preserves true SteamVR identity");
             xr_ok(layer_destroy_session_impl(handle),"Legacy VDXR session cleanup");
             {std::scoped_lock lock(g_state_mutex);g_instances.clear();}return 0;
@@ -170,7 +178,7 @@ int main(int argc,char** argv) {
             auto transport=created->private_runtime;
             check(!transport->director_enabled() && !single_director_pacing(*created),"Framework startup bypasses final director pacing");
             for(int mode:{1,2,0,2,1,0}) {
-                auto next=xrfg::autonomous::snapshot().desired;next.pacing_mode=mode;
+                auto next=xrfg::autonomous::snapshot().desired;next.pacing_mode=mode;next.increase_buffer=mode==2;
                 check(xrfg::autonomous::request(next),"request a live pacing policy");
                 xrfg::autonomous::apply_runtime_settings();ok(apply_embedded_control(created),"apply live policy without recreating session");
                 if(transport->director_enabled()!=(mode!=0) || single_director_pacing(*created)!=(mode==1)) {
@@ -182,6 +190,7 @@ int main(int argc,char** argv) {
                 }
                 check(created->private_runtime==transport && transport->director_enabled()==(mode!=0) &&
                     single_director_pacing(*created)==(mode==1),"every pacing choice applies to the original endpoint");
+                check(transport->buffer_capacity()==(next.increase_buffer?3:2),"buffer applies even before first session start");
             }
             f.transport=transport;
             if(vdxr_probe) {
@@ -426,17 +435,19 @@ int main(int argc,char** argv) {
         xr_ok(f.transport->acquire_image(spare,&acquire,&spare_index),"spare virtual acquire");
         xr_ok(f.transport->wait_image(spare,&wait),"spare virtual wait");
         f.block_end=true;f.end_entered=false;
-        for(unsigned i=1;i<=3;++i){f.begin_virtual();xr_ok(with_runtime_entry(state,[&]{return f.submit(chain,float(i));}),"fill bounded private FIFO");}
+        const auto buffer=static_cast<unsigned>(f.transport->buffer_capacity());
+        for(unsigned i=1;i<=buffer;++i){f.begin_virtual();xr_ok(with_runtime_entry(state,[&]{return f.submit(chain,float(i));}),"fill bounded private FIFO");}
         f.wait_entered();f.begin_virtual();
-        auto blocked=std::async(std::launch::async,[&]{return with_runtime_entry(state,[&]{return f.submit(chain,4);});});
+        auto blocked=std::async(std::launch::async,[&]{return with_runtime_entry(state,[&]{return f.submit(chain,float(buffer+1));});});
         check(blocked.wait_for(30ms)==std::future_status::timeout,"full FIFO must retain backpressure");
         auto release=std::async(std::launch::async,[&]{return with_runtime_entry(state,[&]{
             XrSwapchainImageReleaseInfo info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};return f.transport->release_image(spare,&info);});});
         const bool independent=release.wait_for(100ms)==std::future_status::ready;
         f.unblock();xr_ok(blocked.get(),"queued packet accepted after retirement");xr_ok(release.get(),"spare release");
         check(independent,"private EndFrame FIFO credit blocked unrelated D11 producer release");
-        f.wait_count(4);xr_ok(f.transport->drain(),"gate fixture drain");
-        check(f.positions==std::vector<float>{1,2,3,4} && f.pixels==std::vector<unsigned>{77,77,77,77},"gate fix changed FIFO ownership/order/pixels");
+        f.wait_count(buffer+1);xr_ok(f.transport->drain(),"gate fixture drain");
+        std::vector<float> expected;for(unsigned i=1;i<=buffer+1;++i)expected.push_back(float(i));
+        check(f.positions==expected && f.pixels==std::vector<unsigned>(buffer+1,77),"gate fix changed FIFO ownership/order/pixels");
         // Native/non-private entries still serialize. The private exception
         // must not remove the protection required by inline D11 runtimes.
         auto native=std::make_shared<SessionState>(dispatch);native->d3d11_device=f.device11;
@@ -552,6 +563,19 @@ int main(int argc,char** argv) {
             phase_outputs=f.real_ends.load();
         }
         if(measured)xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,true);
+        if(buffer_toggling && (n==3 || n==5 || n==7)) {
+            auto generation=find_swapchain(chain)->frame_generation;
+            check(bool(generation),"buffer hot-switch requires existing engine history");
+            const auto afw_publication=state->luke_afw_last_evaluated_publication;
+            const auto engine_epoch=state->djules_configuration_epoch.load();
+            const bool directed=f.transport->director_enabled();
+            auto desired=xrfg::autonomous::snapshot().desired;desired.increase_buffer=n!=5;
+            check(xrfg::autonomous::request(desired),"request only larger/smaller private buffer");
+            xrfg::autonomous::apply_runtime_settings();ok(apply_embedded_control(state),"apply buffer without generator reset");
+            check(state->private_runtime==f.transport && f.transport->buffer_capacity()==(desired.increase_buffer?3:2) && f.transport->director_enabled()==directed,"live buffer retains endpoint and pacing policy");
+            check(find_swapchain(chain)->frame_generation==generation && state->luke_afw_last_evaluated_publication==afw_publication,"buffer-only control discarded engine/AFW history");
+            check(state->djules_configuration_epoch.load()==engine_epoch,"buffer-only control reset framework pacing/history epoch");
+        }
         if(toggling && (n==3 || n==5 || n==7)) {
             auto desired=xrfg::autonomous::snapshot().desired;
             desired.pacing_mode=n==3?0:n==5?2:1;

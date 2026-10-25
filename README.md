@@ -155,6 +155,8 @@ There are two different controls:
 
 The native VDXR path uses its existing framework behavior, so the scheduling dropdown is unavailable there. Forcing the other transport is experimental and can change performance, latency and compatibility.
 
+**Increase buffer** controls the non-Legacy output buffer: off allows two frames in flight (default), on allows three. It applies to both Framework and Director on that transport, independently of Fast mode. Changes apply live after queued frames finish, without resetting the generation framework. A larger buffer may help stability at the cost of latency. Legacy Framework and direct AFW Only are unaffected. The active count is shown below the checkbox; benchmarks keep the selected budget.
+
 ### Frameworks
 
 | Framework | Starting considerations |

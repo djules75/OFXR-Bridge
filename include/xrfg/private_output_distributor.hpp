@@ -193,13 +193,19 @@ public:
     bool reserve(std::size_t count=1) {
         std::unique_lock lock(mutex_);
         if(!count || count>capacity_)return false;
-        changed_.wait(lock,[&]{return stopped_ || occupied_<=capacity_-count;});
+        changed_.wait(lock,[&]{return stopped_ || (count<=capacity_ && occupied_<=capacity_-count);});
         if(stopped_)return false;
         occupied_+=count;reserved_+=count;return true;
     }
     bool accept(T value) {
         {std::scoped_lock lock(mutex_);if(stopped_ || !reserved_)return false;
          ready_.push_back(std::move(value));--reserved_;}
+        changed_.notify_all();return true;
+    }
+    // Future admission only: keep all previously owned/reserved entries.
+    bool set_capacity(std::size_t capacity) {
+        if(!capacity)return false;
+        {std::scoped_lock lock(mutex_);capacity_=capacity;}
         changed_.notify_all();return true;
     }
     std::optional<T> pop() {

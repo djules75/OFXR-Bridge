@@ -52,7 +52,7 @@ public:
         ID3D12CommandQueue* producer_queue12{}; // private writes, never future work on queue12
         ID3D11Device* device11{};
         ID3D11DeviceContext* context11{};
-        std::size_t capacity{3};
+        std::size_t capacity{2};
         std::function<std::int64_t()> physical_period;
         // Cached physical vsync only. Must not call a runtime, lock an observer
         // or wait from the consumer. Empty until the session clock is known.
@@ -98,7 +98,7 @@ public:
         std::function<void(std::int64_t)> accepted_output; // optional native End success, never enqueue
         bool director_enabled{true}; // false: ordered native-runtime paced bypass
         // Luke D11/SteamVR only. Freeze image readiness at Release, not after
-        // newer game commands at End. Keep three credits but one work-margin P.
+        // newer game commands at End. Admission/work budget is selected separately.
         bool d11_release_readiness{};
     };
     explicit PrivateOpenXrRuntime(Options);
@@ -112,6 +112,8 @@ public:
     // Drain accepted packets and change only final delivery policy. Session,
     // native binding, private images and worker ownership remain unchanged.
     XrResult set_director_enabled(bool);
+    XrResult set_buffer_capacity(std::size_t);
+    [[nodiscard]] std::size_t buffer_capacity() const noexcept;
     [[nodiscard]] bool director_enabled() const noexcept;
     XrResult wait_frame(const XrFrameWaitInfo*, XrFrameState*);
     XrResult predict_frame(XrFrameState*); // upper virtual application clock
