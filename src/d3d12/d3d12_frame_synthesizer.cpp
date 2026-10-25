@@ -2376,6 +2376,49 @@ struct D3D12FrameSynthesizer::Impl {
         D3D12FrameGenerationMode input_generation_mode,
         bool input_allow_luke_guide_device_alias,
         bool defer_flow_resources = false) {
+        // Initialization-only F9 diagnostics. Preserve every validation rule;
+        // the public HRESULT alone cannot identify a failed transport contract.
+        const auto invalid_argument=[&](std::uint32_t stage,std::size_t index=0,
+            ID3D12Resource* resource=nullptr) -> HRESULT {
+            auto& log=bridge_flight_logger();
+            if(log.enabled()) {
+                constexpr std::uint64_t tag=0x661D0000ULL;
+                const auto emit=[&](std::uint32_t part,std::uint64_t b,std::uint64_t c) {
+                    log.event(BridgeFlightOperation::synthesis_initialize,E_INVALIDARG,tag|part,b,c);
+                };
+                emit(stage,index,reinterpret_cast<std::uintptr_t>(resource));
+                emit(100,reinterpret_cast<std::uintptr_t>(input_device),reinterpret_cast<std::uintptr_t>(input_queue));
+                emit(101,(std::uint64_t(input_current_images.size())<<32)|input_synthetic_images.size(),
+                    (std::uint64_t(input_release_state)<<32)|static_cast<std::uint32_t>(input_view_format));
+                emit(102,static_cast<std::uint64_t>(input_backend),static_cast<std::uint64_t>(input_generation_mode));
+                std::uint64_t bad=(!input_device?1ULL:0)|(!input_queue?2ULL:0)|(!input_history?4ULL:0)|
+                    (input_history&&!input_history->initialized()?8ULL:0)|
+                    (input_current_images.empty()?16ULL:0)|(input_synthetic_images.empty()?32ULL:0)|
+                    ((input_release_state!=D3D12_RESOURCE_STATE_RENDER_TARGET && input_release_state!=D3D12_RESOURCE_STATE_COMMON)?64ULL:0);
+                if(input_queue) {
+                    const auto q=input_queue->GetDesc();
+                    if(q.Type!=D3D12_COMMAND_LIST_TYPE_DIRECT)bad|=128;
+                    if(!same_device(input_device,input_queue))bad|=256;
+                    ComPtr<ID3D12Device> owner;
+                    const auto hr=input_queue->GetDevice(IID_PPV_ARGS(owner.GetAddressOf()));
+                    emit(103,reinterpret_cast<std::uintptr_t>(owner.Get()),static_cast<std::uint32_t>(hr));
+                    emit(104,(std::uint64_t(q.Type)<<32)|q.NodeMask,static_cast<std::uint32_t>(q.Priority));
+                }
+                emit(105,bad,(std::uint64_t(defer_flow_resources)<<1)|input_allow_luke_guide_device_alias);
+                if(resource) {
+                    const auto desc=resource->GetDesc();
+                    emit(110,(std::uint64_t(desc.Width)<<32)|desc.Height,
+                        (std::uint64_t(desc.Format)<<32)|desc.DepthOrArraySize);
+                    emit(111,(std::uint64_t(desc.Flags)<<32)|desc.MipLevels,
+                        (std::uint64_t(desc.SampleDesc.Count)<<32)|desc.SampleDesc.Quality);
+                    emit(112,static_cast<std::uint64_t>(desc.Dimension),static_cast<std::uint64_t>(desc.Layout));
+                    ComPtr<ID3D12Device> owner;
+                    const auto hr=resource->GetDevice(IID_PPV_ARGS(owner.GetAddressOf()));
+                    emit(113,reinterpret_cast<std::uintptr_t>(owner.Get()),static_cast<std::uint32_t>(hr));
+                }
+            }
+            return E_INVALIDARG;
+        };
         if (input_device == nullptr || input_queue == nullptr ||
             input_history == nullptr || !input_history->initialized() ||
             input_current_images.empty() || input_synthetic_images.empty() ||
@@ -2388,12 +2431,12 @@ struct D3D12FrameSynthesizer::Impl {
             (input_generation_mode != D3D12FrameGenerationMode::ofxr &&
              input_generation_mode != D3D12FrameGenerationMode::fsr3 &&
              input_generation_mode != D3D12FrameGenerationMode::native_dlss)) {
-            return E_INVALIDARG;
+            return invalid_argument(1);
         }
 
         ID3D12Resource* const first = input_current_images.front();
         if (first == nullptr || !same_adapter(input_device, first)) {
-            return E_INVALIDARG;
+            return invalid_argument(2,0,first);
         }
         const D3D12_RESOURCE_DESC description = first->GetDesc();
         if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
@@ -2408,7 +2451,7 @@ struct D3D12FrameSynthesizer::Impl {
             description.SampleDesc.Quality != 0 ||
             (description.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0 ||
             !compatible_view_format(description.Format, input_view_format)) {
-            return E_INVALIDARG;
+            return invalid_argument(3,0,first);
         }
 
         D3D12_FEATURE_DATA_FORMAT_SUPPORT format_support{};
@@ -2459,7 +2502,7 @@ struct D3D12FrameSynthesizer::Impl {
                 (image->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0 ||
                 !compatible_view_format(image->GetDesc().Format, input_view_format) ||
                 contains_resource(current_destinations, image)) {
-                return E_INVALIDARG;
+                return invalid_argument(4,current_destinations.size(),image);
             }
             Destination destination{};
             destination.resource = image;
@@ -2474,7 +2517,7 @@ struct D3D12FrameSynthesizer::Impl {
                 (image->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0 ||
                 contains_resource(current_destinations, image) ||
                 contains_resource(synthetic_destinations, image)) {
-                return E_INVALIDARG;
+                return invalid_argument(5,synthetic_destinations.size(),image);
             }
             Destination destination{};
             destination.resource = image;
@@ -2524,7 +2567,7 @@ struct D3D12FrameSynthesizer::Impl {
             unaligned_packed_height > std::numeric_limits<UINT>::max() ||
             packed_width_value > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
             packed_height_value > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
-            return E_INVALIDARG;
+            return invalid_argument(6,0,first);
         }
         packed_width = static_cast<UINT>(packed_width_value);
         packed_height = static_cast<UINT>(packed_height_value);

@@ -5219,6 +5219,50 @@ int main(int argc, char** argv) {
         xrfg::bridge_flight_logger().initialize(trace_dir);
     }
     try {
+        if(argc>1 && std::string_view(argv[1])=="init-diagnostics") {
+            const auto root=std::filesystem::temp_directory_path()/("ofxr-init-guard-"+std::to_string(GetCurrentProcessId()));
+            std::filesystem::create_directories(root);
+            SetEnvironmentVariableW(L"OFXR_BRIDGE_PROFILE_DIR",root.c_str());
+            std::ofstream(root/"ofxr_bridge.ini")<<"[diagnostics]\nlogging_enabled=1\n";
+            auto& log=xrfg::bridge_flight_logger();log.initialize(root);
+            require(log.enabled(),"initialization trace enabled only for isolated diagnostic fixture");
+            D3D12WarpFixture fixture;
+            auto color=create_source_texture(fixture);
+            ID3D12Resource* sources[]{color.Get()};
+            auto history=std::make_shared<xrfg::D3D12SwapchainHistory>();
+            require_hresult(history->initialize(fixture.device(),fixture.queue(),sources,D3D12_RESOURCE_STATE_RENDER_TARGET),"diagnostic history");
+            std::array<ComPtr<ID3D12Resource>,5> resources;
+            for(auto& resource:resources)resource=create_source_texture(fixture);
+            ID3D12Resource* current[]{resources[0].Get(),resources[1].Get(),resources[2].Get()};
+            ID3D12Resource* synthetic[]{resources[3].Get(),resources[4].Get()};
+            const auto initialize=[&](auto device,auto cur,auto syn,DXGI_FORMAT format=kFormat) {
+                xrfg::D3D12FrameSynthesizer engine;
+                return engine.initialize(device,fixture.queue(),history,cur,syn,format,
+                    D3D12_RESOURCE_STATE_RENDER_TARGET,xrfg::D3D12OpticalFlowBackend::fidelity_fx,{},false,
+                    xrfg::D3D12FrameGenerationMode::ofxr,false,true);
+            };
+            const auto cur=std::span<ID3D12Resource* const>(current);
+            const auto syn=std::span<ID3D12Resource* const>(synthetic);
+            require_hresult(initialize(fixture.device(),cur,syn),"independent three-current/two-synthetic destinations are valid");
+            require(initialize(static_cast<ID3D12Device*>(nullptr),cur,syn)==E_INVALIDARG,"argument guard remains strict");
+            current[0]=nullptr;
+            require(initialize(fixture.device(),cur,syn)==E_INVALIDARG,"first resource guard remains strict");
+            current[0]=resources[0].Get();
+            require(initialize(fixture.device(),cur,syn,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)==E_INVALIDARG,"incompatible typed view remains rejected");
+            current[1]=current[0];
+            require(initialize(fixture.device(),cur,syn)==E_INVALIDARG,"duplicate current resource remains rejected");
+            current[1]=resources[1].Get();synthetic[1]=current[0];
+            require(initialize(fixture.device(),cur,syn)==E_INVALIDARG,"overlapping synthetic resource remains rejected");
+            log.flush();std::ifstream file(log.log_path());std::string text{std::istreambuf_iterator<char>(file),{}};
+            for(unsigned stage=1;stage<=5;++stage)require(text.find("a="+std::to_string(0x661D0000ULL|stage)+" ")!=std::string::npos,
+                "each rejected initialization contract has a distinct recorded stage");
+            file.close();log.shutdown();
+            synthetic[1]=resources[4].Get();
+            require(initialize(static_cast<ID3D12Device*>(nullptr),cur,syn)==E_INVALIDARG,"disabled logger does not change rejection");
+            fixture.require_no_debug_errors();
+            std::cout<<"Initialization-only F9 guards: arguments, first texture, view format, current/synthetic uniqueness; valid3/2 destinations PASS\n";
+            return 0;
+        }
         if(argc>1 && std::string_view(argv[1])=="v474-wait") {
             D3D12WarpFixture fixture;test_v474_bounded_history_wait(fixture);return 0;
         }
