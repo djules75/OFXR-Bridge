@@ -369,6 +369,19 @@ int wmain(int count, wchar_t** arguments) {
             "versioned IPC retains swapchain inventory and actual fallback");
         require(xrfg::autonomous::interface_status_text(shared_budget).find("Swapchain fallback")!=std::string::npos,
             "actual fallback reaches shared status");
+        budget_report.shared_queue=true;
+        xrfg::autonomous::report_runtime(budget_report);
+        auto queue_report=xrfg::autonomous::snapshot();
+        require(queue_report.runtime.shared_queue &&
+            xrfg::autonomous::interface_status_text(queue_report).starts_with("Shared queue"),
+            "actual queue fallback survives IPC and appears first in status");
+        const auto active_before=xrfg::autonomous::interface_generation_active(queue_report);
+        budget_report.shared_queue=false;
+        xrfg::autonomous::report_runtime(budget_report);
+        queue_report=xrfg::autonomous::snapshot();
+        require(xrfg::autonomous::interface_status_text(queue_report).find("Shared queue")==std::string::npos &&
+            xrfg::autonomous::interface_generation_active(queue_report)==active_before,
+            "queue warning clears without changing actual generator activity");
         // Only delete the single file/directory this fixture created.
         std::filesystem::remove(xrfg::autonomous::configuration_path());
         std::filesystem::remove(fixture);

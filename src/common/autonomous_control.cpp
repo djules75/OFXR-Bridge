@@ -78,7 +78,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465852;
-constexpr std::uint32_t kAbi = 64701;
+constexpr std::uint32_t kAbi = 64801;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -192,7 +192,7 @@ class Discovery {
     DiscoveryState* data{};
 public:
     Discovery() {
-        const auto prefix=L"Local\\OFXRBridgeV647-discovery-"+std::to_wstring(path_identity(global_configuration_path()));
+        const auto prefix=L"Local\\OFXRBridgeV648-discovery-"+std::to_wstring(path_identity(global_configuration_path()));
         mutex=CreateMutexW(nullptr,FALSE,(prefix+L"-mutex").c_str());
         mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(DiscoveryState),(prefix+L"-data").c_str());
         if(mapping)data=static_cast<DiscoveryState*>(MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(DiscoveryState)));
@@ -241,7 +241,7 @@ public:
         // Profile identity is part of the mapping name, so fixture profiles
         // and future concurrent candidates cannot modify the user's settings.
         const auto identity=path_identity(file);
-        const auto prefix = L"Local\\OFXRBridgeV647-" + std::to_wstring(identity);
+        const auto prefix = L"Local\\OFXRBridgeV648-" + std::to_wstring(identity);
         mutex = CreateMutexW(nullptr, FALSE, (prefix + L"-mutex").c_str());
         if (!mutex) return;
         const DWORD waited = WaitForSingleObject(mutex, 2000);
@@ -529,7 +529,7 @@ bool initialize_game_configuration(const std::filesystem::path& executable) noex
         // A dedicated creation mutex prevents two simultaneous first launches
         // overwriting one another's freshly created profile.
 #ifdef _WIN32
-        const auto name=L"Local\\OFXRBridgeV647-create-"+std::to_wstring(path_identity(file));
+        const auto name=L"Local\\OFXRBridgeV648-create-"+std::to_wstring(path_identity(file));
         HANDLE mutex=CreateMutexW(nullptr,FALSE,name.c_str());if(!mutex)return false;
         struct CreationGuard {HANDLE handle;bool locked{};~CreationGuard(){if(locked)ReleaseMutex(handle);CloseHandle(handle);}} guard{mutex};
         const auto waited=WaitForSingleObject(mutex,2000);
@@ -1159,6 +1159,7 @@ std::string interface_status_text(const Snapshot& s) {
         if (!result.empty()) result += " | "; result += text;
     };
     const auto& r = s.runtime;
+    if (r.shared_queue) add("Shared queue");
     if(pacing_comparison_runtime(r) && r.pacing_mode>=0 && r.pacing_mode!=kAfwOnlyPacingMode && r.pacing_mode!=s.desired.pacing_mode)
         add("Applying pacing policy");
     switch (r.generation_state) {

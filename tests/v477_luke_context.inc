@@ -77,6 +77,9 @@ void luke_standalone_context_test(bool active_alias_history=false, bool no_helpe
         state->d3d12_queue!=original_queue &&
         (active_alias_history ? state->d3d12_queue==private_queue : state->d3d12_queue!=private_queue),
         "late AFW must retain active history queue, or select a private queue before history");
+    check(state->luke_synthesis_queue && state->luke_synthesis_queue!=state->d3d12_queue &&
+        state->luke_synthesis_queue!=original_queue && !session_uses_shared_queue(*state),
+        "late Luke OFXR must have a separate lane without moving producer/AFW ownership");
     if(active_alias_history) {
         xrfg::configure_dlss_motion_vector_tracking(true);
         std::shared_ptr<const xrfg::DlssMotionVectorFrame> frame;

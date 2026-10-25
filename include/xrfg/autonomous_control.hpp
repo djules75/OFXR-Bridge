@@ -143,6 +143,7 @@ struct RuntimeStatus {
     bool luke_shared_swapchains{}, luke_shared_swapchains_forced{}; // active session, not requested next launch
     bool vdxr_runtime{}, vdxr_legacy{true}; // active startup transport, not next-launch preference
     std::uint32_t eye_long_side{}; // minimum per-eye longest side of the submitted stereo scene
+    bool shared_queue{}; // actual capture/OFXR queue fallback, not the requested pacing
 };
 inline bool pacing_comparison_runtime(const RuntimeStatus& r) noexcept {
     return !r.vdxr_legacy;

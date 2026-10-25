@@ -559,7 +559,7 @@ void completed_publication_independence_test(const std::shared_ptr<SessionState>
     std::vector<xrfg::D3D12ReprojectionView> views(desc.ArraySize,view);
     for(unsigned eye=0;eye<views.size();++eye)views[eye].array_slice=eye;
     xrfg::D3D12FrameSynthesisTicket ticket;
-    check(SUCCEEDED(bridge->prepare_synthesis()),"completed output destination access");
+    check(SUCCEEDED(bridge->prepare_synthesis(generation->isolated_luke_synthesis)),"completed output destination access");
     check(SUCCEEDED(generation->synthesizer->submit_copy(capture,views,0,&ticket)),"completed output copy");
     const auto fence=generation->synthesizer->submission_fence(ticket);
     check(fence && SUCCEEDED(wait_composition_fence(fence.Get(),ticket.fence_value)),"exact output completed");
@@ -632,7 +632,7 @@ void completed_publication_independence_test(const std::shared_ptr<SessionState>
     check(SUCCEEDED(bridge->wait_for_idle()),"completed publication cleanup");
     // Reproduce the live single-eye backpressure with actual unfinished GPU
     // work; the worker must retry without holding either producer lock.
-    check(SUCCEEDED(state->d3d12_queue->Wait(gate.Get(),4)),"park busy worker destination");
+    check(SUCCEEDED((generation->isolated_luke_synthesis?state->luke_synthesis_queue:state->d3d12_queue)->Wait(gate.Get(),4)),"park busy worker destination");
     xrfg::D3D12FrameSynthesisTicket blocked_ticket,retried_ticket;
     check(SUCCEEDED(generation->synthesizer->submit_copy(later_capture,views,0,&blocked_ticket)),"queue busy worker owner");
     const auto legacy_result=submit_luke_worker_generation(state,generation,generation->synthesizer,false,[&] {
@@ -689,8 +689,9 @@ void completed_publication_independence_test(const std::shared_ptr<SessionState>
     struct Unpark { ID3D12Fence* fence; ~Unpark(){static_cast<void>(fence->Signal(6));} } unpark{gate.Get()};
     check(SUCCEEDED(state->d3d12_queue->Wait(gate.Get(),5)),"park legacy scratch copy");
     xrfg::D3D12FrameSynthesisTicket legacy_copy;
-    check(SUCCEEDED(generation->synthesizer->submit_copy(later_capture,views,0,&legacy_copy)),"legacy actual scratch copy");
-    auto legacy_fence=generation->synthesizer->submission_fence(legacy_copy);
+    const auto legacy_synth=generation->isolated_luke_synthesis?generation->afw_source_synthesizer:generation->synthesizer;
+    check(SUCCEEDED(legacy_synth->submit_copy(later_capture,views,0,&legacy_copy)),"legacy actual scratch copy");
+    auto legacy_fence=legacy_synth->submission_fence(legacy_copy);
     const bool legacy_starved=FAILED(wait_composition_fence(legacy_fence.Get(),legacy_copy.fence_value,40));
     static_cast<void>(gate->Signal(5));
     check(SUCCEEDED(wait_composition_fence(legacy_fence.Get(),legacy_copy.fence_value,1000)),"legacy copy retirement");
@@ -748,7 +749,8 @@ void inline_afw_publication_gpu_test(const std::shared_ptr<SessionState>& state,
     check(SUCCEEDED(probe_history->initialize(state->d3d12_device.Get(),state->d3d12_queue.Get(),
         gen->d3d11_interop->current_destination_images(),D3D12_RESOURCE_STATE_COMMON)),"inline independent history");
     probe=std::make_shared<xrfg::D3D12FrameSynthesizer>();
-    check(SUCCEEDED(probe->initialize(state->d3d12_device.Get(),state->d3d12_queue.Get(),
+    check(SUCCEEDED(probe->initialize(state->d3d12_device.Get(),
+        gen->isolated_luke_synthesis?state->luke_synthesis_queue.Get():state->d3d12_queue.Get(),
         probe_history,gen->d3d11_interop->current_destination_images(),
         gen->d3d11_interop->synthetic_destination_images(),DXGI_FORMAT_R8G8B8A8_UNORM,
         D3D12_RESOURCE_STATE_COMMON,xrfg::D3D12OpticalFlowBackend::nvidia,{},true)), "inline probe synth");
@@ -760,7 +762,7 @@ void inline_afw_publication_gpu_test(const std::shared_ptr<SessionState>& state,
     Microsoft::WRL::ComPtr<ID3D12Fence> gate;
     check(SUCCEEDED(state->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate))),"inline publication fence");
     const auto before=gen->d3d11_interop->publication_snapshot().copy_complete_value;
-    check(SUCCEEDED(state->d3d12_queue->Wait(gate.Get(),1)),"delay inline output copy");
+    check(SUCCEEDED((gen->isolated_luke_synthesis?state->luke_synthesis_queue:state->d3d12_queue)->Wait(gate.Get(),1)),"delay inline output copy");
     std::atomic<bool> finished{false};
     const auto release=state->dispatch->release_swapchain_image;
     inline_publication_bridge=gen->d3d11_interop;inline_publication_before=before;inline_early_release=false;
@@ -919,7 +921,8 @@ void held_afw_pair_gpu_test(const std::shared_ptr<SessionState>& state,
 #include "luke_private_publication_tests.inc"
 #include "luke_fidelity_busy_fixture.inc"
 void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = false, bool luke = false, bool gap = false,
-                  bool afw_slot_probe = false, bool post_afw_packet = false, bool missing_afw_guides = false, int private_mode = 0) {
+                  bool afw_slot_probe = false, bool post_afw_packet = false, bool missing_afw_guides = false, int private_mode = 0,
+                  bool isolated_lane = false) {
     terminal_optical_test = post_afw_packet;
     terminal_real_reads = terminal_synthetic_reads = 0;
     three_layer_test = with_layers;
@@ -932,6 +935,11 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
             &state->d3d11_device, nullptr, &state->d3d11_context)), "D3D11 hardware");
         check(SUCCEEDED(xrfg::create_d3d12_device_for_d3d11(state->d3d11_device.Get(),
             &state->d3d12_device, &state->d3d12_queue)), "D3D12 bridge");
+        if(isolated_lane) {
+            const auto desc=state->d3d12_queue->GetDesc();
+            check(SUCCEEDED(state->d3d12_device->CreateCommandQueue(&desc,
+                IID_PPV_ARGS(&state->luke_synthesis_queue))),"isolated Luke OFXR lane");
+        }
         const auto diagnostic_root=std::filesystem::current_path()/("capture-integration-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(GetTickCount64()));
         if(diagnostic) {
             std::filesystem::create_directories(diagnostic_root);
@@ -988,15 +996,27 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
         auto& interop = generation->d3d11_interop;
         check(SUCCEEDED(interop->initialize(state->d3d11_device.Get(), state->d3d11_context.Get(),
             state->d3d12_device.Get(), state->d3d12_queue.Get(), sources, reals, synthetics)), "interop");
+        if(isolated_lane) {
+            check(SUCCEEDED(interop->configure_synthesis_queue(state->luke_synthesis_queue.Get())),"isolated publication timeline");
+            generation->isolated_luke_synthesis=true;
+        }
+        auto* synthesis_queue=isolated_lane?state->luke_synthesis_queue.Get():state->d3d12_queue.Get();
         auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
         check(SUCCEEDED(history->initialize(state->d3d12_device.Get(), state->d3d12_queue.Get(),
             interop->source_images(), D3D12_RESOURCE_STATE_COMMON)), "history");
         generation->synthesizer = std::make_shared<xrfg::D3D12FrameSynthesizer>();
         check(SUCCEEDED(generation->synthesizer->initialize(state->d3d12_device.Get(),
-            state->d3d12_queue.Get(), history, interop->current_destination_images(),
+            synthesis_queue, history, interop->current_destination_images(),
             interop->synthetic_destination_images(), desc.Format, D3D12_RESOURCE_STATE_COMMON,
             state->optical_flow_backend,{},private_mode>0,
             xrfg::D3D12FrameGenerationMode::ofxr,false,post_afw_packet)), "NVIDIA synthesis");
+        if(isolated_lane) {
+            generation->afw_source_synthesizer=std::make_shared<xrfg::D3D12FrameSynthesizer>();
+            check(SUCCEEDED(generation->afw_source_synthesizer->initialize(state->d3d12_device.Get(),
+                state->d3d12_queue.Get(),history,interop->current_destination_images(),interop->synthetic_destination_images(),
+                desc.Format,D3D12_RESOURCE_STATE_COMMON,state->optical_flow_backend,{},false,
+                xrfg::D3D12FrameGenerationMode::ofxr,true,true)),"isolated AFW ingress copy");
+        }
         generation->current_images_per_slot = generation->synthetic_images_per_slot = 1;
         generation->current[kAfwScratchSlot].handle = reinterpret_cast<XrSwapchain>(std::uintptr_t(base+kAfwScratchSlot));
         gpu_outputs[generation->current[kAfwScratchSlot].handle] = reals[kAfwScratchSlot];
@@ -1006,7 +1026,7 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
                 state->d3d12_queue.Get(), interop->current_destination_images(), D3D12_RESOURCE_STATE_COMMON)), "post AFW history");
             generation->afw_temporal_synthesizer = std::make_shared<xrfg::D3D12FrameSynthesizer>();
             check(SUCCEEDED(generation->afw_temporal_synthesizer->initialize(state->d3d12_device.Get(),
-                state->d3d12_queue.Get(), generation->afw_final_history, interop->current_destination_images(),
+                synthesis_queue, generation->afw_final_history, interop->current_destination_images(),
                 interop->synthetic_destination_images(), desc.Format, D3D12_RESOURCE_STATE_COMMON,
                 xrfg::D3D12OpticalFlowBackend::nvidia, {}, true,
                 xrfg::D3D12FrameGenerationMode::ofxr,false,true)), "post AFW OFA");
@@ -1116,7 +1136,7 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
                 SUCCEEDED(interop->finish_capture())&&SUCCEEDED(interop->wait_for_idle()),"prediction source ready");
             Microsoft::WRL::ComPtr<ID3D12Fence> gate;
             check(SUCCEEDED(state->d3d12_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&gate))),"prediction gate");
-            check(SUCCEEDED(state->d3d12_queue->Wait(gate.Get(),1)),"park native work until prediction");
+            check(SUCCEEDED((isolated_lane?state->luke_synthesis_queue:state->d3d12_queue)->Wait(gate.Get(),1)),"park native work until prediction");
             xrfg::D3D12ReprojectionView v{};v.fov={-.7F,.7F,.7F,-.7F};v.image_rect={0,0,desc.Width,desc.Height};
             xrfg::D3D12FrameSynthesisTicket ticket;
             check(SUCCEEDED(generation->synthesizer->submit_copy(capture,std::span(&v,1),0,&ticket)),"pending prediction scratch");
@@ -1334,8 +1354,9 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
                     auto gen = c->frame_generation;
                     const auto input_views = build_reprojection_views(snapshot, mapping);
                     check(input_views.has_value(), "post AFW source views");
+                    const AfwSourceCapture source{gen,*c->last_released_capture};
                     const auto scratch = prepare_frame_generation(c->handle,
-                        false, *input_views, 0.5f, false, nullptr, true);
+                        false, *input_views, 0.5f, false, nullptr, true,nullptr,isolated_lane?&source:nullptr);
                     check(scratch.kind == PreparedGenerationKind::prime && scratch.publication_deferred,
                         "post AFW scratch preparation");
                     xrfg::D3D12HistoryCaptureTicket final_capture{};
@@ -1495,7 +1516,7 @@ void gpu_pipeline(bool with_layers, bool transition = false, bool diagnostic = f
                     Microsoft::WRL::ComPtr<ID3D12Fence> promotion_gate;
                     check(SUCCEEDED(state->d3d12_device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
                         IID_PPV_ARGS(&promotion_gate))), "AFW promotion fence");
-                    check(SUCCEEDED(state->d3d12_queue->Wait(promotion_gate.Get(), 1)),
+                    check(SUCCEEDED((isolated_lane?state->luke_synthesis_queue:state->d3d12_queue)->Wait(promotion_gate.Get(), 1)),
                         "AFW promotion GPU hold");
                     const auto& right_input = completed->inputs.back();
                     xrfg::D3D12FrameSynthesisTicket pending_prime{};
@@ -2164,7 +2185,46 @@ void refused_frame_recovery_test() {
 #include "luke_aux_budget_fixture.inc"
 #include "luke_aux_private_fixture.inc"
 #include "luke_ngx_startup_fixture.inc"
+void luke_queue_policy_test() {
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+    check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,0,nullptr,0,
+        D3D11_SDK_VERSION,&device,nullptr,&context)),"queue policy D11 owner");
+    for (bool steamvr : {true,false}) for (bool legacy : {true,false}) for (bool only : {true,false}) {
+        auto state=session();state->luke_afw_enabled=true;state->afw_only=only;
+        state->graphics_binding=SessionGraphicsBinding::d3d11;
+        state->dispatch->steamvr_runtime=steamvr;state->dispatch->virtual_desktop_runtime=!steamvr;
+        state->vdxr_legacy=legacy;state->graphics_binding_capabilities=8;
+        check(SUCCEEDED(xrfg::create_d3d12_device_for_d3d11(device.Get(),&state->d3d12_device,
+            &state->d3d12_queue)),"queue policy capture lane");
+        check(session_uses_shared_queue(*state)==!only,"actual unsplit queue state");
+        initialize_luke_synthesis_queue(*state);
+        check(bool(state->luke_synthesis_queue)==!only && !session_uses_shared_queue(*state),
+            "SteamVR/VDXR/Legacy isolate OFXR; AFW-only allocates no OFXR lane");
+        auto before=state->luke_synthesis_queue;initialize_luke_synthesis_queue(*state);
+        check(before==state->luke_synthesis_queue,"queue remains stable across pacing switches");
+        if(!only) {
+            auto fallback=std::make_shared<FrameGenerationSwapchainState>();
+            fallback->shared_queue_owner=state;++state->luke_shared_generation_count;
+            check(session_uses_shared_queue(*state),"one shared eye must warn even with a dedicated session lane");
+            fallback.reset();check(!session_uses_shared_queue(*state),"retiring last shared eye clears warning");
+        }
+        state->dispatch->steamvr_runtime=true;state->luke_afw_enabled=false;
+        state->graphics_binding=SessionGraphicsBinding::d3d12;
+        check(session_uses_shared_queue(*state)==!only,"native D12 failed synthesis allocation warns");
+        state->d3d12_synthesis_queue=state->d3d12_queue;
+        check(session_uses_shared_queue(*state)==!only,"a shared queue alias still warns");
+        state->d3d12_synthesis_queue=state->luke_synthesis_queue;
+        check(!session_uses_shared_queue(*state),"separate native synthesis queue clears warning");
+        state->d3d12_synthesis_queue.Reset();
+    }
+    std::cout<<"Queue policy: SteamVR/VDXR, legacy/comparison, AFW-only, per-eye fallback lifetime PASS\n";
+}
 int main(int argc, char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="luke-queue-policy") {
+        try {luke_queue_policy_test();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     if(argc>1 && std::string_view(argv[1]).starts_with("luke-aux-private")) {
         try {luke_aux_private_test(std::string_view(argv[1])!="luke-aux-private-vdxr",
             std::string_view(argv[1])!="luke-aux-private-afw-off");return 0;}
@@ -2415,6 +2475,8 @@ int main(int argc, char** argv) {
             if(mode == "depth-history") { depth_history_test(); return 0; }
             if(mode == "luke-afw-slot") { gpu_pipeline(true, false, false, false, false, true); return 0; }
             if(mode == "post-afw-packet") { gpu_pipeline(true, false, false, false, false, false, true); return 0; }
+            if(mode == "luke-isolated-post-afw") { gpu_pipeline(true,false,false,false,false,false,true,false,0,true); return 0; }
+            if(mode == "luke-isolated-raw") { gpu_pipeline(true,false,false,true,false,false,false,false,0,true); return 0; }
             if(mode == "luke-missing-afw-guides") { gpu_pipeline(true, false, false, false, false, false, false, true); return 0; }
             if(mode == "luke-markerless-ofxr") { gpu_pipeline(true,false,false,false,false,false,false,false,6); return 0; }
             if(mode == "luke-private-inline-on") {gpu_pipeline(true,false,false,false,false,false,false,false,1);return 0;}

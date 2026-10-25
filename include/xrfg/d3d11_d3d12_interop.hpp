@@ -117,7 +117,10 @@ public:
 
     // Makes the D3D12 queue wait for any earlier D3D11 publication copy before
     // the synthesizer can reuse a shared destination.
-    [[nodiscard]] HRESULT prepare_synthesis() noexcept;
+    // Optional OFXR lane. Capture/AFW retain their original queue and timeline.
+    // Configure before use; failure leaves the original lane intact.
+    [[nodiscard]] HRESULT configure_synthesis_queue(ID3D12CommandQueue* queue) noexcept;
+    [[nodiscard]] HRESULT prepare_synthesis(bool isolated = false) noexcept;
 
     // Read the actual acquired OpenXR D3D11 output named by this immutable
     // publication receipt back into its shared D3D12 mirror. Call before XR
@@ -138,7 +141,8 @@ public:
         std::uint32_t current_destination_index,
         std::optional<std::uint32_t> synthetic_destination_index,
         D3D11PublicationReceipt* receipt = nullptr,
-        std::optional<D3D11PublicationTargets> targets = {}) noexcept;
+        std::optional<D3D11PublicationTargets> targets = {},
+        bool isolated = false) noexcept;
 
     // Output already completed on its retained synthesis fence. Reject an
     // incomplete proof; never append a ready signal behind newer native work.

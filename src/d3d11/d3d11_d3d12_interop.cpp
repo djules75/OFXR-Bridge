@@ -1,6 +1,7 @@
 #include "xrfg/d3d11_d3d12_interop.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/two_frame_capture.hpp"
+#include "xrfg/native_ingress/D3D_DeviceOwner.h"
 
 #include <windows.h>
 #include <dxgi1_2.h>
@@ -251,6 +252,10 @@ struct D3D11D3D12SwapchainInterop::Impl {
     ComPtr<ID3D11Fence> d3d11_fence;
     ComPtr<ID3D12Fence> native_fence12;
     ComPtr<ID3D11Fence> native_fence11;
+    ComPtr<ID3D12CommandQueue> synthesis_queue;
+    ComPtr<ID3D12Fence> synthesis_fence12;
+    ComPtr<ID3D11Fence> synthesis_fence11;
+    std::uint64_t last_synthesis_signal_value{};
     HANDLE fence_event{};
     std::vector<ComPtr<ID3D11Texture2D>> source_images;
     std::vector<ComPtr<ID3D11Texture2D>> current_destination_images;
@@ -675,14 +680,38 @@ struct D3D11D3D12SwapchainInterop::Impl {
         return S_OK;
     }
 
-    [[nodiscard]] HRESULT prepare_synthesis() noexcept {
+    [[nodiscard]] HRESULT configure_synthesis_queue(ID3D12CommandQueue* queue) noexcept {
+        if (!enabled || !queue) return E_INVALIDARG;
+        if (synthesis_queue) return queue == synthesis_queue.Get() ? S_OK : E_UNEXPECTED;
+        ComPtr<ID3D12Device> owner;
+        if (FAILED(queue->GetDevice(IID_PPV_ARGS(owner.GetAddressOf()))) ||
+            !d3d_owner::same(d3d12_device.Get(), owner.Get()) ||
+            queue == d3d12_queue.Get()) return E_INVALIDARG;
+        ComPtr<ID3D12Fence> fence12;
+        ComPtr<ID3D11Fence> fence11;
+        auto result = d3d12_device->CreateFence(0, D3D12_FENCE_FLAG_SHARED,
+            IID_PPV_ARGS(fence12.GetAddressOf()));
+        UniqueHandle handle;
+        if (SUCCEEDED(result)) result = d3d12_device->CreateSharedHandle(
+            fence12.Get(), nullptr, GENERIC_ALL, nullptr, &handle.value);
+        if (SUCCEEDED(result)) result = d3d11_device5->OpenSharedFence(
+            handle.value, IID_PPV_ARGS(fence11.GetAddressOf()));
+        if (FAILED(result)) return result;
+        synthesis_queue = queue;
+        synthesis_fence12 = std::move(fence12);
+        synthesis_fence11 = std::move(fence11);
+        return S_OK;
+    }
+
+    [[nodiscard]] HRESULT prepare_synthesis(bool isolated) noexcept {
         if (!enabled) {
             return E_UNEXPECTED;
         }
+        if (isolated && !synthesis_queue) return E_UNEXPECTED;
         if (last_d3d11_access_value == 0) {
             return S_OK;
         }
-        const HRESULT result = d3d12_queue->Wait(
+        const HRESULT result = (isolated ? synthesis_queue : d3d12_queue)->Wait(
             d3d12_fence.Get(), last_d3d11_access_value);
         if (FAILED(result)) {
             enabled = false;
@@ -694,7 +723,9 @@ struct D3D11D3D12SwapchainInterop::Impl {
         std::uint32_t current_destination_index,
         std::optional<std::uint32_t> synthetic_destination_index,
         bool source_completed = false,
-        std::optional<D3D11PublicationTargets> targets = {}) noexcept {
+        std::optional<D3D11PublicationTargets> targets = {},
+        bool isolated = false) noexcept {
+        if (isolated && !synthesis_queue) return E_UNEXPECTED;
         const auto current_target = targets ? targets->current_index : current_destination_index;
         const auto synthetic_target = targets ? targets->synthetic_index : synthetic_destination_index;
         if (!enabled ||
@@ -714,15 +745,17 @@ struct D3D11D3D12SwapchainInterop::Impl {
         }
         result = source_completed
             ? d3d11_context4->Signal(d3d11_fence.Get(), ready_value)
-            : d3d12_queue->Signal(native_fence12.Get(), ready_value);
+            : (isolated ? synthesis_queue : d3d12_queue)->Signal(
+                isolated ? synthesis_fence12.Get() : native_fence12.Get(), ready_value);
         if (FAILED(result)) {
             enabled = false;
             return result;
         }
         if (source_completed) last_d3d11_signal_value = ready_value;
+        else if (isolated) last_synthesis_signal_value = ready_value;
         else last_d3d12_signal_value = ready_value;
         result = source_completed ? S_OK :
-            d3d11_context4->Wait(native_fence11.Get(), ready_value);
+            d3d11_context4->Wait(isolated ? synthesis_fence11.Get() : native_fence11.Get(), ready_value);
         if (FAILED(result)) {
             enabled = false;
             return result;
@@ -777,7 +810,7 @@ struct D3D11D3D12SwapchainInterop::Impl {
 
 
     [[nodiscard]] HRESULT wait_for_idle() noexcept {
-        if (last_d3d11_signal_value == 0 && last_d3d12_signal_value == 0) {
+        if (last_d3d11_signal_value == 0 && last_d3d12_signal_value == 0 && last_synthesis_signal_value == 0) {
             return S_OK;
         }
         if (d3d12_fence == nullptr || native_fence12 == nullptr || fence_event == nullptr) {
@@ -805,9 +838,10 @@ struct D3D11D3D12SwapchainInterop::Impl {
                 }
             }
         };
-        const HRESULT result = wait_timeline(d3d12_fence.Get(), last_d3d11_signal_value);
-        return FAILED(result) ? result :
-            wait_timeline(native_fence12.Get(), last_d3d12_signal_value);
+        HRESULT result = wait_timeline(d3d12_fence.Get(), last_d3d11_signal_value);
+        if (SUCCEEDED(result)) result = wait_timeline(native_fence12.Get(), last_d3d12_signal_value);
+        if (SUCCEEDED(result)) result = wait_timeline(synthesis_fence12.Get(), last_synthesis_signal_value);
+        return result;
     }
 };
 
@@ -904,10 +938,17 @@ HRESULT D3D11D3D12SwapchainInterop::finish_capture() noexcept {
     }
 }
 
-HRESULT D3D11D3D12SwapchainInterop::prepare_synthesis() noexcept {
+HRESULT D3D11D3D12SwapchainInterop::configure_synthesis_queue(ID3D12CommandQueue* queue) noexcept {
     try {
         std::scoped_lock lock(mutex_);
-        return impl_ == nullptr ? E_UNEXPECTED : impl_->prepare_synthesis();
+        return impl_ ? impl_->configure_synthesis_queue(queue) : E_UNEXPECTED;
+    } catch (...) { return E_FAIL; }
+}
+
+HRESULT D3D11D3D12SwapchainInterop::prepare_synthesis(bool isolated) noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ == nullptr ? E_UNEXPECTED : impl_->prepare_synthesis(isolated);
     } catch (...) {
         return E_FAIL;
     }
@@ -980,13 +1021,13 @@ HRESULT D3D11D3D12SwapchainInterop::publish(
     std::uint32_t current_destination_index,
     std::optional<std::uint32_t> synthetic_destination_index,
     D3D11PublicationReceipt* receipt,
-    std::optional<D3D11PublicationTargets> targets) noexcept {
+    std::optional<D3D11PublicationTargets> targets, bool isolated) noexcept {
     if (receipt) *receipt = {};
     try {
         std::scoped_lock lock(mutex_);
         if (!impl_) return E_UNEXPECTED;
         const HRESULT result = impl_->publish(
-            current_destination_index, synthetic_destination_index, false, targets);
+            current_destination_index, synthetic_destination_index, false, targets, isolated);
         if (SUCCEEDED(result) && receipt) {
             receipt->fence = impl_->d3d12_fence;
             receipt->copy_complete_value = impl_->last_publication.copy_complete_value;

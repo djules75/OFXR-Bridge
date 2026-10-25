@@ -243,6 +243,8 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
         ImGui::TextWrapped("Fast mode preserves the output capacity needed for 3X; VRAM reduction may be limited.");
     ImGui::Separator();
     if (!ImGui::CollapsingHeader("Details")) return changed;
+    if (state.runtime.shared_queue)
+        ImGui::TextWrapped("Shared queue: AFW/capture and OFXR share a GPU queue. This may reduce performance.");
     const auto& telemetry = state.runtime.telemetry;
     if (state.connected && telemetry.updated_ms && GetTickCount64()-telemetry.updated_ms<2000 && telemetry.cpu_valid)
         ImGui::Text("OpenXR Begin-to-End interval: %.1f ms", telemetry.cpu_render_ms);
@@ -458,6 +460,8 @@ void finish_settings_widget_edits(SettingsWidgetState& ui) noexcept {
 }
 
 static void luke_swapchain_budget(const Snapshot& state) {
+    if (state.runtime.shared_queue)
+        ImGui::TextWrapped("Shared queue: AFW/capture and OFXR share a GPU queue. This may reduce performance.");
     const auto& b=state.runtime.swapchains;
     ImGui::SeparatorText("OpenXR swapchains");
     if (!state.connected || !b.updated_ms || GetTickCount64()-b.updated_ms>3000) {
