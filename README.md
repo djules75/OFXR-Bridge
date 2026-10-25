@@ -155,7 +155,7 @@ There are two different controls:
 
 The native VDXR path uses its existing framework behavior, so the scheduling dropdown is unavailable there. Forcing the other transport is experimental and can change performance, latency and compatibility.
 
-**Increase buffer** controls the non-Legacy output buffer: off allows two frames in flight (default), on allows three. It applies to both Framework and Director on that transport, independently of Fast mode. Changes apply live after queued frames finish, without resetting the generation framework. A larger buffer may help stability at the cost of latency. Legacy Framework and direct AFW Only are unaffected. The active count is shown below the checkbox; benchmarks keep the selected budget.
+**Increase buffer** controls the non-Legacy output buffer: off allows two frames in flight (default), on allows three. It applies to both Framework and Director on that transport, independently of Fast mode. Changes apply live after queued frames finish, without resetting the generation framework. A larger buffer may help stability at the cost of latency. Legacy Framework and direct AFW Only are unaffected. The active count is shown below the checkbox; non-Legacy benchmarks compare both budgets.
 
 ### Frameworks
 
@@ -188,7 +188,8 @@ Enable **Enable benchmarks** in the tray to make the benchmark controls availabl
 - Results include FPS and Cycle minimum statistics. VRAM use is sampled near the end of each test.
 - Results are saved under **`%LOCALAPPDATA%\ofxr-bridge\Benchmarks`**. Use **Open benchmark folder** to open it.
 - Luke Ross tests compare AFW 1x1, 2x2 and 4x4, including AFW alone. They do not test Fast mode or 3X.
-- The full SteamVR suite takes about six minutes. VDXR suites are shorter.
+- Non-Legacy suites compare Framework and Director with both buffer budgets. Other games test Normal and Fast; Luke Ross tests each AFW quality. AFW-only references run once per quality, without a separate buffer trial.
+- Non-Legacy suites contain 41 optical-flow tests, 65 complete tests or 51 Luke Ross tests: about 7, 11 or 9 minutes, plus configuration changes. Legacy VDXR suites remain shorter.
 - At completion, the suite restores the previous settings unless **Auto pick best one** is enabled. Stopping restores them too; manually changing a tested setting cancels the automation and keeps that edit.
 
 Benchmarks change the parameters covered by the selected suite. Other quality settings, such as your chosen flow resolution, are retained.

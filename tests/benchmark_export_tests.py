@@ -2,8 +2,11 @@ from pathlib import Path
 import importlib.util
 import tempfile
 
+
 spec = importlib.util.spec_from_file_location('exporter', Path(__file__).parents[1] / 'scripts/export-benchmark-row.py')
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+
+assert m.decode((1<<24)|(64<<25)|(1<<45),0)['suite_step']==64
 def event(op, ms, a, b, c, result=0):
     return f'seq=1 ms={ms} tid=1 phase=I op={op} result={result} dur_us=0 a={a} b={b} c={c}\n'
 with tempfile.TemporaryDirectory() as directory:
@@ -105,3 +108,22 @@ with tempfile.TemporaryDirectory() as directory:
     assert result['value']=='42-84(44-66)' and result['fps_median']==42 and result['cycle_median']==44
     assert result['start_s']==3 and result['end_s']==10 and len(rows[0]['measurements'])==1
     print('V558 10-second suite, first3s only, medians, final samples and command boundary PASS')
+
+# The current suite must not collapse different pacing or buffer budgets.
+with tempfile.TemporaryDirectory() as directory:
+    path=Path(directory)/'buffer.benchmark.log'
+    rows=[event('logger',0,0,0,0,658)]
+    for i,(pacing,capacity) in enumerate((p,c) for p in (0,1) for c in (2,3)):
+        bits=1|(2<<1)|(1<<15)|(1<<45)|(1<<24)|(64<<25)|(pacing<<42)
+        if capacity==3:bits|=1<<44
+        start=i*12000;revision=i+1
+        rows.append(event('benchmark_configuration',start,revision,bits,100<<16))
+        for point in range(41):
+            ms=start+point*250
+            rows.append(event('benchmark_rates',ms,(90000<<32)|45000,(45000<<32)|90000,revision,2049))
+            rows.append(event('benchmark_cycles',ms,(7000<<32)|55000,44000,revision,7))
+    path.write_text(''.join(rows),encoding='utf-8')
+    result=m.export([path],'meganex','estimated')
+    assert len(result)==4 and {(g['pacing'],g['bridge_buffer']) for g in result}=={(p,c) for p in (0,1) for c in (2,3)}
+    assert all(g['measurements'][0]['config']['suite_step']==64 for g in result)
+print('V658 index64 preserved; Framework/Director and two/three-credit measurements never merge PASS')

@@ -1,0 +1,21 @@
+{
+  "version": 658,
+  "base": 657,
+  "scope": "AdvancedMode0 non-Legacy benchmark matrix and exporters; no change to delivery/rendering",
+  "checks_passed": 15,
+  "ctest_seconds": 44.73,
+  "suite_counts": {
+    "optical": 41,
+    "complete": 65,
+    "Luke": 51
+  },
+  "sheet": "AQ:DU83 cells",
+  "sheet_snapshot_sha256": "429e7cccadaf37172472be701bd22c25cb506ef1b3e635c9f2a4fae29769bf54",
+  "owner_integration": "Actual complete65 and Luke51 controller CSVs map83cells with unique per-trial VRAM; header/old-state/family/combined guards and CLI verified",
+  "shipped_exporter": "Old fixtures pass; index64 and separate pacing/buffer groups verified",
+  "rendering_game_acceptance": "PENDING",
+  "published": false,
+  "live_installation_changed": false,
+  "git_mutation": false,
+  "initial_build_note": "Test-only variable small collided with Windows SDK macro; renamed counters. Final optimized build and all15 checks pass; no product workaround."
+}

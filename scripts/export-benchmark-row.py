@@ -1,6 +1,7 @@
-"""Export logged OFXR menu measurements as a tab-separated owner-sheet row.
+"""Export logged OFXR menu measurements as grouped TSV and JSON evidence.
 
-No spreadsheet edits or third-party dependencies. Missing trials stay n.d.
+Uses historical platform templates; automatic suites write their own metric-row
+CSV. No spreadsheet edits or third-party dependencies. Missing trials stay n.d.
 """
 import argparse
 import csv
@@ -41,8 +42,9 @@ def decode(bits, quality):
     if route == 'Djules' and flags == '00' and bits & (1 << 9):
         cell += ':prefer'
     return dict(route=route, cell=cell, flags=flags, dlssg_preset_request=dlssg_preset,
-                automatic=bool(bits & (1 << 24)), suite_step=(bits >> 25) & 63,
+                automatic=bool(bits & (1 << 24)), suite_step=(bits >> 25) & 127,
                 bridge_buffer=(3 if bits & (1<<44) else 2) if bits & (1<<45) else None,
+                pacing=(bits >> 42) & 3,
                 prefer_fps=bool(bits & (1 << 9)), triple=triple,
                 nr=bool(bits & (1 << 14)), separate_queue=bool(bits & (1 << 15)),
                 luke=bool(bits & (1 << 16)), afw_mode=(bits >> 12) & 3, afw_shading_rate=(bits >> 20) & 15,
@@ -137,7 +139,8 @@ def export(paths, platform, metric, settle=3, minimum=None):
         cfg = segment['config']
         group = (cfg['nr'], cfg['separate_queue'], cfg['luke'], cfg['afw_mode'] if cfg['luke'] else 0,
                  0 if platform == 'meganex' else cfg['dlssg_preset_request'],
-                 cfg['afw_shading_rate'] if cfg['luke'] and cfg['afw_mode'] else 0)
+                 cfg['afw_shading_rate'] if cfg['luke'] and cfg['afw_mode'] else 0,
+                 cfg['pacing'], cfg['bridge_buffer'] or 0)
         key = cfg['cell'] if platform == 'meganex' else cfg['route']
         attempted.setdefault(group, set()).add(key)
         useful_minimum = minimum if minimum is not None else (5 if (segment.get('version') or 0) >= 558 else 10)
@@ -145,10 +148,11 @@ def export(paths, platform, metric, settle=3, minimum=None):
         if result is None:
             continue
         cfg = result['config']
-        # Queue/NR/Luke-AFW runs must never be merged into one owner row.
+        # Different queues, pacing or buffer budgets must never merge.
         group = (cfg['nr'], cfg['separate_queue'], cfg['luke'], cfg['afw_mode'] if cfg['luke'] else 0,
                  0 if platform == 'meganex' else cfg['dlssg_preset_request'],
-                 cfg['afw_shading_rate'] if cfg['luke'] and cfg['afw_mode'] else 0)
+                 cfg['afw_shading_rate'] if cfg['luke'] and cfg['afw_mode'] else 0,
+                 cfg['pacing'], cfg['bridge_buffer'] or 0)
         cells = groups.setdefault(group, {})
         measurements.setdefault(group, []).append(result)
         key = cfg['cell'] if platform == 'meganex' else cfg['route']
@@ -165,6 +169,7 @@ def export(paths, platform, metric, settle=3, minimum=None):
         headers = list(slots) + (['Log', 'Tested Build'] if platform in ('meganex', 'pimax') else [])
         results.append(dict(nr=key[0], separate_queue=key[1], luke=key[2], afw_mode=key[3], headers=headers,
                             dlssg_preset_request=key[4], afw_shading_rate=key[5],
+                            pacing=key[6], bridge_buffer=key[7] or None,
                             start_column='S' if platform == 'meganex' else 'BI' if platform == 'pimax' else 'G',
                             missing=[x for x in slots if x not in cells], cells=cells,
                             untried=[x for x in slots if x not in attempted[key]],

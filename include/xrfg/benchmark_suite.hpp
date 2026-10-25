@@ -15,6 +15,7 @@ struct BenchmarkStep {
     std::string label;
     int afw{-1},shading{-1};
     int pacing{-1}; // -1 preserves the pre-V614 runtime's global choice.
+    int buffer{-1}; // -1 keeps preference (Legacy/advanced); 0=two, 1=three deliveries.
 };
 inline std::vector<BenchmarkStep> legacy_benchmark_plan(bool full,bool luke=false) {
     std::vector<BenchmarkStep> steps;
@@ -47,18 +48,23 @@ inline std::vector<BenchmarkStep> benchmark_plan(bool full,bool luke=false,bool 
     std::vector<BenchmarkStep> steps;
     const auto route=[&](const char* name,int generation,int backend,bool triple,int quality) {
         for(int pacing=0;pacing<(advanced?3:2);++pacing) {
+          for(int buffer=0;buffer<(advanced?1:2);++buffer) {
             for(int fast=0;fast<(luke ? 1 : 2);++fast) {
                 BenchmarkStep step{generation,backend,fast,fast,triple,triple,false,
-                    std::string(name)+" "+benchmark_pacing_label(pacing)+(luke ? "" : fast ? " Fast" : " Normal")};
+                    std::string(name)+" "+benchmark_pacing_label(pacing)+(luke ? "" : fast ? " Fast" : " Normal")+
+                        (buffer ? " Buffer" : "")};
                 step.pacing=pacing;
+                if(!advanced)step.buffer=buffer;
                 if(luke) {step.afw=3;step.shading=quality;}
                 steps.push_back(std::move(step));
             }
+          }
         }
     };
     for(const int quality : (luke ? std::vector<int>{0,4,8} : std::vector<int>{-1})) {
         BenchmarkStep off{0,0,0,0,false,false,true,luke ? "AFW only" : "Disabled"};
         off.pacing=0;
+        if(!advanced)off.buffer=0; // one reference, never repeat it for buffer/fast/pacing
         if(luke) {off.afw=3;off.shading=quality;}
         steps.push_back(std::move(off));
         route("Fidelity",0,0,false,quality);route("0.2.1",0,1,false,quality);
@@ -89,6 +95,7 @@ inline Settings benchmark_settings(Settings saved,const BenchmarkStep& step) {
     saved.separate_synthesis=step.a;saved.lower_vram=step.b;
     saved.triple_frame_gen=step.triple;saved.prefer_fps=step.prefer;
     if(step.pacing>=0)saved.pacing_mode=step.pacing;
+    if(step.buffer>=0)saved.increase_buffer=step.buffer!=0;
     if(step.afw>=0) {saved.afw_mode=step.afw;saved.afw_shading_rate=step.shading;}
     return sanitize(saved);
 }

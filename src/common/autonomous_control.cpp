@@ -78,7 +78,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465852;
-constexpr std::uint32_t kAbi = 65701;
+constexpr std::uint32_t kAbi = 65801;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -180,7 +180,7 @@ bool save(const Shared& shared, const Settings& value) {
 std::filesystem::path process_profile;
 std::atomic_bool process_profile_bound{};
 std::uint64_t path_identity(const std::filesystem::path& path) {
-    std::uint64_t identity=14695981039346657037ULL;
+    std::uint64_t identity=14695981039346658037ULL;
     for (const auto c:path.wstring()) {identity^=static_cast<std::uint64_t>(std::towlower(c));identity*=1099511628211ULL;}
     return identity;
 }
@@ -192,7 +192,7 @@ class Discovery {
     DiscoveryState* data{};
 public:
     Discovery() {
-        const auto prefix=L"Local\\OFXRBridgeV657-discovery-"+std::to_wstring(path_identity(global_configuration_path()));
+        const auto prefix=L"Local\\OFXRBridgeV658-discovery-"+std::to_wstring(path_identity(global_configuration_path()));
         mutex=CreateMutexW(nullptr,FALSE,(prefix+L"-mutex").c_str());
         mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(DiscoveryState),(prefix+L"-data").c_str());
         if(mapping)data=static_cast<DiscoveryState*>(MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(DiscoveryState)));
@@ -241,7 +241,7 @@ public:
         // Profile identity is part of the mapping name, so fixture profiles
         // and future concurrent candidates cannot modify the user's settings.
         const auto identity=path_identity(file);
-        const auto prefix = L"Local\\OFXRBridgeV657-" + std::to_wstring(identity);
+        const auto prefix = L"Local\\OFXRBridgeV658-" + std::to_wstring(identity);
         mutex = CreateMutexW(nullptr, FALSE, (prefix + L"-mutex").c_str());
         if (!mutex) return;
         const DWORD waited = WaitForSingleObject(mutex, 2000);
@@ -529,7 +529,7 @@ bool initialize_game_configuration(const std::filesystem::path& executable) noex
         // A dedicated creation mutex prevents two simultaneous first launches
         // overwriting one another's freshly created profile.
 #ifdef _WIN32
-        const auto name=L"Local\\OFXRBridgeV657-create-"+std::to_wstring(path_identity(file));
+        const auto name=L"Local\\OFXRBridgeV658-create-"+std::to_wstring(path_identity(file));
         HANDLE mutex=CreateMutexW(nullptr,FALSE,name.c_str());if(!mutex)return false;
         struct CreationGuard {HANDLE handle;bool locked{};~CreationGuard(){if(locked)ReleaseMutex(handle);CloseHandle(handle);}} guard{mutex};
         const auto waited=WaitForSingleObject(mutex,2000);
@@ -953,7 +953,9 @@ void tick_benchmark(std::uint64_t now) noexcept {
                 const bool quality_pending=b.luke && s.desired.afw_mode &&
                     s.runtime.afw_shading_rate!=s.desired.afw_shading_rate;
                 const bool pacing_pending=rec.steamvr && s.runtime.pacing_mode!=static_cast<unsigned>(s.desired.pacing_mode);
-                if(s.runtime.applied_revision!=b.revision || s.runtime.pending || quality_pending || pacing_pending) {
+                const bool buffer_pending=rec.steamvr && !b.advanced &&
+                    s.runtime.buffer_capacity!=static_cast<unsigned>(s.desired.increase_buffer?3:2);
+                if(s.runtime.applied_revision!=b.revision || s.runtime.pending || quality_pending || pacing_pending || buffer_pending) {
                     if(now>=b.requested_ms+30000)
                         suite_restore(shared,BenchmarkPhase::error,"Settings not applied within 30 seconds; stopped.",now);
                     return;

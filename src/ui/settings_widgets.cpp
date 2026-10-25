@@ -411,11 +411,11 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     if(pacing_comparison_runtime(state.runtime)) {
         ImGui::TextWrapped(draft.advanced_mode
             ? "Framework, Director, Framework+director for every route. Normal and Fast mode: 31 optical or 49 complete tests including one OFXR Off reference."
-            : "Framework and Director for every route. Normal and Fast mode: 21 optical or 33 complete tests including one OFXR Off reference.");
+            : "Framework and Director for every route, each with buffer 2 and 3. Normal and Fast mode: 41 optical or 65 complete tests including one OFXR Off reference.");
         ImGui::TextWrapped(draft.advanced_mode
             ? "Luke Ross: 39 tests through OFXR 0.3.0, no 3X. Three AFW qualities: 1x1, 2x2, 4x4; each route with all three pacing modes."
-            : "Luke Ross: 27 tests through OFXR 0.3.0, no 3X. Three AFW qualities: 1x1, 2x2, 4x4; each route with Framework and Director.");
-        ImGui::TextWrapped("AFW alone once per quality. Fast mode has no Luke effect. CSV groups each route/pacing's three qualities.");
+            : "Luke Ross: 51 tests through OFXR 0.3.0, no 3X. Three AFW qualities: 1x1, 2x2, 4x4; each route with Framework and Director, buffer 2 and 3.");
+        ImGui::TextWrapped("AFW alone once per quality, without a buffer comparison. Fast mode has no Luke effect. CSV groups each route/pacing/buffer's three qualities.");
     } else {
         ImGui::TextWrapped("Legacy VDXR: 11 optical or 17 complete tests. Every route compares Normal/Fast. Luke: 15 tests, three AFW qualities through 0.3.0, no Fast or 3X.");
     }
