@@ -54,7 +54,9 @@ corner. Start the game and look at that corner in the headset.
 | The game runs **as administrator** | Run the game, and Steam or its launcher, normally. Never as administrator. |
 | The tray was not armed when the game started | Start the tray first; it arms by itself. Then start the game. If you disarm and re-arm, restart the game. |
 | The game runs under another Windows user | Run the tray and the game under the same Windows account. |
-| The game is 32-bit | Not supported. |
+| The game is 32-bit, in D3D12, Vulkan or OpenGL | OFXR supports 32-bit games in D3D11 only: see [32-bit games](../README.md#32-bit-games). |
+| A 32-bit game, and `ofxr_x86` is missing beside the tray | Extract the complete release archive again: the 32-bit layer is in that folder. |
+| A 32-bit game that will not start with OFXR armed | Install the x86 [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist). |
 | The game's anti-cheat blocks it | Star Citizen works with Easy Anti-Cheat, because OFXR is signed. Other anti-cheats may still block OFXR. Using OFXR with an anti-cheat protected game is at your own risk. |
 | You play on Linux | OFXR runs under Proton: follow the [Linux guide](LINUX.md). |
 | The game crashes at start | Try without ReShade and other OpenXR layers, then send a flight log (see below). |
@@ -65,6 +67,7 @@ corner. Start the game and look at that corner in the headset.
 |---|---|
 | You are in a menu or loading screen | Normal. Generation starts once you are in the 3D world. |
 | The game uses OpenGL | Not supported. |
+| A 32-bit game on an AMD or Intel card, or an NVIDIA card without optical flow | 32-bit games need NVIDIA's optical flow: an NVIDIA RTX card or the GTX 1660. See [32-bit games](../README.md#32-bit-games). |
 | Too many swapchains for SteamVR (some UEVR games, often with depth submission on) | Turn off **Prefer FPS over latency**, or turn off depth submission in UEVR. |
 | You disarmed OFXR from the tray | Arm it again, then restart the game. |
 | You paused frame generation, from the tray or with the pause key (the FPS number shows two orange bars) | Choose **Resume frame generation** in the tray menu, or press the key again. No restart needed. |

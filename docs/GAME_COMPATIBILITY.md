@@ -32,14 +32,31 @@ collects players' reports.
 | Skyrim VR | OpenComposite | With a DLSS mod, [settings below](#skyrim-vr) |
 | Elite Dangerous | OpenComposite | Yes, with the [EDVR mod](https://github.com/characterecho-sean/edvr-unofficial-patch), which adds DLSS |
 | Assetto Corsa (CSP) | Native OpenXR | No: CSP turns DLSS off in VR |
+| Alien: Isolation (32-bit) | MotherVR, through OpenComposite | No: [32-bit game](#alien-isolation) |
 
 ## Games
 
+- [Alien: Isolation](#alien-isolation)
 - [Fallout 4 VR](#fallout-4-vr)
 - [Microsoft Flight Simulator 2024](#microsoft-flight-simulator-2024)
 - [R.E.A.L. VR games](#real-vr-games)
 - [Skyrim VR](#skyrim-vr)
 - [Star Citizen](#star-citizen)
+
+---
+
+## Alien: Isolation
+
+**A 32-bit game:** read [32-bit games](../README.md#32-bit-games) first.
+OFXR runs it with NVIDIA's optical flow, on NVIDIA RTX cards and the GTX
+1660, and without Hybrid.
+
+**Mod:** [MotherVR](https://github.com/Nibre/MotherVR), with **VRRuntime**
+set to **OpenVR** in `mothervr.json`, and the 32-bit
+[OpenComposite](https://gitlab.com/znixian/OpenOVR) in the game's folder, so
+the game reaches OpenXR.
+
+**Start the tray before the game**, as for any other game.
 
 ---
 

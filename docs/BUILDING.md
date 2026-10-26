@@ -1,7 +1,8 @@
 # Building OFXR Bridge
 
-OFXR Bridge currently targets 64-bit Windows and builds with Visual Studio
-2022, CMake 3.24 or newer and a recent Windows SDK containing `fxc.exe`.
+OFXR Bridge targets 64-bit Windows, with a 32-bit layer for 32-bit games
+([below](#32-bit-layer)), and builds with Visual Studio 2022, CMake 3.24 or
+newer and a recent Windows SDK containing `fxc.exe`.
 
 ## Dependencies
 
@@ -68,10 +69,38 @@ The distributable files are generated under `build/Release`:
 OFXRBridgeTray.exe
 ofxr/
   XR_APILAYER_XRFrameBridge_diagnostic.dll
+  OFXR_vulkan_queue_layer.dll
   ofxr_bridge.ini
+ofxr_x86/
+  XR_APILAYER_XRFrameBridge_diagnostic.dll   (32-bit, with a Win32 build)
 ```
 
 Do not distribute PDBs, static libraries, test executables or the NVIDIA SDK.
+
+### 32-bit layer
+
+A Win32 configure of the same tree builds the 32-bit layer alone: no tray,
+which stays 64-bit and arms both layers. AMD ships the FidelityFX SDK's
+libraries for x64 only, so the Win32 build needs only its headers and links
+`src/d3d12/fidelityfx_unavailable.cpp` in their place; the 32-bit layer
+uses NVIDIA's optical flow, bridges D3D11 sessions only and leaves out the
+DLSS capture and the Vulkan support. Build it before the 64-bit tree:
+
+```powershell
+cmake -S . -B build-x86 -G "Visual Studio 17 2022" -A Win32
+cmake --build build-x86 --config Release
+cmake --build build --config Release
+```
+
+The tray's build copies `build-x86/Release/XR_APILAYER_XRFrameBridge_diagnostic.dll`
+(`XRFG_X86_LAYER_DLL`) to `build/Release/ofxr_x86/`, which the release zips
+carry beside `ofxr/`. Without a Win32 build the folder is left out and the
+tray arms the 64-bit layer alone.
+
+Most of the suite does not apply to the Win32 build, whose fixtures expect
+FidelityFX on WARP or a D3D12 session. `xrfg_d3d12_nvidia_x86`, run in it
+only, checks NVIDIA's optical flow and synthesis on the GPU in a 32-bit
+process.
 
 ## Continuous integration
 

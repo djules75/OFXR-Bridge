@@ -1399,7 +1399,8 @@ std::shared_ptr<const DlssMotionVectorFrame> place_centred_window(
     try {
         const auto refuse = [](std::uint64_t reason) {
             static std::array<std::atomic_bool, 5> recorded{};
-            if (reason < recorded.size() && !recorded[reason].exchange(true)) {
+            if (reason < recorded.size() &&
+                !recorded[static_cast<std::size_t>(reason)].exchange(true)) {
                 try {
                     bridge_flight_logger().event(
                         BridgeFlightOperation::embedded_configuration, 859, reason);

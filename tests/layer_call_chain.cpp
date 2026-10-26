@@ -42,7 +42,12 @@ constexpr XrDuration kGenerationCooldownDuration = 1'000'000'000;
 
 template <typename Handle>
 [[nodiscard]] Handle fake_handle(std::uintptr_t value) {
-    return reinterpret_cast<Handle>(value);
+    // OpenXR handles are 64-bit integers in a 32-bit build.
+    if constexpr (std::is_pointer_v<Handle>) {
+        return reinterpret_cast<Handle>(value);
+    } else {
+        return static_cast<Handle>(value);
+    }
 }
 
 XrInstance g_instance = fake_handle<XrInstance>(0x101);
@@ -1434,8 +1439,13 @@ extern "C" XRAPI_ATTR XrResult XRAPI_CALL fake_loader_enumerate_api_layer_proper
     return XR_SUCCESS;
 }
 
+#if defined(_WIN64)
 #pragma comment(linker, "/export:xrGetInstanceProcAddr=fake_loader_get_instance_proc_addr")
 #pragma comment(linker, "/export:xrEnumerateApiLayerProperties=fake_loader_enumerate_api_layer_properties")
+#else
+#pragma comment(linker, "/export:xrGetInstanceProcAddr=_fake_loader_get_instance_proc_addr@16")
+#pragma comment(linker, "/export:xrEnumerateApiLayerProperties=_fake_loader_enumerate_api_layer_properties@12")
+#endif
 
 XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_proc_addr(
     XrInstance,
@@ -2767,7 +2777,7 @@ int main(int argc, char** argv) {
                           << " target=" << static_cast<int>(record.target)
                           << " layers=" << record.layer_count
                           << " quad=" << std::hex
-                          << reinterpret_cast<std::uintptr_t>(record.quad_swapchain)
+                          << record.quad_swapchain
                           << std::dec << '\n';
             }
             return EXIT_FAILURE;

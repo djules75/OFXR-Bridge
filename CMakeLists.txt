@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.575.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.576.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -12,6 +12,16 @@ endif()
 option(XRFG_BUILD_LAYER "Build the Windows OpenXR API layer" ON)
 option(XRFG_BUILD_TESTS "Build the core test executable" ON)
 option(XRFG_BUILD_STANDALONE "Build the Windows standalone tray launcher" ON)
+
+# V576: a Win32 configure builds the 32-bit layer, for 32-bit games. The tray
+# stays 64-bit and arms both layers. AMD ships the FidelityFX SDK for x64
+# only, so the 32-bit layer has NVIDIA optical flow alone.
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(XRFG_X86 ON)
+    set(XRFG_BUILD_STANDALONE OFF CACHE BOOL "" FORCE)
+else()
+    set(XRFG_X86 OFF)
+endif()
 
 set(XRFG_OPENXR_SDK_ROOT
     "${CMAKE_CURRENT_SOURCE_DIR}/external/OpenXR-SDK"
@@ -117,11 +127,25 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     set(XRFG_FIDELITYFX_DX12_LIBRARY
         "${XRFG_FIDELITYFX_LIBRARY_DIR}/ffx_backend_dx12_x64.lib")
     if(NOT EXISTS "${XRFG_FIDELITYFX_INCLUDE_DIR}/FidelityFX/host/ffx_opticalflow.h" OR
-       NOT EXISTS "${XRFG_FIDELITYFX_INCLUDE_DIR}/FidelityFX/host/backends/dx12/ffx_dx12.h" OR
-       NOT EXISTS "${XRFG_FIDELITYFX_OPTICALFLOW_LIBRARY}" OR
-       NOT EXISTS "${XRFG_FIDELITYFX_DX12_LIBRARY}")
+       NOT EXISTS "${XRFG_FIDELITYFX_INCLUDE_DIR}/FidelityFX/host/backends/dx12/ffx_dx12.h")
         message(FATAL_ERROR
-            "Pinned FidelityFX SDK v1.1.4 headers and Release DX12/Optical Flow libraries are required")
+            "Pinned FidelityFX SDK v1.1.4 headers are required")
+    endif()
+    if(XRFG_X86)
+        # The synthesizer's FidelityFX calls resolve to stand-ins that fail
+        # at initialisation; see the source.
+        set(XRFG_FIDELITYFX_SOURCES src/d3d12/fidelityfx_unavailable.cpp)
+        set(XRFG_FIDELITYFX_LIBRARIES)
+    else()
+        if(NOT EXISTS "${XRFG_FIDELITYFX_OPTICALFLOW_LIBRARY}" OR
+           NOT EXISTS "${XRFG_FIDELITYFX_DX12_LIBRARY}")
+            message(FATAL_ERROR
+                "Pinned FidelityFX SDK v1.1.4 Release DX12/Optical Flow libraries are required")
+        endif()
+        set(XRFG_FIDELITYFX_SOURCES)
+        set(XRFG_FIDELITYFX_LIBRARIES
+            "${XRFG_FIDELITYFX_OPTICALFLOW_LIBRARY}"
+            "${XRFG_FIDELITYFX_DX12_LIBRARY}")
     endif()
 
     set(XRFG_NVIDIA_OPTICAL_FLOW_INCLUDE_DIR
@@ -322,6 +346,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         src/d3d12/d3d12_history.cpp
         src/d3d12/d3d12_frame_synthesizer.cpp
         src/common/dlss_motion_vectors.cpp
+        ${XRFG_FIDELITYFX_SOURCES}
         "${XRFG_PACK_INPUT_HEADER}"
         "${XRFG_GUIDE_COMPOSE_CLEAR_HEADER}"
         "${XRFG_GUIDE_COMPOSE_MEASURE_HEADER}"
@@ -358,8 +383,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         d3d11
         d3d12
         dxgi
-        "${XRFG_FIDELITYFX_OPTICALFLOW_LIBRARY}"
-        "${XRFG_FIDELITYFX_DX12_LIBRARY}")
+        ${XRFG_FIDELITYFX_LIBRARIES})
     target_compile_definitions(xrfg_d3d12_history PRIVATE
         NOMINMAX
         WIN32_LEAN_AND_MEAN)
@@ -626,6 +650,15 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 "$<TARGET_FILE:OFXR_vulkan_queue_layer>"
                 "$<TARGET_FILE_DIR:OFXRBridgeTray>/ofxr/OFXR_vulkan_queue_layer.dll")
         add_dependencies(OFXRBridgeTray OFXR_vulkan_queue_layer)
+        # V576: the 32-bit layer, built by a Win32 configure of this tree.
+        set(XRFG_X86_LAYER_DLL
+            "${CMAKE_CURRENT_SOURCE_DIR}/build-x86/Release/XR_APILAYER_XRFrameBridge_diagnostic.dll"
+            CACHE FILEPATH "The Win32 build's layer, bundled in ofxr_x86")
+        add_custom_command(TARGET OFXRBridgeTray POST_BUILD
+            COMMAND "${CMAKE_COMMAND}"
+                "-DSOURCE=${XRFG_X86_LAYER_DLL}"
+                "-DDESTINATION=$<TARGET_FILE_DIR:OFXRBridgeTray>/ofxr_x86"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_x86_layer.cmake")
 
         if(XRFG_BUILD_TESTS)
             add_executable(xrfg_standalone_launcher_tests
@@ -1396,6 +1429,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         set_tests_properties(xrfg_d3d12_history_tests PROPERTIES
             ENVIRONMENT "XRFG_IGNORE_LIVE_TUNING=1")
         add_test(NAME xrfg_d3d12_hybrid_composition COMMAND xrfg_d3d12_history_tests hybrid)
+        if(XRFG_X86)
+            # V576: the 32-bit build's flow, NVIDIA's, on the GPU.
+            add_test(NAME xrfg_d3d12_nvidia_x86 COMMAND xrfg_d3d12_history_tests nvidia)
+            set_tests_properties(xrfg_d3d12_nvidia_x86 PROPERTIES LABELS needs_gpu_timing)
+        endif()
 
         add_executable(xrfg_vertical_fov_tests tests/vertical_fov_tests.cpp)
         target_include_directories(xrfg_vertical_fov_tests PRIVATE include)

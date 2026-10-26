@@ -315,9 +315,15 @@ template <typename Handle>
 // Vulkan support as the ini says it; for the elevated copy, only beside its
 // Vulkan queue layer.
 [[nodiscard]] bool vulkan_support_configured() noexcept {
+#if !defined(_WIN64)
+    // V576: the 32-bit layer bridges D3D11 alone, and ships without the
+    // Vulkan queue layer.
+    return false;
+#else
     return (!g_elevated_copy.load(std::memory_order_acquire) ||
             g_elevated_vulkan_layer.load(std::memory_order_acquire)) &&
         xrfg::implicit_layer::read_vulkan_support(current_layer_directory());
+#endif
 }
 
 [[nodiscard]] std::uint64_t optical_flow_configuration_code(
@@ -517,6 +523,10 @@ void probe_vulkan_interop_support(
 
 struct Dispatch {
     PFN_xrGetInstanceProcAddr get_instance_proc_addr{};
+    // V576: the 32-bit layer on an instance without XR_KHR_D3D11_enable.
+    // Every function but xrDestroyInstance is the next one's; see
+    // layer_create_api_layer_instance_impl.
+    bool passthrough{};
     // The D3D11 bridge (SessionState::d3d11_bridge): set when the ini asks
     // for it, the application enabled XR_KHR_D3D11_enable, and the layer
     // could add XR_KHR_D3D12_enable to the instance. The runtime's D3D12
@@ -3067,6 +3077,19 @@ struct SynthesisInitializeRecord {
     std::uint32_t array_size{};
 };
 
+// V576: the flow the menu's choice runs on. The 32-bit layer has no
+// FidelityFX (src/d3d12/fidelityfx_unavailable.cpp), so it runs NVIDIA's
+// whichever is chosen; on a GPU without NVIDIA flow nothing is generated.
+[[nodiscard]] xrfg::D3D12OpticalFlowBackend available_flow_backend(
+    xrfg::D3D12OpticalFlowBackend chosen) noexcept {
+#if defined(_WIN64)
+    return chosen;
+#else
+    static_cast<void>(chosen);
+    return xrfg::D3D12OpticalFlowBackend::nvidia;
+#endif
+}
+
 template <typename Initialize>
 [[nodiscard]] HRESULT initialize_synthesis_with_fallback(
     SessionState& session,
@@ -4621,6 +4644,9 @@ XrResult layer_get_instance_proc_addr_impl(
     if (std::strcmp(name, "xrDestroyInstance") == 0) {
         return expose_intercept(dispatch, dispatch->destroy_instance, layer_destroy_instance, function);
     }
+    if (dispatch->passthrough) {
+        return dispatch->get_instance_proc_addr(instance, name, function);
+    }
     if (std::strcmp(name, "xrCreateSession") == 0) {
         return expose_intercept(dispatch, dispatch->create_session, layer_create_session, function);
     }
@@ -4846,6 +4872,36 @@ XrResult layer_create_api_layer_instance_impl(
         forwarded_create_info = create_info;
         bridge_extension_added = false;
     }
+
+#if !defined(_WIN64)
+    // V576: the 32-bit layer is for 32-bit games, which are D3D11 ones. An
+    // instance that cannot make a D3D11 session gets the runtime's
+    // functions as they are, with the layer kept only to drop its record at
+    // xrDestroyInstance. A D3D11 instance that makes some other session is
+    // handled at xrCreateSession.
+    if (!asked_d3d11) {
+        XrInstance passthrough_instance = XR_NULL_HANDLE;
+        const XrResult passthrough_result = next_create_api_layer_instance(
+            create_info, &next_layer_info, &passthrough_instance);
+        if (XR_FAILED(passthrough_result)) {
+            return passthrough_result;
+        }
+        if (!load_function(next_get_instance_proc_addr, passthrough_instance,
+                "xrDestroyInstance", dispatch->destroy_instance)) {
+            return XR_ERROR_INITIALIZATION_FAILED;
+        }
+        dispatch->passthrough = true;
+        try {
+            std::scoped_lock lock(g_state_mutex);
+            g_instances[passthrough_instance] = dispatch;
+        } catch (...) {
+            dispatch->destroy_instance(passthrough_instance);
+            return XR_ERROR_OUT_OF_MEMORY;
+        }
+        *instance = passthrough_instance;
+        return passthrough_result;
+    }
+#endif
 
     XrInstance created_instance = XR_NULL_HANDLE;
     const XrResult result = next_create_api_layer_instance(
@@ -5118,7 +5174,8 @@ XrResult layer_create_session_impl(
     const auto initial_control = xrfg::embedded::reload();
     xrfg::set_hybrid_depth_search(initial_control.hybrid_depth_search);
     xrfg::set_hud_fix(initial_control.hud_fix);
-    state->optical_flow_backend = static_cast<xrfg::D3D12OpticalFlowBackend>(initial_control.desired.backend);
+    state->optical_flow_backend = available_flow_backend(
+        static_cast<xrfg::D3D12OpticalFlowBackend>(initial_control.desired.backend));
     state->nvidia_options = {
         static_cast<xrfg::D3D12NvidiaPerformancePreset>(initial_control.desired.preset),
         static_cast<xrfg::D3D12NvidiaInputScale>(initial_control.desired.scale),
@@ -5182,6 +5239,17 @@ XrResult layer_create_session_impl(
                 }
                 break;
             }
+#if !defined(_WIN64)
+            // V576: the 32-bit layer bridges D3D11 alone. A D3D12 or Vulkan
+            // session is left with no binding, as one the layer does not
+            // recognise is: no device, so its swapchains are ineligible
+            // (no_d3d12_binding) and every frame passes through.
+            if (next->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR ||
+                next->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR) {
+                binding_structure_type = next->type;
+                break;
+            }
+#endif
             if (next->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
                 const auto* binding = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(next);
                 state->graphics_binding = SessionGraphicsBinding::d3d12;
@@ -6825,8 +6893,7 @@ XrResult layer_enumerate_swapchain_images_impl(
                     xrfg::BridgeFlightOperation::swapchain_image,
                     state->create_info.format,
                     handle_value(state->handle),
-                    static_cast<std::uint64_t>(
-                        reinterpret_cast<std::uintptr_t>(vulkan_images[index].image)),
+                    handle_value(vulkan_images[index].image),
                     state->create_info.usageFlags);
             }
 
@@ -13253,6 +13320,13 @@ constexpr std::size_t kMaxGeneratedPanels = 2;
 void configure_panel_flow(
     SessionState& state,
     const std::shared_ptr<SwapchainState>& swapchain) noexcept {
+#if !defined(_WIN64)
+    // V576: no FidelityFX in the 32-bit layer; a panel keeps the eye
+    // images' flow.
+    static_cast<void>(state);
+    static_cast<void>(swapchain);
+    return;
+#else
     try {
         std::scoped_lock call_lock(swapchain->call_mutex);
         std::shared_ptr<FrameGenerationSwapchainState> generation;
@@ -13281,6 +13355,7 @@ void configure_panel_flow(
             handle_value(swapchain->handle));
     } catch (...) {
     }
+#endif
 }
 
 // Gives each pending panel its private swapchains and synthesizer, after the
@@ -13997,7 +14072,8 @@ void apply_embedded_control(
     for (const auto& chain : swapchains) capture_locks.emplace_back(chain->call_mutex);
     std::scoped_lock gpu_lock(state->gpu_mutex);
     HRESULT result = S_OK;
-    auto backend = static_cast<xrfg::D3D12OpticalFlowBackend>(control.desired.backend);
+    auto backend = available_flow_backend(
+        static_cast<xrfg::D3D12OpticalFlowBackend>(control.desired.backend));
     if (backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
         state->nvidia_backend_unavailable) {
         backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
@@ -16309,6 +16385,12 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_end_frame(
 }
 
 }  // namespace
+
+// V576: a 32-bit __stdcall export is decorated, _name@<argument bytes>; the
+// loader asks for the plain name.
+#if !defined(_WIN64)
+#pragma comment(linker, "/export:xrNegotiateLoaderApiLayerInterface=_xrNegotiateLoaderApiLayerInterface@12")
+#endif
 
 extern "C" __declspec(dllexport) XRAPI_ATTR XrResult XRAPI_CALL xrNegotiateLoaderApiLayerInterface(
     const XrNegotiateLoaderInfo* loader_info,

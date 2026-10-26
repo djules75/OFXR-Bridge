@@ -1589,8 +1589,10 @@ struct Constants {
     float near_far_fov_aspect_invalid[5];
     char flags[7];
 };
+#if defined(_WIN64)
 static_assert(offsetof(Constants, view_to_clip) == 32 && offsetof(Constants, position) == 376 &&
     offsetof(Constants, right) == 400);
+#endif
 
 struct Viewport {
     Header header;

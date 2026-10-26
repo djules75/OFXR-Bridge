@@ -32,7 +32,11 @@ void write_position(const std::filesystem::path& ini, const wchar_t* position) {
     check(MoveFileExW(temporary.c_str(), ini.c_str(),
         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0, "replace atomic INI");
 }
-template<class T> T handle(std::uintptr_t value) { return reinterpret_cast<T>(value); }
+// OpenXR handles are 64-bit integers in a 32-bit build, pointers otherwise.
+template<class T> T handle(std::uint64_t value) {
+    if constexpr (std::is_pointer_v<T>) return reinterpret_cast<T>(value);
+    else return static_cast<T>(value);
+}
 const auto session = handle<XrSession>(2);
 const auto overlay_space = handle<XrSpace>(4);
 const auto overlay_chain = handle<XrSwapchain>(5);

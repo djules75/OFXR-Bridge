@@ -6803,6 +6803,24 @@ int main(int argc, char** argv) {
             nvidia_fixture.require_no_debug_errors();
             return 0;
         }
+        if (argc > 1 && std::string_view(argv[1]) == "nvidia") {
+            // V576: XRFG_TEST_NVIDIA's set, on the GPU, for the 32-bit build,
+            // which has no FidelityFX for the WARP tests before it. Without
+            // the stereo test: its GPU timing check reads an earlier
+            // synthesis's record first, on x64 as well.
+            SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
+            const xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options;
+            D3D12WarpFixture nvidia_fixture(true);
+            test_double_wide_single_slice_views(
+                nvidia_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, nvidia_options);
+            test_rotation_aware_synthesis_beats_uncompensated_flow(
+                nvidia_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, nvidia_options);
+            test_submission_backpressure_and_recovery(
+                nvidia_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, nvidia_options);
+            nvidia_fixture.require_no_debug_errors();
+            std::cout << "D3D12 NVIDIA OFA synthesis test passed\n";
+            return 0;
+        }
         if (argc > 1 && std::string_view(argv[1]) == "panel") {
             // V509 on the GPU: a flat panel's marker moved by the flow.
             SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");

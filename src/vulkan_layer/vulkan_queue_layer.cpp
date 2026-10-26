@@ -499,6 +499,15 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL layer_get_instance_proc_addr(
 
 }  // namespace
 
+// V576: a 32-bit __stdcall export is decorated, _name@<argument bytes>; the
+// loader asks for the plain names its manifest gives.
+#if !defined(_WIN64)
+#pragma comment(linker, "/export:OFXR_vkNegotiateLoaderLayerInterfaceVersion=_OFXR_vkNegotiateLoaderLayerInterfaceVersion@4")
+#pragma comment(linker, "/export:OFXR_vkNegotiateLoaderLayerInterfaceVersionElevated=_OFXR_vkNegotiateLoaderLayerInterfaceVersionElevated@4")
+#pragma comment(linker, "/export:OFXR_vkGetInstanceProcAddr=_OFXR_vkGetInstanceProcAddr@8")
+#pragma comment(linker, "/export:OFXR_vkGetDeviceProcAddr=_OFXR_vkGetDeviceProcAddr@8")
+#endif
+
 extern "C" __declspec(dllexport) VKAPI_ATTR VkResult VKAPI_CALL
 OFXR_vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface* version) {
     if (version == nullptr ||

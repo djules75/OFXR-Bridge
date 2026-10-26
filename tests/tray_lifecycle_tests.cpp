@@ -377,6 +377,70 @@ void arm_and_exit_lifecycle() {
         "next tray start retires the arm-and-exit registration");
 }
 
+// V576: a package with the 32-bit layer arms it beside the 64-bit one, and
+// whatever retires the arm retires both.
+void x86_layer_lifecycle() {
+    Fixture test;
+    test.state.executable_directory = test.state.local_directory / L"Install";
+    for (const std::string folder : {"ofxr", "ofxr_x86"}) {
+        const auto bundle = test.state.executable_directory / folder;
+        std::filesystem::create_directories(bundle);
+        std::ofstream(bundle / xrfg::implicit_layer::kLayerDllName) << folder;
+    }
+    test.state.settings.vulkan_support = false;
+    const auto directory = runtime_directory(test.state.local_directory);
+    const auto find_manifest = [&](std::wstring_view prefix) {
+        std::filesystem::path found;
+        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+            if (entry.path().filename().wstring().starts_with(prefix)) found = entry.path();
+        }
+        return found;
+    };
+    std::wstring error;
+    require(arm_and_exit(test.state, &error,
+                xrfg::implicit_layer::RegistryScope::current_user),
+        "32-bit package arms");
+    const auto manifest = find_manifest(xrfg::implicit_layer::kManifestPrefix);
+    const auto x86_manifest = find_manifest(xrfg::implicit_layer::kX86ManifestPrefix);
+    require(!manifest.empty() && test.registered(manifest), "64-bit layer registered");
+    require(x86_manifest == xrfg::implicit_layer::x86_manifest_for(manifest) &&
+            test.registered(x86_manifest),
+        "32-bit layer registered beside it, under the same arm");
+    std::ifstream x86_file(x86_manifest);
+    const std::string x86_json((std::istreambuf_iterator<char>(x86_file)),
+        std::istreambuf_iterator<char>());
+    x86_file.close();
+    require(x86_json.find("XR_APILAYER_XRFrameBridge_x86.dll") != std::string::npos &&
+            x86_json.find("\"XR_APILAYER_XRFrameBridge_diagnostic\"") != std::string::npos,
+        "32-bit manifest names its own DLL under the layer's name");
+    std::ifstream x86_dll(directory / xrfg::implicit_layer::kX86LayerDllName);
+    std::string copied;
+    x86_dll >> copied;
+    require(copied == "ofxr_x86", "32-bit DLL installed beside the 64-bit one");
+    // The watchdog, its tray gone: both registrations go.
+    require(watch_registered_arm(nullptr, manifest, test.state.local_directory, &error,
+                xrfg::implicit_layer::RegistryScope::current_user, test.state.registry_subkey) &&
+            !test.registered(manifest) && !test.registered(x86_manifest) &&
+            !std::filesystem::exists(x86_manifest),
+        "watchdog retires the 32-bit registration with the arm");
+    // A 32-bit registration left behind: the next tray start retires it.
+    require(arm_and_exit(test.state, &error,
+                xrfg::implicit_layer::RegistryScope::current_user),
+        "32-bit package arms again");
+    const auto again = find_manifest(xrfg::implicit_layer::kX86ManifestPrefix);
+    require(!again.empty() && test.registered(again), "32-bit layer registered again");
+    require(cleanup_all_owned_registrations(test.state, &error) && !test.registered(again),
+        "next tray start retires the 32-bit registration");
+    // Without the bundle, no 32-bit registration.
+    std::filesystem::remove_all(test.state.executable_directory /
+        xrfg::implicit_layer::kX86BundleDirectory);
+    require(arm_and_exit(test.state, &error,
+                xrfg::implicit_layer::RegistryScope::current_user) &&
+            find_manifest(xrfg::implicit_layer::kX86ManifestPrefix).empty(),
+        "a package without the 32-bit layer arms the 64-bit one alone");
+    require(cleanup_all_owned_registrations(test.state, &error), "final cleanup");
+}
+
 void integrity_scope_policy() {
     using xrfg::implicit_layer::RegistryScope;
     require(xrfg::implicit_layer::registry_scope_for_integrity_rid(
@@ -404,6 +468,7 @@ int main() {
         blocked_manifest();
         runtime_stop_and_watchdog();
         arm_and_exit_lifecycle();
+        x86_layer_lifecycle();
         integrity_scope_policy();
         std::cout << "V074 dual-hive registry recovery and production tray lifecycle checks passed\n";
         return 0;

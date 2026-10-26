@@ -299,7 +299,11 @@ struct SteamVrDelivery::Impl {
                 BridgeFlightOperation::steamvr_delivery_attach, -1);
             return;
         }
+#if defined(_WIN64)
         const std::string dll = runtime + "\\bin\\win64\\openvr_api.dll";
+#else
+        const std::string dll = runtime + "\\bin\\win32\\openvr_api.dll";
+#endif
         module = LoadLibraryA(dll.c_str());
         if (module == nullptr) {
             bridge_flight_logger().event(

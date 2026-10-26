@@ -26,8 +26,8 @@ usual causes and fixes: OpenVR games, running as administrator, the game's
 frame rate, frame smoothing in your VR software, and running out of VRAM.
 
 **More guides:** the [game compatibility guide](docs/GAME_COMPATIBILITY.md)
-(the games we tested, and settings for MSFS 2024, Skyrim VR, Fallout 4 VR
-and R.E.A.L. VR games) · [OFXR on Linux (Proton)](docs/LINUX.md)
+(the games we tested, and settings for MSFS 2024, Skyrim VR, Fallout 4 VR,
+R.E.A.L. VR games and Alien: Isolation) · [OFXR on Linux (Proton)](docs/LINUX.md)
 
 ---
 
@@ -74,6 +74,8 @@ and R.E.A.L. VR games) · [OFXR on Linux (Proton)](docs/LINUX.md)
 
 - D3D12, D3D11 and Vulkan games, with a pipeline built specifically for
   SteamVR's compositor.
+- **32-bit games** in D3D11, such as Alien: Isolation with MotherVR, on
+  NVIDIA cards with NVIDIA's optical flow.
 - **Star Citizen**, with Easy Anti-Cheat: OFXR's files are signed.
 - UEVR, OpenComposite, Luke Ross's R.E.A.L. VR mods and Cheeky Foveated
   DLSS.
@@ -140,8 +142,9 @@ Keep the default settings to start with: **FidelityFX** optical flow at
 visual-quality loss.
 
 The tray and bridge require the [Microsoft Visual C++ Redistributable
-x64](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
-OFXR Bridge does not replace your active OpenXR runtime.
+x64](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist),
+and [32-bit games](#32-bit-games) the x86 one as well. OFXR Bridge does not
+replace your active OpenXR runtime.
 
 ### FPS overlay and flight recorder
 
@@ -208,6 +211,25 @@ OFXR before the game. The best settings are in the
 > Easy Anti-Cheat. Using it with an anti-cheat protected game is at your own
 > risk: we accept no responsibility for any account action, ban or other
 > consequence. Check the game's terms of service before you play.
+
+### 32-bit games
+
+OFXR also works in 32-bit games, such as Alien: Isolation with the MotherVR
+mod. The tray arms the 32-bit layer, in the `ofxr_x86` folder, together with
+the 64-bit one: nothing to choose, each game loads the one it needs.
+
+- **D3D11 games only.** A 32-bit game in D3D12, Vulkan or OpenGL runs
+  without OFXR.
+- **NVIDIA optical flow only**, on NVIDIA RTX cards and the GTX 1660.
+  FidelityFX is not available in 32-bit games: OFXR uses NVIDIA's optical
+  flow whatever the tray says, and on other cards it generates no frames.
+- **No Hybrid:** DLSS does not exist for 32-bit games.
+- **The 32-bit Visual C++ Redistributable** is needed too (see below).
+- Most of these games use OpenVR: run them through OpenXR with the 32-bit
+  [OpenComposite](https://gitlab.com/znixian/OpenOVR).
+
+See [Alien: Isolation](docs/GAME_COMPATIBILITY.md#alien-isolation) in the
+game compatibility guide.
 
 ### Optical flow
 
@@ -323,10 +345,10 @@ tools can read it too: see [status.json](docs/STATUS_JSON.md).
 When the tray arms the bridge (at start-up, or when you select **Arm**), it copies the versioned OFXR layer and its
 configuration into `%LOCALAPPDATA%\OFXR Bridge`, creates an absolute-path
 OpenXR implicit-layer manifest and registers that manifest for the current
-Windows user. It does not inject a DLL into the game, replace game files or
-replace the active OpenXR runtime.
+Windows user, with a second one for the 32-bit layer. It does not inject a
+DLL into the game, replace game files or replace the active OpenXR runtime.
 
-Selecting **Disarm** removes the exact OpenXR registration. Closing the tray
+Selecting **Disarm** removes the exact OpenXR registrations. Closing the tray
 also disarms it, with a watchdog providing cleanup if the tray exits
 unexpectedly. After disarming and closing the application, no active OFXR hook
 or OpenXR registration remains on the system. Versioned cache files, settings

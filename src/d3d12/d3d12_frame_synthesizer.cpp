@@ -1786,8 +1786,13 @@ struct D3D12FrameSynthesizer::Impl {
     }
 
     [[nodiscard]] HRESULT create_nvidia_resources(UINT node_mask) noexcept {
+        // The driver installs both; a 32-bit process's System32 is SysWOW64.
         nvidia_module = LoadLibraryExW(
+#if defined(_WIN64)
             L"nvofapi64.dll",
+#else
+            L"nvofapi.dll",
+#endif
             nullptr,
             LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (nvidia_module == nullptr) {

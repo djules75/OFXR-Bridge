@@ -413,15 +413,20 @@ struct Constants {
     float right[3];
     float forward[3];
 };
+// Streamline ships for x64 only: the 32-bit layer never meets these.
+#if defined(_WIN64)
 static_assert(offsetof(Constants, view_to_clip) == 32);
 static_assert(offsetof(Constants, position) == 376);
 static_assert(offsetof(Constants, right) == 400);
+#endif
 
 struct Viewport {
     Header header;
     std::uint32_t value;
 };
+#if defined(_WIN64)
 static_assert(offsetof(Viewport, value) == 32);
+#endif
 
 // {DCD35AD7-4E4A-4BAD-A90C-E0C49EB23AFE}, {171B6435-9B3C-4FC8-9994-FBE52569AAA4}
 constexpr TypeId kConstants{
@@ -5461,6 +5466,11 @@ void install_streamline(HMODULE module) noexcept {
 std::mutex g_install_mutex;
 
 void install_all() noexcept {
+#if !defined(_WIN64)
+    // V576: DLSS and Streamline ship for x64 only. Whatever a 32-bit game
+    // has under those names, the 32-bit layer detours none of it.
+    return;
+#else
     std::scoped_lock lock(g_install_mutex);
     install_streamline(GetModuleHandleW(L"sl.interposer.dll"));
     install<0>(GetModuleHandleW(kModuleNames[0]));
@@ -5472,6 +5482,7 @@ void install_all() noexcept {
     install_vk<0>(GetModuleHandleW(kModuleNames[0]));
     install_vk<1>(GetModuleHandleW(kModuleNames[1]));
     install_vk<2>(GetModuleHandleW(kModuleNames[2]));
+#endif
 }
 
 void start_monitor() noexcept {
