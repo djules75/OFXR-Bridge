@@ -5177,6 +5177,12 @@ enum class HybridScene {
     // V561: the translucent strokes dim, their edges about 14/255 (Star
     // Citizen's dim HUD elements, which ghosted on stick turns).
     overlay_translucent_dim,
+    // V573: the translucent HUD fixed in the cockpit (a ship's instruments on
+    // its canopy): the head turns three pixels or so a pair, which moves the
+    // HUD across the image as it moves the cockpit's struts, while the world
+    // turns past on the stick (the vectors say so). The synthetic is in B's
+    // camera, so the HUD belongs at its place in B.
+    overlay_cockpit,
     // V561: the translucent HUD with a soft glow in the moving background
     // beside it, whose vectors are wrong (a light's flow is poor; a sprite
     // has none). The glow must never be held. Run only with the still
@@ -5223,8 +5229,17 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
     const bool dark_strokes = kind == HybridScene::overlay_translucent_dark;
     const bool dim_strokes = kind == HybridScene::overlay_translucent_dim;
     const bool glow = kind == HybridScene::overlay_glow;
+    const bool cockpit = kind == HybridScene::overlay_cockpit;
     const bool translucent = kind == HybridScene::overlay_translucent || sway || panel ||
-        dark_strokes || dim_strokes || glow;
+        dark_strokes || dim_strokes || glow || cockpit;
+    // V573: the cockpit scene's head yaw a pair, and the world's turn a pair
+    // on the stick (about six pixels near the centre, as the other scenes'
+    // background moves).
+    constexpr float cockpit_yaw_step = 0.02F;
+    constexpr float cockpit_stick_step = 0.05F;
+    const auto frame_views = [&](int frame) {
+        return make_reprojection_views(cockpit ? cockpit_yaw_step * static_cast<float>(frame) : 0.0F);
+    };
     // V561: the glow's centre on the screen for a background shift, and its
     // radius: right of the HUD, a pixel a pair - a far light on a strafe,
     // which nearly stays put while its vectors are wrong.
@@ -5257,7 +5272,7 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
         : panel_fast ? "overlay panel fast" : panel ? "overlay panel"
         : dark_strokes ? "overlay translucent dark"
         : dim_strokes ? "overlay translucent dim"
-        : glow ? "overlay glow"
+        : glow ? "overlay glow" : cockpit ? "overlay cockpit"
         : translucent ? "overlay translucent" : overlay ? "overlay"
         : dark ? "occlusion fast, dark low contrast"
         : far_depth ? "occlusion fast, far inverted depth"
@@ -5341,20 +5356,104 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
         }
         return pattern;
     };
+    // V573: the cockpit scene's frame, cast by ray: the HUD's strokes are
+    // fixed in the room (where the yaw-0 camera sees the other scenes' HUD),
+    // turned by `hud_turn` about the vertical (the dragged reference turns it
+    // with the world), seen from a head turned by `yaw`; 4 x 4 samples a
+    // pixel give its edges their sub-pixel place. The background is flat, so
+    // only the vectors tell the world's turn.
+    const auto yaw_rotation = [](float angle) {
+        xrfg::Quaternion rotation{};
+        rotation.y = std::sin(angle * 0.5F);
+        rotation.w = std::cos(angle * 0.5F);
+        return rotation;
+    };
+    const auto make_cockpit_scene = [&](float yaw, float hud_turn) {
+        const ReprojectionViews views_at = make_reprojection_views(yaw);
+        StereoPattern pattern;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            auto& bytes = pattern[eye];
+            bytes.resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
+            const auto& fov = views_at[eye].fov;
+            const float tan_left = std::tan(fov.angle_left), tan_right = std::tan(fov.angle_right);
+            const float tan_up = std::tan(fov.angle_up), tan_down = std::tan(fov.angle_down);
+            for (UINT y = 0; y < height; ++y) {
+                for (UINT x = 0; x < width; ++x) {
+                    int covered = 0;
+                    for (int sy = 0; sy < 4; ++sy) {
+                        for (int sx = 0; sx < 4; ++sx) {
+                            const float u = (static_cast<float>(x) + (sx + 0.5F) / 4.0F) / width;
+                            const float v = (static_cast<float>(y) + (sy + 0.5F) / 4.0F) / height;
+                            const xrfg::Vec3 ray = rotate_vector(yaw_rotation(-hud_turn),
+                                rotate_vector(views_at[eye].pose.orientation,
+                                    {tan_left + (tan_right - tan_left) * u,
+                                     tan_up + (tan_down - tan_up) * v, -1.0F}));
+                            if (ray.z >= -1.0e-4F) continue;
+                            const float px = (ray.x / -ray.z - tan_left) / (tan_right - tan_left) * width;
+                            const float py = (ray.y / -ray.z - tan_up) / (tan_down - tan_up) * height;
+                            const float ox = px - static_cast<float>(object_left);
+                            if (py >= object_top && py < object_bottom && ox >= 0.0F &&
+                                ox < static_cast<float>(object_width) && std::fmod(ox, 8.0F) < 2.0F) {
+                                ++covered;
+                            }
+                        }
+                    }
+                    const RgbaBytes background{70, 90, 110, 255};
+                    const RgbaBytes stroke{240, 210, 40, 255};
+                    const double alpha = 0.65 * covered / 16.0;
+                    RgbaBytes color{0, 0, 0, 255};
+                    for (UINT c = 0; c < 3; ++c) {
+                        color[c] = static_cast<std::uint8_t>(std::lround(
+                            alpha * stroke[c] + (1.0 - alpha) * background[c]));
+                    }
+                    std::copy(color.begin(), color.end(), bytes.begin() +
+                        (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel);
+                }
+            }
+        }
+        return pattern;
+    };
+    const auto frame_scene = [&](int frame, float brightness = 1.0F) {
+        return cockpit ? make_cockpit_scene(cockpit_yaw_step * static_cast<float>(frame), 0.0F)
+                       : make_scene(background_motion * frame, object_motion * frame, brightness);
+    };
     // The judged pair's frames come after the warm-up pairs, the background
     // a step further each pair, the overlay where it is.
-    const StereoPattern previous =
-        make_scene(background_motion * warm_up_pairs, object_motion * warm_up_pairs);
-    const StereoPattern current = make_scene(background_motion * (warm_up_pairs + 1),
-        object_motion * (warm_up_pairs + 1), fade ? 0.6F : 1.0F);
-    const StereoPattern expected = make_scene(
+    const StereoPattern previous = frame_scene(warm_up_pairs);
+    const StereoPattern current = frame_scene(warm_up_pairs + 1, fade ? 0.6F : 1.0F);
+    // (The cockpit's synthetic is in B's camera, where its HUD is B's.)
+    const StereoPattern expected = cockpit ? current : make_scene(
         background_motion * warm_up_pairs + background_motion / 2,
         object_motion * warm_up_pairs + object_motion / 2, fade ? 0.8F : 1.0F);
     // The game's B-to-A vectors, in render pixels: the background's motion
     // everywhere, the object's where the object is in B. The overlay scene's
     // vectors claim the object moved with the background.
     auto game_motion = create_and_upload_game_motion_field(
-        fixture, motion_width, motion_height, [&](UINT, UINT mx, UINT my) {
+        fixture, motion_width, motion_height, [&](UINT eye, UINT mx, UINT my) {
+            if (cockpit) {
+                // V573: where the world's content at this B pixel was in A:
+                // turned back by the stick's step, seen from A's head, a yaw
+                // step before B's (the same for every pair). Render pixels
+                // are image pixels here.
+                const ReprojectionViews views_a = make_reprojection_views(0.0F);
+                const ReprojectionViews views_b = make_reprojection_views(cockpit_yaw_step);
+                const auto& fov = views_b[eye].fov;
+                const float tan_left = std::tan(fov.angle_left), tan_right = std::tan(fov.angle_right);
+                const float tan_up = std::tan(fov.angle_up), tan_down = std::tan(fov.angle_down);
+                const float bx = static_cast<float>(mx) + 0.5F, by = static_cast<float>(my) + 0.5F;
+                const xrfg::Vec3 world = rotate_vector(yaw_rotation(-cockpit_stick_step),
+                    rotate_vector(views_b[eye].pose.orientation,
+                        {tan_left + (tan_right - tan_left) * bx / width,
+                         tan_up + (tan_down - tan_up) * by / height, -1.0F}));
+                xrfg::Quaternion inverse_a = views_a[eye].pose.orientation;
+                inverse_a.x = -inverse_a.x;
+                inverse_a.y = -inverse_a.y;
+                inverse_a.z = -inverse_a.z;
+                const xrfg::Vec3 seen = rotate_vector(inverse_a, world);
+                const float ax = (seen.x / -seen.z - tan_left) / (tan_right - tan_left) * width;
+                const float ay = (seen.y / -seen.z - tan_up) / (tan_down - tan_up) * height;
+                return std::array<float, 2>{ax - bx, ay - by};
+            }
             // The output pixel under this render pixel's centre.
             const int x = static_cast<int>(std::floor(field_left +
                 (static_cast<float>(mx) + 0.5F) * field_width / motion_width));
@@ -5417,9 +5516,8 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
     std::array<ComPtr<ID3D12Resource>, 1> synthetic_destinations{
         create_source_texture(fixture, width, height)};
     // The warm-up pairs' frames go in first, the judged pair's last.
-    upload_pattern(fixture, sources[0].Get(), make_scene(0, 0));
-    upload_pattern(fixture, sources[1].Get(),
-        make_scene(background_motion, object_motion, fade ? 0.6F : 1.0F));
+    upload_pattern(fixture, sources[0].Get(), frame_scene(0));
+    upload_pattern(fixture, sources[1].Get(), frame_scene(1, fade ? 0.6F : 1.0F));
     std::array<ID3D12Resource*, 2> source_pointers{sources[0].Get(), sources[1].Get()};
     std::array<ID3D12Resource*, 2> current_pointers{
         current_destinations[0].Get(), current_destinations[1].Get()};
@@ -5508,7 +5606,8 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
         }
         return set;
     };
-    const ReprojectionViews views = make_reprojection_views();
+    // Every frame's views: the cockpit scene's head turns a step a frame.
+    const ReprojectionViews views = frame_views(0);
     xrfg::D3D12HistoryCaptureTicket capture_a{}, capture_b{};
     require(operation_succeeded(history->capture(0, &capture_a)) &&
             operation_succeeded(history->commit(capture_a)),
@@ -5523,15 +5622,15 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
     for (int warm = 1; warm <= warm_up_pairs; ++warm) {
         const UINT source = static_cast<UINT>(warm % 2);
         if (warm > 1) {
-            upload_pattern(fixture, sources[source].Get(),
-                make_scene(background_motion * warm, object_motion * warm));
+            upload_pattern(fixture, sources[source].Get(), frame_scene(warm));
         }
         xrfg::D3D12HistoryCaptureTicket capture{};
         require(operation_succeeded(history->capture(source, &capture)) &&
                 operation_succeeded(history->commit(capture)),
             "hybrid warm-up capture failed");
         xrfg::D3D12FrameSynthesisTicket warm_pair{};
-        require(operation_succeeded(synthesizer.submit_pair(capture, views, views, 0, 1, &warm_pair,
+        const ReprojectionViews warm_views = frame_views(warm);
+        require(operation_succeeded(synthesizer.submit_pair(capture, warm_views, warm_views, 0, 1, &warm_pair,
                     std::nullopt, guides(static_cast<std::uint64_t>(warm) + 1U))),
             "hybrid warm-up pair failed");
         fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
@@ -5544,8 +5643,9 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
             operation_succeeded(history->commit(capture_b)),
         "hybrid capture B failed");
     const auto statistics_before = xrfg::dlss_motion_vector_statistics();
-    require(operation_succeeded(synthesizer.submit_pair(capture_b, views, views, 0, 1, &pair,
-                std::nullopt, guides(static_cast<std::uint64_t>(warm_up_pairs) + 2U))),
+    const ReprojectionViews judged_views = frame_views(warm_up_pairs + 1);
+    require(operation_succeeded(synthesizer.submit_pair(capture_b, judged_views, judged_views, 0, 1,
+                &pair, std::nullopt, guides(static_cast<std::uint64_t>(warm_up_pairs) + 2U))),
         "hybrid pair failed");
     fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
     const auto statistics_after = xrfg::dlss_motion_vector_statistics();
@@ -5584,11 +5684,16 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
             // V559: the three columns either side of each edge of the HUD,
             // against the true frame and against the HUD dragged with the
             // background (the vectors' claim).
-            const StereoPattern dragged = make_scene(
-                background_motion * warm_up_pairs + background_motion / 2,
-                background_motion * warm_up_pairs + background_motion / 2);
-            // And held where A had it (V559 sway).
-            const StereoPattern held = make_scene(
+            // (V573: the cockpit's HUD turned with the world by half the
+            // stick's step, in B's camera.)
+            const StereoPattern dragged = cockpit
+                ? make_cockpit_scene(cockpit_yaw_step * static_cast<float>(warm_up_pairs + 1),
+                      0.5F * cockpit_stick_step)
+                : make_scene(background_motion * warm_up_pairs + background_motion / 2,
+                      background_motion * warm_up_pairs + background_motion / 2);
+            // And held where A had it (V559 sway; V573: the cockpit's at its
+            // image place in A, as a helmet's would be held).
+            const StereoPattern held = cockpit ? previous : make_scene(
                 background_motion * warm_up_pairs + background_motion / 2,
                 object_motion * warm_up_pairs);
             double true_total = 0, dragged_total = 0, held_total = 0;
@@ -5627,6 +5732,8 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
                 // second, whichever of RGBA or BGRA the pattern is. The
                 // scene has none of its own (yellow strokes over grey).
                 // (3, V561: the glow's band alone, which must have none.)
+                // V573: green for the cockpit's strokes; the scene has none
+                // of its own either.
                 std::size_t magenta = 0;
                 const int count_left = still_tint_check == 3
                     ? glow_centre_x(0) - glow_radius - 4 : 0;
@@ -5636,10 +5743,13 @@ void test_hybrid_composition(D3D12WarpFixture& fixture, HybridScene kind,
                             (static_cast<std::size_t>(y) * width + static_cast<UINT>(x)) * kBytesPerPixel;
                         const int c0 = actual[eye][offset], c1 = actual[eye][offset + 1],
                                   c2 = actual[eye][offset + 2];
-                        if (c0 > c1 + 60 && c2 > c1 + 60) ++magenta;
+                        if (cockpit ? c1 > c0 + 60 && c1 > c2 + 60 : c0 > c1 + 60 && c2 > c1 + 60) {
+                            ++magenta;
+                        }
                     }
                 }
-                std::cout << "  still tint: " << magenta << " magenta pixels\n";
+                std::cout << "  still tint: " << magenta << (cockpit ? " green" : " magenta")
+                          << " pixels\n";
                 require(still_tint_check == 1 ? magenta >= 50 : magenta == 0,
                     still_tint_check == 1 ? "the still mask's tint did not reach the frame"
                     : still_tint_check == 3 ? "the still mask held a light's glow"
@@ -6554,6 +6664,13 @@ void run_still_mask_benchmark(UINT width, UINT height, int pairs_per_round, UINT
         return set;
     };
     const ReprojectionViews views = make_reprojection_views();
+    // V573: XRFG_BENCH_YAW, a head yaw in radians every other frame (the
+    // head is never quite still in a headset): the pose's work is measured
+    // with it.
+    char yaw_text[32]{};
+    const float bench_yaw = GetEnvironmentVariableA("XRFG_BENCH_YAW", yaw_text, sizeof(yaw_text)) != 0
+        ? std::strtof(yaw_text, nullptr) : 0.0F;
+    const ReprojectionViews turned_views = make_reprojection_views(bench_yaw);
     xrfg::D3D12HistoryCaptureTicket capture_a{};
     require(operation_succeeded(history->capture(0, &capture_a)) &&
             operation_succeeded(history->commit(capture_a)),
@@ -6585,8 +6702,9 @@ void run_still_mask_benchmark(UINT width, UINT height, int pairs_per_round, UINT
             LARGE_INTEGER begin{}, end{};
             QueryPerformanceCounter(&begin);
             xrfg::D3D12FrameSynthesisTicket pair{};
-            const HRESULT pair_result = synthesizer.submit_pair(capture, views, views, 0, 1, &pair,
-                std::nullopt, guides(serial), false, first_fraction, extra);
+            const ReprojectionViews& pair_views = serial % 2U == 0U ? turned_views : views;
+            const HRESULT pair_result = synthesizer.submit_pair(capture, pair_views, pair_views, 0, 1,
+                &pair, std::nullopt, guides(serial), false, first_fraction, extra);
             if (!operation_succeeded(pair_result)) {
                 std::cerr << "benchmark pair " << serial << " HRESULT 0x" << std::hex
                           << static_cast<std::uint32_t>(pair_result) << std::dec << '\n';
@@ -6711,7 +6829,8 @@ int main(int argc, char** argv) {
                                      HybridScene::overlay_translucent, HybridScene::overlay_panel,
                                      HybridScene::overlay_panel_fast,
                                      HybridScene::overlay_translucent_dark,
-                                     HybridScene::overlay_translucent_dim, HybridScene::fade,
+                                     HybridScene::overlay_translucent_dim,
+                                     HybridScene::overlay_cockpit, HybridScene::fade,
                                      HybridScene::occlusion_low_res, HybridScene::occlusion_periphery,
                                      HybridScene::occlusion_foveated,
                                      HybridScene::occlusion_foveated_moved,
@@ -6721,6 +6840,11 @@ int main(int argc, char** argv) {
                                      HybridScene::occlusion_fast_far}) {
                 test_hybrid_composition(hybrid_fixture, scene);
             }
+            // V573: the cockpit's HUD dragged with the HUD fix off.
+            xrfg::set_hud_fix(false);
+            test_hybrid_composition(hybrid_fixture, HybridScene::overlay_cockpit,
+                xrfg::D3D12OpticalFlowBackend::fidelity_fx, 4);
+            xrfg::set_hud_fix(true);
             // V563: the tray's HUD fix off reaches the composition. The dim
             // strokes: the vectors explain them within the agree threshold,
             // so the vectors drag them; the bright ones the hybrid hands to
@@ -6817,6 +6941,9 @@ int main(int argc, char** argv) {
                         xrfg::D3D12OpticalFlowBackend::fidelity_fx, 1);
                     test_hybrid_composition(hybrid_fixture, HybridScene::overlay_glow,
                         xrfg::D3D12OpticalFlowBackend::fidelity_fx, 3);
+                    // V573: the cockpit's HUD held as a cockpit's (green).
+                    test_hybrid_composition(hybrid_fixture, HybridScene::overlay_cockpit,
+                        xrfg::D3D12OpticalFlowBackend::fidelity_fx, 1);
                     SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
                     UnmapViewOfFile(block);
                     CloseHandle(mapping);

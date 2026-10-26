@@ -42,13 +42,15 @@ RWTexture2D<float4> NvidiaPreviousColor : register(u1);
 RWTexture2D<float4> NvidiaCurrentColor : register(u2);
 #endif
 // V559: the still mask (BuildStillMask below), at half the output's
-// resolution over the whole image, three slices per image slice: 3s the
+// resolution over the whole image, four slices per image slice: 4s the
 // texels whose edge has stayed in place for enough pairs in a row (a
-// head-locked HUD's strokes and panel borders), 3s + 1 those grown by a
-// texel, 3s + 2 the texel's age in pairs, kept from pair to pair. The
-// composition keeps a masked pixel still (placed by the pose shift) and
-// refuses a warped sample that lands on the mask, which would paint a copy
-// of the HUD beside its place.
+// head-locked HUD's strokes and panel borders), 4s + 1 those grown by a
+// texel, 4s + 2 and 4s + 3 the texel's ages in pairs, kept from pair to
+// pair (V573: two, read from one and written to the other by the pair's
+// parity, since a cockpit stroke's age is read where the stroke was in A,
+// another texel's). The composition keeps a masked pixel still (placed by
+// the pose shift) and refuses a warped sample that lands on the mask, which
+// would paint a copy of the HUD beside its place.
 Texture2DArray<uint> StillMask : register(t12);
 #ifdef XRFG_STILL_MASK
 RWTexture2DArray<uint> StillMaskOut : register(u0);
@@ -131,14 +133,28 @@ bool hud_fix_enabled() {
     return (SynthesisFlags & 128u) != 0u;
 }
 
+static const uint kStillMaskSlices = 4u;
+
 // The still mask's byte at a target coordinate, from the slice grown by a
-// texel or the one as built: bit 7 a stroke of B is here, bits 0-2 and 3-5
-// where its match in A sits, -3..3 pixels each way, biased by 3. Zero:
-// none. (Bit 6 was V560-V561's confirmed tier's.)
+// texel or the one as built: bit 7 a stroke of B is here, bit 6 it is a
+// cockpit's (V573, below), bits 0-2 and 3-5 where its match in A sits,
+// -3..3 pixels each way, biased by 3. Zero: none. (Bit 6 was V560-V561's
+// confirmed tier's.)
 uint still_mask_word(float2 coordinate, bool grown) {
     uint2 limit = (uint2(Width, Height) - uint2(1u, 1u)) >> 1u;
     int2 texel = clamp(int2(floor(coordinate * 0.5)), int2(0, 0), int2(limit));
-    return StillMask.Load(int4(texel, int(3u * Slice + (grown ? 1u : 0u)), 0));
+    return StillMask.Load(int4(texel, int(kStillMaskSlices * Slice + (grown ? 1u : 0u)), 0));
+}
+
+// V573: the stroke's tier, the word's top two bits. A helmet's (128) stays
+// at its place in the image whatever the head does; a cockpit's (192) - a
+// ship's instruments, drawn on its canopy - stays at its place in the
+// cockpit, which the head pose maps like the cockpit's own struts. Both
+// stay put while the world beyond them turns with the stick.
+static const uint kStillHelmet = 128u;
+static const uint kStillCockpit = 192u;
+uint still_mask_tier(uint word) {
+    return word & 192u;
 }
 
 uint still_mask_pack(int2 offset) {
@@ -151,8 +167,10 @@ float2 still_mask_offset(uint word) {
     return float2(int2(int(word & 7u), int((word >> 3u) & 7u)) - int2(3, 3));
 }
 
-bool still_mask_at(float2 coordinate, bool grown) {
-    return (still_mask_word(coordinate, grown) & 128u) != 0u;
+// A stroke of the tier (0: either) on the grown slice.
+bool still_mask_at(float2 coordinate, uint tier) {
+    uint word = still_mask_word(coordinate, true);
+    return tier == 0u ? (word & 128u) != 0u : still_mask_tier(word) == tier;
 }
 
 // Whether the path from a pixel to its warped sample crosses the mask: a
@@ -161,11 +179,12 @@ bool still_mask_at(float2 coordinate, bool grown) {
 // beside itself, N - 1 copies deep. A tap every three pixels along the
 // path (a stroke's grown band is six or so wide; four fixed taps let a
 // fast turn's samples step over it), the last the landing test, 24 at most.
-bool still_mask_crossed(float2 from, float2 to) {
+// V573: of one tier's strokes (0: either), the path in that tier's frame.
+bool still_mask_crossed(float2 from, float2 to, uint tier) {
     bool crossed = false;
     uint taps = clamp(uint(ceil(length(to - from) / 3.0)), 1u, 24u);
     for (uint tap = 1u; tap <= taps; ++tap) {
-        crossed = crossed || still_mask_at(lerp(from, to, float(tap) / float(taps)), true);
+        crossed = crossed || still_mask_at(lerp(from, to, float(tap) / float(taps)), tier);
     }
     return crossed;
 }
@@ -1058,7 +1077,25 @@ float still_moved_ratio() { return float(still_tuning(15u, 5u, 0u, 100u)) / 100.
 // 3: tint generated frames by the still mask (live_tuning hybrid_tint).
 bool still_tint() { return still_tuning(12u, 0u, 0u, 3u) == 3u; }
 
-StrokeProbe probe_stroke(float2 pixel, uint slice, bool previous_frame) {
+// Which frame a stroke probe reads: B, A at its own image pixels (a
+// helmet's HUD), or A through the head pose (V573: a cockpit's instruments).
+static const uint kProbeCurrent = 0u;
+static const uint kProbeImage = 1u;
+static const uint kProbePose = 2u;
+
+CameraSample probe_sample(float2 pixel, uint slice, uint frame) {
+    CameraSample sample;
+    if (frame == kProbeImage) {
+        sample = sample_previous_image(pixel, slice, ViewIndex);
+    } else if (frame == kProbePose) {
+        sample = sample_previous_target(pixel, slice, ViewIndex);
+    } else {
+        sample = sample_current_target(pixel, slice, ViewIndex);
+    }
+    return sample;
+}
+
+StrokeProbe probe_image_stroke(float2 pixel, uint slice, uint frame) {
     StrokeProbe probe;
     probe.gradient = float2(0.0, 0.0);
     probe.strength = 0.0;
@@ -1071,18 +1108,12 @@ StrokeProbe probe_stroke(float2 pixel, uint slice, bool previous_frame) {
     // difference across adjacent pixels sees a pattern two pixels wide (a
     // HUD panel's scanlines), which one taken either side of the pixel
     // cannot - its two taps are always the same phase of it. A is read at
-    // its own image pixels (sample_previous_image): a HUD sits at the same
-    // screen place in both frames however the head moved.
-    CameraSample c, r, d;
-    if (previous_frame) {
-        c = sample_previous_image(pixel, slice, ViewIndex);
-        r = sample_previous_image(pixel + float2(1.0, 0.0), slice, ViewIndex);
-        d = sample_previous_image(pixel + float2(0.0, 1.0), slice, ViewIndex);
-    } else {
-        c = sample_current_target(pixel, slice, ViewIndex);
-        r = sample_current_target(pixel + float2(1.0, 0.0), slice, ViewIndex);
-        d = sample_current_target(pixel + float2(0.0, 1.0), slice, ViewIndex);
-    }
+    // its own image pixels (sample_previous_image) for a helmet's HUD, which
+    // sits at the same screen place in both frames however the head moved,
+    // or through the pose for a cockpit's (V573).
+    CameraSample c = probe_sample(pixel, slice, frame);
+    CameraSample r = probe_sample(pixel + float2(1.0, 0.0), slice, frame);
+    CameraSample d = probe_sample(pixel + float2(0.0, 1.0), slice, frame);
     float luma_c = edge_luma(c.color);
     float luma_r = edge_luma(r.color), luma_d = edge_luma(d.color);
     probe.gradient = float2(luma_r - luma_c, luma_d - luma_c);
@@ -1104,14 +1135,8 @@ StrokeProbe probe_stroke(float2 pixel, uint slice, bool previous_frame) {
         float near_minus = forward ? luma_c : luma_next;
         float2 plus_at = forward ? abs(probe.axis) : float2(0.0, 0.0);
         float2 minus_at = forward ? float2(0.0, 0.0) : abs(probe.axis);
-        CameraSample far_plus, far_minus;
-        if (previous_frame) {
-            far_plus = sample_previous_image(pixel + plus_at + 2.0 * probe.axis, slice, ViewIndex);
-            far_minus = sample_previous_image(pixel + minus_at - 2.0 * probe.axis, slice, ViewIndex);
-        } else {
-            far_plus = sample_current_target(pixel + plus_at + 2.0 * probe.axis, slice, ViewIndex);
-            far_minus = sample_current_target(pixel + minus_at - 2.0 * probe.axis, slice, ViewIndex);
-        }
+        CameraSample far_plus = probe_sample(pixel + plus_at + 2.0 * probe.axis, slice, frame);
+        CameraSample far_minus = probe_sample(pixel + minus_at - 2.0 * probe.axis, slice, frame);
         // The luma rises along the axis across this pixel. A bright stroke
         // on the plus side falls again beyond it; a dark stroke on the
         // minus side rises again beyond it. (Until V559's tenth rebuild the
@@ -1132,6 +1157,22 @@ StrokeProbe probe_stroke(float2 pixel, uint slice, bool previous_frame) {
             : 0.0;
         // The brighter side (the luma rises along the axis).
         probe.color = forward ? (abs(probe.axis.x) > 0.0 ? r.color : d.color) : c.color;
+    }
+    return probe;
+}
+
+// V573: A through the pose at a target pixel is A's image read around the
+// pixel's mapped place: one mapping a probe instead of one a tap (the
+// mapping is a rotation, near enough a translation over five pixels).
+StrokeProbe probe_stroke(float2 pixel, uint slice, uint frame) {
+    StrokeProbe probe;
+    [branch] if (frame == kProbePose) {
+        MappedCoordinate mapped = map_target_to_source(pixel, PreviousMappings[ViewIndex]);
+        probe = probe_image_stroke(mapped.coordinate, slice, kProbeImage);
+        probe.edge = probe.edge && mapped.valid >= 0.5;
+        probe.stroke = probe.stroke && mapped.valid >= 0.5;
+    } else {
+        probe = probe_image_stroke(pixel, slice, frame);
     }
     return probe;
 }
@@ -1161,10 +1202,10 @@ bool strokes_match(StrokeProbe previous, StrokeProbe current) {
 // same place in A and in B is content that stayed whatever the flow says.
 // The per-pixel form, for a pair without the still mask.
 bool edge_stationary_patch(float2 pixel, uint slice, float4 current) {
-    StrokeProbe now = probe_stroke(pixel, slice, false);
+    StrokeProbe now = probe_stroke(pixel, slice, kProbeCurrent);
     bool stationary = false;
     [branch] if (now.stroke) {
-        stationary = strokes_match(probe_stroke(pixel, slice, true), now);
+        stationary = strokes_match(probe_stroke(pixel, slice, kProbeImage), now);
     }
     return stationary;
 }
@@ -1173,11 +1214,13 @@ bool edge_stationary_patch(float2 pixel, uint slice, float4 current) {
 // own offset, scaled by the fraction, the two frames blended there. A stroke
 // at X in B sat at X + offset in A, so at the fraction it is at
 // X + (1 - f) * offset: this pixel reads A at p + f * offset and B at
-// p - (1 - f) * offset.
+// p - (1 - f) * offset. A is read at its image pixel for a helmet's stroke,
+// through the pose for a cockpit's (V573: what a still world pixel blends).
 float4 still_mask_color(float2 pixel, uint word, float4 fallback) {
     float2 offset = still_mask_offset(word);
     float f = synthesis_fraction();
-    CameraSample a = sample_previous_image(pixel + f * offset, Slice, ViewIndex);
+    CameraSample a = probe_sample(pixel + f * offset, Slice,
+        still_mask_tier(word) == kStillCockpit ? kProbePose : kProbeImage);
     CameraSample b = sample_current_target(pixel - (1.0 - f) * offset, Slice, ViewIndex);
     float4 color = fallback;
     if (a.valid >= 0.5 && b.valid >= 0.5) {
@@ -1756,6 +1799,8 @@ float4 synthesize_midpoint(
     float4 hud_color = float4(0.0, 0.0, 0.0, 1.0);
     // V560, for the still mask's tint: the pixel held by the mask.
     bool still_held = false;
+    // V573: held as a cockpit's stroke (the tint's green).
+    bool cockpit_held = false;
 #ifdef XRFG_HYBRID
     last_disagreement = 1.0;
     last_vectors_case = 0u;
@@ -1794,6 +1839,14 @@ float4 synthesize_midpoint(
                 float2 pose_shift = shifted.valid >= 0.5 ? shifted.coordinate - pixel : float2(0.0, 0.0);
                 hud_source = pixel - (1.0 - synthesis_fraction()) * pose_shift;
                 still_word = still_mask_word(hud_source, true);
+                // V573: a cockpit's stroke is not moved by the pose shift -
+                // the frame carries B's pose and the compositor places the
+                // cockpit, as it does the struts - so it is looked for at
+                // the pixel itself, where no helmet's stroke is.
+                if (still_mask_tier(still_word) != kStillHelmet) {
+                    uint cockpit_word = still_mask_word(pixel, true);
+                    still_word = still_mask_tier(cockpit_word) == kStillCockpit ? cockpit_word : 0u;
+                }
             }
             // The mask first: a HUD element over uniform space passes the
             // unchanged-pixel test too, and that would hold it at B's place
@@ -1838,7 +1891,9 @@ float4 synthesize_midpoint(
                 // where the mask found one.
                 if (edge_stationary) {
                     if (still_mask_available()) {
-                        output_color = still_mask_color(hud_source, still_word, output_color);
+                        cockpit_held = still_mask_tier(still_word) == kStillCockpit;
+                        output_color = still_mask_color(
+                            cockpit_held ? pixel : hud_source, still_word, output_color);
                         still_held = true;
                     } else {
                         CameraSample image_previous = sample_previous_image(pixel, Slice, ViewIndex);
@@ -1964,8 +2019,13 @@ float4 synthesize_midpoint(
                     bool previous_on_mask = previous_source.valid >= 0.5 &&
                         still_mask_crossed(
                             pixel_source.valid >= 0.5 ? pixel_source.coordinate : pixel,
-                            previous_source.coordinate);
-                    bool current_on_mask = still_mask_crossed(pixel, current_coordinate);
+                            previous_source.coordinate, kStillHelmet);
+                    // V573: a cockpit's stroke sat in A where the pose puts
+                    // it, so the A sample's path is tested in B's frame, as
+                    // the B sample's is.
+                    previous_on_mask = previous_on_mask ||
+                        still_mask_crossed(pixel, previous_coordinate, kStillCockpit);
+                    bool current_on_mask = still_mask_crossed(pixel, current_coordinate, 0u);
                     uint current_word = still_mask_word(current_coordinate, true);
                     if (previous_on_mask && current_on_mask) {
                         hud_exclude = true;
@@ -2315,13 +2375,15 @@ float4 synthesize_midpoint(
         output_color = hud_color;
     }
     // V560: the still mask's tint (the tuning window's third box), on
-    // generated frames only: magenta held, yellow a warped sample refused
-    // for crossing the mask (cyan, V560-V561, held by a head-motion
-    // confirmation). Nested: fxc evaluates both sides of &&, and the block
-    // is read only at the few pixels the mask touched.
+    // generated frames only: magenta held, green held as a cockpit's stroke
+    // (V573), yellow a warped sample refused for crossing the mask (cyan,
+    // V560-V561, held by a head-motion confirmation). Nested: fxc evaluates
+    // both sides of &&, and the block is read only at the few pixels the
+    // mask touched.
     [branch] if (still_held || hud_exclude) {
         [branch] if (still_tint()) {
-            float3 tint = still_held ? float3(1.0, 0.0, 1.0) : float3(1.0, 1.0, 0.0);
+            float3 tint = cockpit_held ? float3(0.0, 1.0, 0.0)
+                : still_held ? float3(1.0, 0.0, 1.0) : float3(1.0, 1.0, 0.0);
             output_color.rgb = lerp(output_color.rgb, tint, 0.5);
         }
     }
@@ -2480,6 +2542,170 @@ float4 SynthesizeNvidiaFastBidirectionalMidpointPS(
 // image. BuildStillMask writes, per texel, whether the stroke at its even
 // pixel stayed in place between the frames; DilateStillMask grows that by a
 // texel into the slice a pixel's own stillness reads.
+
+// V573: bit 25 of the mask passes' flags is the pair's parity: the ages are
+// read from slice 4s + 2 + parity and written to the other, so a texel can
+// read a neighbour's age from the last pair while the neighbour writes its
+// new one.
+uint still_age_read_slice() {
+    return kStillMaskSlices * Slice + 2u + ((SynthesisFlags >> 25u) & 1u);
+}
+uint still_age_write_slice() {
+    return kStillMaskSlices * Slice + 3u - ((SynthesisFlags >> 25u) & 1u);
+}
+
+// One tier's reading of a texel's edges in A: whether one matched, whether
+// a matched one is a stroke, and whether the match is a dim element's.
+struct StillMatch {
+    bool matched;
+    bool stroke;
+    bool dim;
+    float dim_strength;
+};
+
+// An edge is matched where the same edge is in A at the tier's place (10/255
+// contrast, the weaker at least 40% of the stronger, their orientations
+// within a cosine of 0.85). V561: an edge sharp in both frames and dimmer
+// than kStillDim is a dim HUD element's, judged on its own contrast
+// (`dim_strength`, its weakest matched strength): its colour differences are
+// a few levels, which the fixed margin and share never let it win, and it
+// ghosted on stick turns. Any other edge - a light's soft glow among them -
+// takes the fixed margin. Dim is the reading only where no matched edge of
+// the texel is a bright one. (V559-V561 also had a loose tier, held once a
+// head motion confirmed it, with its own sliders; at the values the headset
+// settled on it matched only edges identical in both frames, which the age
+// holds anyway, and V562 removed it.)
+StillMatch match_still_edges(float2 pixel, StrokeProbe now, StrokeProbe now_odd, uint frame) {
+    StillMatch match;
+    match.matched = false;
+    match.stroke = false;
+    match.dim = false;
+    match.dim_strength = 1.0;
+    bool bright = false;
+    [branch] if (now.edge) {
+        StrokeProbe before = probe_stroke(pixel, Slice, frame);
+        bool sharp = before.sharpness >= kStillSharp && now.sharpness >= kStillSharp;
+        float weakest = min(before.strength, now.strength);
+        match.matched = edges_match(before, now);
+        match.stroke = match.matched && now.stroke;
+        if (match.matched && sharp && weakest < kStillDim) {
+            match.dim = true;
+            match.dim_strength = min(match.dim_strength, weakest);
+        } else if (match.matched) {
+            bright = true;
+        }
+    }
+    [branch] if (now_odd.edge) {
+        StrokeProbe before_odd = probe_stroke(pixel + float2(1.0, 1.0), Slice, frame);
+        bool sharp_odd = before_odd.sharpness >= kStillSharp && now_odd.sharpness >= kStillSharp;
+        float weakest_odd = min(before_odd.strength, now_odd.strength);
+        bool matched_odd = edges_match(before_odd, now_odd);
+        match.stroke = match.stroke || (matched_odd && now_odd.stroke);
+        match.matched = match.matched || matched_odd;
+        if (matched_odd && sharp_odd && weakest_odd < kStillDim) {
+            match.dim = true;
+            match.dim_strength = min(match.dim_strength, weakest_odd);
+        } else if (matched_odd) {
+            bright = true;
+        }
+    }
+    match.dim = match.dim && !bright;
+    return match;
+}
+
+// The age a matched edge has this pair, from the last pair's. Held only
+// where holding explains the two frames better than moving: A at the tier's
+// place (its own image place for a helmet's stroke, through the pose for a
+// cockpit's) against B, and A where the flow (or the game's vectors, where
+// the pair has them) says this content came from against B, over the three
+// pixels the probe read. A HUD stays still while the world moves past; world
+// content, however its edges match by chance, is where the motion put it.
+// Where nothing moved the two readings are alike and the age is left as it
+// is: a HUD that has earned its age keeps it through a still view, and
+// nothing ghosts there anyway.
+//
+// V573: a cockpit's stroke is judged on its edge: A through the pose is a
+// bilinear reading between pixels, which blurs a thin stroke by up to half
+// its contrast, and the colour share (5%) is never won. It is held where the
+// edge is not where the motion says the content came from (`moved_edge`
+// false: no matching edge there in A) and the pose reading explains the
+// colours at least as well as the moved one. A world edge the motion
+// describes has its match at the moved place; one that happens to match at
+// its pose place, where the motion is wrong (a light), is world content that
+// stayed - what holding shows.
+uint judge_still_age(
+    float2 pixel, float2 residual, float pose_shift, uint frame, StillMatch match,
+    bool moved_edge, uint previous_age) {
+    // V560: for a helmet's stroke, nothing moved on the screen only where
+    // neither the content nor the head did. (V559 asked the content alone,
+    // so a head motion over a still scene judged nothing.) V573: a cockpit's
+    // is read through the pose, so only the content's motion beyond the
+    // pose - the stick's - tells it from the world.
+    bool helmet = frame == kProbeImage;
+    uint age = previous_age;
+    [branch] if (length(residual) >= 1.0 || (helmet && pose_shift >= 1.0)) {
+        float still_error = 0.0, moved_error = 0.0, pose_error = 0.0;
+        // Whether this pair can judge: every sample of holding's reading, and of
+        // at least one of moving's, could be fetched (a sample off the frame or
+        // a cropped viewport is no evidence).
+        bool judged = true;
+        // V560: for a helmet's stroke with the head moving, moved is also read
+        // by the head pose alone, and the better of the two readings counts. A
+        // far light follows the pose exactly while the flow on a light and its
+        // glow is poor; a head-locked HUD follows neither. Without head motion
+        // the pose reading is the still one, so it is not taken (stick turns are
+        // judged by the flow alone). For a cockpit's the pose reading IS the
+        // still one.
+        bool pose_valid = helmet && pose_shift >= 2.0;
+        bool flow_valid = true;
+        float2 taps[3] = {float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0)};
+        [unroll] for (uint tap = 0u; tap < 3u; ++tap) {
+            float2 at = pixel + taps[tap];
+            CameraSample b = sample_current_target(at, Slice, ViewIndex);
+            CameraSample a_still = probe_sample(at, Slice, frame);
+            CameraSample a_moved = sample_previous_target(at + residual, Slice, ViewIndex);
+            CameraSample a_pose = sample_previous_target(at, Slice, ViewIndex);
+            judged = judged && b.valid >= 0.5 && a_still.valid >= 0.5;
+            flow_valid = flow_valid && a_moved.valid >= 0.5;
+            pose_valid = pose_valid && a_pose.valid >= 0.5;
+            still_error += rgb_error(a_still.color, b.color);
+            moved_error += rgb_error(a_moved.color, b.color);
+            pose_error += rgb_error(a_pose.color, b.color);
+        }
+        // V560: moved by whichever readings could be fetched - the pose alone
+        // where the flow's points off the frame (a wild vector on a light).
+        judged = judged && (flow_valid || pose_valid);
+        moved_error = flow_valid && pose_valid ? min(moved_error, pose_error)
+            : pose_valid ? pose_error : moved_error;
+        // Still must beat moved by a margin, and by the window's share (5% built
+        // in since V561, 75% in V559): a repeating pattern moved by its period
+        // reads 0 either way, and that is not a HUD. V561: a dim HUD element's
+        // edge on its own scale - a margin of a tenth of its contrast a pixel,
+        // and a share of at least half (0 still holds nothing): over a few levels
+        // of contrast, moving's error is only a little larger than the contrast
+        // itself.
+        float share = still_moved_ratio();
+        float margin = match.dim ? 3.0 * 0.1 * match.dim_strength : 3.0 * 2.0 / 255.0;
+        if (match.dim && share > 0.0) {
+            share = max(share, 0.5);
+        }
+        bool still_wins = helmet ? judged && still_error + margin <= share * moved_error
+                                 : judged && share > 0.0 && !moved_edge && still_error <= moved_error;
+        // V560: the age resets only where moving clearly explains the two frames
+        // (its error under half of holding's), and is kept where neither reading
+        // clearly wins: lines of HUD text stacked close together, on a vertical
+        // head motion of about their spacing, are explained by the pose reading
+        // about as well as by holding (one line lands where the next was). A
+        // light on a head motion still resets (the pose explains it).
+        bool moved_wins = helmet ? judged && 2.0 * moved_error + margin <= still_error
+                                 : judged && moved_edge && moved_error <= still_error;
+        // V573: four bits an age (both tiers share the byte); the highest
+        // threshold is six.
+        age = still_wins ? min(previous_age + 1u, 15u) : moved_wins ? 0u : previous_age;
+    }
+    return age;
+}
+
 [numthreads(8, 8, 1)]
 void BuildStillMask(uint3 id : SV_DispatchThreadID) {
     uint2 size = (uint2(Width, Height) + 1u) / 2u;
@@ -2488,58 +2714,11 @@ void BuildStillMask(uint3 id : SV_DispatchThreadID) {
     // blur a two-pixel stroke away. The odd one is the dilation's.
     float2 pixel = float2(id.xy) * 2.0;
     uint word = 0u;
-    uint age = 0u;
     // Both parities: the edge between adjacent pixels sits on one of the
     // texel's two columns and one of its two rows, so the even pixel and
     // the odd one diagonally next to it are both probed.
-    StrokeProbe now = probe_stroke(pixel, Slice, false);
-    StrokeProbe now_odd = probe_stroke(pixel + float2(1.0, 1.0), Slice, false);
-    // An edge is matched where the same edge is at the same image place in
-    // A (10/255 contrast, the weaker at least 40% of the stronger, their
-    // orientations within a cosine of 0.85). V561: an edge sharp in both
-    // frames and dimmer than kStillDim is a dim HUD element's, judged below
-    // on its own contrast (`dim_strength`, its weakest matched strength):
-    // its colour differences are a few levels, which the fixed margin and
-    // share never let it win, and it ghosted on stick turns. Any other
-    // edge - a light's soft glow among them - takes the fixed margin. Dim
-    // is the reading only where no matched edge of the texel is a bright
-    // one. (V559-V561 also had a loose tier, held once a head motion
-    // confirmed it, with its own sliders; at the values the headset settled
-    // on it matched only edges identical in both frames, which the age
-    // holds anyway, and V562 removed it.)
-    bool matched = false, stroke = false;
-    bool dim = false, bright = false;
-    float dim_strength = 1.0;
-    [branch] if (now.edge) {
-        StrokeProbe before = probe_stroke(pixel, Slice, true);
-        bool sharp = before.sharpness >= kStillSharp && now.sharpness >= kStillSharp;
-        float weakest = min(before.strength, now.strength);
-        matched = edges_match(before, now);
-        stroke = matched && now.stroke;
-        if (matched && sharp && weakest < kStillDim) {
-            dim = true;
-            dim_strength = min(dim_strength, weakest);
-        } else if (matched) {
-            bright = true;
-        }
-    }
-    [branch] if (now_odd.edge) {
-        StrokeProbe before_odd = probe_stroke(pixel + float2(1.0, 1.0), Slice, true);
-        bool sharp_odd = before_odd.sharpness >= kStillSharp && now_odd.sharpness >= kStillSharp;
-        float weakest_odd = min(before_odd.strength, now_odd.strength);
-        bool matched_odd = edges_match(before_odd, now_odd);
-        stroke = stroke || (matched_odd && now_odd.stroke);
-        matched = matched || matched_odd;
-        if (matched_odd && sharp_odd && weakest_odd < kStillDim) {
-            dim = true;
-            dim_strength = min(dim_strength, weakest_odd);
-        } else if (matched_odd) {
-            bright = true;
-        }
-    }
-    dim = dim && !bright;
-    MappedCoordinate shifted = map_source_to_target(pixel, PreviousMappings[ViewIndex]);
-    float pose_shift = shifted.valid >= 0.5 ? length(shifted.coordinate - pixel) : 0.0;
+    StrokeProbe now = probe_stroke(pixel, Slice, kProbeCurrent);
+    StrokeProbe now_odd = probe_stroke(pixel + float2(1.0, 1.0), Slice, kProbeCurrent);
     // The edge at its own image place in A: a head-locked HUD is there
     // whatever the head did (the composition moves it by the pose shift).
     // No search around it: a world edge moving a few pixels a pair would
@@ -2547,24 +2726,43 @@ void BuildStillMask(uint3 id : SV_DispatchThreadID) {
     // in text a neighbouring stroke of the same glyph matches as well as
     // this one. (The word's offset bits stay for a HUD that sways of its
     // own, should one turn up; none is written now.)
-    //
+    StillMatch helmet = match_still_edges(pixel, now, now_odd, kProbeImage);
+    // V573: and at its place in A through the head pose: a ship's
+    // instruments on its canopy stay with the cockpit, which the head moves
+    // across the image like the struts, while the world turns past them on
+    // the stick. Static world content matches there too, but holding it
+    // there is what a still world pixel shows anyway; only content the flow
+    // says moved is judged.
+    // Where the head moved less than half a pixel the two places are one,
+    // and the helmet's reading is taken as it is.
+    MappedCoordinate shifted = map_source_to_target(pixel, PreviousMappings[ViewIndex]);
+    float pose_shift = shifted.valid >= 0.5 ? length(shifted.coordinate - pixel) : 0.0;
+    StillMatch cockpit = helmet;
+    [branch] if (pose_shift >= 0.5) {
+        cockpit = match_still_edges(pixel, now, now_odd, kProbePose);
+    }
     // And there for pairs in a row: a HUD is, a world edge that happens to
     // sit still on the screen for one pair (a light, a strut) seldom is
     // once the view moves. A stroke counts from its second pair, a step
     // (a panel's border, which a surface's outline resembles) from its
-    // third.
-    // Held only where holding explains the two frames better than moving:
-    // A at this pixel's own image place against B, and A where the flow (or
-    // the game's vectors, where the pair has them) says this content came
-    // from against B, over the three pixels the probe read. A HUD stays
-    // still while the world moves past; world content, however its edges
-    // match by chance, is where the motion put it. Where nothing moved the
-    // two readings are alike and the age is left as it is: a HUD that has
-    // earned its age keeps it through a still view, and nothing ghosts
-    // there anyway. The age byte holds the age alone (bit 7 was the loose
-    // tier's confirmation until V562).
-    uint previous_age = StillMaskOut[uint3(id.xy, 3u * Slice + 2u)] & 127u;
-    [branch] if (matched) {
+    // third. The age byte holds a helmet's age in bits 0-3 and a cockpit's
+    // in bits 4-7 (V573; until then the one age, bit 7 the loose tier's
+    // confirmation until V562). A helmet's stroke was at this texel in the
+    // last pair; a cockpit's where the pose put it in A, which was the last
+    // pair's B.
+    uint read_slice = still_age_read_slice();
+    uint previous_helmet = StillMaskOut[uint3(id.xy, read_slice)] & 15u;
+    uint previous_cockpit = 0u;
+    [branch] if (cockpit.matched) {
+        MappedCoordinate came_from = map_target_to_source(pixel, PreviousMappings[ViewIndex]);
+        if (came_from.valid >= 0.5) {
+            int2 texel = clamp(int2(floor((came_from.coordinate + 0.5) * 0.5)),
+                int2(0, 0), int2(size) - int2(1, 1));
+            previous_cockpit = StillMaskOut[uint3(texel, read_slice)] >> 4u;
+        }
+    }
+    uint helmet_age = 0u, cockpit_age = 0u;
+    [branch] if (helmet.matched || cockpit.matched) {
         bool vectors = GameMotionRect.z >= 1.0 && GameMotionRect.w >= 1.0;
         float2 residual;
         if (vectors) {
@@ -2577,74 +2775,34 @@ void BuildStillMask(uint3 id : SV_DispatchThreadID) {
             MappedCoordinate coverage = map_target_to_source(pixel, PreviousMappings[ViewIndex]);
             residual = nvidia ? raw : raw - (coverage.coordinate - pixel);
         }
-        // V560: nothing moved on the screen only where neither the content
-        // nor the head did. (V559 asked the content alone, so a head motion
-        // over a still scene judged nothing.)
-        if (length(residual) < 1.0 && pose_shift < 1.0) {
-            age = previous_age;
-        } else {
-            float still_error = 0.0, moved_error = 0.0, pose_error = 0.0;
-            // Whether this pair can judge: every sample of holding's
-            // reading, and of at least one of moving's, could be fetched (a
-            // sample off the frame or a cropped viewport is no evidence).
-            bool judged = true;
-            // V560: with the head moving, moved is also read by the head
-            // pose alone, and the better of the two readings counts. A far
-            // light follows the pose exactly while the flow on a light and
-            // its glow is poor; a head-locked HUD follows neither. Without
-            // head motion the pose reading is the still one, so it is not
-            // taken (stick turns are judged by the flow alone).
-            bool pose_valid = pose_shift >= 2.0;
-            bool flow_valid = true;
-            float2 taps[3] = {float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0)};
-            [unroll] for (uint tap = 0u; tap < 3u; ++tap) {
-                float2 at = pixel + taps[tap];
-                CameraSample b = sample_current_target(at, Slice, ViewIndex);
-                CameraSample a_still = sample_previous_image(at, Slice, ViewIndex);
-                CameraSample a_moved = sample_previous_target(at + residual, Slice, ViewIndex);
-                CameraSample a_pose = sample_previous_target(at, Slice, ViewIndex);
-                judged = judged && b.valid >= 0.5 && a_still.valid >= 0.5;
-                flow_valid = flow_valid && a_moved.valid >= 0.5;
-                pose_valid = pose_valid && a_pose.valid >= 0.5;
-                still_error += rgb_error(a_still.color, b.color);
-                moved_error += rgb_error(a_moved.color, b.color);
-                pose_error += rgb_error(a_pose.color, b.color);
+        [branch] if (helmet.matched) {
+            helmet_age = judge_still_age(pixel, residual, pose_shift, kProbeImage, helmet,
+                false, previous_helmet);
+        }
+        [branch] if (cockpit.matched) {
+            // The same edge in A where the motion says this content came
+            // from, at either parity.
+            bool moved_edge = false;
+            [branch] if (now.edge) {
+                moved_edge = edges_match(probe_stroke(pixel + residual, Slice, kProbePose), now);
             }
-            // V560: moved by whichever readings could be fetched - the pose
-            // alone where the flow's points off the frame (a wild vector on
-            // a light).
-            judged = judged && (flow_valid || pose_valid);
-            moved_error = flow_valid && pose_valid ? min(moved_error, pose_error)
-                : pose_valid ? pose_error : moved_error;
-            // Still must beat moved by a margin, and by the window's share
-            // (5% built in since V561, 75% in V559): a repeating pattern
-            // moved by its period reads 0 either way, and that is not a HUD.
-            // V561: a dim HUD element's edge on its own scale - a margin of a
-            // tenth of its contrast a pixel, and a share of at least half (0
-            // still holds nothing): over a few levels of contrast, moving's
-            // error is only a little larger than the contrast itself.
-            float share = still_moved_ratio();
-            float margin = dim ? 3.0 * 0.1 * dim_strength : 3.0 * 2.0 / 255.0;
-            if (dim && share > 0.0) {
-                share = max(share, 0.5);
+            [branch] if (now_odd.edge && !moved_edge) {
+                moved_edge = edges_match(
+                    probe_stroke(pixel + float2(1.0, 1.0) + residual, Slice, kProbePose), now_odd);
             }
-            bool still_wins = judged && still_error + margin <= share * moved_error;
-            // V560: the age resets only where moving clearly explains the
-            // two frames (its error under half of holding's), and is kept
-            // where neither reading clearly wins: lines of HUD text stacked
-            // close together, on a vertical head motion of about their
-            // spacing, are explained by the pose reading about as well as by
-            // holding (one line lands where the next was). A light on a head
-            // motion still resets (the pose explains it).
-            bool moved_wins = judged && 2.0 * moved_error + margin <= still_error;
-            age = still_wins ? min(previous_age + 1u, 127u) : moved_wins ? 0u : previous_age;
+            cockpit_age = judge_still_age(pixel, residual, pose_shift, kProbePose, cockpit,
+                moved_edge, previous_cockpit);
         }
     }
-    if (matched && age >= still_age_pairs() + (stroke ? 0u : 1u)) {
+    // A helmet's stroke first: without head motion the two tiers are one,
+    // and the helmet's placement is the one V559-V572 held.
+    if (helmet.matched && helmet_age >= still_age_pairs() + (helmet.stroke ? 0u : 1u)) {
         word = still_mask_pack(int2(0, 0));
+    } else if (cockpit.matched && cockpit_age >= still_age_pairs() + (cockpit.stroke ? 0u : 1u)) {
+        word = still_mask_pack(int2(0, 0)) | 64u;
     }
-    StillMaskOut[uint3(id.xy, 3u * Slice)] = word;
-    StillMaskOut[uint3(id.xy, 3u * Slice + 2u)] = age;
+    StillMaskOut[uint3(id.xy, kStillMaskSlices * Slice)] = word;
+    StillMaskOut[uint3(id.xy, still_age_write_slice())] = helmet_age | (cockpit_age << 4u);
 }
 
 [numthreads(8, 8, 1)]
@@ -2652,16 +2810,17 @@ void DilateStillMask(uint3 id : SV_DispatchThreadID) {
     uint2 size = (uint2(Width, Height) + 1u) / 2u;
     if (id.x >= size.x || id.y >= size.y) return;
     int2 limit = int2(size) - int2(1, 1);
-    // Its own word, else a neighbour's (they share a stroke's offset).
-    uint grown = StillMaskOut[uint3(id.xy, 3u * Slice)];
+    // Its own word, else a neighbour's (they share a stroke's offset and
+    // tier).
+    uint grown = StillMaskOut[uint3(id.xy, kStillMaskSlices * Slice)];
     [unroll] for (int dy = -1; dy <= 1; ++dy) {
         [unroll] for (int dx = -1; dx <= 1; ++dx) {
             int2 texel = clamp(int2(id.xy) + int2(dx, dy), int2(0, 0), limit);
-            uint neighbour = StillMaskOut[uint3(texel, 3u * Slice)];
+            uint neighbour = StillMaskOut[uint3(texel, kStillMaskSlices * Slice)];
             grown = grown != 0u ? grown : neighbour;
         }
     }
-    StillMaskOut[uint3(id.xy, 3u * Slice + 1u)] = grown;
+    StillMaskOut[uint3(id.xy, kStillMaskSlices * Slice + 1u)] = grown;
 }
 #endif
 

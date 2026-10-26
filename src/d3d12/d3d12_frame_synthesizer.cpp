@@ -138,9 +138,12 @@ constexpr UINT kStillMaskFlag = 64U;
 // V563: bit 7, the tray's "HUD fix" on: the composition holds head-locked
 // HUD strokes (by the still mask where kStillMaskFlag, else per pixel).
 constexpr UINT kHudFixFlag = 128U;
-// Per image slice: the mask as built, grown by a texel, and the texel's age
-// in pairs (how many in a row its edge stayed in place).
-constexpr UINT kStillMaskSlicesPerImageSlice = 3;
+// Per image slice: the mask as built, grown by a texel, and the texel's ages
+// in pairs (how many in a row its edge stayed in place) twice - V573: read
+// from one and written to the other by the pair's parity, flag bit 25 of the
+// mask passes.
+constexpr UINT kStillMaskSlicesPerImageSlice = 4;
+constexpr UINT kStillMaskParityShift = 25U;
 // (Bit 3 and bits 24-26 were the depth search's tiles, V530-V554.)
 // The composition's per-eye verdict words (guide_compose.hlsl): four each.
 constexpr UINT kComposeVerdictBytes = 256;
@@ -1054,6 +1057,9 @@ struct D3D12FrameSynthesizer::Impl {
     UINT still_mask_height{};
     UINT still_mask_slices{};
     D3D12_RESOURCE_STATES still_mask_state{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+    // V573: the parity of the next pair's mask passes (which age slice they
+    // read).
+    UINT still_mask_parity{};
     // V546: the eye-order measurement (frame_synthesis.hlsl, XRFG_EYE_ORDER)
     // and its verdict, copied into the slot's eye_order_readback.
     ComPtr<ID3D12PipelineState> eye_order_clear_pipeline;
@@ -2450,7 +2456,8 @@ struct D3D12FrameSynthesizer::Impl {
                     offset_cpu_handle(cpu_start,
                         block * kDescriptorBlockSize + 10U,
                         descriptor_increment));
-                // V559: the still mask at t12, two slices per image slice.
+                // V559: the still mask at t12, kStillMaskSlicesPerImageSlice
+                // slices per image slice.
                 D3D12_SHADER_RESOURCE_VIEW_DESC null_still = null_mask;
                 null_still.Format = DXGI_FORMAT_R8_UINT;
                 null_still.Texture2DArray.ArraySize =
@@ -3968,8 +3975,11 @@ struct D3D12FrameSynthesizer::Impl {
         list->SetComputeRootSignature(root_signature.Get());
         // Per view: its image slice and mapping; the frames are at t0/t1 of
         // every block.
+        const UINT parity = still_mask_parity << kStillMaskParityShift;
+        still_mask_parity ^= 1U;
         const auto bind = [&](UINT view_index) {
             SynthesisParameters parameters = draw_parameters;
+            parameters.synthesis_flags |= parity;
             parameters.slice = resolved_array_slice(target_views[view_index], view_index,
                 target_views.size(), image_description.DepthOrArraySize);
             parameters.view_index = view_index;
