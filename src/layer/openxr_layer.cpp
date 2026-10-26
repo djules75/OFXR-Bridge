@@ -9247,6 +9247,20 @@ void pace_presenter_submission(
 
 void continuous_presenter_main(
     const std::shared_ptr<SessionState>& state) noexcept {
+    // V570: two steps above the game's threads, as a compositor's thread is,
+    // so a CPU the game saturates does not delay the presenter's runtime
+    // calls. The presenter blocks in the runtime or on events and never
+    // spins, so it takes the CPU only for its own short bursts. 773 records
+    // the priority asked for, the one in force and the error if refused.
+    const BOOL priority_set =
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    const DWORD priority_error = priority_set ? ERROR_SUCCESS : GetLastError();
+    xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::presenter_transition,
+        773,
+        static_cast<std::uint32_t>(THREAD_PRIORITY_HIGHEST),
+        static_cast<std::uint32_t>(GetThreadPriority(GetCurrentThread())),
+        priority_error);
     for (;;) {
         {
             std::scoped_lock lock(state->presenter_mutex);
