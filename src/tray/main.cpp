@@ -2470,9 +2470,105 @@ void handle_command(AppState& state, UINT command) {
     }
 }
 
-// V572: why "Games run as administrator" is not recommended, beside the item
-// while it is selected (WM_MENUSELECT) and gone when the selection moves or
-// the menu closes.
+// What a menu item does, for whoever plays: beside the item while it is
+// selected (WM_MENUSELECT) and gone when the selection moves or the menu
+// closes. V572 explained why "Games run as administrator" is not
+// recommended; V575 adds the settings whose cost or condition is not in
+// their name.
+#define XRFG_NVIDIA_BACKEND_TOOLTIP_TAIL \
+    L"\r\n\r\nNVIDIA costs more GPU time than FidelityFX, and in most games " \
+    L"the difference is hard to see. With Hybrid on, keep FidelityFX: the " \
+    L"game's own motion vectors already do the fine work, so NVIDIA's " \
+    L"advantage is usually not visible."
+
+constexpr wchar_t kNvidiaFastTooltip[] =
+    L"Works out the motion with your NVIDIA card's optical flow hardware, at "
+    L"its fastest and least precise setting." XRFG_NVIDIA_BACKEND_TOOLTIP_TAIL;
+
+constexpr wchar_t kNvidiaMediumTooltip[] =
+    L"Works out the motion with your NVIDIA card's optical flow hardware, "
+    L"balancing speed and precision." XRFG_NVIDIA_BACKEND_TOOLTIP_TAIL;
+
+constexpr wchar_t kNvidiaSlowTooltip[] =
+    L"Works out the motion with your NVIDIA card's optical flow hardware, at "
+    L"its most precise setting. The heaviest choice: at high headset "
+    L"resolutions it can take longer than a refresh, and the game then plays "
+    L"choppier. Keep the optical flow resolution at 50% or lower with it."
+    XRFG_NVIDIA_BACKEND_TOOLTIP_TAIL;
+
+constexpr wchar_t kNvidiaBidirectionalTooltip[] =
+    L"NVIDIA backends only. Works out the motion both ways, forward and "
+    L"back, and keeps what agrees: slightly cleaner edges around moving "
+    L"objects.\r\n\r\n"
+    L"Doubles the GPU time of NVIDIA's optical flow. Leave it off if the "
+    L"game is short of frames.";
+
+constexpr wchar_t kFlowFullTooltip[] =
+    L"Works out the motion at your full per-eye resolution.\r\n\r\n"
+    L"Very costly: about four times the GPU time of 50%, for an image that "
+    L"looks almost the same. When the GPU runs out of time, generated frames "
+    L"arrive late and motion gets choppier.\r\n\r\n"
+    L"Prefer 50%, or 25% with Hybrid on: the game's motion vectors then "
+    L"supply the detail.";
+
+constexpr wchar_t kFlowThreeQuarterTooltip[] =
+    L"Works out the motion at three quarters of your per-eye resolution.\r\n\r\n"
+    L"Costly: more than twice the GPU time of 50%, for an image that looks "
+    L"almost the same. When the GPU runs out of time, generated frames arrive "
+    L"late and motion gets choppier.\r\n\r\n"
+    L"Prefer 50%, or 25% with Hybrid on: the game's motion vectors then "
+    L"supply the detail.";
+
+constexpr wchar_t kDeepPipelineTooltip[] =
+    L"Holds each generated frame back by one display refresh, so OFXR has a "
+    L"whole refresh to make it.\r\n\r\n"
+    L"Gain: a game that holds only about half your refresh rate can reach the "
+    L"full rate, and dips are smoother.\r\n"
+    L"Cost: one frame of extra latency, about 11 ms at 90 Hz.\r\n\r\n"
+    L"If your GPU has headroom, try it off: if you still hold your full frame "
+    L"rate, leave it off. Always on with 3X and 4X. Applies the next time the "
+    L"game starts.";
+
+constexpr wchar_t kLowerVramTooltip[] =
+    L"Keeps fewer working images, which saves about half a gigabyte of video "
+    L"memory (VRAM) at high resolutions.\r\n\r\n"
+    L"On most cards it costs nothing. If you see stutter while VRAM is to "
+    L"spare, untick it. Applies the next time the game starts.";
+
+constexpr wchar_t kHybridTooltip[] =
+    L"For games that run DLSS. OFXR combines the motion the game works out "
+    L"for DLSS with its own optical flow, so moving objects keep their shape "
+    L"with less warping.\r\n\r\n"
+    L"The game must have DLSS turned on (or a DLSS mod, for games without "
+    L"it): without DLSS, Hybrid does nothing. Start OFXR before the game. "
+    L"Adds GPU time to every generated frame.\r\n\r\n"
+    L"The FPS overlay shows HYBRID OK in green when it works, or HYBRID KO "
+    L"with a code in red:\r\n"
+    L"820: the game is not using DLSS. Turn DLSS on, or enable its DLSS "
+    L"mod.\r\n"
+    L"821: DLSS is installed but not running. Choose DLSS, not FSR or "
+    L"another upscaler.\r\n"
+    L"828: the DLSS image does not match the eye images. Usually "
+    L"Quad-Views-Foveated or an upscaler's foveated setting: turn it "
+    L"off.\r\n"
+    L"702: the game's graphics API is not supported.\r\n"
+    L"824, 827, 815: OFXR could not use DLSS's data. Send a flight log.";
+
+constexpr wchar_t kHybridDepthSearchTooltip[] =
+    L"Uses the game's depth to keep thin objects in front solid instead of "
+    L"breaking up or ghosting: moving fences, poles, railings and all kinds "
+    L"of vertical bars.\r\n\r\n"
+    L"Especially useful at 3X and 4X; it may matter less in flight sims. "
+    L"Needs Hybrid on. Uses additional GPU time, more at high headset "
+    L"resolutions: turn it off first if your frame rate drops.";
+
+constexpr wchar_t kHudFixTooltip[] =
+    L"Keeps a HUD and cockpit instruments steady in generated frames, "
+    L"instead of smearing or doubling with the scene when you turn.\r\n\r\n"
+    L"The effect depends on the game: designed first for Star Citizen, and "
+    L"most useful at 3X and 4X. Try it if you see HUD issues. Uses "
+    L"additional GPU time.";
+
 constexpr wchar_t kElevatedLayerTooltip[] =
     L"Lets OFXR work in games started as administrator.\r\n\r\n"
     L"Not recommended. It installs OFXR for every user of this PC, and while "
@@ -2483,6 +2579,9 @@ constexpr wchar_t kElevatedLayerTooltip[] =
     L"game's Properties > Compatibility, and in its launcher's, untick "
     L"\"Run this program as an administrator\".";
 
+// The width a tooltip's text wraps at, in pixels.
+constexpr int kMenuTooltipWidth = 400;
+
 void hide_menu_tooltip(AppState& state) {
     if (state.menu_tooltip == nullptr) return;
     TOOLINFOW tool{};
@@ -2492,8 +2591,27 @@ void hide_menu_tooltip(AppState& state) {
     SendMessageW(state.menu_tooltip, TTM_TRACKACTIVATE, FALSE, reinterpret_cast<LPARAM>(&tool));
 }
 
+[[nodiscard]] const wchar_t* menu_tooltip_text(UINT item) noexcept {
+    switch (item) {
+    case backend_nvidia_fast: return kNvidiaFastTooltip;
+    case backend_nvidia_medium: return kNvidiaMediumTooltip;
+    case backend_nvidia_slow: return kNvidiaSlowTooltip;
+    case toggle_nvidia_bidirectional: return kNvidiaBidirectionalTooltip;
+    case nvidia_scale_full: return kFlowFullTooltip;
+    case nvidia_scale_three_quarter: return kFlowThreeQuarterTooltip;
+    case toggle_deep_pipeline: return kDeepPipelineTooltip;
+    case toggle_lower_vram: return kLowerVramTooltip;
+    case toggle_hybrid: return kHybridTooltip;
+    case toggle_hybrid_depth_search: return kHybridDepthSearchTooltip;
+    case toggle_hud_fix: return kHudFixTooltip;
+    case toggle_elevated_layer: return kElevatedLayerTooltip;
+    default: return nullptr;
+    }
+}
+
 void follow_menu_selection(AppState& state, UINT item, UINT flags, HMENU menu) {
-    if (item != toggle_elevated_layer || (flags & MF_POPUP) != 0 || menu == nullptr) {
+    const wchar_t* text = (flags & MF_POPUP) == 0 ? menu_tooltip_text(item) : nullptr;
+    if (text == nullptr || menu == nullptr) {
         hide_menu_tooltip(state);
         return;
     }
@@ -2502,7 +2620,7 @@ void follow_menu_selection(AppState& state, UINT item, UINT flags, HMENU menu) {
     tool.uFlags = TTF_TRACK | TTF_ABSOLUTE;
     tool.hwnd = state.window;
     tool.uId = 1;
-    tool.lpszText = const_cast<wchar_t*>(kElevatedLayerTooltip);
+    tool.lpszText = const_cast<wchar_t*>(text);
     if (state.menu_tooltip == nullptr) {
         INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES};
         InitCommonControlsEx(&controls);
@@ -2512,9 +2630,15 @@ void follow_menu_selection(AppState& state, UINT item, UINT flags, HMENU menu) {
             GetModuleHandleW(nullptr), nullptr);
         if (state.menu_tooltip == nullptr) return;
         SendMessageW(state.menu_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
-        SendMessageW(state.menu_tooltip, TTM_SETMAXTIPWIDTH, 0, 380);
+        SendMessageW(state.menu_tooltip, TTM_SETMAXTIPWIDTH, 0, kMenuTooltipWidth);
+    } else {
+        SendMessageW(state.menu_tooltip, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&tool));
     }
-    // Beside the item, clear of the menu, on the side with room for it.
+    // Beside the item, clear of the menu, on the side with room for it, and
+    // above the bottom of the screen. TTM_GETBUBBLESIZE measured the text
+    // unwrapped, too small, so a tooltip went right off the screen or was
+    // pushed back over the menu; the text is measured here as the tooltip
+    // wraps it, and the window's real size corrects the place once shown.
     RECT rectangle{};
     const int count = GetMenuItemCount(menu);
     for (int position = 0; position < count; ++position) {
@@ -2523,16 +2647,40 @@ void follow_menu_selection(AppState& state, UINT item, UINT flags, HMENU menu) {
             break;
         }
     }
+    MONITORINFO monitor{sizeof(monitor)};
+    GetMonitorInfoW(MonitorFromRect(&rectangle, MONITOR_DEFAULTTONEAREST), &monitor);
+    const auto place = [&](int width, int height) {
+        const int right_room = static_cast<int>(monitor.rcWork.right - rectangle.right);
+        const int left_room = static_cast<int>(rectangle.left - monitor.rcWork.left);
+        const int x = right_room >= width + 8 || right_room >= left_room
+            ? static_cast<int>(rectangle.right) + 8
+            : static_cast<int>(rectangle.left) - 8 - width;
+        const int y = std::max(static_cast<int>(monitor.rcWork.top),
+            std::min(static_cast<int>(rectangle.top),
+                static_cast<int>(monitor.rcWork.bottom) - height));
+        return POINT{x, y};
+    };
+    RECT text_rectangle{0, 0, kMenuTooltipWidth, 0};
+    if (HDC context = GetDC(state.menu_tooltip)) {
+        const auto font = reinterpret_cast<HFONT>(SendMessageW(state.menu_tooltip, WM_GETFONT, 0, 0));
+        const HGDIOBJ previous = font != nullptr ? SelectObject(context, font) : nullptr;
+        DrawTextW(context, text, -1, &text_rectangle,
+            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EXPANDTABS);
+        if (previous != nullptr) SelectObject(context, previous);
+        ReleaseDC(state.menu_tooltip, context);
+    }
+    SendMessageW(state.menu_tooltip, TTM_ADJUSTRECT, TRUE, reinterpret_cast<LPARAM>(&text_rectangle));
+    POINT at = place(text_rectangle.right - text_rectangle.left,
+        text_rectangle.bottom - text_rectangle.top);
+    SendMessageW(state.menu_tooltip, TTM_TRACKPOSITION, 0, MAKELPARAM(at.x, at.y));
     SendMessageW(state.menu_tooltip, TTM_TRACKACTIVATE, TRUE, reinterpret_cast<LPARAM>(&tool));
     RECT tip{};
     GetWindowRect(state.menu_tooltip, &tip);
-    const int width = tip.right - tip.left;
-    MONITORINFO monitor{sizeof(monitor)};
-    GetMonitorInfoW(MonitorFromRect(&rectangle, MONITOR_DEFAULTTONEAREST), &monitor);
-    const int x = rectangle.right + 8 + width <= monitor.rcWork.right
-        ? rectangle.right + 8
-        : rectangle.left - 8 - width;
-    SendMessageW(state.menu_tooltip, TTM_TRACKPOSITION, 0, MAKELPARAM(x, rectangle.top));
+    const POINT corrected = place(tip.right - tip.left, tip.bottom - tip.top);
+    if (corrected.x != tip.left || corrected.y != tip.top) {
+        SendMessageW(state.menu_tooltip, TTM_TRACKPOSITION, 0,
+            MAKELPARAM(corrected.x, corrected.y));
+    }
 }
 
 LRESULT CALLBACK window_procedure(
