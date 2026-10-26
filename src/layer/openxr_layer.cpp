@@ -626,12 +626,17 @@ struct PresenterSlot {
 };
 
 // A flat panel the application submits beside its projection - a quad or a
-// cylinder: UEVR's HUD, a game's menu - as one frame places it (V508).
+// cylinder: UEVR's HUD, a game's menu - as one frame places it (V508). The
+// part of the swapchain it shows tells apart panels that share one swapchain
+// (V574): OpenKneeboard draws every kneeboard into a single image.
 struct PanelPose {
     XrStructureType type{};
     XrSwapchain swapchain{XR_NULL_HANDLE};
     XrSpace space{XR_NULL_HANDLE};
     XrPosef pose{};
+    XrRect2Di image_rect{};
+    std::uint32_t image_array_index{};
+    XrEyeVisibility eye_visibility{};
 };
 
 struct ProjectionLayerSnapshot {
@@ -860,7 +865,7 @@ struct SessionState {
     // already recorded as 760. frame_call_mutex.
     std::vector<PanelPose> panel_poses_current;
     std::vector<PanelPose> panel_poses_previous;
-    std::vector<XrSwapchain> panels_recorded;
+    std::vector<PanelPose> panels_recorded;
     // V524: Luke Ross's R.E.A.L. VR is in the process (realvr_loaded): its
     // flat panels go out as it placed them, neither moved between frames
     // (V508) nor given generated images (V509). Set at session creation.
@@ -11970,14 +11975,32 @@ struct ProjectionResourceDestination {
     if (layer == nullptr) return std::nullopt;
     if (layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
         const auto* quad = reinterpret_cast<const XrCompositionLayerQuad*>(layer);
-        return PanelPose{layer->type, quad->subImage.swapchain, quad->space, quad->pose};
+        return PanelPose{layer->type, quad->subImage.swapchain, quad->space, quad->pose,
+                         quad->subImage.imageRect, quad->subImage.imageArrayIndex,
+                         quad->eyeVisibility};
     }
     if (layer->type == XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR) {
         const auto* cylinder = reinterpret_cast<const XrCompositionLayerCylinderKHR*>(layer);
         return PanelPose{layer->type, cylinder->subImage.swapchain, cylinder->space,
-                         cylinder->pose};
+                         cylinder->pose, cylinder->subImage.imageRect,
+                         cylinder->subImage.imageArrayIndex, cylinder->eyeVisibility};
     }
     return std::nullopt;
+}
+
+// Two frames' panels from the same layer type, swapchain and space (V508).
+[[nodiscard]] bool same_panel_source(const PanelPose& a, const PanelPose& b) noexcept {
+    return a.type == b.type && a.swapchain == b.swapchain && a.space == b.space;
+}
+
+// ...that also show the same part of it to the same eyes (V574).
+[[nodiscard]] bool same_panel_image(const PanelPose& a, const PanelPose& b) noexcept {
+    return same_panel_source(a, b) &&
+        a.image_rect.offset.x == b.image_rect.offset.x &&
+        a.image_rect.offset.y == b.image_rect.offset.y &&
+        a.image_rect.extent.width == b.image_rect.extent.width &&
+        a.image_rect.extent.height == b.image_rect.extent.height &&
+        a.image_array_index == b.image_array_index && a.eye_visibility == b.eye_visibility;
 }
 
 void note_panel_poses(const XrFrameEndInfo* info, std::vector<PanelPose>* poses) {
@@ -12088,8 +12111,17 @@ void note_panel_poses(const XrFrameEndInfo* info, std::vector<PanelPose>* poses)
 // to this one, so its panels go there too. A panel that did not move - one
 // fixed in the view space, or a still menu - is left as it is. Each panel is
 // recorded once, as presenter_transition 760: a its layer type | 1 << 32
-// where it moved, b its swapchain, c how far it moved between the two
-// frames, micrometres | microradians << 32.
+// where it moved | 1 << 33 where it was matched by order | its image
+// rectangle's x << 34 and y << 49 (15 bits each), b its swapchain, c how far
+// it moved between the two frames, micrometres | microradians << 32.
+//
+// A panel is the previous frame's panel showing the same part of the same
+// swapchain (V574). Matched on the swapchain alone, OpenKneeboard's second
+// kneeboard - another rectangle of the one image it draws all of them into -
+// took the first one's previous pose, and every generated frame drew it
+// halfway between the two. A panel whose rectangle changed (a page of
+// another shape) is matched by order instead, when it is the only one of its
+// swapchain left on both sides.
 //
 // A panel whose image the frame already carries a generated copy of (V509)
 // names that copy's swapchain: `destinations` maps it back to the
@@ -12105,21 +12137,61 @@ void place_panels_between(
     // The same reservation build_generated_frame_end_info made, so nothing
     // already pointing into it moves.
     output->adjusted_layers.reserve(2 * output->layer_pointers.size());
-    for (std::size_t index = 0; index < output->layer_pointers.size(); ++index) {
-        const XrCompositionLayerBaseHeader* layer = output->layer_pointers[index];
-        auto now = panel_pose(layer);
-        if (!now) continue;
+    const std::size_t count = output->layer_pointers.size();
+    std::vector<std::optional<PanelPose>> panels(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        panels[index] = panel_pose(output->layer_pointers[index]);
+        if (!panels[index]) continue;
         for (const ProjectionResourceDestination& destination : destinations) {
-            if (destination.panel && destination.destination_swapchain == now->swapchain) {
-                now->swapchain = destination.application_swapchain;
+            if (destination.panel &&
+                destination.destination_swapchain == panels[index]->swapchain) {
+                panels[index]->swapchain = destination.application_swapchain;
             }
         }
-        const auto before = std::find_if(previous.begin(), previous.end(),
-            [&](const PanelPose& candidate) {
-                return candidate.type == now->type && candidate.swapchain == now->swapchain &&
-                    candidate.space == now->space;
-            });
-        if (before == previous.end()) continue;
+    }
+    // Each previous panel goes to one panel of this frame: the same image
+    // first, then by order where only one of a swapchain is left either side.
+    const std::size_t unmatched = previous.size();
+    std::vector<std::size_t> matches(count, unmatched);
+    std::vector<bool> taken(previous.size());
+    std::vector<bool> by_order(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        if (!panels[index]) continue;
+        for (std::size_t candidate = 0; candidate < previous.size(); ++candidate) {
+            if (!taken[candidate] && same_panel_image(previous[candidate], *panels[index])) {
+                matches[index] = candidate;
+                taken[candidate] = true;
+                break;
+            }
+        }
+    }
+    for (std::size_t index = 0; index < count; ++index) {
+        if (!panels[index] || matches[index] != unmatched) continue;
+        std::size_t left_before = 0;
+        std::size_t candidate_found = unmatched;
+        for (std::size_t candidate = 0; candidate < previous.size(); ++candidate) {
+            if (!taken[candidate] && same_panel_source(previous[candidate], *panels[index])) {
+                ++left_before;
+                candidate_found = candidate;
+            }
+        }
+        std::size_t left_now = 0;
+        for (std::size_t other = 0; other < count; ++other) {
+            if (panels[other] && matches[other] == unmatched &&
+                same_panel_source(*panels[other], *panels[index])) {
+                ++left_now;
+            }
+        }
+        if (left_before != 1 || left_now != 1) continue;
+        matches[index] = candidate_found;
+        taken[candidate_found] = true;
+        by_order[index] = true;
+    }
+    for (std::size_t index = 0; index < count; ++index) {
+        const XrCompositionLayerBaseHeader* layer = output->layer_pointers[index];
+        if (!panels[index] || matches[index] == unmatched) continue;
+        const PanelPose* now = &*panels[index];
+        const PanelPose* before = &previous[matches[index]];
         const XrVector3f& a = before->pose.position;
         const XrVector3f& b = now->pose.position;
         const float distance = std::sqrt((b.x - a.x) * (b.x - a.x) +
@@ -12131,14 +12203,20 @@ void place_panels_between(
         const float angle = 2.0F * std::acos(dot);
         const bool moved = std::isfinite(distance) && std::isfinite(angle) &&
             (distance > 1.0e-5F || angle > 1.0e-5F);
-        if (std::find(state.panels_recorded.begin(), state.panels_recorded.end(),
-                now->swapchain) == state.panels_recorded.end() &&
+        if (std::none_of(state.panels_recorded.begin(), state.panels_recorded.end(),
+                [&](const PanelPose& recorded) { return same_panel_image(recorded, *now); }) &&
             state.panels_recorded.size() < 8) {
-            state.panels_recorded.push_back(now->swapchain);
+            state.panels_recorded.push_back(*now);
+            const auto rectangle = [](std::int32_t offset) noexcept {
+                return static_cast<std::uint64_t>(std::clamp(offset, 0, 0x7fff));
+            };
             xrfg::bridge_flight_logger().event(
                 xrfg::BridgeFlightOperation::presenter_transition,
                 760,
-                static_cast<std::uint64_t>(now->type) | (moved ? 1ULL << 32U : 0ULL),
+                static_cast<std::uint64_t>(now->type) | (moved ? 1ULL << 32U : 0ULL) |
+                    (by_order[index] ? 1ULL << 33U : 0ULL) |
+                    (rectangle(now->image_rect.offset.x) << 34U) |
+                    (rectangle(now->image_rect.offset.y) << 49U),
                 handle_value(now->swapchain),
                 static_cast<std::uint64_t>(std::min(distance * 1.0e6F, 4.0e9F)) |
                     (static_cast<std::uint64_t>(std::min(angle * 1.0e6F, 4.0e9F)) << 32U));

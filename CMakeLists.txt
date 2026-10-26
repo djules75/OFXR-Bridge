@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.573.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.574.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -1016,6 +1016,15 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
                 "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-pipelined-presenter-test.log"
                 flight-simulator)
+
+        # Two quads showing two rectangles of one swapchain, as OpenKneeboard
+        # submits two kneeboards: each keeps its own place (V574).
+        add_test(
+            NAME xrfg_layer_shared_swapchain_panels
+            COMMAND xrfg_layer_call_chain
+                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
+                "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-shared-swapchain-panels-test.log"
+                flight-shared-panels)
 
         add_test(
             NAME xrfg_layer_dcs_pipelined_wait

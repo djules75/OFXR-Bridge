@@ -230,6 +230,9 @@ std::atomic<std::uint32_t> g_budget_refusals{0};
 // frame. The fake runtime behaves exactly as in steamvr-presenter.
 bool g_dcs_mode = false;
 bool g_flight_simulator_mode = false;
+// The flight scenario with a second quad showing another rectangle of the
+// same swapchain, as OpenKneeboard submits two kneeboards (V574).
+bool g_shared_panel_mode = false;
 // Answers enumeration the way Proton's wineopenxr does for a D3D12 session:
 // whole structures copied over the caller's array from one it zeroed, so
 // type comes back 0 and next null with the textures filled in.
@@ -354,8 +357,10 @@ struct EndFrameRecord {
     std::uint32_t quad_layer_count{};
     std::uint32_t quad_layer_index{
         std::numeric_limits<std::uint32_t>::max()};
-    // The quad's x, which the flight scenario moves every frame (V508).
+    // The first quad's x, which the flight scenario moves every frame (V508),
+    // and the second's, which stays where it is (V574).
     float quad_x{};
+    float second_quad_x{};
     // The swapchain the quad names (V509).
     XrSwapchain quad_swapchain{XR_NULL_HANDLE};
 };
@@ -791,12 +796,14 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_end_frame(
             }
             if (layer != nullptr &&
                 layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
-                ++record.quad_layer_count;
-                record.quad_layer_index = layer_index;
-                record.quad_x =
-                    reinterpret_cast<const XrCompositionLayerQuad*>(layer)->pose.position.x;
-                record.quad_swapchain =
-                    reinterpret_cast<const XrCompositionLayerQuad*>(layer)->subImage.swapchain;
+                const auto* quad = reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+                if (++record.quad_layer_count == 1) {
+                    record.quad_layer_index = layer_index;
+                    record.quad_x = quad->pose.position.x;
+                    record.quad_swapchain = quad->subImage.swapchain;
+                } else {
+                    record.second_quad_x = quad->pose.position.x;
+                }
             }
             if (layer == nullptr || layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
                 continue;
@@ -2325,7 +2332,9 @@ int main(int argc, char** argv) {
         (argc == 4 && std::strcmp(argv[3], "steamvr-inline") == 0);
     g_destroy_pending_swapchain =
         argc == 4 && std::strcmp(argv[3], "flight-destroy-swapchain") == 0;
-    g_flight_simulator_mode = g_destroy_pending_swapchain ||
+    g_shared_panel_mode =
+        argc == 4 && std::strcmp(argv[3], "flight-shared-panels") == 0;
+    g_flight_simulator_mode = g_destroy_pending_swapchain || g_shared_panel_mode ||
         (argc == 4 && std::strcmp(argv[3], "flight-simulator") == 0);
     g_wineopenxr_headers_mode =
         argc == 4 && std::strcmp(argv[3], "wineopenxr-headers") == 0;
@@ -3284,10 +3293,18 @@ int main(int argc, char** argv) {
     flight_quad.subImage.imageRect.extent = {4, 4};
     flight_quad.pose.orientation.w = 1.0F;
     flight_quad.size = {1.0F, 1.0F};
+    // OpenKneeboard's second kneeboard: another rectangle of the same image,
+    // 5 m to the side and still (V574).
+    XrCompositionLayerQuad kneeboard_quad = flight_quad;
+    kneeboard_quad.subImage.imageRect.offset = {2, 0};
+    kneeboard_quad.subImage.imageRect.extent = {2, 4};
+    kneeboard_quad.pose.position.x = 5.0F;
     const XrCompositionLayerBaseHeader* layers[] = {
         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&flight_quad),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&kneeboard_quad),
     };
+    const std::uint32_t flight_quads = g_shared_panel_mode ? 2U : 1U;
 
     auto submit_frame = [&](XrTime display_time) {
         XrViewLocateInfo locate_info{XR_TYPE_VIEW_LOCATE_INFO};
@@ -3321,7 +3338,7 @@ int main(int argc, char** argv) {
         XrFrameEndInfo frame_end_info{XR_TYPE_FRAME_END_INFO};
         frame_end_info.displayTime = display_time;
         frame_end_info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-        frame_end_info.layerCount = g_flight_simulator_mode ? 2 : 1;
+        frame_end_info.layerCount = g_flight_simulator_mode ? 1U + flight_quads : 1U;
         frame_end_info.layers = layers;
         // SteamVR throttles the *inline* second cycle, not the application's
         // own wait. Mark the window so the fake runtime can tell them apart by
@@ -3464,6 +3481,7 @@ int main(int argc, char** argv) {
         application_space = fake_handle<XrSpace>(0x405);
         projection.space = application_space;
         flight_quad.space = application_space;
+        kneeboard_quad.space = application_space;
         g_valid_composition_space.store(
             application_space,
             std::memory_order_release);
@@ -3507,19 +3525,27 @@ int main(int argc, char** argv) {
         bool composition_preserved = true;
         // V508: a synthetic's quad lies strictly between the quads of the
         // real frames on either side of it; a real frame's is its own.
+        // V574: the second kneeboard, which does not move, stays where it is.
         std::size_t panels_checked = 0;
         bool panels_between = true;
+        bool kneeboard_still = true;
+        for (const EndFrameRecord& record : end_records) {
+            if (g_shared_panel_mode && record.quad_layer_count == flight_quads) {
+                kneeboard_still = kneeboard_still && record.second_quad_x == 5.0F;
+            }
+        }
         for (std::size_t index = 1; index + 1 < end_records.size(); ++index) {
             const EndFrameRecord& record = end_records[index];
-            if (record.target != SubmittedTarget::synthetic || record.quad_layer_count != 1) {
+            if (record.target != SubmittedTarget::synthetic ||
+                record.quad_layer_count != flight_quads) {
                 continue;
             }
             std::size_t before = index, after = index;
             while (before > 0 && (end_records[before].target != SubmittedTarget::current ||
-                                  end_records[before].quad_layer_count != 1)) --before;
+                                  end_records[before].quad_layer_count != flight_quads)) --before;
             while (after + 1 < end_records.size() &&
                    (end_records[after].target != SubmittedTarget::current ||
-                    end_records[after].quad_layer_count != 1)) ++after;
+                    end_records[after].quad_layer_count != flight_quads)) ++after;
             if (end_records[before].target != SubmittedTarget::current ||
                 end_records[after].target != SubmittedTarget::current ||
                 end_records[after].quad_x - end_records[before].quad_x < 0.05F) {
@@ -3530,12 +3556,15 @@ int main(int argc, char** argv) {
                 record.quad_x > end_records[before].quad_x + 0.01F &&
                 record.quad_x < end_records[after].quad_x - 0.01F;
         }
-        if (g_flight_simulator_mode && (panels_checked == 0 || !panels_between)) {
+        if (g_flight_simulator_mode &&
+            (panels_checked == 0 || !panels_between || !kneeboard_still)) {
             std::cerr << "flat panel not placed between the frames: checked="
-                      << panels_checked << " between=" << panels_between << '\n';
+                      << panels_checked << " between=" << panels_between
+                      << " kneeboard_still=" << kneeboard_still << '\n';
             for (const EndFrameRecord& record : end_records) {
                 std::cerr << "  target=" << static_cast<int>(record.target)
-                          << " quad_x=" << record.quad_x << '\n';
+                          << " quad_x=" << record.quad_x
+                          << " second_quad_x=" << record.second_quad_x << '\n';
             }
             return EXIT_FAILURE;
         }
@@ -3552,8 +3581,8 @@ int main(int argc, char** argv) {
                 ++empty_frames;
             } else {
                 composition_preserved = composition_preserved &&
-                    record.layer_count == 2 &&
-                    record.quad_layer_count == 1 &&
+                    record.layer_count == 1U + flight_quads &&
+                    record.quad_layer_count == flight_quads &&
                     record.quad_layer_index == 1;
             }
         }
