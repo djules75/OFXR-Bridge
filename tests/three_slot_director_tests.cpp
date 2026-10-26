@@ -8,6 +8,9 @@
 #include "autonomous_layer_fixture.hpp"
 #include "xrfg/native_vulkan_transport_test.hpp"
 namespace xrfg {int run_luke_ngx_dispatch_test(const wchar_t*,bool);}
+namespace xrfg {int run_dead_space_ngx_capture_test(const wchar_t*,const wchar_t*);}
+namespace xrfg {int run_gta_enhanced_ngx_capture_test(const wchar_t*,const wchar_t*);}
+namespace xrfg {int run_dead_space_ingress_diagnostics_test(const wchar_t*,const wchar_t*);}
 namespace xrfg {int run_ghost_ngx_capture_test(const wchar_t*,const wchar_t*,bool);}
 namespace xrfg {int run_horizon_ngx_capture_test(const wchar_t*,const wchar_t*,bool);}
 namespace xrfg {int run_actual_ngx_capture_test(const wchar_t*,const wchar_t*); int run_crimson_ngx_capture_test(const wchar_t*,const wchar_t*);}
@@ -2356,10 +2359,16 @@ int main(int argc, char** argv) {
         const std::wstring wr(realvr.begin(),realvr.end()),ws(streamline.begin(),streamline.end());
         return xrfg::run_ghost_ngx_capture_test(wr.c_str(),ws.c_str(),std::string_view(argv[1])=="ghost-steamvr-capture");
     }
-    if(argc>3 && (std::string_view(argv[1])=="luke-ngx-actual-capture" || std::string_view(argv[1])=="crimson-ngx-actual-capture")) {
+    if(argc>3 && (std::string_view(argv[1])=="luke-ngx-actual-capture" || std::string_view(argv[1])=="crimson-ngx-actual-capture" || std::string_view(argv[1])=="dead-space-ngx-actual-capture" || std::string_view(argv[1])=="dead-space-ingress-diagnostics" || std::string_view(argv[1])=="gta-enhanced-ngx-actual-capture")) {
         const std::string realvr=argv[2],streamline=argv[3];
         const std::wstring wide_realvr(realvr.begin(),realvr.end());
         const std::wstring wide_streamline(streamline.begin(),streamline.end());
+        if(std::string_view(argv[1])=="gta-enhanced-ngx-actual-capture")
+            return xrfg::run_gta_enhanced_ngx_capture_test(wide_realvr.c_str(),wide_streamline.c_str());
+        if(std::string_view(argv[1])=="dead-space-ingress-diagnostics")
+            return xrfg::run_dead_space_ingress_diagnostics_test(wide_realvr.c_str(),wide_streamline.c_str());
+        if(std::string_view(argv[1])=="dead-space-ngx-actual-capture")
+            return xrfg::run_dead_space_ngx_capture_test(wide_realvr.c_str(),wide_streamline.c_str());
         return std::string_view(argv[1])=="crimson-ngx-actual-capture" ?
             xrfg::run_crimson_ngx_capture_test(wide_realvr.c_str(),wide_streamline.c_str()) :
             xrfg::run_actual_ngx_capture_test(wide_realvr.c_str(),wide_streamline.c_str());

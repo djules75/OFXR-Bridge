@@ -1,8 +1,8 @@
 void native_counted_scope_test() {
-    auto& s=*session_state;s.dispatch->steamvr_runtime=true;
+    auto& s=*session_state;s.dispatch->steamvr_runtime=true;s.vdxr_legacy=false;
     s.graphics_binding=SessionGraphicsBinding::d3d12;s.queued_nvidia_presenter=true;s.nvidia_new_route=true;
     require(steamvr_counted_native_release(s),"native SteamVR2X not selected");
-    s.dispatch->steamvr_runtime=false;require(!steamvr_counted_native_release(s),"VDXR policy changed");s.dispatch->steamvr_runtime=true;
+    s.dispatch->steamvr_runtime=false;s.vdxr_legacy=true;require(!steamvr_counted_native_release(s),"VDXR policy changed");s.dispatch->steamvr_runtime=true;s.vdxr_legacy=false;
     s.graphics_binding=SessionGraphicsBinding::d3d11;require(!steamvr_counted_native_release(s),"D11 changed");
     s.graphics_binding=SessionGraphicsBinding::vulkan;require(!steamvr_counted_native_release(s),"Vulkan changed");s.graphics_binding=SessionGraphicsBinding::d3d12;
     s.luke_afw_enabled=true;require(!steamvr_counted_native_release(s),"Luke changed");s.luke_afw_enabled=false;
@@ -29,7 +29,7 @@ void native_counted_starvation_test() {
 }
 
 void native_counted_progress_test(bool old_control=false) {
-    auto s=session_state;s->dispatch->steamvr_runtime=true;s->queued_nvidia_presenter=true;
+    auto s=session_state;s->dispatch->steamvr_runtime=true;s->vdxr_legacy=false;s->queued_nvidia_presenter=true;
     s->graphics_binding=SessionGraphicsBinding::d3d12;s->nvidia_new_route=true;
     s->presenter_active=true;s->presenter_display_period=20'000'000;
     D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;

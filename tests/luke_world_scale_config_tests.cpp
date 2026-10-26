@@ -1,6 +1,9 @@
 #include "xrfg/luke_world_scale_config.hpp"
 #include "xrfg/luke_host_config.hpp"
 #include "xrfg/diagnostic_hotkeys.hpp"
+#include "xrfg/luke_native_motion.hpp"
+#include "fixtures/gta_native_camera.hpp"
+#include "fixtures/dead_space_native_basis.hpp"
 #include <fstream>
 #include <iostream>
 int main() {
@@ -38,6 +41,48 @@ int main() {
     check(xrfg::luke_game_camera_config_from_ini(ini).axes ==
         xrfg::LukeProducerCameraAxes::native_view_rows,
         "An inactive DOOM section must not select its camera convention");
+    for(const char* section:{"GTAVE","gtave"}) {
+        write((std::string("[")+section+"]\nWorldScale=1.1\n").c_str());
+        check(xrfg::luke_game_camera_config_from_ini(ini).axes ==
+            xrfg::LukeProducerCameraAxes::native_view_rows,
+            "GTA Enhanced keeps original view rows for scene and native camera history");
+    }
+    for(const auto& sample:xrfg::tests::gta_native_camera_fixtures) {
+        std::array<float,16> native{},reflected{};
+        check(xrfg::native_motion_detail::transform(sample.current,sample.previous,native,1.F,true),
+            "GTA captured native view-row transform is finite");
+        check(xrfg::native_motion_detail::transform(sample.current,sample.previous,reflected),
+            "GTA legacy reflected transform control is finite");
+        float correct_error{},legacy_error{};
+        for(unsigned i=0;i<16;++i) {
+            correct_error=std::max(correct_error,std::abs(native[i]-sample.original_clip_history[i]));
+            legacy_error=std::max(legacy_error,std::abs(reflected[i]-sample.original_clip_history[i]));
+        }
+        if(!(correct_error<.001F && legacy_error>.005F))
+            std::cerr<<"GTA captured camera errors native="<<correct_error<<" reflected="<<legacy_error<<'\n';
+        check(correct_error<.001F && legacy_error>.005F,
+            "GTA native history must reproduce the original SDK clip matrix, not its reflected counterpart");
+    }
+    for(const char* section:{"DS2023","ds2023"}) {
+        write((std::string("[")+section+"]\nWorldScale=1.1\n").c_str());
+        const auto config=xrfg::luke_game_camera_config_from_ini(ini);
+        check(config.axes==xrfg::LukeProducerCameraAxes::physical_forward && config.world_scale==1.1F,
+            "Dead Space decodes the original recovered physical-forward camera at the scene boundary");
+        for(const auto& sample:xrfg::tests::dead_space_basis_fixtures) {
+            xrfg::LukeCameraBasis view{},legacy{};
+            check(xrfg::luke_view_camera_basis(sample.producer,sample.perspective_w,view,config.axes),
+                "Dead Space captured camera decodes");
+            check(xrfg::luke_view_camera_basis(sample.producer,sample.perspective_w,legacy,xrfg::LukeProducerCameraAxes::view),
+                "Dead Space old scene-camera control decodes");
+            float difference{},old_difference{};
+            for(unsigned i=0;i<3;++i) {
+                difference=std::max(difference,std::abs(view[2][i]-sample.native_back[i]));
+                old_difference=std::max(old_difference,std::abs(legacy[2][i]-sample.native_back[i]));
+            }
+            check(view[0]==sample.producer[0] && view[1]==sample.producer[1] && difference<.00001F && old_difference>1.F,
+                "Dead Space scene back must equal the verified native source axis, with right/up unchanged");
+        }
+    }
     write("[GOT]\nWorldScale=1.0\n");
     check(xrfg::luke_world_scale_from_ini(ini) == 1.0F,
         "Ghost-only real configuration must initialize scale");

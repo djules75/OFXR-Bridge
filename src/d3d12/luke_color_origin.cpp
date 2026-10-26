@@ -1,4 +1,5 @@
 #include "xrfg/luke_color_origin.hpp"
+#include "xrfg/luke_origin_inset.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include <wrl/client.h>
 #include <array>
@@ -16,15 +17,16 @@ namespace xrfg {
 namespace {
 // Outlaws' final REAL VR color can translate the corner barcode beyond the
 // eye boundary; its FPS text also covers that corner. Keep its exact token
-// inside the eye, away from that overlay. Other titles retain their layout.
+// inside the eye, away from that overlay. GTA's final reprojection clips its
+// original top-edge band; use the measured vertical margin only for that title.
 std::array<unsigned,2> origin_inset() noexcept {
-    static const bool outlaws=[] {
+    static const auto inset=[] {
         wchar_t path[MAX_PATH]{};
         GetModuleFileNameW(nullptr,path,MAX_PATH);
         const auto* name=wcsrchr(path,L'\\');
-        return _wcsicmp(name?name+1:path,L"Outlaws.exe")==0;
+        return luke_origin_inset_for_title(name?name+1:path);
     }();
-    return outlaws?std::array<unsigned,2>{256,32}:std::array<unsigned,2>{0,0};
+    return inset;
 }
 using Microsoft::WRL::ComPtr;
 struct Uploads {

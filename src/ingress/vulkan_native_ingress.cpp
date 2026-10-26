@@ -1699,7 +1699,11 @@ extern "C" __declspec(dllexport) void OFXR_StartLukeVulkanIngressV1() noexcept {
     // Called by the already armed Vulkan layer before the game creates devices.
     // Never from DllMain, and the exact executable gate keeps all other Vulkan
     // applications on the suspended path.
-    if(xrfg::native_vulkan::luke_vulkan_process())xrfg::native_vulkan::poll_capture();
+    if(xrfg::native_vulkan::luke_vulkan_process()) {
+        // This startup can precede both NGX discovery and the first XR instance.
+        xrfg::native_ingress::refresh_luke_detection(false);
+        xrfg::native_vulkan::poll_capture();
+    }
 }
 
 #if defined(XRFG_NATIVE_INGRESS_TESTS)

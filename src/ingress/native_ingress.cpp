@@ -21,6 +21,7 @@ using Microsoft::WRL::ComPtr;
 struct Hooks {
     std::mutex mutex;
     SafetyHookInline execute, create_queue;
+    std::uintptr_t execute_entry{}; // diagnostics only, assigned on hook installation
     bool execute_probe_active{};
     ULONGLONG execute_probe_retry_at{};
     using Execute=void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*,UINT,ID3D12CommandList* const*);
@@ -110,29 +111,13 @@ bool kcd() {
     return _wcsicmp(basename,L"KingdomCome.exe")==0;
 }
 }
-bool luke_detected() noexcept {
-    // basename lookup alone misses RealVR loaded by an absolute custom path.
-    const auto marked=[](HMODULE module){return module&&GetProcAddress(module,"RealVRVersion");};
-    if(marked(GetModuleHandleW(L"dxgi.dll"))||marked(GetModuleHandleW(L"RealVR64.dll")))return true;
-    HMODULE modules[1024]{};DWORD bytes{};
-    using Enum=BOOL(WINAPI*)(HANDLE,HMODULE*,DWORD,LPDWORD);
-    const auto kernel=GetModuleHandleW(L"kernel32.dll");
-    const auto enumerate=reinterpret_cast<Enum>(GetProcAddress(kernel,"K32EnumProcessModules"));
-    if(!enumerate||!enumerate(GetCurrentProcess(),modules,sizeof(modules),&bytes))return false;
-    for(unsigned i=0;i<std::min<DWORD>(bytes/sizeof(HMODULE),1024);++i) {
-        wchar_t path[32768]{};if(!GetModuleFileNameW(modules[i],path,32768))continue;
-        auto* filename=wcsrchr(path,L'\\');filename=filename?filename+1:path;
-        if(marked(modules[i]))return true;
-    }
-    return false;
-}
 // Caller owns Hooks::mutex. Installing an entry point does not establish a
 // producer: only an observed SR/RR list submitted through it can do that.
 static bool install_execute_hook(Hooks& s, ID3D12CommandQueue* queue) {
     if (!s.execute) {
         auto** table=*reinterpret_cast<void***>(queue);
         s.execute=safetyhook::create_inline(table[10],reinterpret_cast<void*>(&execute),SafetyHookInline::StartDisabled);
-        if(s.execute){s.submit=s.execute.original<Hooks::Execute>();(void)s.execute.enable();}
+        if(s.execute){s.execute_entry=reinterpret_cast<std::uintptr_t>(table[10]);s.submit=s.execute.original<Hooks::Execute>();(void)s.execute.enable();}
     }
     return bool(s.execute);
 }
@@ -261,6 +246,13 @@ bool apply_camera(DlssMotionVectorPublication& g,ID3D12GraphicsCommandList* list
 Statistics statistics() noexcept {
     auto& s=hooks();std::scoped_lock lock(s.mutex);
     return {luke_detected(),streamline_camera::hooked(),camera_accepted.load(),camera_rejected.load(),submissions.load()};
+}
+LukeContextDiagnostics luke_context_diagnostics() noexcept {
+    auto& s=hooks();std::scoped_lock lock(s.mutex);
+    return {has_luke_context.load(std::memory_order_acquire),bool(s.execute),bool(s.create_queue),
+        static_cast<std::uint32_t>(s.luke_lists.size()),static_cast<std::uint32_t>(s.queues.size()),
+        s.execute_entry,reinterpret_cast<std::uintptr_t>(s.luke_device.Get()),
+        reinterpret_cast<std::uintptr_t>(s.luke_queue.Get()),submissions.load()};
 }
 std::uint32_t allocate_handle_key() noexcept {
     auto prior=handles.load();

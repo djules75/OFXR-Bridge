@@ -103,6 +103,7 @@ int run_luke_ngx_dispatch_test(const wchar_t* path, bool engine = false) {
  try {
   test_kcd_production_identity=true;
   HMODULE fixture=LoadLibraryW(path);require(fixture!=nullptr,"fixture load");
+  native_ingress::refresh_luke_detection(); // mirror the production XR/session entry
   if(engine)require(!luke_dispatch_module_valid(fixture),"engine misidentified as REAL VR");
   else {
    require(luke_dispatch_module_valid(fixture),"REAL VR own NGX dispatch not recognized");
@@ -322,6 +323,7 @@ int run_luke_ngx_dispatch_test(const wchar_t* path, bool engine = false) {
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }
 
+bool test_dead_space_rejected_camera{};
 struct ActualNgxCaptureContext {
     Evaluate evaluate{};
     ID3D12GraphicsCommandList* list{};
@@ -550,6 +552,19 @@ void actual_ngx_capture_observer(void* list,std::uint32_t feature,std::uint32_t 
     std::uint32_t viewport,const void*) {
     auto& c=*actual_ngx_capture_context;
     const auto camera=native_ingress::streamline_camera::current();
+    if(test_dead_space_rejected_camera) {
+        if(camera.valid || camera.rejection!=8 || camera.right!=std::array<float,3>{2,0,0})
+            throw std::runtime_error("rejected camera basis was normalized or replaced");
+        const auto before=dlss_motion_vector_statistics().published;
+        if(NVSDK_NGX_FAILED(c.evaluate(c.list,c.handle,c.parameters,nullptr)) || dlss_motion_vector_statistics().published!=before)
+            throw std::runtime_error("rejected camera changed original SR or published a guide");
+        DlssMotionVectorPublication guide{};guide.stream=17;
+        const auto diagnostic=dead_space_rejected_camera_contract(camera,guide);
+        if(std::string_view(diagnostic.stage)!="dead_space_rejected_camera" || diagnostic.publication!=0 ||
+            diagnostic.mode!=-8 || diagnostic.camera_right!=camera.right || diagnostic.view_to_clip!=camera.projection)
+            throw std::runtime_error("F8 rejected camera diagnostic lost exact values or claimed AFW admission");
+        c.frame.reset();return;
+    }
     if(list!=c.list||feature!=sl1::eFeatureDLSS||!camera.valid||camera.frame!=frame||camera.viewport!=viewport)
         throw std::runtime_error("actual NGX capture lost its original Streamline production camera");
     const auto before=dlss_motion_vector_statistics().published;
@@ -601,12 +616,14 @@ void actual_ngx_capture_observer(void* list,std::uint32_t feature,std::uint32_t 
         throw std::runtime_error("actual NGX publication borrowed another production camera");
 }
 using SelectLukeExecutionQueue=HRESULT(*)(bool,ID3D12Device*,ID3D12CommandQueue*,ComPtr<ID3D12CommandQueue>&);
+bool test_dead_space_diagnostics{};
 int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streamline,bool logical_family,
-    bool scene_camera=false,SelectLukeExecutionQueue selector=nullptr,bool outlaws=false) {
+    bool scene_camera=false,SelectLukeExecutionQueue selector=nullptr,bool outlaws=false,bool dead_space=false,bool gta=false) {
     const auto require=[](bool ok,const char* message){if(!ok)throw std::runtime_error(message);};
     const auto check=[&](HRESULT result,const char* message){require(SUCCEEDED(result),message);};
     try {
         const auto vr_module=LoadLibraryW(realvr),sl_module=LoadLibraryW(streamline);
+        native_ingress::refresh_luke_detection(); // mirror the production XR/session entry
         require(vr_module&&sl_module&&native_ingress::luke_detected(),"actual NGX capture fixtures");
         const auto observer=reinterpret_cast<void(*)(decltype(&actual_ngx_capture_observer))>(
             GetProcAddress(sl_module,"TestObserver"));
@@ -631,14 +648,16 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
         }
         test_kcd_production_identity=logical_family&&!outlaws;
         test_outlaws_production_identity=outlaws;
+        test_dead_space_production_identity=dead_space;
+        test_gta_enhanced_production_identity=gta;
         test_kcd_scene_camera=scene_camera;
-        if(outlaws) {
+        if(outlaws||dead_space||gta) {
             // Exercise the shipping title selector and marked-module lookup,
             // including cached public exports. A forced test-only slot install
             // would hide the original Outlaws dispatcher coverage failure.
             install_feature_hooks();
             require(state().modules[3].retained==vr_module&&!state().modules[3].typed_implementation,
-                "Outlaws marked public RR dispatcher was not installed by the actual title policy");
+                "selected title's marked cached NGX dispatcher was not installed by the actual title policy");
         } else install_dispatch<3>(vr_module);
         const auto feature=outlaws?NVSDK_NGX_Feature_RayReconstruction:NVSDK_NGX_Feature_SuperSampling;
         const bool scene_bindings=scene_camera||outlaws;
@@ -668,6 +687,21 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
         native_ingress::configure_queue(queue.Get());
         ComPtr<ID3D12CommandAllocator> bootstrap_allocator;ComPtr<ID3D12GraphicsCommandList> bootstrap_list;
         make_list(bootstrap_allocator,bootstrap_list);native_ingress::observe_luke_production(bootstrap_list.Get());
+        if(dead_space&&test_dead_space_diagnostics) {
+            DispatchParameters parameters;
+            {std::scoped_lock lock(state().mutex);state().queue=queue;state().active=false;}
+            dead_space_capture_report_at=0;
+            require(!capture(bootstrap_list.Get(),nullptr,&parameters,0,0),"inactive diagnostics created guides");
+            const auto stamp=dead_space_capture_report_at.load();
+            require(stamp!=0,"F9 diagnostic attempt not sampled");
+            require(!capture(bootstrap_list.Get(),nullptr,&parameters,0,0)&&dead_space_capture_report_at==stamp,
+                "F9 diagnostics bypassed the one-second limit");
+            state().active=true;dead_space_capture_report_at=0;
+            require(!capture(bootstrap_list.Get(),nullptr,&parameters,0,0),"unsubmitted producer admitted by diagnostics");
+            const auto context=native_ingress::luke_context_diagnostics();
+            require(!context.admitted&&context.execute_hook&&context.pending_lists==1&&context.submissions==0,
+                "diagnostic snapshot fabricated a producer or consumed its pending list");
+        }
         check(bootstrap_list->Close(),"actual capture bootstrap close");
         ID3D12CommandList* bootstrap[]{bootstrap_list.Get()};queue->ExecuteCommandLists(1,bootstrap);wait();
         ComPtr<ID3D12Device> submitted_owner;ComPtr<ID3D12CommandQueue> submitted_queue;
@@ -696,7 +730,7 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             require(!d3d_owner::same(foreign_device.Get(),device.Get()),"foreign hardware owner equals WARP");
             check(foreign_device->CreateCommandQueue(&qd,IID_PPV_ARGS(&foreign_queue)),"foreign actual consumer queue");
         }
-        if(test_crimson_native_motion)check(device->CreateCommandQueue(&qd,IID_PPV_ARGS(&execution)),
+        if(test_crimson_native_motion||dead_space)check(device->CreateCommandQueue(&qd,IID_PPV_ARGS(&execution)),
             "Crimson independent snapshot read queue");
         auto* consumer=execution?execution.Get():queue.Get();
 
@@ -710,7 +744,8 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             return resource;
         };
         auto color=texture(512,32,DXGI_FORMAT_R8G8B8A8_UNORM,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-        auto motion=texture(7,3,DXGI_FORMAT_R32G32_FLOAT,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        auto motion=texture(7,3,dead_space?DXGI_FORMAT_R16G16_TYPELESS:DXGI_FORMAT_R32G32_FLOAT,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         auto depth=texture(7,3,DXGI_FORMAT_R32_FLOAT,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         ComPtr<ID3D12Resource> injector_motion,injector_depth,injector_output,composited_color;
         if(scene_camera||outlaws||test_crimson_native_motion) {
@@ -767,6 +802,19 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
         state().modules[2].release=native_release;
         state().modules[release_slot].release=&actual_recycling_release;
         {std::scoped_lock lock(state().mutex);state().queue=queue;state().active=true;}
+        if(dead_space&&test_dead_space_diagnostics) {
+            const auto feature_metadata=state().features.at(handle);
+            auto unknown_flags=feature_metadata;unknown_flags.flags_known=false;
+            dead_space_capture_report_at=0;
+            require(!capture(bootstrap_list.Get(),handle,&parameters,0,0,nullptr,0,nullptr,&unknown_flags,nullptr,0),
+                "diagnostics bypassed missing creation flags");
+            dead_space_capture_report_at=0;
+            require(!capture(bootstrap_list.Get(),handle,&parameters,0,0),"diagnostics invented an exact native camera");
+            const auto context=native_ingress::luke_context_diagnostics();
+            require(context.admitted&&context.pending_lists==0&&context.submissions>0&&context.queue==reinterpret_cast<UINT64>(queue.Get()),
+                "diagnostic snapshot lost actual submission admission");
+            dead_space_capture_report_at=0;
+        }
         configure_dlss_motion_vector_tracking(true);configure_luke_color_origin_extent(512,32);
         require(embedded::afw_snapshot().desired.mode!=0,"actual capture test requires its AFW defaults");
         ActualNgxCaptureContext context{evaluate_feature,nullptr,queue.Get(),handle,&parameters};
@@ -883,12 +931,17 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
                 void* bytes{};const D3D12_RANGE range{0,static_cast<SIZE_T>(sizes[i])};
                 check(readbacks[i]->Map(0,&range,&bytes),"private snapshot map");
                 const unsigned native_frame=(i&1)?previous->camera_frame_token:current->camera_frame_token;
-                const unsigned pixel_bytes=i<2?8:4;
+                const unsigned pixel_bytes=i<2&&!dead_space?8:4;
                 const float expected[]{scene_camera?(i<2?8.F+native_frame:.875F):
                     (i<2?.125F+.01F*native_frame:.125F*native_frame),scene_camera?9.F+native_frame:-.25F};
+                const std::uint16_t half_expected[]{static_cast<std::uint16_t>(0x3c00+native_frame*64),0xb400};
+                if(dead_space&&i<2)require(resources[i]->GetDesc().Format==DXGI_FORMAT_R16G16_FLOAT&&
+                    motion->GetDesc().Format==DXGI_FORMAT_R16G16_TYPELESS&&resources[i].Get()!=motion.Get(),
+                    "Dead Space did not type only its owned motion snapshot");
                 for(unsigned y=0;y<3;++y)for(unsigned x=0;x<7;++x)
                     require(!std::memcmp(static_cast<char*>(bytes)+footprints[i].Offset+y*footprints[i].Footprint.RowPitch+x*pixel_bytes,
-                        expected,pixel_bytes),"private current/previous motion or depth changed GPU bits");
+                        dead_space&&i<2?static_cast<const void*>(half_expected):static_cast<const void*>(expected),
+                        pixel_bytes),"private current/previous motion or depth changed GPU bits");
                 const D3D12_RANGE no_write{0,0};readbacks[i]->Unmap(0,&no_write);
             }
         };
@@ -977,11 +1030,13 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
                 std::memset(data,0,static_cast<std::size_t>(bytes));
                 const float values[]{index==0?.125F+.01F*n:index==1?.125F*n:index==2?8.F+n:.875F,
                     index<2?-.25F:9.F+n};
-                const unsigned pixel_bytes=index==0||index==2?8:4;
+                const unsigned pixel_bytes=(index==0&&!dead_space)||index==2?8:4;
+                const std::uint16_t half_values[]{static_cast<std::uint16_t>(0x3c00+n*64),0xb400};
                 const std::array<unsigned char,4> pixel{static_cast<unsigned char>(40+n),51,63,255};
                 for(unsigned y=0;y<desc.Height;++y)for(unsigned x=0;x<desc.Width;++x)
                     std::memcpy(static_cast<char*>(data)+footprint.Offset+y*footprint.Footprint.RowPitch+x*pixel_bytes,
-                        index==4?static_cast<const void*>(pixel.data()):static_cast<const void*>(values),pixel_bytes);
+                        index==4?static_cast<const void*>(pixel.data()):dead_space&&index==0?
+                        static_cast<const void*>(half_values):static_cast<const void*>(values),pixel_bytes);
                 uploads[index]->Unmap(0,nullptr);
                 const auto resource_state=index==4?D3D12_RESOURCE_STATE_COPY_SOURCE:D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
                 auto before=transition(resource,resource_state,D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1031,10 +1086,16 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
                 if(scene_camera)constants.cameraPos={-777.F,0,0};
             }
             constants.depthInverted=static_cast<decltype(constants.depthInverted)>(1);
+            if(dead_space&&test_dead_space_diagnostics&&n==1) {
+                constants.cameraRight={2,0,0};dead_space_capture_report_at=0;test_dead_space_rejected_camera=true;
+                require(set_constants(constants,n,0)&&evaluate_sl(reinterpret_cast<sl1::CommandBuffer*>(list.Get()),sl1::eFeatureDLSS,n,0),
+                    "rejected exact basis original Streamline result");
+                test_dead_space_rejected_camera=false;constants.cameraRight={1,0,0};dead_space_capture_report_at=0;
+            }
             require(set_constants(constants,n,0)&&evaluate_sl(reinterpret_cast<sl1::CommandBuffer*>(list.Get()),sl1::eFeatureDLSS,n,0),
                 "actual capture original Streamline results");
             if(context.frame && !scene_camera)require(
-                context.frame->raw_motion_native_span==((test_ghost_native_motion ||
+                context.frame->raw_motion_native_span==((dead_space || gta || test_ghost_native_motion ||
                     test_horizon_native_motion)?2u:1u),
                 "actual title/runtime capture used the wrong native motion interval");
             const unsigned successful=n>=recycle_production?n-recycle_production+1:
@@ -1163,9 +1224,9 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
                     verify_private_snapshots(joined);
                     if(scene_camera||outlaws)verify_final_public_color(n);
                 }
-                if(test_crimson_native_motion) {
+                if(test_crimson_native_motion||dead_space) {
                     verify_private_snapshots(joined);
-                    verify_final_public_color(n);
+                    if(test_crimson_native_motion)verify_final_public_color(n);
                 }
                 if(logical_family) {
                     LukeNativeMotionConstants corrected{};unsigned why{};
@@ -1464,6 +1525,8 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
         std::cout<<"Actual native NGX capture: original scoped SL camera/NGX callback, four queried GPU owners, exact CRC colors/submission histories and callback-reused generation PASS\n";
         if(logical_family&&!outlaws)std::cout<<"KCD public source: full engine4/core2/REALVR3/native0 chain, direct/recovered native geometry, eleven strict ABA productions/calibration, actual capture miss and callback-reused public retirement PASS\n";
         if(outlaws)std::cout<<"Outlaws public RR: actual title-selected marked cached late-public3/native1 dispatch, no invented creation geometry, alternating native handles/exact SL camera, logical ABA clock/calibration, true capture gap and callback-reused creator lifetime PASS\n";
+        if(dead_space)std::cout<<"Dead Space public SR: actual title-selected marked cached dispatcher, original SL camera, unchanged original RG16 typeless resource, bit-exact typed float16 current/previous owned GPU snapshots, color CRC and retirement PASS\n";
+        if(gta)std::cout<<"GTA Enhanced public SR: actual title-selected marked cached dispatcher, exact GPU guides/color CRC and retirement PASS\n";
         if(scene_camera)std::cout<<"KCD scene camera: original public CBV/final Output, actual typed-native GPU guides/scalars after wrapper replacement and in-place edits, unchanged native delegation, deferred caller color CRC, strict list/once/gap and fenced private GPU bits/lifetime PASS\n";
         if(selector)std::cout<<"Luke private ingress: actual selector and original Execute, exact private CRC/current/N-1 fenced owners and GPU bits/lifetimes, unsubmitted and foreign rejection PASS\n";
         return 0;
@@ -1471,6 +1534,56 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
 }
 int run_actual_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline) {
     return run_actual_ngx_capture_pipeline(realvr,streamline,false);
+}
+int run_dead_space_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline) {
+    return run_actual_ngx_capture_pipeline(realvr,streamline,false,false,nullptr,false,true);
+}
+int run_gta_enhanced_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline) {
+    const auto root=std::filesystem::temp_directory_path()/
+        (L"ofxr-gta-enhanced-diagnostics-"+std::to_wstring(GetCurrentProcessId()));
+    std::filesystem::create_directories(root);
+    {std::ofstream ini(root/"ofxr_bridge.ini");ini<<"[diagnostics]\nlogging_enabled=1\n";}
+    auto& logger=bridge_flight_logger();logger.shutdown();logger.initialize(root);
+    const auto result=run_actual_ngx_capture_pipeline(realvr,streamline,false,false,nullptr,false,false,true);
+    if(result)return result;
+    std::fflush(state().log);
+    wchar_t module[MAX_PATH]{};GetModuleFileNameW(nullptr,module,MAX_PATH);
+    std::ifstream file(std::filesystem::path(module).parent_path()/
+        (L"ofxr-ngx-capture-pid"+std::to_wstring(GetCurrentProcessId())+L".log"));
+    const std::string text((std::istreambuf_iterator<char>(file)),{});
+    if(text.find("gta_enhanced_capture_gate")==std::string::npos||
+        text.find("gta_enhanced_camera_receipt")==std::string::npos)return 1;
+    test_gta_enhanced_production_identity=false;dead_space_capture_report_at=0;
+    if(sample_dead_space_capture()||dead_space_capture_report_at!=0)return 1;
+    logger.shutdown();return 0;
+}
+int run_dead_space_ingress_diagnostics_test(const wchar_t* realvr,const wchar_t* streamline) {
+    const auto root=std::filesystem::temp_directory_path()/
+        (L"ofxr-dead-space-diagnostics-"+std::to_wstring(GetCurrentProcessId()));
+    std::filesystem::create_directories(root);
+    {std::ofstream ini(root/"ofxr_bridge.ini");ini<<"[diagnostics]\nlogging_enabled=1\n";}
+    auto& logger=bridge_flight_logger();logger.shutdown();logger.initialize(root);
+    test_dead_space_diagnostics=true;
+    const auto result=run_actual_ngx_capture_pipeline(realvr,streamline,false,false,nullptr,false,true);
+    if(result)return result;
+    if(state().log)fflush(state().log);
+    wchar_t module[MAX_PATH]{};GetModuleFileNameW(nullptr,module,MAX_PATH);
+    const auto path=std::filesystem::path(module).parent_path()/
+        (L"ofxr-ngx-capture-pid"+std::to_wstring(GetCurrentProcessId())+L".log");
+    std::ifstream input(path);const std::string text(std::istreambuf_iterator<char>(input),{});
+    for(unsigned reason:{0U,1U,3U,11U,12U})if(text.find("dead_space_capture_gate a="+std::to_string(reason)+" ")==std::string::npos) {
+        std::cerr<<"Missing actual capture rejection/success diagnostic "<<reason<<"\n";return 1;
+    }
+    if(text.find("dead_space_camera_receipt")==std::string::npos || text.find("dead_space_queue_state")==std::string::npos)return 1;
+    if(text.find("dead_space_camera_right a=1073741824 b=0 c=0 ")==std::string::npos ||
+        text.find("dead_space_camera_projection_3")==std::string::npos)
+        {std::cerr<<"Rejected basis raw float bits/matrix missing\n";return 1;}
+    dead_space_capture_report_at=0;test_dead_space_production_identity=false;
+    if(sample_dead_space_capture()||dead_space_capture_report_at!=0)return 1;
+    test_dead_space_production_identity=true;logger.shutdown();dead_space_capture_report_at=0;
+    if(sample_dead_space_capture()||dead_space_capture_report_at!=0)return 1;
+    std::cout<<"Dead Space diagnostic gates: actual inactive/unsubmitted/flags/camera/success, one-second limit, non-title/F9-off bypass and unchanged GPU results PASS\n";
+    return 0;
 }
 int run_ghost_ngx_capture_test(const wchar_t* realvr,const wchar_t* streamline,bool steamvr) {
     test_ghost_native_motion=true;

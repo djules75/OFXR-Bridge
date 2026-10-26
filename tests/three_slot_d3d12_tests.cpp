@@ -369,6 +369,8 @@ void release(const std::shared_ptr<SwapchainState>& c, bool poison = true) {
 #include "native_input_readiness_tests.inc"
 
 #include "native_counted_release_tests.inc"
+#include "optical_reserve_admission_tests.inc"
+#include "bounded_optical_publication_tests.inc"
 #include "fsr_phase_clock_tests.inc"
 #include "worker_backpressure_fixture.inc"
 
@@ -569,9 +571,23 @@ int main(int argc,char** argv) {
             s->frame_generation_mode=xrfg::D3D12FrameGenerationMode::fsr3;
             dispatch->steamvr_runtime=fsr_queue;
         }
+        // These publication probes request the ordinary SteamVR transport.
+        // SessionState's Legacy default is not a substitute for session routing.
+        if(publication_test && dispatch->steamvr_runtime)s->vdxr_legacy=false;
         s->control_revision=xrfg::embedded::snapshot().revision;
         if(mode=="msfs-order-guards") { test_msfs_capture_order(*s); session_state.reset(); return 0; }
         hr(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&s->d3d12_device)),"device");
+        if(mode=="bounded-publication-scope") {optical_reserve_scope_test();session_state.reset();return 0;}
+        if(mode=="bounded-publication-preparation" || mode=="bounded-publication-old-control") {bounded_optical_preparation_test(mode.ends_with("old-control"));session_state.reset();return 0;}
+        if(mode=="bounded-publication-publication") {optical_reserve_activation_test();session_state.reset();return 0;}
+        if(mode=="bounded-publication-consumer") {optical_reserve_consumer_test();session_state.reset();return 0;}
+        if(mode=="bounded-publication-admission") {optical_reserve_admission_test();session_state.reset();return 0;}
+        if(mode=="optical-reserve-scope") {optical_reserve_scope_test();session_state.reset();return 0;}
+        if(mode=="optical-reserve-admission") {optical_reserve_admission_test();session_state.reset();return 0;}
+        if(mode=="optical-reserve-activation") {optical_reserve_activation_test();session_state.reset();return 0;}
+        if(mode=="optical-reserve-consumer") {optical_reserve_consumer_test();session_state.reset();return 0;}
+        if(mode=="optical-reserve-consumer-old-control") {optical_reserve_consumer_test(true);session_state.reset();return 0;}
+        if(mode=="optical-reserve-old-control") {optical_reserve_admission_test(true);session_state.reset();return 0;}
         if(mode=="native-counted-scope") {native_counted_scope_test();session_state.reset();return 0;}
         if(mode=="native-counted-starved") {native_counted_starvation_test();session_state.reset();return 0;}
         if(mode=="native-counted-progress") {native_counted_progress_test();session_state.reset();return 0;}

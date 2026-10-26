@@ -1,5 +1,6 @@
 
 #include "xrfg/luke_color_origin.hpp"
+#include "xrfg/luke_origin_inset.hpp"
 #include "xrfg/luke_afw_source.hpp"
 #include <dxgi1_6.h>
 #include <d3d12sdklayers.h>
@@ -110,6 +111,13 @@ void codec_tests() {
     stamp(row,32,1,0);
     require(!xrfg::decode_luke_origin_row(row).token,"zero token accepted");
     xrfg::LukeColorOriginLayout layout;
+    require(xrfg::luke_origin_inset_for_title(L"gta5_enhanced.EXE")==std::array<unsigned,2>{0,32},"GTA Enhanced case-insensitive protected policy");
+    require(xrfg::luke_origin_inset_for_title(L"Outlaws.exe")==std::array<unsigned,2>{256,32},"Outlaws protected policy changed");
+    for(const auto* name:{L"GTA5.exe",L"Dead Space.exe",L"KingdomCome.exe",L"HorizonForbiddenWest.exe"})
+        require(xrfg::luke_origin_inset_for_title(name)==std::array<unsigned,2>{0,0},"unrelated title got GTA inset");
+    require(xrfg::compact_luke_origin_layout(2128,1696,1553,1696,layout,0,32)&&layout.band_count==1&&
+        layout.bands[0].x==577&&layout.bands[0].y==34&&layout.scan.y==16&&layout.scan.height==44,
+        "GTA measured final-color protected geometry");
     require(xrfg::compact_luke_origin_layout(3344,3344,3063,3344,layout),"Horizon crop layout");
     require(layout.band_count==1 && layout.bands[0].x==283 && layout.bands[0].y==2 && layout.bands[0].width==256 &&
         layout.bands[0].height==8 && layout.scan.width==541 && layout.scan.height==12,"derived corner crop");
@@ -626,6 +634,26 @@ void outlaws_protected_gpu_test() {
     }
     std::cout<<"Outlaws protected GPU: "<<checks<<" checks PASS\n";
 }
+void gta_protected_gpu_test() {
+    wchar_t executable[MAX_PATH]{};GetModuleFileNameW(nullptr,executable,MAX_PATH);
+    const auto* name=wcsrchr(executable,L'\\');
+    require(_wcsicmp(name?name+1:executable,L"GTA5_Enhanced.exe")==0,"GTA GPU test requires shipping process-name routing");
+    Gpu gpu;auto source=gpu.texture(2128,1696);
+    xrfg::configure_luke_color_origin_extent(1553,1696);
+    xrfg::LukeColorOriginRect written{};constexpr std::uint32_t expected=223;
+    check(xrfg::mark_luke_color_origin(gpu.list.Get(),source.Get(),expected,D3D12_RESOURCE_STATE_COMMON,gpu.device.Get(),{},DXGI_FORMAT_UNKNOWN,&written),"GTA original writer");
+    require(written.x==577&&written.y==34&&written.width==256&&written.height==8,"GTA actual process did not select vertical inset");
+    std::vector<ComPtr<ID3D12Resource>> eyes;
+    for(unsigned crop:{0U,288U,575U})for(int shift:{-16,-8,0,8,16}) {
+        auto eye=gpu.texture(1553,1696);
+        const unsigned sy=shift<0?unsigned(-shift):0,dy=shift>0?unsigned(shift):0;
+        gpu.crop(source.Get(),eye.Get(),crop,sy,1553,1696-std::abs(shift),0,dy);eyes.push_back(std::move(eye));
+    }
+    gpu.submit();
+    for(const auto& eye:eyes){std::uint32_t token{};check(xrfg::read_luke_color_origin(gpu.queue.Get(),eye.Get(),&token,D3D12_RESOURCE_STATE_COMMON,5000),"GTA cropped/shifted actual GPU reader");
+        require(token==expected,"GTA crop or reprojection margin lost exact CRC token");}
+    std::cout<<"GTA protected GPU: "<<checks<<" checks PASS\n";
+}
 int captured_decode_benchmark(char** argv) {
  constexpr unsigned width=260,height=303,pitch=14080;
  std::array<std::vector<std::byte>,2> bytes;
@@ -644,6 +672,7 @@ int captured_decode_benchmark(char** argv) {
 }
 int main(int argc,char** argv) {
     try { if(argc==2 && std::string_view(argv[1])=="outlaws-protected") {outlaws_protected_gpu_test();return 0;}
+        if(argc==2 && std::string_view(argv[1])=="gta-protected") {gta_protected_gpu_test();return 0;}
         if(argc==3)return captured_decode_benchmark(argv);cpu_batch_tests();codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }
     catch(const std::exception& e) {std::cerr<<"Compact origin FAIL: "<<e.what()<<"\n";return 1;}
 }

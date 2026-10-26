@@ -85,6 +85,10 @@ struct DlssMotionVectorPublication {
     // In-process receipt:1=current->N-1,2=current->same-eye N-2.
     // Append fields so existing aggregate publishers retain their contract.
     std::uint32_t raw_motion_native_span{1};
+    // In-process NGX SR/RR receipt for Dead Space's RG16 typeless allocation.
+    // DLSS consumes float XY; only our existing owned motion copy is typed.
+    // Generic/external publishers keep the original resource format.
+    bool dlss_float_motion{};
 };
 
 // Scalar native camera history: no retained older GPU resources or SL metadata.

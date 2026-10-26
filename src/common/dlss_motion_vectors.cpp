@@ -2,6 +2,7 @@
 #include "xrfg/luke_camera_units.hpp"
 #include "xrfg/luke_color_token.hpp"
 #include "xrfg/luke_interleaved_history.hpp"
+#include "xrfg/luke_motion_format.hpp"
 #include "xrfg/two_frame_capture.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 
@@ -216,7 +217,8 @@ HRESULT snapshot_resource(
     D3D12_RESOURCE_STATES snapshot_state = kSnapshotReadState,
     std::shared_ptr<DlssSnapshotRetention>* retention = nullptr,
     ComPtr<ID3D12Device>* allocation_receipt = nullptr,
-    std::size_t retained_capacity = SnapshotCount) noexcept {
+    std::size_t retained_capacity = SnapshotCount,
+    bool dlss_float_motion = false) noexcept {
     if (source == nullptr || producer_command_list == nullptr ||
         producer_queue == nullptr || snapshot == nullptr) return E_POINTER;
     snapshot->Reset();
@@ -249,7 +251,17 @@ HRESULT snapshot_resource(
         allocation_device = source_device;
     }
 
-    const D3D12_RESOURCE_DESC description = source->GetDesc();
+    D3D12_RESOURCE_DESC description = source->GetDesc();
+    // The observed NGX SR/RR MotionVectors input has the documented float-XY
+    // contract. Dead Space allocates that field as RG16_TYPELESS. Preserve its
+    // bits in the existing owned copy using the compatible RG16_FLOAT format;
+    // never change the game resource or relax generic typeless SRV rejection.
+    if (dlss_float_motion && description.Format == DXGI_FORMAT_R16G16_TYPELESS &&
+        description.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+        description.DepthOrArraySize == 1 && description.SampleDesc.Count == 1 &&
+        !(description.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)) {
+        description.Format = dlss_motion_snapshot_format(description.Format, true);
+    }
     // Ordinary producers keep four slots. Luke may use eight but NEVER
     // overwrite a CPU-pinned or GPU-in-flight guide. No producer wait/flush.
     const std::size_t capacity = retention ? std::min(retained_capacity,SnapshotCount) : 4;
@@ -504,7 +516,7 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
                 publication.verified_producer_device,
                 &motion_snapshot, kSnapshotReadState,
                 retain_snapshots ? &motion_retention : nullptr,
-                &motion_snapshot_device,retained_capacity))) {
+                &motion_snapshot_device,retained_capacity,publication.dlss_float_motion))) {
             ++state.statistics.snapshot_failures;
             state.statistics.status = DlssMotionVectorStatus::invalid_input;
             return {};

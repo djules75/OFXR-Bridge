@@ -78,7 +78,7 @@ std::string_view generation_status_text(int mode, int motion_source, GenerationS
 }
 namespace {
 constexpr std::uint32_t kMagic = 0x41465952;
-constexpr std::uint32_t kAbi = 66301;
+constexpr std::uint32_t kAbi = 68101;
 std::atomic_uint overlay_limits{};
 static_assert(offsetof(RuntimeStatus, provider_error)==80); // V611 IPC layout
 static_assert(offsetof(RuntimeStatus, afw_running)==77); // V611 AFW activity field
@@ -192,7 +192,7 @@ class Discovery {
     DiscoveryState* data{};
 public:
     Discovery() {
-        const auto prefix=L"Local\\OFXRBridgeV663-discovery-"+std::to_wstring(path_identity(global_configuration_path()));
+        const auto prefix=L"Local\\OFXRBridgeV667-discovery-"+std::to_wstring(path_identity(global_configuration_path()));
         mutex=CreateMutexW(nullptr,FALSE,(prefix+L"-mutex").c_str());
         mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(DiscoveryState),(prefix+L"-data").c_str());
         if(mapping)data=static_cast<DiscoveryState*>(MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(DiscoveryState)));
@@ -241,7 +241,7 @@ public:
         // Profile identity is part of the mapping name, so fixture profiles
         // and future concurrent candidates cannot modify the user's settings.
         const auto identity=path_identity(file);
-        const auto prefix = L"Local\\OFXRBridgeV663-" + std::to_wstring(identity);
+        const auto prefix = L"Local\\OFXRBridgeV667-" + std::to_wstring(identity);
         mutex = CreateMutexW(nullptr, FALSE, (prefix + L"-mutex").c_str());
         if (!mutex) return;
         const DWORD waited = WaitForSingleObject(mutex, 2000);
@@ -529,7 +529,7 @@ bool initialize_game_configuration(const std::filesystem::path& executable) noex
         // A dedicated creation mutex prevents two simultaneous first launches
         // overwriting one another's freshly created profile.
 #ifdef _WIN32
-        const auto name=L"Local\\OFXRBridgeV663-create-"+std::to_wstring(path_identity(file));
+        const auto name=L"Local\\OFXRBridgeV667-create-"+std::to_wstring(path_identity(file));
         HANDLE mutex=CreateMutexW(nullptr,FALSE,name.c_str());if(!mutex)return false;
         struct CreationGuard {HANDLE handle;bool locked{};~CreationGuard(){if(locked)ReleaseMutex(handle);CloseHandle(handle);}} guard{mutex};
         const auto waited=WaitForSingleObject(mutex,2000);
@@ -703,6 +703,7 @@ struct SuiteRecorder {
     bool afw_success{};
     bool vector_success{};
     std::uint32_t eye_long_side{};
+    std::uint32_t bridge_buffer_capacity{};
     bool memory_requested{};
     bool steamvr{}; // pacing matrix; may also be opt-in VDXR
     bool legacy_vdxr{};
@@ -817,7 +818,7 @@ void csv_finish(SuiteRecorder& rec,const BenchmarkStatus& b,std::uint64_t ended,
         csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_working_set_bytes);rec.stream<<',';
         csv_mib(rec.stream,rec.memory.ram_valid,rec.memory.ram_private_commit_bytes);rec.stream<<','<<quoted(verdict)<<','<<s.pacing_mode<<','<<rec.runtime<<','<<rec.legacy_vdxr<<','<<rec.eye_long_side<<',';
         if(rec.samples.refresh_hz.empty())rec.stream<<"N/A";else rec.stream<<benchmark_median(rec.samples.refresh_hz);
-        rec.stream<<','<<rec.vector_success<<','<<(rec.steamvr?(s.increase_buffer?3:2):0)<<'\n';
+        rec.stream<<','<<rec.vector_success<<','<<rec.bridge_buffer_capacity<<'\n';
         rec.stream.flush();
         if(!rec.stream)throw std::runtime_error("CSV write failed");
     }
@@ -980,12 +981,14 @@ void tick_benchmark(std::uint64_t now) noexcept {
                 rec.revision=b.revision;rec.index=b.index;rec.started=now;
                 rec.settings=s.desired;rec.label=b.label;rec.samples={};
                 rec.afw_success=false;rec.vector_success=false;rec.eye_long_side=0;
+                rec.bridge_buffer_capacity=s.runtime.buffer_capacity;
                 rec.memory_requested=false;rec.memory={};
                 rec.next_sample=now;
             }
             if(now>=rec.next_sample) {
                 rec.next_sample=now+250;
                 if(s.runtime.applied_revision==b.revision && s.runtime.telemetry.updated_ms<=GetTickCount64()) {
+                    rec.bridge_buffer_capacity=s.runtime.buffer_capacity;
                     const auto previous=rec.samples.last_ms;
                     rec.samples.observe(s.runtime.telemetry,b.started_ms,std::min(now+1,b.started_ms+kBenchmarkDurationMs));
                     if(rec.samples.last_ms!=previous) {

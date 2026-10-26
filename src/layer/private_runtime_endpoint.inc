@@ -93,7 +93,7 @@ HRESULT install_private_runtime(const std::shared_ptr<SessionState>& state) {
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
             stage<0?5719:5710+stage,sequence,at,hold);
     };
-    if(original->virtual_desktop_runtime) {
+    if(original->virtual_desktop_runtime || original->runtime_name.find("Pimax OpenXR")!=std::string::npos) {
         state->runtime_acceptance=std::make_shared<xrfg::RuntimeAcceptanceRate>();
         const auto rate=state->runtime_acceptance;
         options.accepted_output=[rate](auto at){rate->accepted(at);};

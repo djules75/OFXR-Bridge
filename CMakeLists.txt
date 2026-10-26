@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.663.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.681.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -85,6 +85,18 @@ endif()
 if(XRFG_BUILD_TESTS)
     enable_testing()
     if(WIN32)
+        add_library(xrfg_luke_marker_custom SHARED tests/luke_detection_marker.cpp)
+        add_library(xrfg_luke_marker_named SHARED tests/luke_detection_marker.cpp)
+        set_target_properties(xrfg_luke_marker_named PROPERTIES OUTPUT_NAME RealVR64)
+        add_executable(xrfg_luke_detection_tests tests/luke_detection_tests.cpp src/ingress/luke_detection.cpp)
+        target_include_directories(xrfg_luke_detection_tests PRIVATE include)
+        target_compile_features(xrfg_luke_detection_tests PRIVATE cxx_std_20)
+        target_compile_definitions(xrfg_luke_detection_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN XRFG_LUKE_DETECTION_TESTS)
+        add_dependencies(xrfg_luke_detection_tests xrfg_luke_marker_custom xrfg_luke_marker_named)
+        add_test(NAME xrfg_luke_detection_lifecycle COMMAND xrfg_luke_detection_tests
+            "$<TARGET_FILE:xrfg_luke_marker_custom>" "$<TARGET_FILE:xrfg_luke_marker_named>")
+        add_test(NAME xrfg_luke_detection_preloaded COMMAND xrfg_luke_detection_tests
+            "$<TARGET_FILE:xrfg_luke_marker_custom>" "$<TARGET_FILE:xrfg_luke_marker_named>" --preloaded)
         add_executable(xrfg_streamline_native_interface_tests tests/streamline_native_interface_tests.cpp)
         target_link_libraries(xrfg_streamline_native_interface_tests PRIVATE d3d12)
         target_include_directories(xrfg_streamline_native_interface_tests PRIVATE include "${CMAKE_CURRENT_SOURCE_DIR}/include/xrfg/native_ingress")
@@ -606,7 +618,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
 
     add_library(XR_APILAYER_XRFrameBridge_diagnostic ${XRFG_LAYER_KIND}
         ${XRFG_LAYER_SOURCE})
-    target_sources(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE src/layer/ngx_guide_capture.cpp src/layer/provider_api.cpp src/ingress/native_ingress.cpp src/ingress/streamline_camera.cpp src/ingress/d3d11_native_ingress.cpp src/ingress/vulkan_native_ingress.cpp src/ingress/vulkan_command_stream.cpp)
+    target_sources(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE src/layer/ngx_guide_capture.cpp src/layer/provider_api.cpp src/ingress/native_ingress.cpp src/ingress/luke_detection.cpp src/ingress/streamline_camera.cpp src/ingress/d3d11_native_ingress.cpp src/ingress/vulkan_native_ingress.cpp src/ingress/vulkan_command_stream.cpp)
     target_link_libraries(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE safetyhook version)
     if(TARGET xrfg_vulkan_capture_suspended_tests)
         add_dependencies(xrfg_vulkan_capture_suspended_tests XR_APILAYER_XRFrameBridge_diagnostic)
@@ -846,6 +858,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/outlaws-protected-origin"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_outlaws_origin_test.cmake")
         set_tests_properties(xrfg_outlaws_protected_origin PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+        add_test(NAME xrfg_gta_protected_origin COMMAND ${CMAKE_COMMAND}
+            "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_color_origin_tests>"
+            "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/gta-protected-origin"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gta_origin_test.cmake")
+        set_tests_properties(xrfg_gta_protected_origin PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         add_executable(xrfg_ngx_feature_metadata_tests tests/ngx_feature_metadata_tests.cpp)
         target_include_directories(xrfg_ngx_feature_metadata_tests PRIVATE include "${XRFG_DLSS_SDK_ROOT}/include")
         target_compile_features(xrfg_ngx_feature_metadata_tests PRIVATE cxx_std_20)
@@ -898,6 +915,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         foreach(probe scope starved progress)
             add_test(NAME xrfg_native_counted_${probe}_gpu COMMAND xrfg_three_slot_d3d12_tests native-counted-${probe})
             set_tests_properties(xrfg_native_counted_${probe}_gpu PROPERTIES TIMEOUT 15 RUN_SERIAL TRUE)
+        endforeach()
+        foreach(probe scope preparation publication admission consumer)
+            add_test(NAME xrfg_bounded_publication_${probe}_gpu COMMAND xrfg_three_slot_d3d12_tests bounded-publication-${probe})
+            set_tests_properties(xrfg_bounded_publication_${probe}_gpu PROPERTIES TIMEOUT 15 RUN_SERIAL TRUE)
         endforeach()
 
         foreach(route new djules fsr)
@@ -1056,6 +1077,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_executable(xrfg_three_slot_d3d12_tests tests/three_slot_d3d12_tests.cpp
             src/common/embedded_control.cpp)
         add_executable(xrfg_private_runtime_layer_tests tests/private_runtime_layer_tests.cpp src/common/embedded_control.cpp)
+        add_test(NAME xrfg_pimax_native_session_gpu COMMAND xrfg_private_runtime_layer_tests pimax-session)
+        add_test(NAME xrfg_pimax_forced_framework_session_gpu COMMAND xrfg_private_runtime_layer_tests force-framework-pimax-session)
+        set_tests_properties(xrfg_pimax_native_session_gpu xrfg_pimax_forced_framework_session_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         add_test(NAME xrfg_private_d11_entry_gate COMMAND xrfg_private_runtime_layer_tests d11-entry-gate)
         set_tests_properties(xrfg_private_d11_entry_gate PROPERTIES TIMEOUT 15 RUN_SERIAL TRUE)
         target_include_directories(xrfg_private_runtime_layer_tests PRIVATE include "${XRFG_OPENXR_SDK_ROOT}/include")
@@ -1492,7 +1516,7 @@ if(TARGET xrfg_streamline_native_interface_tests)
 endif()
 if(XRFG_BUILD_TESTS AND XRFG_BUILD_LAYER)
     foreach(t xrfg_three_slot_director_tests xrfg_three_slot_d3d12_tests xrfg_private_runtime_layer_tests xrfg_openxr_elliott_meter_tests)
-        target_sources(${t} PRIVATE src/layer/ngx_guide_capture.cpp src/ingress/native_ingress.cpp src/ingress/streamline_camera.cpp src/ingress/d3d11_native_ingress.cpp src/ingress/vulkan_native_ingress.cpp src/ingress/vulkan_command_stream.cpp)
+        target_sources(${t} PRIVATE src/layer/ngx_guide_capture.cpp src/ingress/native_ingress.cpp src/ingress/luke_detection.cpp src/ingress/streamline_camera.cpp src/ingress/d3d11_native_ingress.cpp src/ingress/vulkan_native_ingress.cpp src/ingress/vulkan_command_stream.cpp)
         target_include_directories(${t} PRIVATE "${XRFG_DLSS_SDK_ROOT}/include" "${XRFG_DEPENDENCY_ROOT}/Streamline")
         target_include_directories(${t} PRIVATE "${XRFG_GENERATED_SHADER_DIR}")
         target_link_libraries(${t} PRIVATE xrfg_autonomous_control xrfg_neural_rendering safetyhook version)
@@ -1525,6 +1549,21 @@ if(TARGET xrfg_three_slot_director_tests AND TARGET xrfg_sl_fixture_legacy)
         luke-ngx-actual-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
         "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
     set_tests_properties(xrfg_luke_ngx_actual_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+    add_test(NAME xrfg_dead_space_ngx_actual_capture COMMAND xrfg_three_slot_director_tests
+        dead-space-ngx-actual-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
+        "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
+    set_tests_properties(xrfg_dead_space_ngx_actual_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+        PASS_REGULAR_EXPRESSION "Dead Space public SR:")
+    add_test(NAME xrfg_gta_enhanced_ngx_actual_capture COMMAND xrfg_three_slot_director_tests
+        gta-enhanced-ngx-actual-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
+        "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
+    set_tests_properties(xrfg_gta_enhanced_ngx_actual_capture PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+        PASS_REGULAR_EXPRESSION "GTA Enhanced public SR:")
+    add_test(NAME xrfg_dead_space_ingress_diagnostics COMMAND xrfg_three_slot_director_tests
+        dead-space-ingress-diagnostics "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
+        "$<TARGET_FILE:xrfg_sl_fixture_legacy>")
+    set_tests_properties(xrfg_dead_space_ingress_diagnostics PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE
+        PASS_REGULAR_EXPRESSION "Dead Space diagnostic gates:")
     foreach(horizon_runtime steamvr vdxr)
       add_test(NAME xrfg_horizon_${horizon_runtime}_capture COMMAND xrfg_three_slot_director_tests
           horizon-${horizon_runtime}-capture "$<TARGET_FILE:xrfg_luke_ngx_dispatch_fixture>"
@@ -1701,6 +1740,16 @@ add_executable(xrfg_luke_kcd_quality_tests tests/luke_kcd_quality_tests.cpp)
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
   set_tests_properties(xrfg_luke_indiana_quality_bundled PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
       PASS_REGULAR_EXPRESSION "Indiana full quality:")
+  add_test(NAME xrfg_luke_gta_native_quality COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/gta-native-quality" -DTITLE=GTAVE
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_gta_native_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+  add_test(NAME xrfg_luke_dead_space_native_quality COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/dead-space-native-quality" -DTITLE=DS2023
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_dead_space_native_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
   set(XRFG_INDIANA_GAME_AFW_PROVIDER "" CACHE FILEPATH "Optional read-only actual Indiana PDAFW provider")
   if(EXISTS "${XRFG_INDIANA_GAME_AFW_PROVIDER}")
    add_test(NAME xrfg_luke_indiana_quality_game COMMAND "${CMAKE_COMMAND}"

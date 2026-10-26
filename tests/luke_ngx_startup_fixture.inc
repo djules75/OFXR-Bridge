@@ -6,11 +6,16 @@ void luke_ngx_startup_test() {
     {std::ofstream ini(root/"ofxr_bridge.ini");ini<<"[diagnostics]\nlogging_enabled=1\nmax_file_mb=8\n";}
     auto& logger=xrfg::bridge_flight_logger();logger.shutdown();logger.initialize(root);
     auto marker=LoadLibraryW((current_layer_directory()/L"luke-runtime-fixture.dll").c_str());
-    check(marker&&xrfg::native_ingress::luke_detected(),"startup Luke marker");
+    // The cache is deliberately cold until the real session entry refreshes
+    // it. Loading a marker alone no longer performs eager discovery (V667).
+    check(marker&&GetProcAddress(marker,"RealVRVersion"),"startup Luke marker");
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,
         D3D11_CREATE_DEVICE_BGRA_SUPPORT,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,nullptr)),"startup D11 device");
     auto dispatch=std::make_shared<Dispatch>();
+    // This is a native D11/VDXR startup fixture, not the private Framework
+    // endpoint (which requires a complete runtime dispatch).
+    dispatch->virtual_desktop_runtime=true;dispatch->runtime_name="VirtualDesktopXR";
     dispatch->get_instance_proc_addr=+[](XrInstance,const char*,PFN_xrVoidFunction* p)->XrResult {
         *p=nullptr;return XR_ERROR_FUNCTION_UNSUPPORTED;
     };

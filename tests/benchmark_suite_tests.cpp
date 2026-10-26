@@ -13,7 +13,8 @@ using namespace xrfg::autonomous;
 void check(bool condition,const char* text) {if(!condition)throw std::runtime_error(text);}
 // Mock the private endpoint's applied capacity alongside the existing applied revision.
 void report_test_runtime(RuntimeStatus& runtime) {
-    runtime.buffer_capacity=runtime.vdxr_legacy ? 0 : snapshot().desired.increase_buffer ? 3 : 2;
+    const auto desired=snapshot().desired;
+    runtime.buffer_capacity=runtime.vdxr_legacy ? 0 : desired.increase_buffer ? 3 : 2;
     report_runtime(runtime);
 }
 #include "buffer_benchmark_plan_tests.inc"
@@ -56,14 +57,14 @@ void quality_choice_rules() {
     check(benchmark_best({score(70,40),score(95,40,8,3999)},true)==0,"4x4 excluded below 4000 pixels");
     check(benchmark_best({score(70,40),score(95,40,8,4000)},true)==1,"4x4 allowed at exactly 4000 pixels");
     check(benchmark_best({score(70,40),score(95,40,8,0)},true)==0,"unknown resolution never permits coarse AFW");
-    check(benchmark_best({score(81,90),score(90,20,4)},true)==0,"1x1 at 90 percent Hz wins despite lower FPS and higher latency");
-    check(benchmark_best({score(80.99,90),score(90,20,4)},true)==1,"1x1 below 90 percent does not override performance");
-    check(benchmark_best({score(108,90,0,4100,120),score(120,20,4,4100,120)},true)==0,"quality preference follows actual refresh, not a fixed FPS cap");
+    check(benchmark_best({score(81,90),score(89,20,4)},true)==0,"1x1 at 90 percent Hz wins despite lower FPS and higher latency");
+    check(benchmark_best({score(80.99,90),score(89,20,4)},true)==1,"1x1 below 90 percent does not override performance");
+    check(benchmark_best({score(108,90,0,4100,120),score(119,20,4,4100,120)},true)==0,"quality preference follows actual refresh, not a fixed FPS cap");
     check(benchmark_best({score(81,90,0,4100,0),score(90,20,4,4100,0)},true)==1,"unknown refresh cannot trigger a relative preference");
-    check(benchmark_best({score(72,90,0,4100,90,true),score(90,20)},true)==0,"AFW alone at exactly 80 percent Hz takes priority");
-    check(benchmark_best({score(71.99,90,0,4100,90,true),score(90,20)},true)==1,"AFW alone below 80 percent uses ordinary comparison");
+    check(benchmark_best({score(72,90,0,4100,90,true),score(89,20)},true)==0,"AFW alone at exactly 80 percent Hz takes priority");
+    check(benchmark_best({score(71.99,90,0,4100,90,true),score(89,20)},true)==1,"AFW alone below 80 percent uses ordinary comparison");
     check(benchmark_best({score(72,90,4,3100,90,true),score(81,20)},true)==0,"AFW-only priority precedes OFXR full-quality preference");
-    check(benchmark_best({score(81,90,0,4100,90,true),score(90,20,4,4100,90,true)},true)==0,"within AFW-only group prefer full quality near refresh");
+    check(benchmark_best({score(81,90,0,4100,90,true),score(89,20,4,4100,90,true)},true)==0,"within AFW-only group prefer full quality near refresh");
     check(benchmark_best({score(72,90,0,4100,90,true),score(79.199,20,4,4100,90,true)},true)==0,
         "both AFW qualities at eighty percent retain 1x1 below ten percent gain despite lower half-quality latency");
     check(benchmark_best({score(72,90,0,4100,90,true),score(79.2,20,4,4100,90,true)},true)==1,
@@ -77,27 +78,43 @@ void quality_choice_rules() {
     check(benchmark_best({score(96,90,0,4100,120,true),score(105.599,20,4,4100,120,true)},true)==0 &&
           benchmark_best({score(96,90,0,4100,120,true),score(105.6,20,4,4100,120,true)},true)==1,
         "AFW ten-percent rule also respects the eighty-percent gate at 120 Hz");
-    check(benchmark_best({score(81,90,0,4100,90,true),score(90,20,4,4100,90,true)},true)==0,
+    check(benchmark_best({score(81,90,0,4100,90,true),score(89,20,4,4100,90,true)},true)==0,
         "existing ninety-percent full-quality preference still applies after ten-percent eligibility");
     auto invalid_full=score(72,90,0,4100,90,true);invalid_full.valid=false;
     check(benchmark_best({invalid_full,score(73,20,4,4100,90,true)},true)==1,
         "an invalid 1x1 result cannot veto sufficient AFW 2x2");
-    check(benchmark_best({score(72,90,0,4100,90,true),score(79,20,4,4100,90,true),score(90,10)},true)==0,
+    check(benchmark_best({score(72,90,0,4100,90,true),score(79,20,4,4100,90,true),score(89,10)},true)==0,
         "AFW-only priority is retained when 2x2 is excluded for insufficient quality gain");
-    check(benchmark_best({score(90,40),score(89.5,52,0,4100,90,false,true)})==1,"vectors may cost twelve ms at equivalent FPS");
-    check(benchmark_best({score(90,40),score(89.5,52.01,0,4100,90,false,true)})==0,"vector preference cannot exceed twelve ms");
-    check(benchmark_best({score(90,40),score(87,52,0,4100,90,false,true)})==1,"vectors can lose exactly three FPS with twelve extra ms");
-    check(benchmark_best({score(90,40),score(86.99,40,0,4100,90,false,true)})==0,"vector preference cannot exceed three FPS loss");
-    check(benchmark_best({score(90,40),score(87,52.01,0,4100,90,false,true)})==0,"three-FPS vector preference still has a twelve-ms cap");
-    check(benchmark_best({score(90,40),score(87,40,0,4100,90,false,true),score(89,50,0,4100,90,false,true)})==2,
+    check(benchmark_best({score(90,40),score(90,52,0,4100,90,false,true)})==1,"vectors may cost twelve ms at equivalent FPS");
+    check(benchmark_best({score(90,40),score(90,52.01,0,4100,90,false,true)})==0,"vector preference cannot exceed twelve ms");
+    check(benchmark_best({score(88,40),score(85,52,0,4100,90,false,true)})==1,"vectors can lose exactly three FPS with twelve extra ms");
+    check(benchmark_best({score(88,40),score(84.99,40,0,4100,90,false,true)})==0,"vector preference cannot exceed three FPS loss");
+    check(benchmark_best({score(88,40),score(85,52.01,0,4100,90,false,true)})==0,"three-FPS vector preference still has a twelve-ms cap");
+    check(benchmark_best({score(88,40),score(85,40,0,4100,90,false,true),score(87,50,0,4100,90,false,true)})==2,
         "vector-to-vector comparison retains one FPS tolerance");
-    check(benchmark_best({score(90,40),score(90.5,60,0,4100,90,false,true),score(87,52,0,4100,90,false,true)})==2,
+    check(benchmark_best({score(88,40),score(88.5,60,0,4100,90,false,true),score(85,52,0,4100,90,false,true)})==2,
         "three-FPS preference is anchored to the best optical result, not an expensive native peak");
     check(benchmark_best({score(90,40),score(89.5,52)})==0,"unconfirmed optical fallback does not gain native-vector preference");
-    auto triple=score(90,40);triple.triple=true;
+    check(benchmark_best({score(90,40),score(89.5,1,0,4100,90,false,true)})==0,"sub-refresh vectors are discarded even inside the ordinary one-FPS tie");
+    check(benchmark_best({score(90,40),score(87,40,0,4100,90,false,true)})==0,"three-FPS preference cannot lose full headset refresh");
+    check(benchmark_best({score(94,40),score(90,52,0,4100,90,false,true)})==1,"both at refresh use vector preference without a three-FPS gap rule");
+    check(benchmark_best({score(120,40,0,4100,120),score(119.99,1,0,4100,120,false,true)})==0,"full-refresh gate follows a 120-Hz headset");
+    check(benchmark_best({score(119,40,0,4100,120),score(116,52,0,4100,120,false,true)})==1,"three-FPS allowance remains below 120-Hz refresh");
+    check(benchmark_best({score(90,40),score(90.5,60,0,4100,90,false,true),score(87,52,0,4100,90,false,true)})==0,"discarded low-refresh vector result cannot beat an optical full-refresh route through a third candidate");
+    check(benchmark_best({score(90,40),score(95,1,0,4100,0,false,true)})==0,"unknown vector refresh cannot prove matching the optical full-refresh target");
+    check(benchmark_best({score(90,60,0,4100,90),score(89.5,1,0,4100,90)})==0,"full-refresh gate also excludes optical results inside the one-FPS tolerance");
+    check(benchmark_best({score(90,60),score(89.999,40)})==1,"owner-approved one-millifps numerical margin qualifies exactly at the cap");
+    check(benchmark_best({score(90,60),score(89.998,1)})==0,"below the numerical cap margin cannot win through latency");
+    check(benchmark_best({score(94,60),score(90,40)})==1,"measured overshoot does not remove another full-refresh route");
+    check(benchmark_best({score(72,10,0,4100,90,true),score(90,60)},true)==1,"full refresh precedes the AFW-only eighty-percent preference");
+    check(benchmark_best({score(81,10),score(90,60,4)},true)==1,"full refresh precedes the full-quality ninety-percent preference");
+    auto triple=score(89,40);triple.triple=true;
     check(benchmark_best({score(59.4,20),triple})==0,"3X excluded when a normal route reaches exactly 66 percent refresh");
     check(benchmark_best({score(59.39,20),triple})==1,"3X can win when all normal routes are below 66 percent");
-    auto at120=score(120,40,0,4100,120);at120.triple=true;
+    auto capped_triple=triple;capped_triple.fps=90;
+    check(benchmark_best({score(60,20),capped_triple})==1,"measured full-refresh candidate excludes every sub-refresh route before any multiplier preference");
+    check(benchmark_best({score(90,20),capped_triple})==0,"2X retains priority when both multipliers reach full refresh");
+    auto at120=score(119,40,0,4100,120);at120.triple=true;
     check(benchmark_best({score(79.2,20,0,4100,120),at120})==0,"3X threshold follows measured headset refresh");
     auto invalid=score(90,20);invalid.valid=false;
     check(benchmark_best({score(59,20),invalid,triple})==2,"failed normal trials cannot block a valid 3X result");
@@ -123,8 +140,8 @@ void quality_choice_rules() {
 void automatic_choice_controller() {
     RuntimeStatus runtime{};runtime.sessions=1;runtime.dlssg_preset_request=1;
     // Original VDXR, private basic, private full and Luke all use the same chooser.
-    for(unsigned scenario=0;scenario<10;++scenario) {
-        const bool modern=scenario!=0,luke=scenario>=3 && scenario<=6,full=scenario==2 || scenario==7;
+    for(unsigned scenario=0;scenario<12;++scenario) {
+        const bool modern=scenario!=0,luke=scenario>=3 && scenario<=6,full=scenario==2 || scenario==7 || scenario>=10;
         auto saved=snapshot().desired;saved.advanced_mode=false;saved.pacing_mode=1;
         saved.benchmark_auto_pick=true;saved.nr_enabled=true;saved.afw_mode=3;saved.afw_shading_rate=0;
         saved.afw_only=scenario==6; // also test clearing an unapplied direct-AFW request when OFXR wins
@@ -132,7 +149,13 @@ void automatic_choice_controller() {
         runtime.vdxr_runtime=!modern;runtime.steamvr_runtime=modern;runtime.vdxr_legacy=!modern;runtime.luke_detected=luke;
         runtime.pacing_mode=modern?1:0;runtime.applied_revision=snapshot().revision;report_test_runtime(runtime);
         runtime.eye_long_side=scenario==4?2800:4100;report_test_runtime(runtime);
-        const auto plan=benchmark_execution_plan(full,luke,modern,false,runtime.eye_long_side);auto winner=plan.size()-1;
+        auto plan=benchmark_execution_plan(full,luke,modern,false,runtime.eye_long_side);
+        if(scenario>=10)std::erase_if(plan,[](const auto& step){return step.triple;});
+        auto winner=plan.size()-1;
+        if(scenario==11) {
+            winner=0;while(winner<plan.size() && (plan[winner].disabled || plan[winner].generation || plan[winner].backend!=2))++winner;
+            check(winner<plan.size(),"full-refresh optical candidate exists");
+        }
         if(scenario==4 || scenario==6) {
             winner=0;while(winner<plan.size() && (plan[winner].disabled || plan[winner].backend!=2 || plan[winner].shading!=0 || plan[winner].pacing!=1))++winner;
             check(winner<plan.size(),"full-quality OFXR candidate exists");
@@ -170,14 +193,20 @@ void automatic_choice_controller() {
                 t.cycle_estimated_valid=true;t.cycle_estimated_ms=(i==1 || fidelity?1.F:i==winner?40.F:60.F)+float(sample);
                 t.display_hz=(!luke && scenario<8)?180.F:120.F;
                 if(scenario==4 && current.desired.afw_shading_rate!=0)t.output_fps=120+float(sample)-1;
-                if(scenario==5)t.output_fps=(i==winner?96.F:current.desired.enabled?120.F:70.F)+(float(sample)-1)*.5F;
+                if(scenario==5)t.output_fps=(i==winner?96.F:current.desired.enabled?119.F:70.F)+(float(sample)-1)*.5F;
                 if(scenario==6) {
-                    t.output_fps=(i==winner?108.F:current.desired.enabled && current.desired.afw_shading_rate!=0?120.F:70.F)+(float(sample)-1)*.5F;
+                    t.output_fps=(i==winner?108.F:current.desired.enabled && current.desired.afw_shading_rate!=0?119.F:70.F)+(float(sample)-1)*.5F;
                     t.cycle_estimated_ms=(i==winner?80.F:40.F)+float(sample);
                 }
                 if(scenario==7) {
                     t.output_fps=(i==winner?87.F:current.desired.frame_generation?70.F:fidelity?120.F:current.desired.enabled?90.F:70.F)+(float(sample)-1)*.5F;
                     t.cycle_estimated_ms=(i==winner?52.F:current.desired.frame_generation?70.F:40.F)+float(sample);
+                }
+                if(scenario>=10) {
+                    t.display_hz=90;
+                    const bool vector=current.desired.frame_generation!=0;
+                    t.output_fps=(vector ? (scenario==10 && i==winner ? 90.F : 89.5F) : 90.F)+(float(sample)-1)*.5F;
+                    t.cycle_estimated_ms=(vector ? (scenario==10 ? 52.F:10.F) : i==winner || scenario==10 ? 40.F:60.F)+float(sample);
                 }
                 if(scenario==8 || scenario==9) {
                     const bool triple=current.desired.enabled && current.desired.triple_frame_gen;

@@ -35,7 +35,7 @@ constexpr wchar_t kWindowClass[] = L"OFXRBridgeTrayWindow";
 #define XRFG_STRING(x) XRFG_STRING_IMPL(x)
 #define XRFG_WIDE_IMPL(x) L##x
 #define XRFG_WIDE(x) XRFG_WIDE_IMPL(x)
-constexpr wchar_t kApplicationName[] = L"OFXR-BRIDGE 0.3.0 (v" XRFG_WIDE(XRFG_STRING(XRFG_IMPLEMENTATION_VERSION)) L")";
+constexpr wchar_t kApplicationName[] = L"OFXR-BRIDGE 0.3.1 (v" XRFG_WIDE(XRFG_STRING(XRFG_IMPLEMENTATION_VERSION)) L")";
 constexpr wchar_t kCleanupArgument[] = L"--cleanup-manual-arm";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kTrayId = 1;
@@ -990,7 +990,7 @@ void handle_command(AppState& state, UINT command) {
         break;
     case show_about: {
         wchar_t version_label[64]{};
-        swprintf_s(version_label, L"OFXR-BRIDGE 0.3.0 (v%03u)", kImplementationVersion);
+        swprintf_s(version_label, L"OFXR-BRIDGE 0.3.1 (v%03u)", kImplementationVersion);
         TASKDIALOGCONFIG dialog{};
         dialog.cbSize = sizeof(dialog);
         dialog.hwndParent = state.window;
