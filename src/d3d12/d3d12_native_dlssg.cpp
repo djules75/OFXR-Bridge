@@ -3,6 +3,7 @@
 #include "xrfg/two_frame_capture.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -426,6 +427,39 @@ struct DirectProvider {
     }
 };
 DirectProvider direct_provider;
+struct LifetimeCounters {
+    std::atomic<std::uint64_t> create_attempts{},create_successes{},create_failures{};
+    std::atomic<std::uint64_t> created{},failed_create_handles{};
+    std::atomic<std::uint64_t> release_attempts{},released{},release_failures{},live{};
+};
+LifetimeCounters lifetime;
+void observe_created(NVSDK_NGX_Result result,NVSDK_NGX_Handle* handle,bool direct) noexcept {
+    lifetime.create_attempts.fetch_add(1,std::memory_order_relaxed);
+    if(NVSDK_NGX_SUCCEED(result))lifetime.create_successes.fetch_add(1,std::memory_order_relaxed);
+    else lifetime.create_failures.fetch_add(1,std::memory_order_relaxed);
+    if(handle) {
+        lifetime.created.fetch_add(1,std::memory_order_relaxed);
+        lifetime.live.fetch_add(1,std::memory_order_relaxed);
+        if(NVSDK_NGX_FAILED(result))lifetime.failed_create_handles.fetch_add(1,std::memory_order_relaxed);
+    }
+    auto& logger=bridge_flight_logger();
+    if(logger.enabled() || logger.ram_enabled())
+        logger.event(BridgeFlightOperation::native_dlssg_provider,static_cast<unsigned>(result),
+            9,reinterpret_cast<std::uintptr_t>(handle),direct?1:0);
+}
+void release_owned_feature(NVSDK_NGX_Handle* handle,bool direct) noexcept {
+    if(!handle)return;
+    lifetime.release_attempts.fetch_add(1,std::memory_order_relaxed);
+    const auto result=direct?direct_provider.release(handle):NVSDK_NGX_D3D12_ReleaseFeature(handle);
+    if(NVSDK_NGX_SUCCEED(result)) {
+        lifetime.released.fetch_add(1,std::memory_order_relaxed);
+        lifetime.live.fetch_sub(1,std::memory_order_relaxed);
+    } else lifetime.release_failures.fetch_add(1,std::memory_order_relaxed);
+    auto& logger=bridge_flight_logger();
+    if(logger.enabled() || logger.ram_enabled())
+        logger.event(BridgeFlightOperation::native_dlssg_provider,static_cast<unsigned>(result),
+            10,reinterpret_cast<std::uintptr_t>(handle),direct?1:0);
+}
 struct DirectDevice { ComPtr<ID3D12Device> device; UINT frames{}; };
 std::mutex direct_mutex;
 std::vector<DirectDevice> direct_devices;
@@ -691,10 +725,7 @@ struct D3D12NativeDlssG::Impl {
                                                IID_PPV_ARGS(&out));
     }
     void release_feature(Feature &f) noexcept {
-        if (f.handle) {
-            if (f.direct) direct_provider.release(f.handle);
-            else NVSDK_NGX_D3D12_ReleaseFeature(f.handle);
-        }
+        release_owned_feature(f.handle,f.direct);
         if (f.params) {
             NVSDK_NGX_D3D12_DestroyParameters(f.params);
         }
@@ -763,6 +794,7 @@ struct D3D12NativeDlssG::Impl {
         create.NativeBackbufferFormat = color_format;
         result = f.direct ? direct_provider.create(list, f.params, &create, &f.handle)
                           : NGX_D3D12_CREATE_DLSSG(list, 1, 1, &f.handle, f.params, &create);
+        observe_created(result,f.handle,f.direct);
         bridge_flight_logger().event(BridgeFlightOperation::native_dlssg_provider,
             static_cast<unsigned>(result),4,width,height);
         if (NVSDK_NGX_FAILED(result)) {
@@ -1115,6 +1147,23 @@ struct D3D12NativeDlssG::Impl {
 #else
 struct D3D12NativeDlssG::Impl {};
 #endif
+
+D3D12NativeDlssGLifetime native_dlssg_lifetime_snapshot() noexcept {
+#ifdef XRFG_NATIVE_DLSSG
+    return {
+        lifetime.create_attempts.load(std::memory_order_relaxed),
+        lifetime.create_successes.load(std::memory_order_relaxed),
+        lifetime.create_failures.load(std::memory_order_relaxed),
+        lifetime.created.load(std::memory_order_relaxed),
+        lifetime.failed_create_handles.load(std::memory_order_relaxed),
+        lifetime.release_attempts.load(std::memory_order_relaxed),
+        lifetime.released.load(std::memory_order_relaxed),
+        lifetime.release_failures.load(std::memory_order_relaxed),
+        lifetime.live.load(std::memory_order_relaxed)};
+#else
+    return {};
+#endif
+}
 
 D3D12NativeDlssG::D3D12NativeDlssG() = default;
 D3D12NativeDlssG::~D3D12NativeDlssG() = default;

@@ -4,6 +4,7 @@ void djules_v474_policy_lifecycle_test() {
     s->graphics_binding=SessionGraphicsBinding::d3d12;
     s->application_wait_thread_id=1;s->application_end_thread_id=1;
     s->dispatch->steamvr_runtime=true;
+    s->vdxr_legacy=false;
     for (int backend:{0,1,2,3}) {
         s->djules_route=backend==3;s->nvidia_new_route=backend>=2;
         s->optical_flow_backend=backend?xrfg::D3D12OpticalFlowBackend::nvidia:xrfg::D3D12OpticalFlowBackend::fidelity_fx;
@@ -23,16 +24,16 @@ void djules_v474_policy_lifecycle_test() {
     check(history_capture_wait_limit_us(*s)==13888,"observed period, not fixed 11ms");
     s->history_capture_wait_period=33'333'333;
     check(history_capture_wait_limit_us(*s)==20000,"per capture 20ms ceiling");
-    s->dispatch->steamvr_runtime=false;
+    s->dispatch->steamvr_runtime=false;s->vdxr_legacy=true;
     check(presenter_holds_djules_prime(*s),"other runtimes retain prime hold");
     s->dispatch->inline_unless_pipelined=s->dispatch->virtual_desktop_runtime=true;
     s->split_frame_loop=true;s->application_wait_thread_id=1;s->application_end_thread_id=2;
     check(djules_inline_runtime(*s),"fresh VD split loop remains inline");
     s->presenter_restore_after_bypass=true;
     check(!djules_inline_runtime(*s),"V442 restores only previous Djules VD presenter past latch");
-    s->dispatch->virtual_desktop_runtime=false;
+    s->dispatch->virtual_desktop_runtime=false;s->vdxr_legacy=false;
     check(djules_inline_runtime(*s),"V442 does not extend to other runtimes");
-    s->dispatch->virtual_desktop_runtime=true;
+    s->dispatch->virtual_desktop_runtime=true;s->vdxr_legacy=true;
     s->graphics_binding=SessionGraphicsBinding::d3d11;
     check(presenter_forbidden(*s),"hard D11 split-driver prohibition retained");
     s->graphics_binding=SessionGraphicsBinding::d3d12;

@@ -253,17 +253,39 @@ struct DlssMotionVectorStatistics {
 std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
     const DlssMotionVectorPublication& publication) noexcept;
 void configure_dlss_motion_vector_tracking(bool enabled) noexcept;
-// Call only after all queue work that may reference published snapshots has
-// completed. A live disable intentionally retains them until this safe point.
+// Request after the layer has drained its consumers on disable. Nonblocking:
+// exact unsubmitted/in-flight producer copies and retained GPU readers remain
+// protected. Repeat at a bounded cadence until the final writer receipts finish.
+// Also collects already retired streams after a rapid re-enable. An empty
+// retirement queue uses an atomic fast path and takes no registry lock.
 void retire_disabled_dlss_motion_vector_resources() noexcept;
 void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept;
 // Failed native SR invalidates temporal joins immediately while preserving the
 // owned slot allocations and in-flight GPU snapshot lifetimes.
 void invalidate_dlss_motion_vector_stream_history(std::uint64_t stream) noexcept;
+// Mark an exact original Execute attempt BEFORE forwarding it. No GPU receipt
+// or guide admission is granted here; it only prevents a reentrant successful
+// Reset inside a proxy Execute from canceling potentially submitted copies.
+// Uses an atomic-only fast path when there are no cancelable recordings.
+void begin_dlss_motion_vector_submission(std::uint32_t,ID3D12CommandList* const*) noexcept;
+// Original Execute threw before its post-call receipt. Keep resources in an
+// unknown-writer quarantine; a later reuse of the same COM list is not proof
+// that the abandoned attempt completed.
+void abandon_dlss_motion_vector_submission(std::uint32_t,ID3D12CommandList* const*) noexcept;
+// Native hooks pass began_before_execute=true to consume only their exact
+// pre-call markers. Legacy post-only callers are marked without allocation
+// here before receipt bookkeeping; they do not admit already quarantined slots.
 void report_dlss_motion_vector_submission(
     ID3D12CommandQueue* queue,
     std::uint32_t command_list_count,
-    ID3D12CommandList* const* command_lists) noexcept;
+    ID3D12CommandList* const* command_lists,
+    bool began_before_execute=false) noexcept;
+// Call only AFTER the original GraphicsCommandList::Reset succeeds. Cancels
+// copies recorded on that exact list which have never actually executed.
+// Submitted GPU work and unknown completion receipts remain quarantined.
+// Invalidates canceled active guide history; the next publication primes a
+// fresh epoch. With no cancelable copies, this is an atomic-only fast path.
+void report_dlss_motion_vector_reset(ID3D12GraphicsCommandList*) noexcept;
 // Strict FSR joins never infer semantic eye identity from discovery order.
 // A learned stream/epoch is scalar metadata, not a retained GPU snapshot.
 struct DlssReleasedEyeIdentity {

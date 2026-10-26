@@ -39,6 +39,15 @@ struct SnapshotSlot {
     D3D12_RESOURCE_DESC description{};
     D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
     std::shared_ptr<DlssSnapshotRetention> retention;
+    // Recording a copy is not submission. The original Execute callback
+    // replaces this list with a fence receipt before reuse or retirement.
+    ComPtr<ID3D12GraphicsCommandList> producer_command_list;
+    IUnknown* producer_identity{}; // canonical weak identity, pinned by producer_command_list
+    ComPtr<ID3D12Fence> producer_fence;
+    std::uint64_t producer_fence_value{};
+    bool producer_canceled{};
+    bool writer_unknown{}; // actual Execute observed, but no trustworthy completion receipt
+    bool submission_started{}; // pre-Execute quarantine awaiting its first post-Execute receipt
 };
 
 struct StreamState {
@@ -62,6 +71,7 @@ struct StreamState {
     std::size_t next_depth_snapshot{};
     ComPtr<ID3D12Fence> submission_fence;
     ComPtr<ID3D12Device> submission_fence_device;
+    ComPtr<IUnknown> submission_fence_queue;
     std::uint64_t next_submission_fence_value{1};
 };
 
@@ -70,8 +80,8 @@ struct Registry {
     std::unordered_map<std::uint64_t, StreamState> streams;
     // A retired stream must disappear from resolution immediately, but its
     // snapshot resources can still be referenced by command lists that have
-    // only been recorded. Keep those allocations alive until the layer's
-    // existing GPU-idle retirement boundary.
+    // only been recorded. Actual Execute/fence receipts or successful Reset
+    // cancellation, plus consumer retirement, authorize their destruction.
     std::vector<StreamState> retired_streams;
     DlssMotionVectorStatistics statistics;
     // Tracking toggles and stream resets cannot reuse a color-carried key.
@@ -86,6 +96,45 @@ Registry& registry() {
 }
 
 std::atomic_bool g_tracking_enabled{false};
+std::atomic_bool g_retirement_pending{false};
+std::atomic_uint64_t g_cancelable_snapshots{};
+std::atomic_bool g_submission_ever_started{};
+
+bool writer_complete(const SnapshotSlot& slot) noexcept {
+    if(!slot.resource)return true;
+    if(slot.writer_unknown)return false;
+    if(slot.producer_canceled)return true;
+    if(slot.producer_command_list || !slot.producer_fence || !slot.producer_fence_value)return false;
+    const auto completed=slot.producer_fence->GetCompletedValue();
+    return completed!=UINT64_MAX && completed>=slot.producer_fence_value;
+}
+
+void clear_frame_history(StreamState& stream) noexcept {
+    stream.previous.reset();stream.previous2.reset();stream.latest.reset();
+    stream.luke_origin_history.clear();
+}
+
+// Every retained allocation has its own actual writer proof. Consumer frame
+// pins and AFW's GPU-read receipts independently prevent early destruction.
+void collect_retired(Registry& registry) noexcept {
+    for(auto& stream:registry.retired_streams) {
+        clear_frame_history(stream);
+        const auto trim=[](auto& slots) {
+            for(auto& slot:slots)if(slot.resource && writer_complete(slot) &&
+                (!slot.retention || (slot.retention.use_count()==1 && slot.retention->reusable())))
+                slot=SnapshotSlot{};
+        };
+        trim(stream.output_snapshots);trim(stream.snapshots);trim(stream.depth_snapshots);
+    }
+    std::erase_if(registry.retired_streams,[](const auto& stream) {
+        const auto empty=[](const auto& slots) {
+            return std::none_of(slots.begin(),slots.end(),[](const auto& slot){return bool(slot.resource);});
+        };
+        return empty(stream.output_snapshots) && empty(stream.snapshots) && empty(stream.depth_snapshots);
+    });
+    g_retirement_pending.store(!registry.retired_streams.empty() ||
+        (!g_tracking_enabled.load(std::memory_order_acquire) && !registry.streams.empty()),std::memory_order_release);
+}
 
 ComPtr<IUnknown> identity(IUnknown* object) noexcept {
     ComPtr<IUnknown> value;
@@ -99,6 +148,15 @@ bool same_identity(IUnknown* left, IUnknown* right) noexcept {
     const auto a = identity(left);
     const auto b = identity(right);
     return a && b && a.Get() == b.Get();
+}
+
+std::vector<ComPtr<IUnknown>> command_identities(std::uint32_t count,ID3D12CommandList* const* lists) {
+    std::vector<ComPtr<IUnknown>> values;values.reserve(count);
+    for(std::uint32_t index=0;index<count;++index)values.push_back(identity(lists[index]));
+    return values;
+}
+bool contains_identity(const std::vector<ComPtr<IUnknown>>& values,IUnknown* value) noexcept {
+    return value && std::any_of(values.begin(),values.end(),[&](const auto& candidate){return candidate.Get()==value;});
 }
 
 bool same_device(IUnknown* left, IUnknown* right) noexcept {
@@ -223,6 +281,8 @@ HRESULT snapshot_resource(
         producer_queue == nullptr || snapshot == nullptr) return E_POINTER;
     snapshot->Reset();
     if (allocation_receipt) allocation_receipt->Reset();
+    const auto list_identity=identity(producer_command_list);
+    if(!list_identity)return E_NOINTERFACE;
 
     ComPtr<ID3D12Device> source_device;
     ComPtr<ID3D12Device> command_device;
@@ -262,14 +322,16 @@ HRESULT snapshot_resource(
         !(description.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)) {
         description.Format = dlss_motion_snapshot_format(description.Format, true);
     }
-    // Ordinary producers keep four slots. Luke may use eight but NEVER
-    // overwrite a CPU-pinned or GPU-in-flight guide. No producer wait/flush.
+    // Ordinary producers keep four slots; direct receipts and Luke use their
+    // explicit bounds. Never overwrite a pending producer, CPU pin or GPU read.
+    // No producer wait/flush is introduced at recording time.
     const std::size_t capacity = retention ? std::min(retained_capacity,SnapshotCount) : 4;
     std::size_t selected = capacity;
     for (std::size_t offset = 0; offset < capacity; ++offset) {
         const auto index = (next_snapshot + offset) % capacity;
         const auto& use = snapshots[index].retention;
-        if (!use || (use.use_count() == 1 && use->reusable())) { selected = index; break; }
+        if (writer_complete(snapshots[index]) &&
+            (!use || (use.use_count() == 1 && use->reusable()))) { selected = index; break; }
     }
     if (selected == capacity) {
         return HRESULT_FROM_WIN32(ERROR_BUSY);
@@ -333,6 +395,11 @@ HRESULT snapshot_resource(
     *snapshot = slot.resource;
     if (allocation_receipt) *allocation_receipt = slot.allocation_device;
     slot.retention = std::move(lifetime);
+    slot.producer_command_list=producer_command_list;
+    slot.producer_identity=list_identity.Get();
+    slot.producer_fence.Reset();slot.producer_fence_value=0;
+    slot.producer_canceled=false;slot.writer_unknown=false;slot.submission_started=false;
+    g_cancelable_snapshots.fetch_add(1,std::memory_order_release);
     if (retention) *retention = slot.retention;
     next_snapshot = (selected + 1) % capacity;
     return S_OK;
@@ -459,6 +526,9 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         if (!g_tracking_enabled.load(std::memory_order_acquire)) return {};
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
+        // Disable can win after the fast check but before this lock. No late
+        // publisher may repopulate a registry whose retirement already ended.
+        if(!g_tracking_enabled.load(std::memory_order_acquire))return {};
         if (!valid(publication)) {
             ++state.statistics.invalid_publications;
             state.statistics.status = DlssMotionVectorStatus::invalid_input;
@@ -727,10 +797,11 @@ void configure_dlss_motion_vector_tracking(bool enabled) noexcept {
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
         if (!enabled) {
-            // Do not release the private resources here. The desired setting is
-            // visible to DLSS before the OpenXR layer reaches xrEndFrame and its
-            // GPU-idle fence, so snapshots may still be referenced by submitted
-            // synthesis work. The layer retires them explicitly after that fence.
+            // The layer's drained consumer boundary requests retirement. The
+            // per-slot writer receipt will still protect copies recorded on an
+            // application list that has not actually executed yet.
+            g_retirement_pending.store(!state.streams.empty() || !state.retired_streams.empty(),
+                std::memory_order_release);
             state.statistics.status = DlssMotionVectorStatus::disabled;
             return;
         }
@@ -751,19 +822,24 @@ void configure_dlss_motion_vector_tracking(bool enabled) noexcept {
         }
         state.statistics = {};
         state.statistics.status = DlssMotionVectorStatus::waiting_for_dlss;
+        collect_retired(state);
     } catch (...) {
     }
 }
 
 void retire_disabled_dlss_motion_vector_resources() noexcept {
+    if(!g_retirement_pending.load(std::memory_order_acquire))return;
     try {
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
-        if (g_tracking_enabled.load(std::memory_order_acquire)) return;
-        state.streams.clear();
-        state.retired_streams.clear();
-        state.statistics = {};
-        state.statistics.status = DlssMotionVectorStatus::disabled;
+        if (!g_tracking_enabled.load(std::memory_order_acquire)) {
+            state.retired_streams.reserve(state.retired_streams.size()+state.streams.size());
+            for(auto& [unused,stream]:state.streams)state.retired_streams.push_back(std::move(stream));
+            state.streams.clear();
+            state.statistics = {};
+            state.statistics.status = DlssMotionVectorStatus::disabled;
+        }
+        collect_retired(state);
     } catch (...) {
     }
 }
@@ -772,9 +848,12 @@ void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept {
     try {
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
+        state.retired_streams.reserve(state.retired_streams.size()+1);
         auto retired = state.streams.extract(stream);
         if (!retired.empty()) {
             state.retired_streams.push_back(std::move(retired.mapped()));
+            g_retirement_pending.store(true,std::memory_order_release);
+            collect_retired(state);
         }
     } catch (...) {
     }
@@ -800,27 +879,155 @@ void invalidate_dlss_motion_vector_stream_history(std::uint64_t stream_id) noexc
     }
 }
 
+void begin_dlss_motion_vector_submission(std::uint32_t count,ID3D12CommandList* const* lists) noexcept {
+    if(!count || !lists || !g_cancelable_snapshots.load(std::memory_order_acquire))return;
+    try {
+        auto& state=registry();std::scoped_lock lock(state.mutex);
+        bool marked=false;
+        const auto visit=[&](const auto& operation) {
+            const auto stream=[&](StreamState& value) {
+                for(auto& slot:value.output_snapshots)operation(slot);
+                for(auto& slot:value.snapshots)operation(slot);
+                for(auto& slot:value.depth_snapshots)operation(slot);
+            };
+            for(auto& [unused,value]:state.streams)stream(value);
+            for(auto& value:state.retired_streams)stream(value);
+        };
+        // No temporary vectors/allocations may fail before the original Execute.
+        // Each supplied identity is queried once and compared to cached slot IDs.
+        for(std::uint32_t index=0;index<count;++index) {
+            const auto canonical=identity(lists[index]);
+            if(!canonical) {
+                // An unidentified input might own any pending copy. Keep every
+                // such resource unknown, never cancelable or receipt-admissible.
+                visit([&](SnapshotSlot& slot) {
+                    if(slot.resource && slot.producer_command_list) {
+                        if(!slot.writer_unknown) {
+                            slot.writer_unknown=true;g_cancelable_snapshots.fetch_sub(1,std::memory_order_release);
+                        }
+                        slot.submission_started=false;
+                    }
+                });
+                return;
+            }
+            visit([&](SnapshotSlot& slot) {
+                if(slot.resource && !slot.writer_unknown && slot.producer_command_list && slot.producer_identity==canonical.Get()) {
+                    slot.writer_unknown=true;slot.submission_started=true;
+                    g_cancelable_snapshots.fetch_sub(1,std::memory_order_release);
+                    marked=true;
+                }
+            });
+        }
+        if(marked)g_submission_ever_started.store(true,std::memory_order_release);
+    }catch(...){}
+}
+
+void abandon_dlss_motion_vector_submission(std::uint32_t count,ID3D12CommandList* const* lists) noexcept {
+    // Do not even lazily construct the registry before the first actual marker.
+    if(!count || !lists || !g_submission_ever_started.load(std::memory_order_acquire))return;
+    try {
+        auto& state=registry();std::scoped_lock lock(state.mutex);
+        const auto visit=[&](const auto& operation) {
+            const auto stream=[&](StreamState& value) {
+                for(auto& slot:value.output_snapshots)operation(slot);
+                for(auto& slot:value.snapshots)operation(slot);
+                for(auto& slot:value.depth_snapshots)operation(slot);
+            };
+            for(auto& [unused,value]:state.streams)stream(value);
+            for(auto& value:state.retired_streams)stream(value);
+        };
+        for(std::uint32_t index=0;index<count;++index) {
+            const auto canonical=identity(lists[index]);
+            visit([&](SnapshotSlot& slot) {
+                if(slot.writer_unknown && slot.submission_started && slot.producer_command_list &&
+                    (!canonical || slot.producer_identity==canonical.Get()))slot.submission_started=false;
+            });
+            if(!canonical)return; // unidentified failure conservatively seals every started attempt
+        }
+    }catch(...){}
+}
+
+void report_dlss_motion_vector_reset(ID3D12GraphicsCommandList* list) noexcept {
+    if(!list || !g_cancelable_snapshots.load(std::memory_order_acquire))return;
+    try {
+        const auto reset_identity=identity(list);if(!reset_identity)return;
+        auto& state=registry();std::scoped_lock lock(state.mutex);
+        const auto contains=[&](const auto& slots) {
+            return std::any_of(slots.begin(),slots.end(),[&](const auto& slot) {
+                return slot.resource && !slot.writer_unknown && slot.producer_command_list &&
+                    slot.producer_identity==reset_identity.Get();
+            });
+        };
+        const auto affected=[&](const StreamState& stream) {
+            return contains(stream.output_snapshots) || contains(stream.snapshots) || contains(stream.depth_snapshots);
+        };
+        const auto cancel=[&](StreamState& stream) {
+            const auto slots=[&](auto& values) {
+                for(auto& slot:values)if(slot.resource && !slot.writer_unknown && slot.producer_command_list &&
+                    slot.producer_identity==reset_identity.Get()) {
+                    slot.producer_identity=nullptr;slot.producer_command_list.Reset();slot.producer_fence.Reset();slot.producer_fence_value=0;
+                    slot.producer_canceled=true;g_cancelable_snapshots.fetch_sub(1,std::memory_order_release);
+                }
+            };
+            slots(stream.output_snapshots);slots(stream.snapshots);slots(stream.depth_snapshots);
+        };
+        const auto affected_count=std::count_if(state.streams.begin(),state.streams.end(),
+            [&](const auto& entry){return affected(entry.second);});
+        if(!affected_count && std::none_of(state.retired_streams.begin(),state.retired_streams.end(),affected))return;
+        state.retired_streams.reserve(state.retired_streams.size()+affected_count);
+        for(auto& [unused,stream]:state.streams)if(affected(stream)) {
+            const auto next_epoch=stream.epoch+1;
+            cancel(stream);
+            state.retired_streams.push_back(std::move(stream));
+            stream=StreamState{};stream.epoch=next_epoch;
+        }
+        for(auto& stream:state.retired_streams)cancel(stream);
+        collect_retired(state);
+    }catch(...){}
+}
+
 void report_dlss_motion_vector_submission(
     ID3D12CommandQueue* queue,
     std::uint32_t command_list_count,
-    ID3D12CommandList* const* command_lists) noexcept {
+    ID3D12CommandList* const* command_lists,bool began_before_execute) noexcept {
+    if(!command_list_count || !command_lists)return;
+    // Legacy/manual reporters have already executed their lists. Mark them
+    // without allocation before any receipt bookkeeping can throw. Native
+    // reporters consume ONLY the exact pre-call markers, never copies recorded
+    // reentrantly on a reset list before the outer Execute returns.
+    if(!began_before_execute)begin_dlss_motion_vector_submission(command_list_count,command_lists);
+    if(!queue){abandon_dlss_motion_vector_submission(command_list_count,command_lists);return;}
     try {
-        if (queue == nullptr || command_list_count == 0 || command_lists == nullptr)
-            return;
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
-        const auto was_submitted = [&](const auto& frame) {
-            if (!frame || !frame->producer_command_list) return false;
-            for (std::uint32_t index = 0; index < command_list_count; ++index) {
-                if (same_identity(
-                        frame->producer_command_list.Get(), command_lists[index]))
-                    return true;
-            }
-            return false;
+        std::vector<ComPtr<IUnknown>> identities;
+        bool identities_ready=false;
+        const auto list_submitted = [&](IUnknown* canonical) {
+            if(!canonical)return false;
+            if(!identities_ready){identities=command_identities(command_list_count,command_lists);identities_ready=true;}
+            return contains_identity(identities,canonical);
         };
-
-        for (auto& [unused_stream_id, stream] : state.streams) {
-            static_cast<void>(unused_stream_id);
+        const auto process_stream = [&](StreamState& stream) {
+            std::vector<SnapshotSlot*> submitted_slots;
+            const auto inspect_slots=[&](auto& slots) {
+                for(auto& slot:slots)if(slot.resource && slot.writer_unknown && slot.submission_started &&
+                    slot.producer_command_list && list_submitted(slot.producer_identity))
+                    submitted_slots.push_back(&slot);
+            };
+            inspect_slots(stream.output_snapshots);inspect_slots(stream.snapshots);inspect_slots(stream.depth_snapshots);
+            for(auto* slot:submitted_slots) {
+                // Any error after this point leaves a completed-attempt
+                // quarantine. A later Reset or unrelated receipt cannot clear it.
+                slot->submission_started=false;
+            }
+            const auto was_submitted = [&](const auto& frame) {
+                if(!frame || !frame->producer_command_list || !list_submitted(identity(frame->producer_command_list.Get()).Get()))return false;
+                const auto owns=[&](ID3D12Resource* resource) {
+                    return std::any_of(submitted_slots.begin(),submitted_slots.end(),
+                        [&](const auto* slot){return slot->resource.Get()==resource;});
+                };
+                return owns(frame->motion_vectors.Get()) && (!frame->depth || owns(frame->depth.Get()));
+            };
             const bool latest_submitted = was_submitted(stream.latest);
             const bool previous_submitted = was_submitted(stream.previous);
             const bool previous2_submitted = was_submitted(stream.previous2);
@@ -828,13 +1035,18 @@ void report_dlss_motion_vector_submission(
                 stream.luke_origin_history.begin(), stream.luke_origin_history.end(),
                 was_submitted);
             if (!latest_submitted && !previous_submitted &&
-                !previous2_submitted && !origin_submitted) continue;
+                !previous2_submitted && !origin_submitted && submitted_slots.empty()) return;
 
             // The callback follows actual ExecuteCommandLists. Take the
             // allocation receipt from those submitted lists' snapshots;
             // queue.GetDevice may report a Streamline device proxy.
             ComPtr<ID3D12Device> submission_device;
             bool incompatible_devices = false;
+            for(const auto* slot:submitted_slots) {
+                if(!slot->allocation_device || (submission_device &&
+                    !same_identity(submission_device.Get(),slot->allocation_device.Get())))incompatible_devices=true;
+                else submission_device=slot->allocation_device;
+            }
             const auto inspect_owner = [&](const auto& frame, bool submitted) {
                 if (!submitted) return;
                 if (!frame->motion_snapshot_device ||
@@ -855,20 +1067,23 @@ void report_dlss_motion_vector_submission(
             if (!submission_device || incompatible_devices) {
                 ++state.statistics.invalid_rejections;
                 state.statistics.status = DlssMotionVectorStatus::invalid_input;
-                continue;
+                return;
             }
+            const auto queue_identity=identity(queue);
             if (!stream.submission_fence || !same_identity(
-                    stream.submission_fence_device.Get(), submission_device.Get())) {
+                    stream.submission_fence_device.Get(), submission_device.Get()) ||
+                stream.submission_fence_queue.Get()!=queue_identity.Get()) {
                 ComPtr<ID3D12Fence> fence;
                 if (FAILED(submission_device->CreateFence(
                         0, D3D12_FENCE_FLAG_NONE,
                         IID_PPV_ARGS(fence.GetAddressOf())))) {
                     ++state.statistics.invalid_rejections;
                     state.statistics.status = DlssMotionVectorStatus::invalid_input;
-                    continue;
+                    return;
                 }
                 stream.submission_fence = std::move(fence);
                 stream.submission_fence_device = submission_device;
+                stream.submission_fence_queue = queue_identity;
                 stream.next_submission_fence_value = 1;
             }
 
@@ -877,7 +1092,15 @@ void report_dlss_motion_vector_submission(
             if (FAILED(queue->Signal(stream.submission_fence.Get(), fence_value))) {
                 ++state.statistics.invalid_rejections;
                 state.statistics.status = DlssMotionVectorStatus::invalid_input;
-                continue;
+                return;
+            }
+
+            for(auto* slot:submitted_slots) {
+                slot->producer_fence=stream.submission_fence;
+                slot->producer_fence_value=fence_value;
+                slot->producer_identity=nullptr;
+                slot->producer_command_list.Reset();
+                slot->writer_unknown=false;
             }
 
             std::unordered_map<std::uint64_t,
@@ -903,8 +1126,14 @@ void report_dlss_motion_vector_submission(
             stamp_submission(stream.previous2, previous2_submitted);
             for (auto& origin : stream.luke_origin_history)
                 stamp_submission(origin, was_submitted(origin));
-        }
+        };
+        for(auto& [unused_stream_id,stream]:state.streams)process_stream(stream);
+        for(auto& stream:state.retired_streams)process_stream(stream);
+        if(g_retirement_pending.load(std::memory_order_acquire))collect_retired(state);
     } catch (...) {
+        // The registry lock has unwound. This path allocates nothing and seals
+        // pre-call markers even if receipt vectors/frame clones ran out of RAM.
+        abandon_dlss_motion_vector_submission(command_list_count,command_lists);
         report_dlss_motion_vector_status(DlssMotionVectorStatus::invalid_input);
     }
 }

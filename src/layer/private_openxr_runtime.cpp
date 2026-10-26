@@ -1,6 +1,7 @@
 #include "xrfg/private_openxr_runtime.hpp"
 #include "xrfg/private_output_distributor.hpp"
 #include "xrfg/interface_metrics.hpp"
+#include "xrfg/owned_d11_output.hpp"
 
 #include <algorithm>
 #include <array>
@@ -55,8 +56,9 @@ struct PrivateOpenXrRuntime::Impl {
     };
     struct Chain {
         XrSwapchain handle{};
-        // Only generated UEVR separate-eye outputs opt into this publication
-        // owner. Application handles and every other transport retain 1:1 XR.
+        // Internally generated outputs may share this publication owner only
+        // within one original source and identical resource/state contract.
+        // Application handles retain their separate native XR ownership.
         std::shared_ptr<Chain> publication;
         XrSwapchain publication_source{};
         unsigned publication_owners{};
@@ -927,12 +929,14 @@ XrResult PrivateOpenXrRuntime::end_frame(const XrFrameEndInfo* info,const std::s
     reservation.accepted=true;{std::scoped_lock lock(s.mutex);s.begun=0;++s.accepted_packets;}s.changed.notify_all();
     s.trace(1,packet->sequence);return XR_SUCCESS;
 }
-XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* info,XrSwapchain* output,D3D12_RESOURCE_STATES image_state,std::uint32_t image_count,XrSwapchain publication_source) {
+XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* info,XrSwapchain* output,D3D12_RESOURCE_STATES image_state,std::uint32_t image_count,XrSwapchain publication_source,ID3D12Device* d11_output_owner) {
     if(!info || !output || info->type!=XR_TYPE_SWAPCHAIN_CREATE_INFO || image_count<1 || image_count>3)return XR_ERROR_VALIDATION_FAILURE;
     const bool pooled=publication_source!=XR_NULL_HANDLE;
-    // Internal pooling accepts only plain color outputs. Unknown extension
-    // structures, static/depth/array/cube chains retain the existing path.
-    if(pooled && (info->next || info->createFlags || info->arraySize!=1 || info->faceCount!=1 ||
+    // A packed stereo image or texture array is still one source domain: its
+    // full resource and owned view rectangles/slices travel together. Pooling
+    // never joins different sources, and compatibility includes the array size.
+    // Unknown extensions, static/protected/depth/cube chains stay independent.
+    if(pooled && (info->next || info->createFlags || !info->arraySize || info->faceCount!=1 ||
         !(info->usageFlags&XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) ||
         (info->usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)))return XR_ERROR_VALIDATION_FAILURE;
     auto& s=*impl_;std::unique_lock lock(s.mutex);
@@ -977,7 +981,15 @@ XrResult PrivateOpenXrRuntime::create_swapchain(const XrSwapchainCreateInfo* inf
         }
     } else {
         D3D11_TEXTURE2D_DESC desc{};endpoint.real11.front()->GetDesc(&desc);
-        for(auto& image:chain->images){made=s.device11->CreateTexture2D(&desc,nullptr,&image.d11);if(FAILED(made))break;}
+        const bool share_owned_output=d11_output_owner && !info->next && !info->createFlags &&
+            info->faceCount==1 && info->arraySize && info->mipCount==1 && info->sampleCount==1 &&
+            (info->usageFlags&XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) &&
+            !(info->usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+        for(auto& image:chain->images) {
+            made=share_owned_output?owned_d11_output::create(s.device11.Get(),d11_output_owner,desc,&image.d11):E_NOINTERFACE;
+            if(FAILED(made))made=s.device11->CreateTexture2D(&desc,nullptr,&image.d11);
+            if(FAILED(made))break;
+        }
     }
     if(FAILED(made))return abandon(XR_ERROR_RUNTIME_FAILURE);
     if(pooled) {

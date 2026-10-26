@@ -10,6 +10,10 @@ bool apply_camera(DlssMotionVectorPublication& publication,
     ID3D12GraphicsCommandList* command_list) noexcept;
 void configure_queue(ID3D12CommandQueue* queue) noexcept;
 void install_device(ID3D12Device* device) noexcept;
+// Install successful-Reset observation on the canonical original guide list.
+// This grants no Luke/producer authority and applies equally to ordinary DLSS.
+// Once installed, observation is an atomic-only fast path on later evaluations.
+void observe_guide_list(ID3D12GraphicsCommandList* list) noexcept;
 // Bind only a native queue that actually executes an observed game SR/RR list.
 // Layer-created queues and queue creation alone are not producer evidence.
 void observe_luke_production(ID3D12GraphicsCommandList* list) noexcept;

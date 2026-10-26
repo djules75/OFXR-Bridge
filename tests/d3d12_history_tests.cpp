@@ -1,4 +1,5 @@
 #include "xrfg/d3d12_history.hpp"
+#include "xrfg/d3d11_dlss_guides.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/luke_color_origin.hpp"
@@ -21,6 +22,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -231,7 +233,7 @@ public:
     [[nodiscard]] std::uint64_t last_submitted_value() const noexcept { return next_fence_value_ - 1; }
 
     template <typename Recorder>
-    void execute_and_wait(Recorder&& recorder) {
+    void execute_and_wait(Recorder&& recorder,bool report_submission=true) {
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> command_list;
         require_hresult(
@@ -252,6 +254,7 @@ public:
         require_hresult(command_list->Close(), "ID3D12GraphicsCommandList::Close");
         ID3D12CommandList* command_lists[] = {command_list.Get()};
         queue_->ExecuteCommandLists(1, command_lists);
+        if(report_submission)xrfg::report_dlss_motion_vector_submission(queue_.Get(),1,command_lists);
 
         const std::uint64_t fence_value = next_fence_value_++;
         require_hresult(queue_->Signal(fence_.Get(), fence_value), "ID3D12CommandQueue::Signal");
@@ -1337,13 +1340,15 @@ void require_readback_matches(
         "ID3D12Resource::Map(readback)");
     const auto* mapped_bytes = static_cast<const std::byte*>(mapped_memory);
     for (UINT eye = 0; eye < kEyeCount; ++eye) {
-        for (UINT y = 0; y < kHeight; ++y) {
+        require(expected[eye].size()==description.Width*description.Height*kBytesPerPixel,
+            std::string(label)+" expected pattern extent differs from actual texture");
+        for (UINT y = 0; y < description.Height; ++y) {
             const std::byte* actual =
                 mapped_bytes + layouts[eye].Offset +
                 static_cast<std::size_t>(y) * layouts[eye].Footprint.RowPitch;
             const std::uint8_t* wanted =
                 expected[eye].data() +
-                static_cast<std::size_t>(y) * kWidth * kBytesPerPixel;
+                static_cast<std::size_t>(y) * description.Width * kBytesPerPixel;
             if (std::memcmp(actual, wanted, static_cast<std::size_t>(row_sizes[eye])) != 0) {
                 std::size_t first_difference = 0;
                 while (first_difference < row_sizes[eye] &&
@@ -1773,7 +1778,7 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
     std::vector<std::shared_ptr<const xrfg::DlssMotionVectorFrame>> held;
     std::shared_ptr<const xrfg::DlssMotionVectorFrame> published;
     std::uint64_t production_sequence{};
-    const auto publish = [&](unsigned n, bool reset = false) {
+    const auto publish = [&](unsigned n, bool reset = false,bool submit_receipt=true) {
         upload_pattern(fixture, motion.Get(), make_pattern(static_cast<std::uint8_t>(n * 13)));
         upload_pattern(fixture, depth.Get(), make_pattern(static_cast<std::uint8_t>(n * 17)));
         fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
@@ -1792,14 +1797,16 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
             p.raw_clip_to_previous_clip[12]=float(n)*.25F;
             p.raw_previous_clip_to_clip[12]=-float(n)*.25F;
             published = xrfg::publish_dlss_motion_vectors(p);
-        });
+        },submit_receipt);
         const auto resolved = xrfg::resolve_dlss_motion_vectors(1, fixture.queue());
         require(resolved && resolved->eye_count == 1 && resolved->eyes[0], "protected guide resolution");
         return resolved->eyes[0];
     };
     constexpr unsigned snapshot_capacity = 16;
     for (unsigned n = 1; n <= snapshot_capacity; ++n) {
-        auto frame = publish(n);
+        // Preserve the explicit cross-queue ownership counterfactual below:
+        // actual GPU copies finish, but n3/n4 have no admitted receipt yet.
+        auto frame = publish(n,false,n!=3 && n!=4);
         require(published && published->publication == frame->publication &&
             published->color_origin_token != 0 &&
             published->color_origin_token == frame->color_origin_token &&
@@ -1997,7 +2004,7 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
                 p.resource_state = p.depth_resource_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
                 p.protect_snapshot_lifetime = true;
                 exact_frame = xrfg::publish_dlss_motion_vectors(p);
-            });
+            },false); // the proxy-owner negative test supplies its receipt explicitly
             require(exact_frame != nullptr, "unused original metadata blocked protected publication");
         }
         require(unused_color->device_queries() == 0, "publisher queried an unsnapshotted unused color device");
@@ -2094,7 +2101,7 @@ void test_luke_multi_handle_origins(D3D12WarpFixture& fixture) {
         std::shared_ptr<const xrfg::DlssMotionVectorFrame> frame;
         ComPtr<ID3D12Resource> color;
     };
-    const auto publish=[&](std::uint64_t stream,unsigned n,unsigned seed,bool reset=false) {
+    const auto publish=[&](std::uint64_t stream,unsigned n,unsigned seed,bool reset=false,bool submit_receipt=true) {
         upload_pattern(fixture,motion.Get(),make_pattern(static_cast<std::uint8_t>(seed+n)));
         upload_pattern(fixture,depth.Get(),make_pattern(static_cast<std::uint8_t>(seed+n+50)));
         FrozenOrigin recorded{};recorded.color=create_single_slice_texture(fixture,512,32);
@@ -2120,7 +2127,7 @@ void test_luke_multi_handle_origins(D3D12WarpFixture& fixture) {
                 transition_barrier(color.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET),
                 transition_barrier(recorded.color.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_RENDER_TARGET)};
             list->ResourceBarrier(2,after);
-        });
+        },submit_receipt);
         return recorded;
     };
     const auto read=[&](const FrozenOrigin& source) {
@@ -2130,7 +2137,10 @@ void test_luke_multi_handle_origins(D3D12WarpFixture& fixture) {
         require(token==source.frame->color_origin_token,"multi-handle frozen color lost its exact origin");
         return token;
     };
-    auto a1=publish(90499,1,10),a2=publish(90499,2,10),a3=publish(90499,3,10);
+    auto a1=publish(90499,1,10);
+    // The exact A2/A3 originals execute now, but their ownership receipt is
+    // deliberately withheld for the cross-queue negative/positive pair below.
+    auto a2=publish(90499,2,10,false,false),a3=publish(90499,3,10,false,false);
     const auto a_token=read(a3);
     require(xrfg::resolve_luke_guide_token(a_token,fixture.queue(),fixture.device())!=nullptr,
         "single-handle baseline did not resolve exact color");
@@ -2179,7 +2189,12 @@ void test_luke_multi_handle_origins(D3D12WarpFixture& fixture) {
     // Deliberately corrupt this fixture's registry claim: a process-unique
     // token cannot have two native owners. Preserve the actual GPU colors and
     // restore the fixture immediately after exercising the fail-closed guard.
-    auto forged_owner=std::const_pointer_cast<xrfg::DlssMotionVectorFrame>(b3.frame);
+    // Submission stamps an immutable registry copy. Corrupt that ACTUAL owner
+    // temporarily, not the earlier CPU publication object returned by publish.
+    const auto native_owner=xrfg::resolve_dlss_guide_publication(90500,b3.frame->publication,fixture.queue());
+    require(native_owner && native_owner->color_origin_token==b3.frame->color_origin_token,
+        "duplicate-origin counterfactual did not identify the actual submitted registry owner");
+    auto forged_owner=std::const_pointer_cast<xrfg::DlssMotionVectorFrame>(native_owner);
     const auto b_token=forged_owner->color_origin_token;
     forged_owner->color_origin_token=a_token;
     require(!xrfg::resolve_luke_guide_token(read(a3),fixture.queue(),fixture.device()),
@@ -3714,7 +3729,7 @@ void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
             p.producer_queue = fixture.queue(); p.producer_command_list = list;
             p.resource_state = D3D12_RESOURCE_STATE_COMMON; p.reset = reset;
             require(xrfg::publish_dlss_motion_vectors(p) != nullptr, "R15 publication failed");
-        });
+        },false); // this helper owns the deliberate submit_receipt counterfactual
         if (submit_receipt) {
             ID3D12CommandList* lists[] = {recorded.Get()};
             xrfg::report_dlss_motion_vector_submission(fixture.queue(), 1, lists);
@@ -5207,6 +5222,7 @@ void test_djules_extra_output(D3D12WarpFixture& fixture) {
 #include "hybrid_gpu.inc"
 
 #include "history_v474_wait_tests.inc"
+#include "synthesis_memory_lifecycle_tests.inc"
 
 int main(int argc, char** argv) {
     const bool trace_test = std::getenv("XRFG_TEST_GPU_TRACE") != nullptr;
@@ -5219,6 +5235,15 @@ int main(int argc, char** argv) {
         xrfg::bridge_flight_logger().initialize(trace_dir);
     }
     try {
+        if(argc>1 && std::string_view(argv[1])=="memory-lifecycle") {
+            D3D12WarpFixture fixture;
+            std::cout<<"MEMORY_TEST history begin"<<std::endl;
+            test_history_memory_lifecycle(fixture);
+            std::cout<<"MEMORY_TEST method begin"<<std::endl;
+            test_synthesis_method_memory(fixture);
+            fixture.require_no_debug_errors();
+            return 0;
+        }
         if(argc>1 && std::string_view(argv[1])=="init-diagnostics") {
             const auto root=std::filesystem::temp_directory_path()/("ofxr-init-guard-"+std::to_string(GetCurrentProcessId()));
             std::filesystem::create_directories(root);

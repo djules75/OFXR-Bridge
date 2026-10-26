@@ -20,14 +20,16 @@ namespace {
 using Microsoft::WRL::ComPtr;
 struct Hooks {
     std::mutex mutex;
-    SafetyHookInline execute, create_queue;
+    SafetyHookInline execute, create_queue, reset_list;
     std::uintptr_t execute_entry{}; // diagnostics only, assigned on hook installation
     bool execute_probe_active{};
     ULONGLONG execute_probe_retry_at{};
     using Execute=void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*,UINT,ID3D12CommandList* const*);
     using CreateQueue=HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*,const D3D12_COMMAND_QUEUE_DESC*,REFIID,void**);
+    using ResetList=HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,ID3D12CommandAllocator*,ID3D12PipelineState*);
     Execute submit{};
     CreateQueue make_queue{};
+    ResetList reset{};
     std::vector<ComPtr<ID3D12CommandQueue>> queues;
     std::vector<ComPtr<ID3D12GraphicsCommandList>> luke_lists;
     ComPtr<ID3D12Device> luke_device;
@@ -38,6 +40,8 @@ std::atomic_uint64_t camera_accepted{},camera_rejected{},submissions{};
 std::atomic_uint32_t handles{};
 std::atomic_uint pending_luke_lists{};
 std::atomic_bool has_luke_context{};
+std::atomic_bool has_reset_hook{};
+std::atomic<ULONGLONG> reset_hook_retry_at{};
 template<std::size_t N> bool finite(const std::array<float,N>& values) {
     for(float v:values)if(!std::isfinite(v))return false;
     return true;
@@ -46,16 +50,29 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue* queue,UINT count,ID3D12Comman
     ++submissions;
     std::vector<ComPtr<ID3D12CommandList>> owners;
     std::vector<ID3D12CommandList*> native_lists;
+    bool normalization_failed=count && !lists;
     owners.reserve(count);native_lists.reserve(count);
     for(UINT i=0;lists&&i<count;++i) {
         IUnknown* native{};ComPtr<ID3D12CommandList> owner;
         if(d3d_native::get_borrowed(lists[i],&native)&&SUCCEEDED(native->QueryInterface(IID_PPV_ARGS(&owner)))) {
             native_lists.push_back(owner.Get());owners.push_back(std::move(owner));
-        }
+        } else normalization_failed=true;
     }
     auto receipts=neural_rendering::take_submission_receipts(
         static_cast<unsigned>(native_lists.size()),native_lists.data());
-    hooks().submit(queue,count,lists);
+    if(normalization_failed) {
+        // The original still receives EVERY application list. An omitted
+        // identity may own a pending copy, so none may remain Reset-cancelable.
+        // A null identity invokes the allocation-free conservative quarantine.
+        ID3D12CommandList* unidentified[]{nullptr};
+        begin_dlss_motion_vector_submission(1,unidentified);
+    }
+    begin_dlss_motion_vector_submission(static_cast<unsigned>(native_lists.size()),native_lists.data());
+    try {hooks().submit(queue,count,lists);}
+    catch(...) {
+        abandon_dlss_motion_vector_submission(static_cast<unsigned>(native_lists.size()),native_lists.data());
+        throw;
+    }
     IUnknown* unwrapped{};ComPtr<ID3D12CommandQueue> actual;
     if(d3d_native::get_borrowed(queue,&unwrapped))unwrapped->QueryInterface(IID_PPV_ARGS(&actual));
     if(actual) {
@@ -90,10 +107,10 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue* queue,UINT count,ID3D12Comman
             }
             pending_luke_lists.store(static_cast<unsigned>(h.luke_lists.size()),std::memory_order_release);
         }
-        report_dlss_motion_vector_submission(actual.Get(),static_cast<unsigned>(native_lists.size()),native_lists.data());
+        report_dlss_motion_vector_submission(actual.Get(),static_cast<unsigned>(native_lists.size()),native_lists.data(),true);
         two_frame_capture_submission(actual.Get(),static_cast<unsigned>(native_lists.size()),native_lists.data());
         neural_rendering::complete_submission(actual.Get(),receipts);
-    }
+    } else abandon_dlss_motion_vector_submission(static_cast<unsigned>(native_lists.size()),native_lists.data());
 }
 HRESULT STDMETHODCALLTYPE create_queue(ID3D12Device* device,const D3D12_COMMAND_QUEUE_DESC* desc,
     REFIID iid,void** output) {
@@ -103,6 +120,12 @@ HRESULT STDMETHODCALLTYPE create_queue(ID3D12Device* device,const D3D12_COMMAND_
         static_cast<IUnknown*>(*output)->QueryInterface(IID_PPV_ARGS(&queue));
         if(queue)configure_queue(queue.Get());
     }
+    return result;
+}
+HRESULT STDMETHODCALLTYPE reset_command_list(ID3D12GraphicsCommandList* list,
+    ID3D12CommandAllocator* allocator,ID3D12PipelineState* initial) {
+    const auto result=hooks().reset(list,allocator,initial);
+    if(SUCCEEDED(result))report_dlss_motion_vector_reset(list);
     return result;
 }
 bool kcd() {
@@ -182,7 +205,28 @@ void install_device(ID3D12Device* input) noexcept {
         if(probing){auto& s=hooks();std::scoped_lock lock(s.mutex);s.execute_probe_active=false;}
     }
 }
+void observe_guide_list(ID3D12GraphicsCommandList* input) noexcept {
+    if(!input || has_reset_hook.load(std::memory_order_acquire))return;
+    const auto now=GetTickCount64();
+    if(now<reset_hook_retry_at.load(std::memory_order_relaxed))return;
+    try {
+        IUnknown* borrowed{};ComPtr<ID3D12GraphicsCommandList> list;
+        if(!d3d_native::get_borrowed(input,&borrowed) ||
+            FAILED(borrowed->QueryInterface(IID_PPV_ARGS(&list))))return;
+        auto& state=hooks();std::scoped_lock lock(state.mutex);
+        if(has_reset_hook.load(std::memory_order_acquire))return;
+        reset_hook_retry_at.store(now+1000,std::memory_order_relaxed);
+        auto** table=*reinterpret_cast<void***>(list.Get());
+        state.reset_list=safetyhook::create_inline(table[10],reinterpret_cast<void*>(&reset_command_list),SafetyHookInline::StartDisabled);
+        if(state.reset_list) {
+            state.reset=state.reset_list.original<Hooks::ResetList>();
+            if(state.reset_list.enable())has_reset_hook.store(true,std::memory_order_release);
+            else {state.reset_list={};state.reset=nullptr;}
+        }
+    }catch(...){}
+}
 void observe_luke_production(ID3D12GraphicsCommandList* input) noexcept {
+    observe_guide_list(input);
     if(!input || !luke_detected())return;
     try {
         IUnknown* borrowed{};ComPtr<ID3D12GraphicsCommandList> list;

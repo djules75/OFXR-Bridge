@@ -194,6 +194,24 @@ std::shared_ptr<SessionState> session() {
     return state;
 }
 
+// The real content EndFrame entry resolves the exact session by handle. Pure
+// policy fixtures need no registration, but a live test consumer does.
+struct RegisteredFixtureSession {
+    std::shared_ptr<SessionState> current,previous;
+    explicit RegisteredFixtureSession(std::shared_ptr<SessionState> value):current(std::move(value)) {
+        std::scoped_lock lock(g_state_mutex);
+        if(const auto found=g_sessions.find(current->handle);found!=g_sessions.end())previous=found->second;
+        g_sessions[current->handle]=current;
+    }
+    ~RegisteredFixtureSession() {
+        std::scoped_lock lock(g_state_mutex);
+        const auto found=g_sessions.find(current->handle);
+        if(found!=g_sessions.end() && found->second==current) {
+            if(previous)found->second=std::move(previous);else g_sessions.erase(found);
+        }
+    }
+};
+
 void pipelined_route_handoff_test(bool steamvr = false, bool budget_demotion = false) {
     auto state = session();
     state->presenter_active = false;
@@ -351,11 +369,14 @@ void unified_route_policy_test() {
         reference->frame_generation_mode = xrfg::D3D12FrameGenerationMode::ofxr;
         reference->nvidia_new_route = false;
         reference->dispatch->steamvr_runtime = true;
+        reference->vdxr_legacy = false;
         check(steamvr_reference_capture_overlap(*reference), "native SteamVR Reference transport not selected");
         reference->dispatch->steamvr_runtime = false;
         reference->dispatch->virtual_desktop_runtime = true;
+        reference->vdxr_legacy = true;
         check(!steamvr_reference_capture_overlap(*reference), "Reference overlap leaked into Virtual Desktop");
         reference->dispatch->steamvr_runtime = true;
+        reference->vdxr_legacy = false;
         reference->nvidia_new_route = true;
         check(!steamvr_reference_capture_overlap(*reference), "Reference overlap changed New/Djules");
         reference->nvidia_new_route = false;
@@ -376,6 +397,7 @@ void unified_route_policy_test() {
     auto live = std::make_shared<SessionState>(std::make_shared<Dispatch>());
     live->graphics_binding = SessionGraphicsBinding::d3d12;
     live->dispatch->steamvr_runtime = true;
+    live->vdxr_legacy = false;
     live->dispatch->inline_unless_pipelined = true;
     live->three_slot_director = true;
     live->djules_pipeline_switchable = true;
@@ -1818,22 +1840,51 @@ void embedded_eligibility_test() {
             auto s = std::make_shared<SessionState>(std::make_shared<Dispatch>());
             s->handle = reinterpret_cast<XrSession>(0x213);
             s->graphics_binding = binding;
+            s->dispatch->create_swapchain=+[](XrSession,const XrSwapchainCreateInfo*,XrSwapchain* output)->XrResult {
+                if(output)*output=XR_NULL_HANDLE;
+                return XR_ERROR_VALIDATION_FAILURE;
+            };
+            s->dispatch->destroy_swapchain=+[](XrSwapchain)->XrResult{return XR_SUCCESS;};
+            s->dispatch->enumerate_swapchain_images=+[](XrSwapchain,std::uint32_t,std::uint32_t* count,XrSwapchainImageBaseHeader*)->XrResult {
+                if(count)*count=0;
+                return XR_ERROR_VALIDATION_FAILURE;
+            };
+            check(SUCCEEDED(apply_embedded_control(s)),"establish actual initial control tuple before testing admission");
             s->control_revision = 0;
             s->generation_budget_exhausted = mode == 2;
-            const XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+            XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+            info.width=info.height=16;info.arraySize=info.faceCount=info.sampleCount=info.mipCount=1;
+            info.format=DXGI_FORMAT_R8G8B8A8_UNORM;info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
             auto chain = std::make_shared<SwapchainState>(s, info);
             chain->handle = reinterpret_cast<XrSwapchain>(0x213);
             chain->session = s;
             chain->generation_eligible_pending = mode != 0;
             chain->generation_declined = mode == 1;
             { std::scoped_lock lock(g_state_mutex); g_swapchains[chain->handle] = chain; }
-            apply_embedded_control(s);
+            struct Remove {
+                XrSwapchain handle;
+                ~Remove(){std::scoped_lock lock(g_state_mutex);g_swapchains.erase(handle);}
+            } cleanup{chain->handle};
+            check(SUCCEEDED(apply_embedded_control(s)),"apply equivalent control revision before projection admission");
+            check(chain->generation_declined == (mode == 1) && !chain->frame_generation,
+                "control revision spent an unsubmitted source's generation budget");
+            ProjectionResourceMapping mapping{};mapping.application_swapchain=chain->handle;
+            check(ensure_projection_frame_generation(s,std::span<const ProjectionResourceMapping>(&mapping,1)),
+                "incompatible graphics binding incorrectly exhausted the session swapchain budget");
             // Eligible attempt fails without a graphics binding: refusal must
             // latch. Ineligible/budget-exhausted chains must remain untouched.
             check(chain->generation_declined == (mode == 1 || mode == 3),
                 "control eligibility/refusal gate");
+            if(mode==3) {
+                check(chain->generation_refusal==(binding==SessionGraphicsBinding::d3d11
+                    ?SwapchainEligibilityReason::invalid_d3d11_image:SwapchainEligibilityReason::missing_dispatch_or_history),
+                    "explicit projection admission returned an unrelated refusal reason");
+                const auto detail=binding==SessionGraphicsBinding::d3d11
+                    ?static_cast<std::uint64_t>(static_cast<std::int64_t>(XR_ERROR_VALIDATION_FAILURE)):0ULL;
+                check(chain->generation_refusal_detail==detail,"explicit projection admission lost the exact runtime/binding failure");
+            }
+            check(s->generation_budget_exhausted==(mode==2),"local graphics refusal changed the session budget gate");
             check(!chain->frame_generation, "unexpected control allocation");
-            { std::scoped_lock lock(g_state_mutex); g_swapchains.erase(chain->handle); }
         }
     }
 }
@@ -2097,6 +2148,7 @@ void refused_frame_recovery_test() {
             auto s = session();
             s->three_slot_director = director;
             s->nvidia_new_route = director;
+            RegisteredFixtureSession registration(s);
             try {
                 auto rejected_frame = frame(61);
                 if (!director) s->presenter_last_frame = frame(60)->frame;
@@ -2134,6 +2186,7 @@ void refused_frame_recovery_test() {
     // Exercise an owned director slot as well as borrowed submissions. The
     // refused A must be consumed so that B can drain; no slot/failure is stuck.
     auto s = session();
+    RegisteredFixtureSession registration(s);
     try {
         auto rejected = frame(71);
         s->three_slots.push_real(rejected);
@@ -2182,6 +2235,7 @@ void refused_frame_recovery_test() {
 #include "d3d12_reported_device_alias.hpp"
 #include "luke_stale_queue_fixture.hpp"
 #include "v477_luke_context.inc"
+#include "native_reset_lifetime_test.inc"
 #include "../src/layer/outlaws_startup_test.inc"
 
 #include "luke_fresh_pacing_fixture.inc"
@@ -2254,6 +2308,10 @@ int main(int argc, char** argv) {
         catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
     }
     xrfg_fixture::ControlProfile autonomous_profile;
+    if(argc>1 && std::string_view(argv[1])=="native-reset-lifetime") {
+        try {native_reset_lifetime_test();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
+    }
     if(argc>3 && std::string_view(argv[1])=="outlaws-startup") {
         const std::string marker=argv[2],provider=argv[3];
         const std::wstring wide_marker(marker.begin(),marker.end());
@@ -2287,6 +2345,10 @@ int main(int argc, char** argv) {
     }
     if(argc>1 && std::string_view(argv[1])=="luke-late-alias-context") {
         try {luke_standalone_context_test(true);return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
+    }
+    if(argc>1 && std::string_view(argv[1])=="luke-afw-resource-lifecycle") {
+        try {luke_standalone_context_test(true,false,false,true);return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
     }
     if(argc>1 && std::string_view(argv[1])=="v474-vd") {
@@ -2520,9 +2582,11 @@ int main(int argc, char** argv) {
             }
             gpu_pipeline(mode == "composition" || mode == "transition" || mode == "capture", mode == "transition", mode == "capture"); return 0;
         }
+        std::cerr<<"Director fixture: explicit eligibility\n"<<std::flush;
         embedded_eligibility_test();
         // Apply both menu revisions to the real session implementation. The
         // GPU backend stays NVIDIA: only presenter ownership is switched.
+        std::cerr<<"Director fixture: control route revisions\n"<<std::flush;
         {
             auto selected = session();
             selected->presenter_active = false;
@@ -2545,6 +2609,7 @@ int main(int argc, char** argv) {
         }
         // Virtual WaitFrame must return even while synthesis is deliberately
         // marked busy and no director is running. No tick/fence gate survives.
+        std::cerr<<"Director fixture: virtual prediction\n"<<std::flush;
         { std::scoped_lock lock(g_state_mutex); g_sessions[state->handle] = state; }
         state->synthesis_busy = true;
         XrFrameState prediction{XR_TYPE_FRAME_STATE};
@@ -2590,10 +2655,13 @@ int main(int argc, char** argv) {
 
         // Real director, mock pixels. Verify downstream blocking keeps A's
         // slot owned and prevents an early synthetic from overwriting it.
+        std::cerr<<"Director fixture: actual consumer 49 cycles\n"<<std::flush;
+        RegisteredFixtureSession director_registration(state);
         state->three_slots.push_real(frame(1));
         state->three_slots.shift_empty(); state->three_slots.shift_empty();
         state->presenter_thread = std::thread(three_slot_director_main, state);
         for (unsigned n = 2; n <= 25; ++n) {
+            std::cerr<<"Director fixture: admit real "<<n<<'\n'<<std::flush;
             until(state, [&] { return state->three_slots.can_accept_real(); });
             {
                 std::scoped_lock lock(state->presenter_mutex);
@@ -2627,9 +2695,11 @@ int main(int argc, char** argv) {
         check(presented.back() == std::pair<unsigned,bool>{25,false}, "last real drain");
         check(waits == begins && begins == ends && ends == 49, "frame cycle mismatch");
 
+        std::cerr<<"Director fixture: refused output recovery\n"<<std::flush;
         refused_frame_recovery_test();
 
         auto failing = session();
+        RegisteredFixtureSession failing_registration(failing);
         failing->three_slots.push_real(frame(1));
         failing->three_slots.shift_empty(); failing->three_slots.shift_empty();
         failing->three_slots.push_real(frame(2));
@@ -2641,6 +2711,7 @@ int main(int argc, char** argv) {
         fail_runtime = false;
 
         auto held = session();
+        RegisteredFixtureSession held_registration(held);
         held->three_slots.push_real(frame(1));
         held->three_slots.shift_empty(); held->three_slots.shift_empty();
         const auto before_stop = ends.load();
@@ -2651,6 +2722,7 @@ int main(int argc, char** argv) {
         // The actual worker error path must wake both producer rendezvous and
         // director. A missing mapping cannot silently strand a busy worker.
         auto failed = session();
+        RegisteredFixtureSession failed_registration(failed);
         auto job = std::make_shared<SynthesisJob>();
         job->current = frame(1); failed->synthesis_job = job; failed->synthesis_busy = true;
         failed->synthesis_thread = std::thread(synthesis_worker_main, failed);

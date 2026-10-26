@@ -860,6 +860,7 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     auto& s=state(); if(!s.active.load()){rejected(1);return {};}
     const auto call=++s.calls;
     if(!list||!p){rejected(2);return {};}
+    native_ingress::observe_guide_list(list);
     // The projection rarely changes: refresh it every 32 evaluations, and on
     // every one until it is known. OpenXR depth metadata takes precedence.
     if(!s.camera_ready.load()||call%32==0)update_uevr_projection();

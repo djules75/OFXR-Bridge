@@ -345,6 +345,14 @@ public:
         D3D12FrameGenerationMode generation_mode =
             D3D12FrameGenerationMode::ofxr) noexcept;
 
+    // Retire OFXR's optical provider after its exact GPU fences while keeping
+    // the existing device, queue, history and XR destinations copy-ready.
+    // Completed publication fence identities remain valid. Only a later real
+    // prime/pair recreates flow resources; this never creates D11/XR images.
+    // Returns S_FALSE for another generation mode; an already-cold OFXR
+    // transport is unchanged. Caller excludes new captures/presenter use.
+    [[nodiscard]] HRESULT suspend_flow_resources() noexcept;
+
     // Returns S_OK and consumes one completed NVIDIA timing record, S_FALSE
     // when none is ready, or an error for an invalid output pointer/readback.
     [[nodiscard]] HRESULT consume_nvidia_gpu_timing(
@@ -382,6 +390,9 @@ public:
 
 private:
     HRESULT ensure_flow_resources_locked();
+    HRESULT replace_resources_locked(D3D12OpticalFlowBackend backend,
+        D3D12NvidiaOpticalFlowOptions options,D3D12FrameGenerationMode mode,
+        bool defer_flow,bool preserve_completed_tickets);
     struct Impl;
 
     mutable std::mutex mutex_;
