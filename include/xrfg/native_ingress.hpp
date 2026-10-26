@@ -1,11 +1,11 @@
 #pragma once
 #include "dlss_motion_vectors.hpp"
+#include "luke_detection.hpp"
 #include <cstdint>
 
 namespace xrfg::native_ingress {
 // Native production, never newest-frame camera recovery. The current Streamline
 // frame/viewport or KCD list-bound packet owns all camera/history metadata.
-bool luke_detected() noexcept;
 bool apply_camera(DlssMotionVectorPublication& publication,
     ID3D12GraphicsCommandList* command_list) noexcept;
 void configure_queue(ID3D12CommandQueue* queue) noexcept;
@@ -25,4 +25,12 @@ struct Statistics {
     std::uint64_t camera_accepted{}, camera_rejected{}, submissions{};
 };
 Statistics statistics() noexcept;
+// Read-only F9 snapshot; never establishes a producer or changes hook policy.
+struct LukeContextDiagnostics {
+    bool admitted{}, execute_hook{}, create_queue_hook{};
+    std::uint32_t pending_lists{}, registered_queues{};
+    std::uintptr_t execute_entry{}, device{}, queue{};
+    std::uint64_t submissions{};
+};
+LukeContextDiagnostics luke_context_diagnostics() noexcept;
 }

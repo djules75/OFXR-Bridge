@@ -97,17 +97,23 @@ enum class LukeProducerCameraAxes {
 [[nodiscard]] inline bool luke_destination_view_camera_basis(
     Quaternion source_orientation, Quaternion destination_orientation,
     const LukeCameraBasis& source_view, float perspective_w,
-    LukeCameraBasis& destination_view) noexcept {
+    LukeCameraBasis& destination_view, float view_x_sign = 1.F,
+    float view_y_sign = 1.F) noexcept {
     if (!std::isfinite(perspective_w) || perspective_w == 0.0F) return false;
+    if (std::abs(view_x_sign) != 1.F || std::abs(view_y_sign) != 1.F) return false;
     // Producer axes have already been decoded. Only projection handedness
     // remains here: XR local Z is back, while a LH view Z is forward. Conjugate
     // the relative XR rotation into/out of that view convention.
     const float back_to_view = -std::copysign(1.0F, perspective_w);
     auto xr_basis = source_view;
+    for (float& value : xr_basis[0]) value *= view_x_sign;
+    for (float& value : xr_basis[1]) value *= view_y_sign;
     for (float& value : xr_basis[2]) value *= back_to_view;
     if (!luke_destination_camera_basis(source_orientation, destination_orientation,
             xr_basis, destination_view)) return false;
     for (float& value : destination_view[2]) value *= back_to_view;
+    for (float& value : destination_view[0]) value *= view_x_sign;
+    for (float& value : destination_view[1]) value *= view_y_sign;
     return true;
 }
 

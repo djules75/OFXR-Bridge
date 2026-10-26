@@ -1,6 +1,7 @@
 #include <sl.h>
 #include "xrfg/native_ingress/streamline1/sl1.h"
 #include "xrfg/native_ingress/streamline_camera.hpp"
+#include "xrfg/native_ingress/DeadSpaceCameraSource.h"
 #include <windows.h>
 #include <cstring>
 #include <iostream>
@@ -16,6 +17,7 @@ int failures{},calls{};bool supported{},nested{},inside{};uint32_t expected_fram
 const void* expected_constants{};bool expect_camera=true;void(*run_nested)();
 uint32_t expected_rejection{};
 bool projection_case{},luke_receipt{};
+bool native_source_case{};
 float rejected_fov=std::numeric_limits<float>::max();
 void check(bool ok,const char* why){if(!ok){++failures;std::cerr<<"FAIL: "<<why<<'\n';}}
 void observe(void* list,uint32_t feature,uint32_t frame,uint32_t viewport,const void* values){
@@ -27,7 +29,8 @@ void observe(void* list,uint32_t feature,uint32_t frame,uint32_t viewport,const 
         c.rejection==expected_rejection&&c.fov==rejected_fov&&c.near_z==.1f&&c.far_z==100,
         "exact rejected camera preserves field mask and original scalar bits");
     if(c.valid){check(c.frame==frame&&c.viewport==viewport,"camera belongs to exact evaluate");
-        check(c.position[0]==7&&c.projection[0]==1&&(projection_case||c.inverse[15]==1)&&c.camera_motion==1&&c.inverted,"typed camera fields preserved");
+        check(c.position[0]==7&&c.projection[0]==1&&(projection_case||native_source_case||c.inverse[15]==1)&&c.camera_motion==1&&c.inverted,"typed camera fields preserved");
+        if(native_source_case)check(c.forward==std::array<float,3>{0,0,-1}&&c.right==std::array<float,3>{1,0,0},"native source camera did not survive exact SL evaluate scope");
         if(projection_case){check(std::abs(c.fov-2.F*std::atan(.5F))<1e-6F,"FOV was not derived from exact perspective");
             const auto raw=camera::current();check(raw.observed&&!raw.valid&&raw.rejection==64&&raw.fov==99,
                 "Luke correction changed the original non-Luke receipt");}}
@@ -55,6 +58,28 @@ template<class Constants,class Invoke>void projection_cases(Constants& v,Invoke 
     inverse[0]=1;inverse[15]=std::numeric_limits<float>::quiet_NaN();expected_rejection=66;++expected_frame;invoke();
     initialize(v);v.cameraFOV=99;expected_rejection=64;++expected_frame;invoke(); // orthographic/identity
     check(!camera::current(true).valid,"Luke receipt escaped exact evaluate scope");
+}
+template<class Constants,class Set,class Evaluate>void native_source_cases(Constants& v,Set set,Evaluate evaluate) {
+    native_source_case=true;projection_case=luke_receipt=false;rejected_fov=1;
+    for(unsigned kind=0;kind<4;++kind) {
+        initialize(v);v.cameraFwd={-1,0,0};
+        auto* p=reinterpret_cast<float*>(&v.cameraViewToClip);auto* inverse=reinterpret_cast<float*>(&v.clipToCameraView);
+        std::fill_n(p,16,0.F);std::fill_n(inverse,16,0.F);
+        p[0]=1;p[5]=2;p[11]=-1;p[14]=.1F;
+        inverse[0]=1;inverse[5]=.5F;inverse[11]=10;inverse[14]=-1;
+        std::array<unsigned char,dead_space_camera_source::packet_bytes> source{};
+        const auto copy=[&](std::size_t offset,const void* value,std::size_t bytes){std::memcpy(source.data()+offset,value,bytes);};
+        copy(0x70,&v.cameraPos,12);copy(0x7c,&v.cameraUp,12);copy(0x94,&v.cameraRight,12);
+        const float back[]{0,0,1};copy(0x88,back,12);copy(0xa0,p,64);copy(0xe0,inverse,64);
+        copy(0x120,&v.clipToPrevClip,64);copy(0x160,&v.prevClipToClip,64);
+        if(kind==2)source[0xa0]^=1;
+        if(kind==3)copy(0x88,&v.cameraRight,12);
+        ++expected_frame;expect_camera=kind==0;expected_rejection=kind==0?0:8;
+        {dead_space_camera_source::Scope native(source.data(),expected_frame+(kind==1?1:0));set();}
+        check(!dead_space_camera_source::source.active,"native source leaked beyond original builder");
+        evaluate();check(v.cameraFwd.x==-1&&v.cameraFwd.y==0&&v.cameraFwd.z==0,"caller SDK basis was modified");
+    }
+    native_source_case=false;
 }
 using Set1=decltype(&sl1::slSetConstants);using Eval1=decltype(&sl1::slEvaluateFeature);
 Set1 set1;Eval1 eval1;PFun_slSetConstants* set2;PFun_slEvaluateFeature* eval2;PFun_slGetNewFrameToken* get_token;
@@ -90,6 +115,8 @@ int main(int argc,char** argv){
         check(eval1(nullptr,sl1::eFeatureDLSS,expected_frame,expected_viewport),"rejected legacy evaluate original result preserved");
         projection_cases(*v,[&]{check(set1(*v,expected_frame,expected_viewport),"projection legacy original Set result");
             check(eval1(nullptr,sl1::eFeatureDLSS,expected_frame,expected_viewport),"projection legacy original Evaluate result");});
+        if(supported){expected_viewport=0;native_source_cases(*v,[&]{check(set1(*v,expected_frame,expected_viewport),"native source original Set result");},
+            [&]{check(eval1(nullptr,sl1::eFeatureDLSS,expected_frame,expected_viewport),"native source original Evaluate result");});}
     }else{
         auto* v=new(page+4096-sizeof(sl::Constants))sl::Constants;initialize(*v);expected_constants=v;
         set2=reinterpret_cast<PFun_slSetConstants*>(GetProcAddress(module,"slSetConstants"));eval2=reinterpret_cast<PFun_slEvaluateFeature*>(GetProcAddress(module,"slEvaluateFeature"));
@@ -111,6 +138,6 @@ int main(int argc,char** argv){
             check(set2(*v,*token,viewport)==sl::Result::eOk,"projection modern original Set result");
             check(eval2(sl::kFeatureDLSS,*token,inputs,1,nullptr)==sl::Result::eOk,"projection modern original Evaluate result");});
     }
-    check(calls==9,"all original and projection evaluations reached");check(!camera::current().valid,"no camera leaks outside evaluate");
+    check(calls==((legacy&&supported)?13:9),"all original, projection and native source evaluations reached");check(!camera::current().valid,"no camera leaks outside evaluate");
     VirtualFree(page,0,MEM_RELEASE);std::cout<<"Streamline "<<(legacy?1:2)<<" supported="<<supported<<" original_calls="<<calls<<" failures="<<failures<<'\n';return failures?1:0;
 }

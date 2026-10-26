@@ -1,4 +1,5 @@
 #include "xrfg/native_ingress/streamline_camera.hpp"
+#include "xrfg/native_ingress/DeadSpaceCameraSource.h"
 #include <sl.h>
 #include "xrfg/native_ingress/streamline1/sl1.h"
 #include <safetyhook.hpp>
@@ -71,9 +72,10 @@ sl::Result set_constants(const sl::Constants& v,const sl::FrameToken& frame,
     return result;
 }
 bool set_constants1(const sl1::Constants& v,uint32_t frame,uint32_t viewport) {
-    const auto c=decode(v,frame,viewport);
+    dead_space_camera_source::poll(true);
+    auto c=decode(v,frame,viewport);
     const auto result=hooks().set1(v,frame,viewport);
-    if(result)remember(c);
+    if(result){static_cast<void>(dead_space_camera_source::correct(c));remember(c);}
     return result;
 }
 Camera select(uint32_t frame,bool has_viewport,uint32_t viewport,bool ambiguous=false) {
@@ -152,6 +154,7 @@ Camera current(bool luke_projection_receipt) noexcept {
 }
 bool hooked() noexcept {auto& s=hooks();std::scoped_lock lock(s.mutex);return bool(s.constants)&&bool(s.evaluate);}
 void poll() noexcept {
+    dead_space_camera_source::poll();
     try {
         auto& s=hooks();std::scoped_lock lock(s.mutex);if(s.constants&&s.evaluate)return;
         const auto module=GetModuleHandleW(L"sl.interposer.dll");if(!module)return;

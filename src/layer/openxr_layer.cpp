@@ -8,6 +8,7 @@
 #include "xrfg/three_slot_buffer.hpp"
 #include "xrfg/djules_triple_release.hpp"
 #include "xrfg/two_output_schedule.hpp"
+#include "xrfg/optical_pacing_reserve.hpp"
 #include "xrfg/midpoint_schedule.hpp"
 #include "xrfg/frame_capture.hpp"
 #include "xrfg/diagnostic_ring_sink.hpp"
@@ -708,7 +709,7 @@ struct SessionState {
     bool uevr_application{}; // captured once at session creation, never inferred from game name
     bool steamvr_separate_queue{true}; // immutable session preference, tray-only
     bool afw_only{}; // immutable session transport; does not disable Neural Rendering
-    bool vdxr_legacy{true}; // immutable VDXR transport comparison
+    bool vdxr_legacy{true}; // immutable native/Legacy transport (VDXR and Pimax Auto)
     // D25 comparison policy: SteamVR's runtime gets its own binding queue.
     // Shared non-pacing support for both advanced NVIDIA routes.
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> binding_queue;
@@ -760,6 +761,7 @@ struct SessionState {
         if (presenter_pace_timer != nullptr) {
             CloseHandle(presenter_pace_timer);
         }
+        if (optical_reserve_timer) CloseHandle(optical_reserve_timer);
     }
 
     SessionState(const SessionState&) = delete;
@@ -1010,6 +1012,12 @@ struct SessionState {
     bool three_slot_director{};
     bool fsr_two_slot_presenter{}; // presenter_mutex; immutable while thread runs
     bool queued_nvidia_presenter{}; // Legacy synthesis, fresh S/B consumer; immutable while running.
+    std::atomic<std::int64_t> optical_reserve_ns{};
+    // presenter_mutex: a fractional preparation lead before the current frame
+    // of one acknowledged synthetic pair. Not an extra XR frame or FIFO skip.
+    std::chrono::steady_clock::time_point optical_reserve_current_due{};
+    std::uint64_t optical_reserve_pair{}, optical_reserve_served{};
+    HANDLE optical_reserve_timer{}; // application publication thread only
     bool synthesis_busy{};
     bool director_draining{};
     std::uint64_t next_source_sequence{1};
@@ -2752,6 +2760,63 @@ XrResult wait_presenter_runtime_frame(const std::shared_ptr<SessionState>& state
         !djules_deep_active(state) && !djules_triple_active(state) &&
         !reduced_native_outputs(state) &&
         (state.nvidia_new_route || state.frame_generation_mode!=xrfg::D3D12FrameGenerationMode::ofxr);
+}
+
+[[nodiscard]] bool adaptive_optical_reserve_route(const SessionState& state) noexcept {
+    return state.menu_enabled && !state.manual_control.stop_requested() &&
+        !state.private_runtime && state.dispatch->virtual_desktop_runtime && state.vdxr_legacy &&
+        state.graphics_binding == SessionGraphicsBinding::d3d12 &&
+        !state.d3d11_bridge && !state.vulkan_bridge && !state.luke_afw_enabled &&
+        !state.luke_outlaws_preframe && !state.three_slot_director &&
+        state.queued_nvidia_presenter && state.nvidia_new_route &&
+        state.frame_generation_mode == xrfg::D3D12FrameGenerationMode::ofxr &&
+        state.optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
+        !state.hybrid_requested && !state.nvidia_options.hybrid &&
+        !djules_deep_active(state) && !djules_triple_active(state) && !reduced_native_outputs(state);
+}
+
+// A positive learned lead advances preparation by less than one display slot.
+// The existing two-ring output pool owns the preceding B and the new S/B.
+// One admission per acknowledged S prevents an unbounded producer backlog.
+[[nodiscard]] XrResult wait_for_optical_reserve_admission(
+    const std::shared_ptr<SessionState>& state) noexcept {
+    try {
+        std::unique_lock lock(state->presenter_mutex);
+        for (;;) {
+            if (XR_FAILED(state->presenter_failure)) return state->presenter_failure;
+            if (state->presenter_stop_requested) return XR_ERROR_SESSION_NOT_RUNNING;
+            if (state->presenter_submissions.empty() && !state->presenter_inflight_submission) break;
+            // A stale S receipt cannot publish another pair behind a later
+            // complete S/B pair. Only its single B may remain when the
+            // already prepared new pair enters the presentation queue.
+            if (state->outstanding_presenter_submissions <= 1 &&
+                state->optical_reserve_pair > state->optical_reserve_served) {
+                const auto budget = state->optical_reserve_ns.load(std::memory_order_relaxed);
+                const auto due = state->optical_reserve_current_due - std::chrono::nanoseconds(budget);
+                if (std::chrono::steady_clock::now() >= due) break;
+                // Windows condition-variable timeouts may round past the
+                // entire fractional lead. Use a separate high-resolution
+                // publication timer; bounded slices recheck stop/failure and
+                // release presenter_mutex while the consumer retires B.
+                if (!state->optical_reserve_timer)
+                    state->optical_reserve_timer = CreateWaitableTimerExW(nullptr, nullptr,
+                        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+                const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    due - std::chrono::steady_clock::now()).count();
+                LARGE_INTEGER delay{};
+                delay.QuadPart = -(std::max)(1LL, (std::min)(remaining, 1'000'000LL) / 100);
+                if (state->optical_reserve_timer && SetWaitableTimer(state->optical_reserve_timer,
+                        &delay, 0, nullptr, nullptr, FALSE)) {
+                    lock.unlock();
+                    const auto waited = WaitForSingleObject(state->optical_reserve_timer, 100);
+                    lock.lock();
+                    if (waited != WAIT_OBJECT_0) return XR_ERROR_RUNTIME_FAILURE;
+                } else state->presenter_condition.wait_until(lock, due);
+            } else state->presenter_condition.wait(lock);
+        }
+        state->optical_reserve_served = state->optical_reserve_pair;
+        return XR_SUCCESS;
+    } catch (...) { return XR_ERROR_RUNTIME_FAILURE; }
 }
 
 [[nodiscard]] std::uint32_t history_capture_wait_limit_us(const SessionState& state) noexcept {
@@ -5511,6 +5576,9 @@ XrResult layer_create_session_impl(
         return dispatch->create_session(instance, create_info, session);
     }
 
+    // RealVR may have arrived after NGX discovery or the previous XR session.
+    // Resolve that boundary before selecting any session-specific Luke path.
+    xrfg::native_ingress::refresh_luke_detection();
     auto state = std::make_shared<SessionState>(dispatch);
     state->steamvr_separate_queue = GetPrivateProfileIntW(L"tray", L"steamvr_separate_queue", 1,
         xrfg::autonomous::global_configuration_path().c_str()) != 0;
@@ -5519,8 +5587,13 @@ XrResult layer_create_session_impl(
     wchar_t transport[32]{};
     GetPrivateProfileStringW(L"tray",L"pacing",L"auto",transport,32,
         xrfg::autonomous::global_configuration_path().c_str());
+    // Preserve native Pimax OpenXR's queue/frame-loop contract in Auto, like
+    // VDXR. Upstream V371 retains its application queue; V545/V464fix2 uses
+    // the presenter for a single-thread loop and keeps split loops inline.
+    // An explicit comparison-transport request still takes the private path.
     state->vdxr_legacy=_wcsicmp(transport,L"force_vdxr")==0 ||
-        (_wcsicmp(transport,L"force_steamvr")!=0 && dispatch->virtual_desktop_runtime);
+        (_wcsicmp(transport,L"force_steamvr")!=0 && (dispatch->virtual_desktop_runtime ||
+            dispatch->runtime_name.find("Pimax OpenXR")!=std::string::npos));
     const auto game_preferences=xrfg::autonomous::snapshot().desired;
     state->afw_only=state->luke_afw_enabled && game_preferences.afw_only;
     state->luke_shared_swapchains=game_preferences.luke_shared_swapchains;
@@ -5862,7 +5935,8 @@ XrResult layer_create_session_impl(
             }, dispatch.get());
         bind_private_delivery_metrics(state);
         state->fps_overlay->set_delivery_source(state->steamvr_delivery.get());
-        if(state->dispatch->virtual_desktop_runtime) {
+        if(state->dispatch->virtual_desktop_runtime ||
+            state->dispatch->runtime_name.find("Pimax OpenXR")!=std::string::npos) {
             const auto rate=state->runtime_acceptance;
             state->fps_overlay->set_runtime_acceptance_source(rate?std::function<std::optional<float>(std::int64_t)>([rate](auto now){return rate->rate(now);}):std::function<std::optional<float>(std::int64_t)>{},!rate);
         }
@@ -9583,6 +9657,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
         xrfg::TwoOutputSchedule director_schedule;
         xrfg::MidpointSchedule midpoint_schedule;
         DjulesAbsoluteSchedule djules_schedule;
+        xrfg::OpticalPacingReserve optical_reserve;
         if(fsr_steamvr_phase_clock(*state)) state->djules_phase_cooldown=0;
         std::chrono::steady_clock::time_point djules_last_returned{};
         std::shared_ptr<GeneratedFrameEndInfo> djules_last_owned;
@@ -9766,6 +9841,7 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                 xrfg::BridgeFlightOperation::presenter_pace, 0);
             const auto epoch=state->djules_configuration_epoch.load();
             if(epoch!=configuration_epoch) {
+                optical_reserve = {};
                 djules_last_owned.reset(); djules_schedule={}; djules_last_returned={};
                 fsr_schedule={}; director_schedule={}; midpoint_schedule={};
                 state->djules_phase_cooldown=0;
@@ -9897,6 +9973,25 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
                             state->frame_generation_mode==xrfg::D3D12FrameGenerationMode::ofxr
                             ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
             } // The private director owns timing; no upstream schedule advances.
+            if (adaptive_optical_reserve_route(*state) && XR_SUCCEEDED(result) && end.layerCount) {
+                const auto returned = std::chrono::steady_clock::now();
+                const auto period = std::chrono::nanoseconds(state->presenter_display_period);
+                const auto ns = [](auto at) { return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    at.time_since_epoch()).count(); };
+                const auto budget = optical_reserve.observe(ns(returned), ns(submission_slot), period.count());
+                const auto previous = state->optical_reserve_ns.exchange(budget, std::memory_order_relaxed);
+                {
+                    std::scoped_lock lock(state->presenter_mutex);
+                    if (synthetic && borrowed) {
+                        state->optical_reserve_pair = borrowed->pair_sequence;
+                        state->optical_reserve_current_due = djules_native_scheduler(*state)
+                            ? djules_schedule.claim(returned, period) : director_schedule.claim(returned, period);
+                    }
+                }
+                if (budget != previous)
+                    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition,
+                        6680, budget, previous, period.count());
+            }
             {
                 std::scoped_lock lock(state->presenter_mutex);
                 if (selected) {
@@ -9976,6 +10071,9 @@ void three_slot_director_main(const std::shared_ptr<SessionState>& state) noexce
         state->presenter_failure = XR_SUCCESS;
         state->next_presenter_sequence = 1;
         state->outstanding_presenter_submissions = 0;
+        state->optical_reserve_ns = 0;
+        state->optical_reserve_current_due = {};
+        state->optical_reserve_pair = state->optical_reserve_served = 0;
         if (state->three_slot_director || state->fsr_two_slot_presenter || state->queued_nvidia_presenter) {
             // Seed was already presented by the inline path. Do not repeat it.
             seed_frame.reset();
@@ -10230,6 +10328,25 @@ void wait_for_presenter_pair(
     }
 }
 
+// Preparation can overlap one complete older pair in the existing two-ring
+// pool. The fractional/S-receipt wait belongs to publishing ready outputs.
+[[nodiscard]] XrResult wait_for_native_preparation_admission(
+    const std::shared_ptr<SessionState>& state,bool metadata_pairable) noexcept {
+    const bool counted=steamvr_counted_native_release(*state);
+    const bool reserved=adaptive_optical_reserve_route(*state) && state->optical_reserve_ns.load(std::memory_order_relaxed)>0;
+    if(counted) {
+        const auto result=wait_for_native_counted_admission(state,metadata_pairable);
+        if(XR_FAILED(result))return result;
+    }
+    const auto result=wait_for_presenter_capacity(state,counted || reserved ? 2U :
+        (state->fsr_two_slot_presenter || state->queued_nvidia_presenter) ? 0U : 1U);
+    if(XR_SUCCEEDED(result) && !reserved && adaptive_optical_reserve_route(*state)) {
+        std::scoped_lock lock(state->presenter_mutex);
+        state->optical_reserve_served=state->optical_reserve_pair;
+    }
+    return result;
+}
+
 [[nodiscard]] XrResult wait_for_presenter_idle(
     const std::shared_ptr<SessionState>& state) noexcept {
     try {
@@ -10333,11 +10450,16 @@ enqueue_presenter_submission(
                 ? state->presenter_failure
                 : XR_ERROR_SESSION_NOT_RUNNING;
         }
+        // At publication only one older real output may remain. Never append
+        // a ready pair behind another complete pair, even on reserve activation.
+        if(adaptive_optical_reserve_route(*state) && state->outstanding_presenter_submissions>1)
+            return XR_ERROR_RUNTIME_FAILURE;
         auto first = std::make_shared<PresenterSubmission>();
         // Native counted release permits two bounded pairs in the existing
         // two-ring pool. Other paths retain one pair; slot leases gate reuse.
         if ((state->fsr_two_slot_presenter || state->queued_nvidia_presenter) &&
-            state->outstanding_presenter_submissions > (steamvr_counted_native_release(*state)?2U:0U))
+            state->outstanding_presenter_submissions >
+                ((steamvr_counted_native_release(*state) || adaptive_optical_reserve_route(*state)) ? 2U : 0U))
             return XR_ERROR_RUNTIME_FAILURE;
         first->sequence = state->next_presenter_sequence++;
         first->pair_sequence = first->sequence;
@@ -10363,6 +10485,18 @@ enqueue_presenter_submission(
     } catch (...) {
         return XR_ERROR_OUT_OF_MEMORY;
     }
+}
+
+[[nodiscard]] XrResult publish_native_generated_pair(
+    const std::shared_ptr<SessionState>& state,
+    std::shared_ptr<GeneratedFrameEndInfo> synthetic,
+    std::shared_ptr<GeneratedFrameEndInfo> current,
+    std::shared_ptr<GeneratedFrameEndInfo> middle=nullptr) noexcept {
+    if(adaptive_optical_reserve_route(*state) && state->optical_reserve_ns.load(std::memory_order_relaxed)>0) {
+        const auto result=wait_for_optical_reserve_admission(state);
+        if(XR_FAILED(result))return result;
+    }
+    return enqueue_presenter_pair(state,std::move(synthetic),std::move(current),std::move(middle));
 }
 
 [[nodiscard]] bool capture_projection_snapshot(
@@ -14380,6 +14514,9 @@ HRESULT apply_embedded_control(const std::shared_ptr<SessionState>& state,
     {
         std::scoped_lock lock(state->presenter_mutex);
         state->presenter_last_frame.reset();
+        state->optical_reserve_ns = 0;
+        state->optical_reserve_current_due = {};
+        state->optical_reserve_pair = state->optical_reserve_served = 0;
     }
     auto swapchains = find_swapchains(state);
     std::vector<std::unique_lock<std::mutex>> capture_locks;
@@ -15958,16 +16095,8 @@ XrResult layer_end_frame_impl(
         return handoff;
     }
     if (use_continuous_presenter && !state->luke_afw_enabled) {
-        const bool counted=steamvr_counted_native_release(*state);
-        if(counted) {
-            const auto release=wait_for_native_counted_admission(state,metadata_pairable);
-            if(XR_FAILED(release)) return release;
-        }
-        // Capacity/slot leases remain separate safety bounds, not a demand
-        // to retire the preceding pair before starting any next preparation.
-        const XrResult capacity = wait_for_presenter_capacity(state,
-            counted ? 2 : (state->fsr_two_slot_presenter || state->queued_nvidia_presenter) ? 0 : 1);
-        if (XR_FAILED(capacity)) return capacity;
+        const auto admission=wait_for_native_preparation_admission(state,metadata_pairable);
+        if(XR_FAILED(admission))return admission;
     }
     // For the remaining inline backends the synthetic is displayed one display period before the current frame,
     // so it should show the scene as it was one period before the current
@@ -16354,7 +16483,11 @@ XrResult layer_end_frame_impl(
     XrResult result = XR_SUCCESS;
     if (use_continuous_presenter) {
         if (pair_ready) {
-            result = enqueue_presenter_pair(
+            // The consumer must be able to retire the preceding frame while
+            // ready outputs wait for their bounded publication admission.
+            if(adaptive_optical_reserve_route(*state) && presenter_content_lock.owns_lock())
+                presenter_content_lock.unlock();
+            result = publish_native_generated_pair(
                 state,
                 presenter_first_frame,
                 presenter_current_frame,presenter_extra_frame);

@@ -19,7 +19,7 @@ struct BenchmarkStep {
     std::string label;
     int afw{-1},shading{-1};
     int pacing{-1}; // -1 preserves the pre-V614 runtime's global choice.
-    int buffer{-1}; // -1 keeps preference (Legacy/advanced); 0=two, 1=three deliveries.
+    int buffer{-1}; // -1 keeps preference; 0=two, 1=three deliveries (private transport only).
 };
 inline std::vector<BenchmarkStep> legacy_benchmark_plan(bool full,bool luke=false) {
     std::vector<BenchmarkStep> steps;
@@ -171,8 +171,15 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
         if(luke && !benchmark_afw_quality_allowed(s.shading,s.eye_long_side))continue;
         pool.push_back(i);
     }
-    // 3X is a last resort, not a competitor to a sufficiently useful 2X/Off
-    // route. Unknown refresh does not establish permission to choose 3X.
+    const auto at_refresh=[&](const auto& score) {
+        return score.display_hz>0 && score.fps+1e-3>=score.display_hz;
+    };
+    const bool capped_pool=std::any_of(pool.begin(),pool.end(),[&](auto i) {return at_refresh(scores[i]);});
+    // Once an eligible measured route reaches the headset, sub-refresh
+    // results cannot enter ANY later preference or ordinary one-FPS tie.
+    if(capped_pool)std::erase_if(pool,[&](auto i) {return !at_refresh(scores[i]);});
+    // Within the admitted refresh group, 3X remains a last resort. Below
+    // refresh the original 66% gate applies. Unknown refresh cannot permit 3X.
     const bool normal_sufficient=std::any_of(pool.begin(),pool.end(),[&](auto i) {
         const auto& s=scores[i];return !s.triple && (s.display_hz<=0 || s.fps+1e-3>=s.display_hz*.66);
     });
@@ -196,7 +203,16 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
         });
         if(full_quality)std::erase_if(pool,[&](auto i){return scores[i].shading!=0;});
     }
+    const bool optical_at_refresh=std::any_of(pool.begin(),pool.end(),[&](auto i) {
+        return !scores[i].vectors && at_refresh(scores[i]);
+    });
+    // A measured full-refresh optical route cannot lose to a sub-refresh
+    // vector result, even inside the ordinary one-FPS tie group.
+    if(optical_at_refresh)std::erase_if(pool,[&](auto i) {
+        return scores[i].vectors && !at_refresh(scores[i]);
+    });
     const auto keep_fps=[&](auto& candidates) {
+        if(capped_pool)return; // all remaining candidates deliver the display cap
         double highest=0;
         for(const auto i:candidates)highest=std::max(highest,scores[i].fps);
         std::erase_if(candidates,[&](auto i){return highest-scores[i].fps>1+epsilon;});
@@ -206,13 +222,15 @@ inline std::optional<std::size_t> benchmark_best(const std::vector<BenchmarkScor
     auto ordinary=pool;keep_fps(ordinary);
     double optical_latency=std::numeric_limits<double>::infinity();
     double optical_fps=0;
-    for(const auto i:ordinary)if(!scores[i].vectors) {
+    const auto& optical_candidates=optical_at_refresh?pool:ordinary;
+    for(const auto i:optical_candidates)if(!scores[i].vectors && (!optical_at_refresh || at_refresh(scores[i]))) {
         optical_latency=std::min(optical_latency,scores[i].latency);
         optical_fps=std::max(optical_fps,scores[i].fps);
     }
     std::vector<std::size_t> vectors;
     if(optical_fps>0)for(const auto i:pool)if(scores[i].vectors &&
-        optical_fps-scores[i].fps<=3+epsilon && scores[i].latency<=optical_latency+12+epsilon)vectors.push_back(i);
+        (optical_at_refresh ? at_refresh(scores[i]) : optical_fps-scores[i].fps<=3+epsilon) &&
+        scores[i].latency<=optical_latency+12+epsilon)vectors.push_back(i);
     if(!vectors.empty()) {pool=std::move(vectors);keep_fps(pool);}
     else pool=std::move(ordinary);
     double lowest=std::numeric_limits<double>::infinity();

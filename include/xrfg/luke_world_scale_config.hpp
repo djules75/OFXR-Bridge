@@ -14,9 +14,13 @@ struct LukeGameCameraConfig {
 // DOOM supplies right/down/forward rows; its entire input camera basis needs
 // conversion to view right/up/back. KCD's native packet decoder exposes
 // physical forward (-inverse-view Z), as in accepted OptiScaler V33011.
+// Dead Space's verified original source also exposes physical forward:
+// V680 F8 proves the scene camera must decode it back to the native view Z.
 // Horizon retains V33018's physical-forward convention; other titles keep
 // their later accepted view-row contracts. Indiana supplies native view rows
 // directly, as proved by OptiScaler V30078 and the V700 captured clip history.
+// GTA Enhanced GTAVE has the same native view-row contract: V679 captured
+// original SL clip history matches it, while reflected native history does not.
 inline LukeGameCameraConfig luke_game_camera_config_from_ini(
     const std::filesystem::path& ini) noexcept {
     wchar_t sections[32768]{};
@@ -38,9 +42,10 @@ inline LukeGameCameraConfig luke_game_camera_config_from_ini(
         result.world_scale = scale;
         result.axes = _wcsicmp(section, L"DOOMTDA") == 0
             ? LukeProducerCameraAxes::right_down_forward
-            : ((_wcsicmp(section, L"HFW") == 0 || _wcsicmp(section, L"KCD2") == 0)
+            : ((_wcsicmp(section, L"HFW") == 0 || _wcsicmp(section, L"KCD2") == 0 ||
+                _wcsicmp(section, L"DS2023") == 0)
                 ? LukeProducerCameraAxes::physical_forward
-                : (_wcsicmp(section, L"INDY") == 0
+                : ((_wcsicmp(section, L"INDY") == 0 || _wcsicmp(section, L"GTAVE") == 0)
                     ? LukeProducerCameraAxes::native_view_rows
                     : LukeProducerCameraAxes::view));
         found = true;

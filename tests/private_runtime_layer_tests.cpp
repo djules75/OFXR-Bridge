@@ -21,11 +21,13 @@ int main(int argc,char** argv) {
     const bool force_vdxr_steamvr=route=="force-vdxr-steamvr-session";
     const bool force_steamvr_vdxr=route=="force-steamvr-vdxr-session";
     const bool unknown_session=route=="other-session";
+    const bool pimax_session=route=="pimax-session" || route=="force-framework-pimax-session";
+    const bool force_framework_pimax=route=="force-framework-pimax-session";
     const bool vdxr_probe=route.starts_with("vdxr-") || force_steamvr_vdxr;
     if(route.starts_with("vdxr-"))route=route.substr(5);
-    if(force_vdxr_steamvr || force_steamvr_vdxr || unknown_session)route="session";
+    if(force_vdxr_steamvr || force_steamvr_vdxr || unknown_session || pimax_session)route="session";
     if(vdxr_probe)period=8'333'333; // 120Hz runtime predictions, no SteamVR timing API
-    vdxr_legacy_probe=force_vdxr_steamvr || route=="legacy-session";if(vdxr_legacy_probe)route="session";
+    vdxr_legacy_probe=force_vdxr_steamvr || route=="legacy-session" || (pimax_session && !force_framework_pimax);if(vdxr_legacy_probe)route="session";
     if(route.starts_with("afw-only") || route=="luke-shared-session")return afw_only_session_test(route,argc>2?argv[2]:nullptr);
     const bool shared_budget=route=="luke-shared-budget",unshared_budget=route=="luke-unshared-budget" || route=="outlaws-unshared-budget";
     const bool outlaws_budget=route=="outlaws-budget" || route=="outlaws-unshared-budget";
@@ -65,6 +67,7 @@ int main(int argc,char** argv) {
         ~StartupRestore(){if(existed){std::ofstream f(p,std::ios::binary);f<<bytes;}else{std::error_code e;std::filesystem::remove(p,e);}WritePrivateProfileStringW(nullptr,nullptr,nullptr,p.c_str());}
     } startup_restore(startup_ini);
     if(force_vdxr_steamvr)check(WritePrivateProfileStringW(L"tray",L"pacing",L"force_vdxr",xrfg::autonomous::global_configuration_path().c_str()),"force VDXR on real SteamVR identity");
+    if(pimax_session)check(WritePrivateProfileStringW(L"tray",L"pacing",force_framework_pimax?L"force_steamvr":L"auto",xrfg::autonomous::global_configuration_path().c_str()),"Pimax auto/explicit framework transport preference");
     if(vdxr_probe)check(WritePrivateProfileStringW(L"tray",L"pacing",vdxr_legacy_probe?L"auto":L"force_steamvr",xrfg::autonomous::global_configuration_path().c_str()),"isolated VDXR transport preference");
     if(benchmark_sequence && GetEnvironmentVariableW(L"XRFG_BENCH_TRACE",nullptr,0)) {
         const auto folder=xrfg::autonomous::configuration_path().parent_path()/L"trace";
@@ -103,7 +106,8 @@ int main(int argc,char** argv) {
     if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
     Fixture f(native12);f.transport->stop();if(route!="memory" && route!="scope" && !framework_session_probe)f.transport.reset();f.throttled=false;f.real_common=true;f.expected_views=2;f.unblock();
     f.create_state=[] {std::scoped_lock lock(g_state_mutex);return g_swapchains.empty()?D3D12_RESOURCE_STATE_RENDER_TARGET:D3D12_RESOURCE_STATE_COMMON;};
-    auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=!vdxr_probe && !unknown_session;dispatch->virtual_desktop_runtime=vdxr_probe;
+    auto dispatch=std::make_shared<Dispatch>();dispatch->instance=reinterpret_cast<XrInstance>(1);dispatch->steamvr_runtime=!vdxr_probe && !unknown_session && !pimax_session;dispatch->virtual_desktop_runtime=vdxr_probe;
+    if(pimax_session){dispatch->runtime_name="Pimax OpenXR";dispatch->inline_unless_pipelined=true;}
     if(measured)dispatch->get_instance_proc_addr=+[](XrInstance,const char*,PFN_xrVoidFunction* out)->XrResult{*out=nullptr;return XR_ERROR_FUNCTION_UNSUPPORTED;};
     dispatch->wait_frame=Fixture::wait;dispatch->begin_frame=Fixture::begin;dispatch->end_frame=Fixture::end;
     dispatch->create_swapchain=Fixture::create;dispatch->destroy_swapchain=Fixture::destroy;dispatch->enumerate_swapchain_images=Fixture::enumerate;
@@ -122,11 +126,64 @@ int main(int argc,char** argv) {
         XrSessionCreateInfo info{XR_TYPE_SESSION_CREATE_INFO};info.next=&binding;info.systemId=1;
         XrSession handle{};xr_ok(layer_create_session_impl(dispatch->instance,&info,&handle),"shipping session creates private delivery binding");
         auto created=find_session(handle);
+        if(pimax_session)check(created && !created->dispatch->steamvr_runtime && !created->dispatch->virtual_desktop_runtime &&
+            created->dispatch->runtime_name=="Pimax OpenXR","transport selection must retain native Pimax identity");
+        if(pimax_session && force_framework_pimax)
+            check(created->runtime_acceptance && !created->runtime_acceptance->rate(xrfg::interface_clock_ns()),
+                "Pimax Framework must observe native accepted output without inventing an initial rate");
         if(!vdxr_legacy_probe)check(created && created->private_runtime && created->private_runtime->buffer_capacity()==(large_buffer?3:2),"session uses default2 or saved3 private deliveries");
         if(vdxr_legacy_probe) {
             check(created && created->vdxr_legacy && !created->private_runtime && !created->private_delivery_queue,
-                "Legacy VDXR keeps original native binding without a private director");
+                "Legacy runtime keeps original native binding without a private director");
             check(f.delivery_queue==f.queue,"Legacy keeps the exact application runtime queue");
+            if(pimax_session) {
+                // The actual session entry must connect its native output
+                // counter. A detached overlay test would miss this wiring bug.
+                check(bool(created->fps_overlay),"Pimax session has no output meter");
+                const auto original_end=created->dispatch->end_frame;
+                created->dispatch->end_frame=+[](XrSession,const XrFrameEndInfo*)->XrResult{return XR_ERROR_RUNTIME_FAILURE;};
+                XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+                const auto* content=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer);
+                XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.layerCount=1;end.layers=&content;
+                check(XR_FAILED(created->fps_overlay->end_frame(&end,false)) && !created->fps_overlay->metrics().sample_valid,
+                    "failed native End fabricated Pimax output FPS");
+                created->dispatch->end_frame=+[](XrSession,const XrFrameEndInfo*)->XrResult{return XR_SUCCESS;};
+                end.layerCount=0;
+                xr_ok(created->fps_overlay->end_frame(&end,false),"empty Pimax native End");
+                check(!created->fps_overlay->metrics().sample_valid,"empty native End fabricated Pimax output FPS");
+                end.layerCount=1;
+                xr_ok(created->fps_overlay->end_frame(&end,false),"real Pimax native End");
+                const auto content_counts=created->fps_overlay->metrics();
+                created->fps_overlay->set_session_focused(false);
+                check(WritePrivateProfileStringW(L"overlay",L"position",L"off",startup_ini.c_str()),"isolate meter telemetry from GPU drawing");
+                xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,true);
+                created->fps_overlay->application_frame(&end);
+                const auto measured_output=xrfg::autonomous::snapshot().runtime.telemetry;
+                xrfg::autonomous::set_interface_visible(xrfg::autonomous::InterfaceSurface::desktop,false);
+                check(xrfg::output_rate_valid(measured_output) && measured_output.output_fps>0 &&
+                    measured_output.output_source==xrfg::InterfaceSource::runtime_accepted_delivery &&
+                    content_counts.generated_fps==0 && !content_counts.active,
+                    "Pimax output FPS remains N/A after accepted real output or falsely claims generation");
+                created->dispatch->end_frame=original_end;
+            }
+            if(pimax_session) {
+                // The restored auto route must expose V545's actual shape rule,
+                // not a parallel test-only decision helper.
+                created->menu_enabled=true;created->nvidia_new_route=true;created->djules_route=true;
+                created->optical_flow_backend=xrfg::D3D12OpticalFlowBackend::nvidia;
+                created->frame_generation_mode=xrfg::D3D12FrameGenerationMode::ofxr;
+                for(auto graphics:{SessionGraphicsBinding::d3d12,SessionGraphicsBinding::d3d11}) {
+                    created->graphics_binding=graphics;created->split_frame_loop=false;
+                    created->application_wait_thread_id=created->application_end_thread_id=GetCurrentThreadId();
+                    check(!djules_inline_runtime(*created) && three_slot_generation_session(created),"Pimax single-thread shape must acquire presenter at startup");
+                    created->split_frame_loop=true;created->application_end_thread_id=GetCurrentThreadId()+1;
+                    check(djules_inline_runtime(*created),"Pimax split frame loop must retain native inline policy");
+                    created->presenter_restore_after_bypass=true;
+                    check(!djules_inline_runtime(*created),"previously active Pimax presenter must recover after bypass");
+                    created->presenter_restore_after_bypass=false;
+                }
+                created->graphics_binding=SessionGraphicsBinding::d3d12;
+            }
             check(!xrfg::autonomous::snapshot().runtime.buffer_capacity,"Legacy never reports or creates a bridge buffer even when requested");
             if(force_vdxr_steamvr)check(created->dispatch->steamvr_runtime && !created->dispatch->virtual_desktop_runtime,"forcing transport preserves true SteamVR identity");
             xr_ok(layer_destroy_session_impl(handle),"Legacy VDXR session cleanup");

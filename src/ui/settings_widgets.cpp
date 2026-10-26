@@ -4,7 +4,6 @@
 #include "xrfg/benchmark_suite.hpp"
 #include "imgui.h"
 #include <windows.h>
-#include <shellapi.h>
 
 #include <algorithm>
 #include <iterator>
@@ -31,7 +30,7 @@ void status(const Snapshot& state) {
     const auto now = GetTickCount64();
     const bool current = state.connected && m.updated_ms && now >= m.updated_ms && now - m.updated_ms < 2000;
     const float header_x=ImGui::GetCursorPosX(),header_width=ImGui::GetContentRegionAvail().x;
-    ImGui::TextDisabled("OFXR-BRIDGE 0.3.0 (v%d)",XRFG_IMPLEMENTATION_VERSION);
+    ImGui::TextDisabled("OFXR-BRIDGE 0.3.1 (v%d)",XRFG_IMPLEMENTATION_VERSION);
     const auto vram=interface_vram_text(state);
     const auto vram_width=ImGui::CalcTextSize(vram.c_str()).x;
     ImGui::SameLine();
@@ -56,7 +55,7 @@ void status(const Snapshot& state) {
     if (ImGui::BeginTable("Interface metrics", 4, ImGuiTableFlags_SizingStretchSame)) {
         ImGui::TableNextRow();
         value(state.runtime.luke_detected?"New submitted FPS":"Output FPS", m.output_fps, current && output_rate_valid(m), true,
-            state.runtime.luke_detected ? "Distinct new images successfully accepted by the OpenXR runtime per second; held images and repeats excluded. This measures delivery to the runtime, not physical headset scanout. N/A only when source identity is unavailable." : "SteamVR compositor frames actually presented per second. Zero-present records excluded; repeated scanouts counted once. Source pixel identity is not measured.");
+            state.runtime.luke_detected ? "Distinct new images successfully accepted by the OpenXR runtime per second; held images and repeats excluded. This measures delivery to the runtime, not physical headset scanout. N/A only when source identity is unavailable." : "SteamVR uses compositor presents. VDXR and Pimax OpenXR use successful content submissions to the native runtime. Empty or failed submissions are excluded. Native OpenXR acceptance does not measure physical headset scanout.");
         value("Real submitted", m.game_fps, current && m.rates_valid, true, "Successfully submitted real frames. Luke OFXR counter preserved; AFW-only held source identities are excluded.");
         value("Gen submitted", m.generated_fps, current && m.rates_valid, true, "Successfully submitted generated frames with native GPU confirmation.");
         value("Display Hz", m.display_hz, current && m.display_hz > 0, true,
@@ -198,7 +197,7 @@ bool generation(SettingsWidgetState& ui, const Snapshot& state, bool compact) {
         constexpr int engine_order[] = {0, 1, 3, 2};
         int selected_engine = engine_order[std::clamp(draft.backend, 0, 3)];
         if (ImGui::Combo("OFXR engine", &selected_engine,
-                "FidelityFX (low latency, medium compatibility)\0Nvidia 0.2.1 (low latency, low compatibility)\0Nvidia 0.2.13 (medium latency, high compatibility)\0Nvidia 0.3.0 (high latency, high performance, medium compatibility)\0")) {
+                "FidelityFX (low latency, medium compatibility)\0Nvidia 0.2.1 (low latency, low compatibility)\0Nvidia 0.2.13 (medium latency, high compatibility)\0Nvidia 0.3.0 (medium latency, medium compatibility)\0")) {
             select_generation(draft, 0, engine_order[selected_engine]);
             changed = true;
         }
@@ -386,13 +385,6 @@ bool display(SettingsWidgetState& ui, const Snapshot& state) {
     ImGui::BeginDisabled(active || !permitted || !state.connected || !state.runtime.luke_detected);
     const bool luke=ImGui::Button("Test Luke Ross");
     ImGui::EndDisabled();
-    if(ImGui::Button("Open benchmark folder")) {
-        const auto folder=common_folder()/L"Benchmarks";
-        std::error_code error;std::filesystem::create_directories(folder,error);
-        ui.benchmark_folder_failed=bool(error) || reinterpret_cast<INT_PTR>(ShellExecuteW(
-            GetActiveWindow(),L"open",folder.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32;
-    }
-    if(ui.benchmark_folder_failed)ImGui::TextWrapped("Could not open the benchmark folder.");
     if(optical || complete || luke) {
         ui.dirty|=changed;finish_settings_widget_edits(ui);
         if(!ui.dirty) static_cast<void>(start_benchmark(complete,luke));

@@ -481,6 +481,14 @@ int main() { try {
     for(auto format:{DXGI_FORMAT_R16G16_TYPELESS,DXGI_FORMAT_R32G32_TYPELESS,DXGI_FORMAT_R16G16_UNORM,DXGI_FORMAT_R16G16_SINT,DXGI_FORMAT_R32_FLOAT,
                     DXGI_FORMAT_R16G16B16A16_TYPELESS,DXGI_FORMAT_R32G32B32A32_TYPELESS,DXGI_FORMAT_R16G16B16A16_UNORM,DXGI_FORMAT_R16G16B16A16_SINT})
       expect(xrfg::luke_motion_srv_format(format)==DXGI_FORMAT_UNKNOWN);
+    expect(xrfg::dlss_motion_snapshot_format(DXGI_FORMAT_R16G16_TYPELESS,true)==DXGI_FORMAT_R16G16_FLOAT);
+    for(auto format:{DXGI_FORMAT_R16G16_TYPELESS,DXGI_FORMAT_R32G32_TYPELESS,DXGI_FORMAT_R16G16_UNORM,
+                    DXGI_FORMAT_R16G16_SNORM,DXGI_FORMAT_R16G16_SINT,DXGI_FORMAT_R16G16_UINT,
+                    DXGI_FORMAT_R16G16B16A16_TYPELESS,DXGI_FORMAT_R16G16_FLOAT}) {
+      expect(xrfg::dlss_motion_snapshot_format(format,false)==format);
+      if(format!=DXGI_FORMAT_R16G16_TYPELESS)
+        expect(xrfg::dlss_motion_snapshot_format(format,true)==format);
+    }
     expect(xrfg::luke_depth_format(DXGI_FORMAT_R8G8B8A8_UNORM).resource==DXGI_FORMAT_UNKNOWN);
     if(info) for(UINT64 i=0;i<info->GetNumStoredMessages();++i) { SIZE_T n=0;check(info->GetMessage(i,nullptr,&n));auto data=new char[n];auto msg=reinterpret_cast<D3D12_MESSAGE*>(data);check(info->GetMessage(i,msg,&n));bool bad=msg->Severity<=D3D12_MESSAGE_SEVERITY_ERROR; if(bad) std::cerr<<msg->pDescription<<'\n';delete[] data;expect(!bad); }
     CloseHandle(event);std::cout<<"Depth families and typed float16/float32 depth/camera correction passed on WARP\n";return 0;

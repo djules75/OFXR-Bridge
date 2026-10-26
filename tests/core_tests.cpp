@@ -5,6 +5,7 @@
 #include "xrfg/luke_guide_window.hpp"
 #include "xrfg/luke_physical_projection.hpp"
 #include "xrfg/luke_pose_camera.hpp"
+#include "xrfg/luke_native_motion_interval.hpp"
 #include "xrfg/luke_world_scale.hpp"
 #include "xrfg/luke_camera_units.hpp"
 #include "xrfg/luke_camera_origin.hpp"
@@ -426,6 +427,54 @@ int main() {
         ghost_window->width == 1532 && ghost_window->height == 1672 &&
         rejection == xrfg::LukeGuideWindowFailure::none,
         "measured positive-Z Ghost projection admits the correct guide crop");
+    expect(xrfg::luke_same_eye_native_motion_title(L"Spider-Man.exe") &&
+        xrfg::luke_same_eye_native_motion_title(L"SPIDER-MAN.EXE") &&
+        xrfg::luke_same_eye_native_motion_title(L"GhostOfTsushima.exe") &&
+        xrfg::luke_same_eye_native_motion_title(L"HorizonForbiddenWest.exe") &&
+        xrfg::luke_same_eye_native_motion_title(L"GTA5_Enhanced.exe") &&
+        xrfg::luke_same_eye_native_motion_title(L"gta5_enhanced.EXE") &&
+        !xrfg::luke_same_eye_native_motion_title(L"GTA5.exe") &&
+        xrfg::luke_same_eye_native_motion_title(L"Dead Space.exe") &&
+        xrfg::luke_same_eye_native_motion_title(L"DEAD SPACE.EXE") &&
+        !xrfg::luke_same_eye_native_motion_title(L"DeadSpace.exe") &&
+        !xrfg::luke_same_eye_native_motion_title(L"Outlaws.exe") &&
+        !xrfg::luke_same_eye_native_motion_title(L"Spider-Man2.exe"),
+        "measured same-eye interval includes Remastered without guessing other games");
+    // Spider-Man Remastered PID28936: the native view uses down for Y,
+    // compensated by a negative projection focal term. Physical XR up still
+    // samples the upper raster half; rejecting the sign prevents all AFW.
+    auto spidey_projection = ghost_projection;
+    spidey_projection[0] = 0.8540806770324707F;
+    spidey_projection[5] = -0.8540806770324707F;
+    spidey_projection[10] = -1.0000099791795947e-05F;
+    spidey_projection[11] = 1.F;
+    spidey_projection[14] = 0.10000099241733551F;
+    const auto spidey_window = xrfg::luke_guide_window(spidey_projection,
+        -0.8203047513961792F, 0.8203047513961792F,
+        0.8639379739761353F, -0.8639379739761353F,
+        3344, 3344, 1672, 1672, 3063, 3344, &rejection);
+    expect(spidey_window && spidey_window->x == 70 && spidey_window->y == 0 &&
+        spidey_window->width == 1532 && spidey_window->height == 1672 &&
+        rejection == xrfg::LukeGuideWindowFailure::none,
+        "captured Spider-Man negative-Y projection must admit the physical crop");
+    auto spidey_physical = spidey_projection;
+    expect(xrfg::luke_physical_eye_projection(spidey_physical,
+        -0.8203047513961792F, 0.8203047513961792F,
+        0.8639379739761353F, -0.8639379739761353F) && spidey_physical[5] < 0,
+        "physical projection preserves the producer's down-Y view convention");
+    for (const float focal_sign : {-1.F, 1.F}) {
+        auto p = ghost_projection;
+        p[0] *= focal_sign; p[5] *= focal_sign;
+        p[8] = .025F; p[9] = -.035F;
+        const auto reflected = xrfg::luke_guide_window(p,
+            -.7F, .65F, .6F, -.75F,3344,3344,1672,1672,2600,2800);
+        auto reference = p; reference[0] = std::abs(p[0]); reference[5] = std::abs(p[5]);
+        const auto positive = xrfg::luke_guide_window(reference,
+            -.7F,.65F,.6F,-.75F,3344,3344,1672,1672,2600,2800);
+        expect(reflected && positive && reflected->x == positive->x && reflected->y == positive->y &&
+            reflected->width == positive->width && reflected->height == positive->height,
+            "asymmetric FOV and off-axis centers preserve equivalent reflected-view crops");
+    }
     auto equivalent_lh = luke_projection;
     for (unsigned column = 0; column < 4; ++column)
         equivalent_lh[8 + column] = -equivalent_lh[8 + column];
@@ -634,6 +683,25 @@ int main() {
         for (unsigned column = 0; column < 3; ++column)
             expect(near(lh_peer[row][column], rh_peer[row][column] * (row == 2 ? -1.0F : 1.0F)),
                 "LH and RH camera yaw describe the same physical rotation");
+    // Equivalent producer view-axis reflections must transport the same
+    // physical headset pitch/yaw/roll, not reverse pitch on a down-Y camera.
+    const xrfg::Quaternion reflected_source_head{.10F,.08F,-.04F,.99F};
+    const xrfg::Quaternion reflected_destination_head{-.05F,.12F,.03F,.98F};
+    for (float sign_x : {-1.F,1.F}) for (float sign_y : {-1.F,1.F}) {
+        auto reflected_view=lh_view;
+        for (auto& v:reflected_view[0]) v*=sign_x;
+        for (auto& v:reflected_view[1]) v*=sign_y;
+        xrfg::LukeCameraBasis physical_peer{},reflected_peer{};
+        expect(xrfg::luke_destination_view_camera_basis(reflected_source_head,
+            reflected_destination_head,lh_view,1.F,physical_peer) &&
+            xrfg::luke_destination_view_camera_basis(reflected_source_head,
+            reflected_destination_head,reflected_view,1.F,reflected_peer,sign_x,sign_y),
+            "signed producer view supports full headset rotation");
+        for (unsigned row=0;row<3;++row) for(unsigned col=0;col<3;++col)
+            expect(near(reflected_peer[row][col],physical_peer[row][col]*
+                (row==0?sign_x:row==1?sign_y:1.F)),
+                "reflected view axes preserve physical pitch yaw and roll");
+    }
     for (float sign : {-1.0F, 1.0F}) {
         xrfg::LukeCameraBasis view{};
         expect(xrfg::luke_view_camera_basis(sign > 0 ? lh_producer_basis :

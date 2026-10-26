@@ -2,7 +2,7 @@
 
 OFXR-BRIDGE is an experimental OpenXR API layer that inserts generated frames between rendered frames.
 
-Current beta release: **0.3.0**. The internal build number is shown in the package name and the application.
+Current beta release: **0.3.1**. The internal build number is shown in the package name and the application.
 
 Download builds from [GitHub Releases](https://github.com/tig3rmast3r/OFXR-Bridge/releases).
 
@@ -83,6 +83,8 @@ The bridge distinguishes real frames, generated frames and output delivery. Prod
 ## Luke Ross
 
 AFW reconstructs the missing eye in selected Luke Ross games using depth and motion information. Compared with AER V2, enabling AFW can improve FPS and reduce latency, as well as improve image quality and smoothness. The size of the gain depends on the game, resolution and settings.
+
+Version 0.3.1 adds Luke Ross AFW support for Spider-Man Remastered, Miles Morales, Dead Space (2023), and Grand Theft Auto V Enhanced.
 
 > [!IMPORTANT]
 > Use **Legacy AER**, not AER V2 or AER 1/2. These modes are not interchangeable for this AFW integration.
@@ -184,7 +186,7 @@ Fast mode has **no effect on the Luke Ross path**. For other paths, benchmark bo
 - Each test lasts **7.5 seconds**: **2.5 seconds** settling, then **5 seconds** measured.
 - Diagnostic logging is not required. Benchmark CSV output is automatic.
 - Results include FPS and Cycle minimum statistics. VRAM use is sampled near the end of each test.
-- Results are saved under **`%LOCALAPPDATA%\ofxr-bridge\Benchmarks`**. Use **Open benchmark folder** to open it.
+- Results are saved under **`%LOCALAPPDATA%\ofxr-bridge\Benchmarks`**. Use **Open folder** in the tray, then open **Benchmarks**.
 - Luke Ross tests compare suitable AFW qualities for the headset resolution, including AFW alone. They do not test Fast mode or 3X.
 - Suite length adapts to measured results and headset resolution. Skipped tests remain n.a. in the CSV.
 - At completion, the suite restores the previous settings unless **Auto pick best one** is enabled. Stopping restores them too; manually changing a tested setting cancels the automation and keeps that edit.

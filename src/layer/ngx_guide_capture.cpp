@@ -4,8 +4,11 @@
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/third_party/uevr_api.h"
 #include "xrfg/native_ingress.hpp"
+#include "xrfg/native_ingress/streamline_camera.hpp"
+#include "xrfg/native_ingress/DeadSpaceCameraSource.h"
 #include "xrfg/native_ingress/D3D_DeviceOwner.h"
 #include "xrfg/luke_color_origin.hpp"
+#include "xrfg/luke_native_motion_interval.hpp"
 #include "xrfg/embedded_control.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/two_frame_capture.hpp"
@@ -24,6 +27,7 @@
 #include <safetyhook.hpp>
 #include <d3d12sdklayers.h>
 #include <array>
+#include <bit>
 #include <algorithm>
 #include <climits>
 #include <atomic>
@@ -39,6 +43,7 @@
 #ifdef XRFG_NATIVE_INGRESS_TESTS
 #include <stdexcept>
 #include <iostream>
+#include <fstream>
 #include <dxgi1_6.h>
 #include "xrfg/native_ingress/streamline1/sl1.h"
 #include "xrfg/native_ingress/streamline_camera.hpp"
@@ -119,7 +124,104 @@ bool test_outlaws_production_identity{};
 bool test_crimson_native_motion{};
 bool test_ghost_native_motion{};
 bool test_horizon_native_motion{};
+bool test_dead_space_production_identity{};
+bool test_gta_enhanced_production_identity{};
 #endif
+bool dead_space_process() {
+    static const bool selected=[] {
+        wchar_t process[MAX_PATH]{};GetModuleFileNameW(nullptr,process,MAX_PATH);
+        const auto* basename=wcsrchr(process,L'\\');basename=basename?basename+1:process;
+        return !_wcsicmp(basename,L"Dead Space.exe");
+    }();
+#ifdef XRFG_NATIVE_INGRESS_TESTS
+    return selected || test_dead_space_production_identity;
+#else
+    return selected;
+#endif
+}
+bool gta_enhanced_process() {
+    static const bool selected=[] {
+        wchar_t process[MAX_PATH]{};GetModuleFileNameW(nullptr,process,MAX_PATH);
+        const auto* basename=wcsrchr(process,L'\\');basename=basename?basename+1:process;
+        return !_wcsicmp(basename,L"GTA5_Enhanced.exe");
+    }();
+#ifdef XRFG_NATIVE_INGRESS_TESTS
+    return selected||test_gta_enhanced_production_identity;
+#else
+    return selected;
+#endif
+}
+bool cached_luke_title() {return dead_space_process()||gta_enhanced_process();}
+void title_capture_log(const char* message,UINT64 a=0,UINT64 b=0,UINT64 c=0,UINT64 d=0) {
+    if(gta_enhanced_process()&&strncmp(message,"dead_space_",11)==0) {
+        char label[MAX_PATH+40]{};snprintf(label,sizeof(label),"gta_enhanced_%s",message+11);
+        log(label,a,b,c,d);
+    } else log(message,a,b,c,d);
+}
+std::atomic_uint64_t dead_space_capture_report_at{};
+bool sample_dead_space_capture() noexcept {
+    if(!bridge_flight_logger().enabled() || !cached_luke_title())return false;
+    const auto now=GetTickCount64();auto previous=dead_space_capture_report_at.load(std::memory_order_relaxed);
+    return now-previous>=1000 && dead_space_capture_report_at.compare_exchange_strong(previous,now,std::memory_order_relaxed);
+}
+TwoFrameGuideContract dead_space_rejected_camera_contract(
+    const native_ingress::streamline_camera::Camera& camera,const DlssMotionVectorPublication& guides) {
+    TwoFrameGuideContract out{};out.stage="dead_space_rejected_camera";
+    out.stream=guides.stream;out.serial=camera.frame;out.native_camera_token=camera.frame;
+    out.publication=0;out.mode=-static_cast<int>(camera.rejection); // diagnostic mask, not an AFW mode
+    out.camera_position=camera.position;out.camera_right=camera.right;
+    out.camera_up=camera.up;out.camera_forward=camera.forward;
+    out.view_to_clip=out.camera_view_to_clip=camera.projection;
+    out.clip_to_view=out.camera_clip_to_view=camera.inverse;
+    out.raw_clip_to_previous_clip=camera.previous;out.raw_previous_clip_to_clip=camera.to_current;
+    out.camera_near=camera.near_z;out.camera_far=camera.far_z;out.camera_fov_vertical=camera.fov;
+    out.raw_camera_motion_included=camera.camera_motion;out.depth_inverted=camera.inverted;
+    out.motion_width=guides.motion_width;out.motion_height=guides.motion_height;
+    out.depth_width=guides.depth_width;out.depth_height=guides.depth_height;
+    out.output_width=guides.output_width;out.output_height=guides.output_height;
+    return out;
+}
+// One sampled capture attempt per second, including silent pre-publication
+// exits. Only reads existing receipts; never supplies a queue or camera.
+void report_dead_space_capture(unsigned reason,std::uint64_t call,UINT64 detail=0) {
+    if(dead_space_process()) {
+        const auto source=dead_space_camera_source::statistics();
+        title_capture_log("dead_space_native_source",source.status,source.failure,source.observed,source.corrected);
+        title_capture_log("dead_space_native_source_rejections",source.matched,source.rejected);
+    }
+    title_capture_log("dead_space_capture_gate",reason,call,detail,state().active.load());
+    const auto context=native_ingress::luke_context_diagnostics();
+    title_capture_log("dead_space_queue_state",context.admitted|(context.execute_hook?2U:0U)|(context.create_queue_hook?4U:0U),
+        (UINT64(context.pending_lists)<<32)|context.registered_queues,context.submissions,context.execute_entry);
+    title_capture_log("dead_space_queue_owner",context.device,context.queue);
+    static std::atomic_uintptr_t reported_execute{};
+    if(context.execute_entry && reported_execute.exchange(context.execute_entry)!=context.execute_entry) {
+        HMODULE module{};char path[MAX_PATH]{};
+        if(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(context.execute_entry),&module) && GetModuleFileNameA(module,path,MAX_PATH)) {
+            const auto* basename=strrchr(path,'\\');basename=basename?basename+1:path;
+            char label[MAX_PATH+40]{};snprintf(label,sizeof(label),"dead_space_execute_module:%s",basename);
+            title_capture_log(label,context.execute_entry-reinterpret_cast<std::uintptr_t>(module));
+        }
+    }
+    const auto camera=native_ingress::streamline_camera::current(true);
+    title_capture_log("dead_space_camera_receipt",native_ingress::streamline_camera::hooked(),
+        camera.observed|(camera.valid?2U:0U)|(camera.ambiguous?4U:0U),camera.rejection,
+        (UINT64(camera.frame)<<32)|camera.viewport);
+    const auto bits=[](float x){return std::bit_cast<std::uint32_t>(x);};
+    const auto vector=[&](const char* label,const auto& v){title_capture_log(label,bits(v[0]),bits(v[1]),bits(v[2]));};
+    vector("dead_space_camera_right",camera.right);vector("dead_space_camera_up",camera.up);
+    vector("dead_space_camera_forward",camera.forward);vector("dead_space_camera_position",camera.position);
+    title_capture_log("dead_space_camera_planes_fov",bits(camera.near_z),bits(camera.far_z),bits(camera.fov),camera.camera_motion+1);
+    for(unsigned row=0;row<4;++row) {
+        char label[48]{};snprintf(label,sizeof(label),"dead_space_camera_projection_%u",row);
+        title_capture_log(label,bits(camera.projection[row*4]),bits(camera.projection[row*4+1]),bits(camera.projection[row*4+2]),bits(camera.projection[row*4+3]));
+        snprintf(label,sizeof(label),"dead_space_camera_inverse_%u",row);
+        title_capture_log(label,bits(camera.inverse[row*4]),bits(camera.inverse[row*4+1]),bits(camera.inverse[row*4+2]),bits(camera.inverse[row*4+3]));
+    }
+    const auto guides=dlss_motion_vector_statistics();
+    title_capture_log("dead_space_publication_state",static_cast<unsigned>(guides.status),guides.published,guides.matched,guides.used);
+}
 bool kingdom_come_process() {
     static const bool selected=[] {
         wchar_t process[MAX_PATH]{};GetModuleFileNameW(nullptr,process,MAX_PATH);
@@ -173,19 +275,22 @@ bool same_eye_native_motion() noexcept {
     static const auto selected=[] {
         wchar_t process[MAX_PATH]{};GetModuleFileNameW(nullptr,process,MAX_PATH);
         const auto* basename=wcsrchr(process,L'\\');basename=basename?basename+1:process;
-        return std::pair{!_wcsicmp(basename,L"GhostOfTsushima.exe"),
-                         !_wcsicmp(basename,L"HorizonForbiddenWest.exe")};
+        return luke_same_eye_native_motion_title(basename);
     }();
 #ifdef XRFG_NATIVE_INGRESS_TESTS
-    const bool ghost=selected.first||test_ghost_native_motion;
-    const bool horizon=selected.second||test_horizon_native_motion;
+    const bool same_eye=selected||test_ghost_native_motion||test_horizon_native_motion||
+        test_gta_enhanced_production_identity||test_dead_space_production_identity;
 #else
-    const bool ghost=selected.first, horizon=selected.second;
+    const bool same_eye=selected;
 #endif
-    // Quest/VDXR captures establish the same N-2 endpoint on both titles:
+    // Quest/VDXR captures establish the same N-2 endpoint on these titles:
     // Tsushima V629 .17-.20px; Horizon V632 .011-.014px (N-1 1.88-3.03px).
     // The native motion field interval does not depend on the XR runtime.
-    return ghost || horizon;
+    // Spider-Man V664 F8: N-2 median .0009/.0022px versus N-1 2.30/1.28px.
+    // GTA Enhanced V679: N-2/native view rows .011-.020px; N-1 5.8-11.2px.
+    // Dead Space V680 F8: native N-2 matches same-eye image flow at .30/.32px;
+    // interpreting it as N-1 introduces an erroneous stereo interval.
+    return same_eye;
 }
 bool outlaws_public_process() {
     return outlaws_process()&&native_ingress::luke_detected();
@@ -499,7 +604,7 @@ public:
         const NVSDK_NGX_Parameter* parameters,const NVSDK_NGX_Handle* handle=nullptr)
         :parent_(current_),list_(list),device_(device),type_(feature.type),
          production_(production),public_(public_dispatch) {
-        if(native_ingress::luke_detected()&&kcd_scene_camera_process()) {
+        if(kcd_scene_camera_process()&&native_ingress::luke_detected()) {
             // Root presence is distinct from match validity. An authoritative
             // public transaction cannot fall back to an injector's guides if
             // a child changes its list/device/type or its creator is retired.
@@ -750,9 +855,11 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     KcdCameraInvocationScope* invocation_camera=nullptr,std::uint32_t public_production=0,bool* snapshot_attempted=nullptr,
     const Feature* invocation_feature,ID3D12Resource* final_caller_output,unsigned observed_motion_span) {
     if(snapshot_attempted)*snapshot_attempted=false;
-    auto& s=state(); if(!s.active.load())return {};
+    const bool diagnostic=sample_dead_space_capture();
+    const auto rejected=[&](unsigned reason,UINT64 detail=0) {if(diagnostic)report_dead_space_capture(reason,state().calls.load(),detail);};
+    auto& s=state(); if(!s.active.load()){rejected(1);return {};}
     const auto call=++s.calls;
-    if(!list||!p)return {};
+    if(!list||!p){rejected(2);return {};}
     // The projection rarely changes: refresh it every 32 evaluations, and on
     // every one until it is known. OpenXR depth metadata takes precedence.
     if(!s.camera_ready.load()||call%32==0)update_uevr_projection();
@@ -766,27 +873,27 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     const bool luke=native_ingress::luke_detected();
     if(luke) {
         ComPtr<ID3D12Device> owner;ComPtr<ID3D12CommandQueue> producer;
-        if(!native_ingress::query_luke_context(owner.GetAddressOf(),producer.GetAddressOf()))return {};
+        if(!native_ingress::query_luke_context(owner.GetAddressOf(),producer.GetAddressOf())){rejected(3);return {};}
         queue=std::move(producer);
     }
-    if(!queue)return {};
+    if(!queue){rejected(4);return {};}
     // Only creation-observed SR/RR types may enter guide capture or NR. NGX
     // evaluation maps alone cannot distinguish SR, DLSS-G and neural rendering.
     if(!known || (feature.type!=NVSDK_NGX_Feature_SuperSampling&&
-        feature.type!=NVSDK_NGX_Feature_RayReconstruction))return {};
+        feature.type!=NVSDK_NGX_Feature_RayReconstruction)){rejected(5,feature.type);return {};}
     auto output_owner=native(get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_Output));
-    if(final_caller_output&&!output_owner)return {};
+    if(final_caller_output&&!output_owner){rejected(6);return {};}
     // KCD's native guides accompany the completed original public color.
     // Retain its existing output/marker identity; never stamp a private SR target.
     if(final_caller_output)output_owner=final_caller_output;
     auto* output=output_owner.Get();
     auto motion=native(get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_MotionVectors));
     auto depth=native(get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_Depth));
-    if(!output||!motion||!depth) { if(call<8)log("missing_guides",call); return {}; }
-    auto cmd=native(list); auto nq=native(queue.Get());if(!cmd||!nq)return {};
+    if(!output||!motion||!depth) { if(call<8)log("missing_guides",call);rejected(6,(output?1U:0U)|(motion?2U:0U)|(depth?4U:0U)); return {}; }
+    auto cmd=native(list); auto nq=native(queue.Get());if(!cmd||!nq){rejected(7);return {};}
     ComPtr<ID3D12Device> md,dd,cd,qd;
     if(FAILED(motion->GetDevice(IID_PPV_ARGS(&md)))||FAILED(depth->GetDevice(IID_PPV_ARGS(&dd)))||
-       FAILED(cmd->GetDevice(IID_PPV_ARGS(&cd)))||FAILED(nq->GetDevice(IID_PPV_ARGS(&qd))))return {};
+       FAILED(cmd->GetDevice(IID_PPV_ARGS(&cd)))||FAILED(nq->GetDevice(IID_PPV_ARGS(&qd)))){rejected(8);return {};}
     if(luke) {
         // Keep the real game resources/list/queue intact. Only the proven
         // allocation owner bypasses an injector's private-queue interception.
@@ -802,13 +909,14 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
                 if(failures.fetch_add(1,std::memory_order_relaxed)<8)
                     log("native_allocation_owner_failed",static_cast<UINT>(result),
                         reinterpret_cast<UINT64>(owner->Get()));
+                rejected(9,static_cast<UINT>(result));
                 return {};
             }
             *owner=std::move(canonical);
         }
     }
     if(!d3d_owner::same(md.Get(),dd.Get())||!d3d_owner::same(md.Get(),cd.Get())||!d3d_owner::same(md.Get(),qd.Get())) {
-        if(call<8)log("device_mismatch",call); return {};
+        if(call<8)log("device_mismatch",call);rejected(10); return {};
     }
     const auto od=output->GetDesc(), mv=motion->GetDesc(), dz=depth->GetDesc();
     DlssMotionVectorPublication g{};
@@ -828,6 +936,11 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     g.protect_snapshot_lifetime=luke;
     g.stream=guide_stream; g.output=output;
     g.motion_vectors=motion.Get(); g.depth=depth.Get();
+    // This is the original, creation-observed NGX SR/RR MotionVectors input,
+    // not an arbitrary game texture. DLSS specifies float XY. Type only our
+    // snapshot of Dead Space's measured RG16_TYPELESS allocation.
+    g.dlss_float_motion=luke && dead_space_process() &&
+        mv.Format==DXGI_FORMAT_R16G16_TYPELESS;
     g.producer_queue=nq.Get(); g.producer_command_list=cmd.Get(); g.verified_producer_device=qd.Get();
     g.output_x=get<UINT>(p,NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X);
     g.output_y=get<UINT>(p,NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y);
@@ -918,6 +1031,7 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     // provider mutates native motion. All snapshots are recorded now.
     if(luke&&!feature.flags_known) {
         if(call<=8||call%300==0)log("waiting_creation_flags",call,g.stream);
+        rejected(11);
         return {};
     }
     bool exact_camera{},scoped_camera{};
@@ -932,10 +1046,15 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     if(exact_camera)g.depth=depth.Get();
     if(luke && !exact_camera) {
         if(embedded::afw_snapshot().desired.mode!=0)embedded::report_afw_ingress(false,false);
+        if(dead_space_process() && two_frame_capture_images_active())
+            two_frame_capture_guide_contract(dead_space_rejected_camera_contract(
+                native_ingress::streamline_camera::current(true),g));
+        rejected(12);
         return {};
     }
     if(snapshot_attempted)*snapshot_attempted=true;
     auto frame=publish_dlss_motion_vectors(g);
+    if(diagnostic)report_dead_space_capture(frame?0:13,call,g.stream);
     if(frame && !invocation_camera && two_frame_capture_images_active()) {
         // Generic Luke titles may refuse AFW before its input captures run.
         // F8 must still show the exact retained native guides, independently
@@ -1076,10 +1195,13 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
     const auto original = c_entry ? state().modules[slot].evaluate_c : state().modules[slot].evaluate;
     const bool kcd_production=kingdom_come_process();
     const bool outlaws_production=outlaws_public_process();
-    if(kingdom_come_process()) {
-        static std::atomic_uint64_t last_entry{};
+    bool diagnostic_entry{};
+    if(kingdom_come_process()||cached_luke_title()) {
+        static std::array<std::atomic_uint64_t,5> last_entries{};
+        auto& last_entry=last_entries[cached_luke_title()?slot:0];
         const auto now=GetTickCount64();auto previous=last_entry.load();
         if(now-previous>=1000&&last_entry.compare_exchange_strong(previous,now)) {
+            diagnostic_entry=cached_luke_title()&&bridge_flight_logger().enabled();
             int flags{};
             const auto result=p?p->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,&flags):NVSDK_NGX_Result_Fail;
             log("native_evaluate_entry",slot,state().modules[slot].typed_implementation,h!=nullptr,
@@ -1168,6 +1290,8 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
          evaluation_metadata=it->second;
          if(sr)native_available=state().modules[it->second.type==NVSDK_NGX_Feature_SuperSampling?0:1].typed_implementation;
          hdr=it->second.flags_known&&(it->second.flags&NVSDK_NGX_DLSS_Feature_Flags_IsHDR)!=0;}}
+    if(diagnostic_entry)title_capture_log("dead_space_evaluation_state",slot,sr,
+        (evaluation_metadata.flags_known?1U:0U)|(evaluation_metadata.creation_observed?2U:0U),identity);
     if(replaced_native_generation)
         invalidate_dlss_motion_vector_stream_history(previous_native_stream);
     // An untyped core dispatch may reach the typed SR module, where recovery
@@ -1217,6 +1341,7 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
     const bool crimson_delegate_nr=crimson_public && native_available;
     NgxEvaluationBoundary scope(slot,state().modules[slot].typed_implementation,
         native_available && !crimson_public,crimson_public);
+    if(diagnostic_entry)title_capture_log("dead_space_observation_state",slot,scope.observes(),state().active.load(),scope.outermost());
     if(sr && scope.outermost() && !state().modules[slot].typed_implementation &&
         crimson_desert_process() && two_frame_capture_images_active() && native_ingress::luke_detected()) {
         // F8 evidence before the generic dispatcher forwards to REALVR/native
@@ -1421,7 +1546,7 @@ void install(UINT i,HMODULE mod,void* create_fn,void* eval_fn,void* release_fn,v
     }
     // KCD's existing injector can redirect exports before the XR layer loads.
     // Hook the actual typed implementation body used by cached original calls.
-    if(i<2&&native_ingress::luke_detected()&&kingdom_come_process()) {
+    if(i<2&&native_ingress::luke_detected()&&(kingdom_come_process()||cached_luke_title())) {
         const auto original_c=native_export_address(mod,"NVSDK_NGX_D3D12_CreateFeature");
         const auto original_e=native_export_address(mod,"NVSDK_NGX_D3D12_EvaluateFeature");
         const auto original_r=native_export_address(mod,"NVSDK_NGX_D3D12_ReleaseFeature");
@@ -1455,7 +1580,8 @@ void install_feature_hooks() {
     install_dispatch<0>(GetModuleHandleW(L"nvngx_dlss.dll"));
     install_dispatch<1>(GetModuleHandleW(L"nvngx_dlssd.dll"));
     install_dispatch<2>(GetModuleHandleW(L"_nvngx.dll"));
-    if(kingdom_come_process()||outlaws_public_process()) {
+    if(kingdom_come_process()||outlaws_public_process()||
+        (cached_luke_title()&&native_ingress::luke_detected())) {
         const auto module=luke_dispatch_module();
         install_dispatch<3>(module);
     }
@@ -1468,9 +1594,10 @@ void install_feature_hooks() {
 }
 void start_hook_monitor() {
     static std::atomic_bool started{};if(started.exchange(true))return;
-    HMODULE pinned{};GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
-        reinterpret_cast<LPCWSTR>(&start_hook_monitor),&pinned);
-    std::thread([]{for(;;){install_feature_hooks();Sleep(50);}}).detach();
+    HMODULE pinned{};if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
+        reinterpret_cast<LPCWSTR>(&start_hook_monitor),&pinned))return;
+    native_ingress::start_luke_detection_notifications();
+    std::thread([]{for(;;){native_ingress::refresh_luke_detection(false);install_feature_hooks();Sleep(50);}}).detach();
 }
 // NGX looks for a feature's module only along the path list of the process's
 // first initialisation, which is usually the game's own DLSS: OFXR's later
@@ -1536,6 +1663,7 @@ HMODULE load_ngx_core() {
 #endif
 void prepare_ngx_feature_discovery(const wchar_t* directory) noexcept {
     try {
+        native_ingress::refresh_luke_detection();
         auto& d=discovery(); if(d.ext_hook||d.project_hook||!directory||!*directory)return;
         const HMODULE core=load_ngx_core(); if(!core)return;
         install_feature_hooks();start_hook_monitor();

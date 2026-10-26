@@ -347,7 +347,9 @@ bool camera_data(const D3D12ReprojectionView& source,
         source_position, output.source_view_to_world);
     if (!invert(output.source_view_to_world, output.source_world_to_view))
         return false;
-    const float direction = source_eye == 0 ? 1.0F : -1.0F;
+    const float view_x_sign = std::copysign(1.F, guide.camera_view_to_clip[0]);
+    const float view_y_sign = std::copysign(1.F, guide.camera_view_to_clip[5]);
+    const float direction = (source_eye == 0 ? 1.0F : -1.0F) * view_x_sign;
     std::array<float, 3> destination_position{
         source_position[0] + direction * guide.camera_right[0] * game_baseline,
         source_position[1] + direction * guide.camera_right[1] * game_baseline,
@@ -355,7 +357,8 @@ bool camera_data(const D3D12ReprojectionView& source,
     LukeCameraBasis destination_basis{};
     if (!luke_destination_view_camera_basis(source.pose.orientation,
             destination.pose.orientation, source_basis,
-            guide.camera_view_to_clip[11], destination_basis)) return false;
+            guide.camera_view_to_clip[11], destination_basis,
+            view_x_sign, view_y_sign)) return false;
     view_to_world(destination_basis[0], destination_basis[1],
         destination_basis[2], destination_position,
         output.destination_view_to_world);

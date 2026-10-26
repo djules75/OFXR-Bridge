@@ -174,7 +174,7 @@ void route_motion_widgets() {
     require(request(settings), "initialize OFXR optical-flow selection");
     Context tray(ImVec2(674, 861), false), headset(ImVec2(1024, 768), true);
     tray.draw(); tray.draw(); headset.draw(); headset.draw();
-    tray.choose("OFXR engine", 3, "Nvidia 0.3.0 (high latency, high performance, medium compatibility)");
+    tray.choose("OFXR engine", 3, "Nvidia 0.3.0 (medium latency, medium compatibility)");
     require(snapshot().desired.backend == 2, "new display order keeps 0.3.0 on persisted backend 2");
     headset.draw();
     headset.choose("OFXR engine", 2, "Nvidia 0.2.13 (medium latency, high compatibility)");
@@ -424,13 +424,17 @@ void offline_preset() {
 }
 void automatic_buttons() {
     require(WritePrivateProfileStringW(L"benchmark",L"enabled",L"1",configuration_path().c_str()),"enable benchmark GUI fixture in single INI");
+    // Factory Auto pick is ON since V663. This click test exercises OFF->ON.
+    auto initial=snapshot().desired;initial.benchmark_auto_pick=false;
+    require(request(initial),"explicit unchecked state for auto-pick interaction fixture");
     RuntimeStatus runtime{};runtime.sessions=1;runtime.luke_detected=true;
     runtime.steamvr_runtime=true;runtime.vdxr_legacy=false;
     runtime.dlssg_preset_request=3;runtime.applied_revision=snapshot().revision;report_runtime(runtime);
     const auto prior=snapshot().desired;
     Context tray({690,900},false);tray.draw();tray.draw();tray.select_tab("Display");tray.draw(true);
-    for(const auto label:{"Tests without vectors","Complete tests","Test Luke Ross","Open benchmark folder"})
+    for(const auto label:{"Tests without vectors","Complete tests","Test Luke Ross"})
         require(tray.rendered_text.find(label)!=std::string::npos,"All automatic controls are in Display");
+    require(tray.rendered_text.find("Open benchmark folder")==std::string::npos,"shared settings no longer opens shell folders");
     require(tray.rendered_text.find("25 optical or 43 complete")!=std::string::npos &&
         tray.rendered_text.find("Luke Ross: up to 30 tests")!=std::string::npos,
         "SteamVR Display describes its actual pacing and AFW matrix");
