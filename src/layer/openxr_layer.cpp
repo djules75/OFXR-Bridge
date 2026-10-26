@@ -240,6 +240,21 @@ struct Exports {
 }  // namespace optiscaler_bootstrap
 
 constexpr char kLayerName[] = "XR_APILAYER_XRFrameBridge_diagnostic";
+// V572: the machine-wide copy for games run as administrator registers the
+// same DLL under this name (implicit_layer::kElevatedLayerName).
+constexpr char kElevatedLayerName[] = "XR_APILAYER_XRFrameBridge_elevated";
+// Set at negotiation when the elevated copy loaded: its settings and logs are
+// the per-user arm's folder's. A Vulkan session needs the Vulkan queue
+// layer, which an elevated game has only through its own machine-wide copy
+// beside this one (implicit_layer::kElevatedVulkanManifestName); without
+// that copy, current and registered, Vulkan sessions are left alone.
+std::atomic<bool> g_elevated_copy{false};
+std::atomic<bool> g_elevated_vulkan_layer{false};
+
+[[nodiscard]] const char* negotiated_layer_name() noexcept {
+    return g_elevated_copy.load(std::memory_order_acquire) ? kElevatedLayerName
+                                                           : kLayerName;
+}
 constexpr XrVersion kLayerApiVersion = XR_MAKE_VERSION(1, 0, 0);
 constexpr XrDuration kGenerationCooldownDuration = 1'000'000'000;
 // Consecutive submissions one scanout apart before any phase correction is
@@ -269,7 +284,13 @@ template <typename Handle>
     }
 }
 
+// The folder the ini is read from: this DLL's, or for the elevated copy the
+// per-user arm's (xrfg::set_layer_directory, at negotiation).
 [[nodiscard]] std::filesystem::path current_layer_directory() noexcept {
+    return xrfg::layer_directory();
+}
+
+[[nodiscard]] std::filesystem::path current_layer_dll() noexcept {
     try {
         HMODULE module = nullptr;
         if (!GetModuleHandleExW(
@@ -285,10 +306,18 @@ template <typename Handle>
         if (length == 0 || length >= path.size()) {
             return {};
         }
-        return std::filesystem::path(path.data()).parent_path();
+        return std::filesystem::path(path.data());
     } catch (...) {
         return {};
     }
+}
+
+// Vulkan support as the ini says it; for the elevated copy, only beside its
+// Vulkan queue layer.
+[[nodiscard]] bool vulkan_support_configured() noexcept {
+    return (!g_elevated_copy.load(std::memory_order_acquire) ||
+            g_elevated_vulkan_layer.load(std::memory_order_acquire)) &&
+        xrfg::implicit_layer::read_vulkan_support(current_layer_directory());
 }
 
 [[nodiscard]] std::uint64_t optical_flow_configuration_code(
@@ -4722,7 +4751,7 @@ XrResult layer_create_api_layer_instance_impl(
         layer_info->nextInfo->structType != XR_LOADER_INTERFACE_STRUCT_API_LAYER_NEXT_INFO ||
         layer_info->nextInfo->structVersion < XR_API_LAYER_NEXT_INFO_STRUCT_VERSION ||
         layer_info->nextInfo->structSize < sizeof(XrApiLayerNextInfo) ||
-        std::strcmp(layer_info->nextInfo->layerName, kLayerName) != 0 ||
+        std::strcmp(layer_info->nextInfo->layerName, negotiated_layer_name()) != 0 ||
         layer_info->nextInfo->nextGetInstanceProcAddr == nullptr ||
         layer_info->nextInfo->nextCreateApiLayerInstance == nullptr) {
         return XR_ERROR_INITIALIZATION_FAILED;
@@ -4769,7 +4798,7 @@ XrResult layer_create_api_layer_instance_impl(
             xrfg::implicit_layer::read_d3d11_bridge(current_layer_directory());
         // The Vulkan bridge wants the same extension, for the same reason.
         vulkan_bridge_requested_by_ini =
-            xrfg::implicit_layer::read_vulkan_support(current_layer_directory()) &&
+            vulkan_support_configured() &&
             xrfg::implicit_layer::read_vulkan_session_bridge(current_layer_directory());
         if (!asked_d3d12 &&
             ((asked_d3d11 && bridge_requested_by_ini) ||
@@ -5106,8 +5135,7 @@ XrResult layer_create_session_impl(
         xrfg::implicit_layer::read_single_swapchain_rings(current_layer_directory());
     state->capture_at_end_frame =
         xrfg::implicit_layer::read_capture_at_end_frame(current_layer_directory());
-    state->vulkan_support =
-        xrfg::implicit_layer::read_vulkan_support(current_layer_directory());
+    state->vulkan_support = vulkan_support_configured();
     state->pause_applied = state->manual_control.pause_requested();
     xrfg::bridge_flight_logger().event(
         xrfg::BridgeFlightOperation::arm_control,
@@ -16208,11 +16236,57 @@ extern "C" __declspec(dllexport) XRAPI_ATTR XrResult XRAPI_CALL xrNegotiateLoade
     const XrNegotiateLoaderInfo* loader_info,
     const char* layer_name,
     XrNegotiateApiLayerRequest* layer_request) {
+    // V572: the machine-wide copy, for games run as administrator. Anywhere
+    // else - a game that is not elevated, which the per-user arm serves, or
+    // no arm with this very DLL - it declines before anything of the layer
+    // runs, and the loader goes on without it. Its settings and logs are
+    // then the arm's folder's, as the per-user layer's are.
+    const bool elevated_copy =
+        layer_name != nullptr && std::strcmp(layer_name, kElevatedLayerName) == 0;
+    if (elevated_copy) {
+        if (!xrfg::implicit_layer::process_is_elevated()) {
+            return XR_ERROR_INITIALIZATION_FAILED;
+        }
+        const std::filesystem::path armed =
+            xrfg::implicit_layer::armed_directory_matching(current_layer_dll());
+        if (armed.empty()) {
+            return XR_ERROR_INITIALIZATION_FAILED;
+        }
+        xrfg::set_layer_directory(armed);
+        g_elevated_copy.store(true, std::memory_order_release);
+        namespace layer = xrfg::implicit_layer;
+        const std::filesystem::path installed = current_layer_dll().parent_path();
+        g_elevated_vulkan_layer.store(
+            layer::manifest_registered(installed / layer::kElevatedVulkanManifestName,
+                layer::RegistryScope::local_machine, layer::kVulkanRegistrySubkey) &&
+                layer::files_identical(installed / layer::kVulkanLayerDll,
+                    armed / layer::kVulkanLayerDll),
+            std::memory_order_release);
+    }
     if (const auto delegated = optiscaler_bootstrap::negotiate(
             loader_info, layer_name, layer_request)) {
         return *delegated;
     }
     xrfg::initialize_bridge_flight_logger();
+    {
+        // V572: which game this log is.
+        const std::wstring executable =
+            xrfg::implicit_layer::current_executable_name();
+        std::string utf8(static_cast<std::size_t>(WideCharToMultiByte(
+            CP_UTF8, 0, executable.c_str(), static_cast<int>(executable.size()),
+            nullptr, 0, nullptr, nullptr)), '\0');
+        if (!utf8.empty()) {
+            WideCharToMultiByte(CP_UTF8, 0, executable.c_str(),
+                static_cast<int>(executable.size()), utf8.data(),
+                static_cast<int>(utf8.size()), nullptr, nullptr);
+        }
+        xrfg::bridge_flight_logger().note(
+            xrfg::BridgeFlightOperation::process_identity,
+            xrfg::implicit_layer::process_is_elevated() ? 1 : 0,
+            utf8,
+            elevated_copy ? 1u : 0u,
+            GetCurrentProcessId());
+    }
     const auto token = xrfg::bridge_flight_logger().begin(
         xrfg::BridgeFlightOperation::negotiation,
         loader_info ? loader_info->minInterfaceVersion : 0,
@@ -16220,7 +16294,7 @@ extern "C" __declspec(dllexport) XRAPI_ATTR XrResult XRAPI_CALL xrNegotiateLoade
         loader_info ? loader_info->maxApiVersion : 0);
     const XrResult result = guard_c_api_boundary([&] {
         if (loader_info == nullptr || layer_request == nullptr || layer_name == nullptr ||
-            std::strcmp(layer_name, kLayerName) != 0 ||
+            std::strcmp(layer_name, negotiated_layer_name()) != 0 ||
             loader_info->structType != XR_LOADER_INTERFACE_STRUCT_LOADER_INFO ||
             loader_info->structVersion != XR_LOADER_INFO_STRUCT_VERSION ||
             loader_info->structSize != sizeof(XrNegotiateLoaderInfo) ||

@@ -34,6 +34,10 @@ constexpr wchar_t kWindowClass[] = L"OFXRBridgeTrayWindow";
 constexpr wchar_t kApplicationName[] = L"OFXR Bridge";
 constexpr wchar_t kCleanupArgument[] = L"--cleanup-manual-arm";
 constexpr wchar_t kArmAndExitArgument[] = L"--arm-and-exit";
+// V572: the elevated helper that installs or removes the machine-wide layer
+// for games run as administrator.
+constexpr wchar_t kInstallElevatedArgument[] = L"--install-elevated-layer";
+constexpr wchar_t kRemoveElevatedArgument[] = L"--remove-elevated-layer";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT_PTR kTrayId = 1;
 constexpr int kPauseHotkeyId = 1;
@@ -83,6 +87,8 @@ enum MenuCommand : UINT {
     // V566: the multiplier key's step, and its dialog.
     cycle_frame_multiplier = 144,
     change_multiplier_key = 145,
+    // V572: games run as administrator.
+    toggle_elevated_layer = 146,
     reset_defaults = 127,
     toggle_diagnostics = 120,
     overlay_off = 121,
@@ -143,6 +149,9 @@ struct AppState {
     std::array<HWND, 14> tuning_labels{};
     HANDLE tuning_mapping{};
     xrfg::live_tuning::Block* tuning_block{};
+    // V572: the explanation shown beside "Games run as administrator" while
+    // the menu has it selected; a menu item has no tooltip of its own.
+    HWND menu_tooltip{};
 };
 
 constexpr wchar_t kTuningWindowClass[] = L"OFXRBridgeLiveTuning";
@@ -709,6 +718,207 @@ void show_balloon(
     state.icon.dwInfoFlags = flags;
     state.icon.uFlags = NIF_INFO;
     static_cast<void>(Shell_NotifyIconW(NIM_MODIFY, &state.icon));
+}
+
+// V572: the machine-wide layers for games run as administrator
+// (implicit_layer::kElevatedLayerName, and the Vulkan queue layer's copy). They
+// are installed by this executable run elevated, from the DLLs beside it, and
+// they are "current" while they are the very DLLs this tray arms with:
+// anything else they decline to load.
+enum class ElevatedLayerState { absent, current, outdated };
+
+// %ProgramFiles%\OFXR Bridge\Elevated, writable by administrators only.
+// Empty when the folder is unknown.
+[[nodiscard]] std::filesystem::path elevated_install_directory() noexcept {
+    try {
+        PWSTR value = nullptr;
+        if (FAILED(SHGetKnownFolderPath(FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, nullptr, &value))) {
+            return {};
+        }
+        const std::filesystem::path program_files(value);
+        CoTaskMemFree(value);
+        return program_files / L"OFXR Bridge" / L"Elevated";
+    } catch (...) {
+        return {};
+    }
+}
+
+[[nodiscard]] std::filesystem::path bundled_layer_dll(
+    const std::filesystem::path& executable_directory) {
+    return executable_directory / L"ofxr" / xrfg::implicit_layer::kLayerDllName;
+}
+
+[[nodiscard]] ElevatedLayerState elevated_layer_state(const AppState& state) {
+    namespace layer = xrfg::implicit_layer;
+    const auto directory = elevated_install_directory();
+    if (directory.empty() ||
+        !layer::manifest_registered(directory / layer::kElevatedManifestName,
+            layer::RegistryScope::local_machine)) {
+        return ElevatedLayerState::absent;
+    }
+    const auto bundled = state.executable_directory / L"ofxr";
+    return layer::files_identical(directory / layer::kLayerDllName,
+               bundled / layer::kLayerDllName) &&
+            layer::manifest_registered(directory / layer::kElevatedVulkanManifestName,
+                layer::RegistryScope::local_machine, layer::kVulkanRegistrySubkey) &&
+            layer::files_identical(directory / layer::kVulkanLayerDll,
+                bundled / layer::kVulkanLayerDll)
+        ? ElevatedLayerState::current
+        : ElevatedLayerState::outdated;
+}
+
+// Elevated. Registrations off first, so no game starting meanwhile loads a
+// half-copied DLL; a game run as administrator that holds an old one makes
+// the copy fail, and the user is told to close it.
+[[nodiscard]] bool install_elevated_layer(
+    const std::filesystem::path& executable_directory, std::wstring* error) {
+    namespace layer = xrfg::implicit_layer;
+    namespace standalone = xrfg::standalone;
+    const auto directory = elevated_install_directory();
+    if (directory.empty()) {
+        *error = L"The Program Files folder could not be found.";
+        return false;
+    }
+    const auto bundled = executable_directory / L"ofxr";
+    for (const wchar_t* name : {layer::kLayerDllName, layer::kVulkanLayerDll}) {
+        if (!std::filesystem::is_regular_file(bundled / name)) {
+            *error = L"An OFXR layer is missing beside the tray:\r\n" +
+                (bundled / name).wstring();
+            return false;
+        }
+    }
+    const auto manifest = directory / layer::kElevatedManifestName;
+    const auto vulkan_manifest = directory / layer::kElevatedVulkanManifestName;
+    static_cast<void>(layer::unregister_manifest(
+        manifest, layer::RegistryScope::local_machine));
+    static_cast<void>(layer::unregister_manifest(vulkan_manifest,
+        layer::RegistryScope::local_machine, nullptr, layer::kVulkanRegistrySubkey));
+    std::error_code failure;
+    std::filesystem::create_directories(directory, failure);
+    for (const wchar_t* name : {layer::kLayerDllName, layer::kVulkanLayerDll}) {
+        if (!failure) {
+            std::filesystem::copy_file(bundled / name, directory / name,
+                std::filesystem::copy_options::overwrite_existing, failure);
+        }
+    }
+    if (failure) {
+        *error = L"Copying the layers to " + directory.wstring() + L" failed. "
+            L"Close any game running as administrator and try again.";
+        return false;
+    }
+    const auto write = [&](const std::filesystem::path& path, const std::string& text) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << text;
+        if (!output) *error = L"Writing " + path.wstring() + L" failed.";
+        return static_cast<bool>(output);
+    };
+    return write(manifest, standalone::build_implicit_layer_manifest(
+               directory / layer::kLayerDllName, kImplementationVersion,
+               "XR_APILAYER_XRFrameBridge_elevated")) &&
+        write(vulkan_manifest, standalone::build_vulkan_layer_manifest(
+            directory / layer::kVulkanLayerDll, kImplementationVersion,
+            "VK_LAYER_OFXR_queue_serialize_elevated",
+            "OFXR_vkNegotiateLoaderLayerInterfaceVersionElevated")) &&
+        layer::register_manifest(vulkan_manifest, layer::RegistryScope::local_machine,
+            error, layer::kVulkanRegistrySubkey) &&
+        layer::register_manifest(manifest, layer::RegistryScope::local_machine, error);
+}
+
+// Elevated. With the registrations gone the files are inert, so a DLL a
+// running game still holds is left behind rather than failing the removal.
+[[nodiscard]] bool remove_elevated_layer(std::wstring* error) {
+    namespace layer = xrfg::implicit_layer;
+    const auto directory = elevated_install_directory();
+    if (directory.empty()) {
+        *error = L"The Program Files folder could not be found.";
+        return false;
+    }
+    if (!layer::unregister_manifest(directory / layer::kElevatedManifestName,
+            layer::RegistryScope::local_machine, error) ||
+        !layer::unregister_manifest(directory / layer::kElevatedVulkanManifestName,
+            layer::RegistryScope::local_machine, error, layer::kVulkanRegistrySubkey)) {
+        return false;
+    }
+    std::error_code ignored;
+    for (const wchar_t* name : {layer::kElevatedManifestName,
+             layer::kElevatedVulkanManifestName, layer::kLayerDllName,
+             layer::kVulkanLayerDll}) {
+        std::filesystem::remove(directory / name, ignored);
+    }
+    std::filesystem::remove(directory, ignored);
+    std::filesystem::remove(directory.parent_path(), ignored);
+    return true;
+}
+
+// The tray run elevated with one of the two arguments: does the work and
+// leaves before anything of the tray starts.
+[[nodiscard]] std::optional<int> run_elevated_layer_helper() {
+    int argument_count = 0;
+    LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count);
+    if (arguments == nullptr) return std::nullopt;
+    const bool install = argument_count == 2 &&
+        _wcsicmp(arguments[1], kInstallElevatedArgument) == 0;
+    const bool remove = argument_count == 2 &&
+        _wcsicmp(arguments[1], kRemoveElevatedArgument) == 0;
+    LocalFree(arguments);
+    if (!install && !remove) return std::nullopt;
+    if (!xrfg::implicit_layer::process_is_elevated()) return EXIT_FAILURE;
+    std::wstring error;
+    bool done = false;
+    try {
+        done = install
+            ? install_elevated_layer(executable_directory(), &error)
+            : remove_elevated_layer(&error);
+        log_lifecycle(local_app_data() / L"OFXR Bridge",
+            install ? L"elevated-install" : L"elevated-remove", error);
+    } catch (...) {
+        error = L"The layer for games run as administrator could not be changed.";
+    }
+    if (!done) {
+        MessageBoxW(nullptr, error.c_str(), kApplicationName, MB_OK | MB_ICONERROR);
+    }
+    return done ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+// Runs the helper elevated - Windows asks the user - and waits for it.
+void change_elevated_layer(AppState& state) {
+    const bool remove = elevated_layer_state(state) == ElevatedLayerState::current;
+    std::array<wchar_t, 32768> path{};
+    const DWORD length = GetModuleFileNameW(
+        nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (length == 0 || length >= path.size()) return;
+    SHELLEXECUTEINFOW info{};
+    info.cbSize = sizeof(info);
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    info.hwnd = state.window;
+    info.lpVerb = L"runas";
+    info.lpFile = path.data();
+    info.lpParameters = remove ? kRemoveElevatedArgument : kInstallElevatedArgument;
+    info.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&info) || info.hProcess == nullptr) {
+        show_balloon(state, L"Games run as administrator: not changed",
+            L"Windows did not give OFXR administrator rights, so nothing was "
+            L"changed.");
+        return;
+    }
+    WaitForSingleObject(info.hProcess, 60000);
+    CloseHandle(info.hProcess);
+    switch (elevated_layer_state(state)) {
+    case ElevatedLayerState::current:
+        show_balloon(state, L"Games run as administrator: on",
+            L"OFXR now also works in games started as administrator, while the "
+            L"tray is armed. Turn this off from the menu before you remove OFXR.");
+        break;
+    case ElevatedLayerState::outdated:
+        show_balloon(state, L"Games run as administrator: not updated",
+            L"The installed copy is still another version and stays off.",
+            NIIF_WARNING);
+        break;
+    case ElevatedLayerState::absent:
+        show_balloon(state, L"Games run as administrator: off",
+            L"OFXR works in games started normally only.");
+        break;
+    }
 }
 
 [[nodiscard]] bool add_tray_icon(AppState& state) {
@@ -1822,6 +2032,16 @@ void show_context_menu(AppState& state) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, reset_defaults, L"Reset to default...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    {
+        const ElevatedLayerState elevated = elevated_layer_state(state);
+        AppendMenuW(menu,
+            MF_STRING | (elevated == ElevatedLayerState::current ? MF_CHECKED : MF_UNCHECKED),
+            toggle_elevated_layer,
+            elevated == ElevatedLayerState::outdated
+                ? L"Games run as administrator (not recommended, update needed)"
+                : L"Games run as administrator (not recommended)");
+    }
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     HMENU donate_menu = CreatePopupMenu();
     if (donate_menu) {
         AppendMenuW(donate_menu, MF_STRING, donate_creator,
@@ -2023,6 +2243,9 @@ void handle_command(AppState& state, UINT command) {
             L"some graphics cards that showed as stutter; turn it off if you "
             L"see any and have VRAM to spare. Takes effect the next time the "
             L"game starts.");
+        break;
+    case toggle_elevated_layer:
+        change_elevated_layer(state);
         break;
     case reset_defaults:
         if (MessageBoxW(
@@ -2247,6 +2470,71 @@ void handle_command(AppState& state, UINT command) {
     }
 }
 
+// V572: why "Games run as administrator" is not recommended, beside the item
+// while it is selected (WM_MENUSELECT) and gone when the selection moves or
+// the menu closes.
+constexpr wchar_t kElevatedLayerTooltip[] =
+    L"Lets OFXR work in games started as administrator.\r\n\r\n"
+    L"Not recommended. It installs OFXR for every user of this PC, and while "
+    L"it is on, OFXR's small Vulkan layer loads into every Vulkan program, "
+    L"even when OFXR is off (it does nothing there).\r\n\r\n"
+    L"A game run as administrator can change anything on your PC, and so can "
+    L"every mod it loads. Run your games normally whenever you can: in the "
+    L"game's Properties > Compatibility, and in its launcher's, untick "
+    L"\"Run this program as an administrator\".";
+
+void hide_menu_tooltip(AppState& state) {
+    if (state.menu_tooltip == nullptr) return;
+    TOOLINFOW tool{};
+    tool.cbSize = sizeof(tool);
+    tool.hwnd = state.window;
+    tool.uId = 1;
+    SendMessageW(state.menu_tooltip, TTM_TRACKACTIVATE, FALSE, reinterpret_cast<LPARAM>(&tool));
+}
+
+void follow_menu_selection(AppState& state, UINT item, UINT flags, HMENU menu) {
+    if (item != toggle_elevated_layer || (flags & MF_POPUP) != 0 || menu == nullptr) {
+        hide_menu_tooltip(state);
+        return;
+    }
+    TOOLINFOW tool{};
+    tool.cbSize = sizeof(tool);
+    tool.uFlags = TTF_TRACK | TTF_ABSOLUTE;
+    tool.hwnd = state.window;
+    tool.uId = 1;
+    tool.lpszText = const_cast<wchar_t*>(kElevatedLayerTooltip);
+    if (state.menu_tooltip == nullptr) {
+        INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES};
+        InitCommonControlsEx(&controls);
+        state.menu_tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+            WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT,
+            CW_USEDEFAULT, CW_USEDEFAULT, state.window, nullptr,
+            GetModuleHandleW(nullptr), nullptr);
+        if (state.menu_tooltip == nullptr) return;
+        SendMessageW(state.menu_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
+        SendMessageW(state.menu_tooltip, TTM_SETMAXTIPWIDTH, 0, 380);
+    }
+    // Beside the item, clear of the menu, on the side with room for it.
+    RECT rectangle{};
+    const int count = GetMenuItemCount(menu);
+    for (int position = 0; position < count; ++position) {
+        if (GetMenuItemID(menu, position) == item) {
+            GetMenuItemRect(nullptr, menu, static_cast<UINT>(position), &rectangle);
+            break;
+        }
+    }
+    SendMessageW(state.menu_tooltip, TTM_TRACKACTIVATE, TRUE, reinterpret_cast<LPARAM>(&tool));
+    RECT tip{};
+    GetWindowRect(state.menu_tooltip, &tip);
+    const int width = tip.right - tip.left;
+    MONITORINFO monitor{sizeof(monitor)};
+    GetMonitorInfoW(MonitorFromRect(&rectangle, MONITOR_DEFAULTTONEAREST), &monitor);
+    const int x = rectangle.right + 8 + width <= monitor.rcWork.right
+        ? rectangle.right + 8
+        : rectangle.left - 8 - width;
+    SendMessageW(state.menu_tooltip, TTM_TRACKPOSITION, 0, MAKELPARAM(x, rectangle.top));
+}
+
 LRESULT CALLBACK window_procedure(
     HWND window,
     UINT message,
@@ -2276,7 +2564,15 @@ LRESULT CALLBACK window_procedure(
             handle_command(*state, toggle_arm);
         }
         return 0;
+    case WM_MENUSELECT:
+        follow_menu_selection(*state, LOWORD(wparam), HIWORD(wparam),
+            reinterpret_cast<HMENU>(lparam));
+        return 0;
+    case WM_EXITMENULOOP:
+        hide_menu_tooltip(*state);
+        return 0;
     case WM_COMMAND:
+        hide_menu_tooltip(*state);
         handle_command(*state, LOWORD(wparam));
         write_status(*state);
         return 0;
@@ -2445,6 +2741,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (const auto helper_result = run_cleanup_helper()) {
         return *helper_result;
     }
+    if (const auto elevated_result = run_elevated_layer_helper()) {
+        return *elevated_result;
+    }
     const bool arm_only = arm_and_exit_requested();
 
     HANDLE single_instance = CreateMutexW(nullptr, TRUE, L"Local\\OFXRBridgeTray");
@@ -2550,6 +2849,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (!arm_bridge(state, &arm_error)) {
             show_error(window, arm_error);
         }
+    }
+    // V572: an installed copy for games run as administrator that is not
+    // this version's stays off until it is updated.
+    if (elevated_layer_state(state) == ElevatedLayerState::outdated) {
+        show_balloon(state, L"Games run as administrator: update needed",
+            L"The copy installed for games run as administrator is from another "
+            L"OFXR version and stays off. Update it from the menu.",
+            NIIF_WARNING);
     }
 
     MSG message{};

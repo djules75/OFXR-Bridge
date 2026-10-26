@@ -9,6 +9,7 @@
 #include <vector>
 #include <cstdint>
 #include <algorithm>
+#include <cstring>
 
 namespace xrfg::implicit_layer {
 namespace {
@@ -896,6 +897,100 @@ bool cleanup_owned_registrations(
     } catch (...) {
         if (error) *error = L"Unable to inspect or clean OFXR registrations.";
         return false;
+    }
+}
+
+bool process_is_elevated() noexcept {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        return false;
+    }
+    TOKEN_ELEVATION elevation{};
+    DWORD size = 0;
+    const bool elevated = GetTokenInformation(
+            token, TokenElevation, &elevation, sizeof(elevation), &size) &&
+        elevation.TokenIsElevated != 0;
+    CloseHandle(token);
+    return elevated;
+}
+
+bool files_identical(
+    const std::filesystem::path& first,
+    const std::filesystem::path& second) noexcept {
+    try {
+        const auto open = [](const std::filesystem::path& path) {
+            return CreateFileW(path.c_str(), GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        };
+        const HANDLE a = open(first);
+        if (a == INVALID_HANDLE_VALUE) return false;
+        const HANDLE b = open(second);
+        if (b == INVALID_HANDLE_VALUE) {
+            CloseHandle(a);
+            return false;
+        }
+        bool same = false;
+        LARGE_INTEGER size_a{}, size_b{};
+        if (GetFileSizeEx(a, &size_a) && GetFileSizeEx(b, &size_b) &&
+            size_a.QuadPart == size_b.QuadPart) {
+            std::vector<char> buffer_a(1 << 16), buffer_b(1 << 16);
+            same = true;
+            for (;;) {
+                DWORD read_a = 0, read_b = 0;
+                if (!ReadFile(a, buffer_a.data(), static_cast<DWORD>(buffer_a.size()), &read_a, nullptr) ||
+                    !ReadFile(b, buffer_b.data(), static_cast<DWORD>(buffer_b.size()), &read_b, nullptr) ||
+                    read_a != read_b ||
+                    std::memcmp(buffer_a.data(), buffer_b.data(), read_a) != 0) {
+                    same = false;
+                    break;
+                }
+                if (read_a == 0) break;
+            }
+        }
+        CloseHandle(a);
+        CloseHandle(b);
+        return same;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::filesystem::path armed_directory_matching(
+    const std::filesystem::path& layer_dll,
+    std::wstring_view registry_subkey,
+    std::wstring_view prefix) noexcept {
+    try {
+        HKEY key = nullptr;
+        const std::wstring subkey(registry_subkey);
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0,
+                KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS) {
+            return {};
+        }
+        std::filesystem::path found;
+        std::vector<wchar_t> name(32768);
+        for (DWORD index = 0;; ++index) {
+            DWORD count = static_cast<DWORD>(name.size());
+            DWORD type = 0;
+            DWORD data = 1;
+            DWORD data_size = sizeof(data);
+            const LSTATUS status = RegEnumValueW(key, index, name.data(), &count,
+                nullptr, &type, reinterpret_cast<BYTE*>(&data), &data_size);
+            if (status == ERROR_NO_MORE_ITEMS) break;
+            if (status != ERROR_SUCCESS || type != REG_DWORD || data != 0) continue;
+            const std::filesystem::path manifest(std::wstring(name.data(), count));
+            const std::wstring file = manifest.filename().wstring();
+            if (file.rfind(prefix, 0) != 0) continue;
+            const std::filesystem::path directory = manifest.parent_path();
+            if (files_identical(directory / layer_dll.filename(), layer_dll)) {
+                found = directory;
+                break;
+            }
+        }
+        RegCloseKey(key);
+        return found;
+    } catch (...) {
+        return {};
     }
 }
 

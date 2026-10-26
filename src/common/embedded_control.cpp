@@ -1,4 +1,5 @@
 #include "xrfg/embedded_control.hpp"
+#include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/implicit_layer.hpp"
 #include "xrfg/ini_file.hpp"
 #include <windows.h>
@@ -9,15 +10,15 @@
 
 namespace xrfg::embedded {
 namespace {
+// The layer's folder: its DLL's, or for the copy that games run as
+// administrator load (V572) the per-user arm's, set at negotiation. Read
+// from this DLL's own folder, that copy found no ini and ran on defaults -
+// Hybrid off, motion vectors off - whatever the tray said.
 std::filesystem::path directory() {
-    HMODULE module{};
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        reinterpret_cast<LPCWSTR>(&directory), &module);
-    wchar_t path[32768]{};
-    GetModuleFileNameW(module, path, 32768);
-    return std::filesystem::path(path).parent_path();
+    return xrfg::layer_directory();
 }
-const std::filesystem::path& ini() { static auto path = directory() / L"ofxr_bridge.ini"; return path; }
+// Not cached: a caller ahead of negotiation must not fix the folder for good.
+std::filesystem::path ini() { return directory() / L"ofxr_bridge.ini"; }
 struct Receipt { std::uint64_t revision{}; bool enabled{}; long error{}; };
 Settings read_settings() {
     Settings settings;

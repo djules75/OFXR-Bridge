@@ -541,13 +541,15 @@ std::optional<std::string> hotkey_setting(Hotkey hotkey) {
 
 std::string build_vulkan_layer_manifest(
     const std::filesystem::path& layer_dll,
-    std::uint32_t implementation_version) {
+    std::uint32_t implementation_version,
+    std::string_view layer_name,
+    std::string_view negotiation) {
     const std::string escaped_path = escape_json(wide_to_utf8(
         std::filesystem::absolute(layer_dll).lexically_normal().native()));
     return "{\n"
            "  \"file_format_version\": \"1.2.0\",\n"
            "  \"layer\": {\n"
-           "    \"name\": \"VK_LAYER_OFXR_queue_serialize\",\n"
+           "    \"name\": \"" + std::string(layer_name) + "\",\n"
            "    \"type\": \"GLOBAL\",\n"
            "    \"library_path\": \"" + escaped_path + "\",\n"
            "    \"api_version\": \"1.3.296\",\n"
@@ -557,7 +559,8 @@ std::string build_vulkan_layer_manifest(
            std::to_string(implementation_version) +
            ": serialises Vulkan queue submissions while the bridge is armed\",\n"
            "    \"functions\": {\n"
-           "      \"vkNegotiateLoaderLayerInterfaceVersion\": \"OFXR_vkNegotiateLoaderLayerInterfaceVersion\",\n"
+           "      \"vkNegotiateLoaderLayerInterfaceVersion\": \"" +
+           std::string(negotiation) + "\",\n"
            "      \"vkGetInstanceProcAddr\": \"OFXR_vkGetInstanceProcAddr\",\n"
            "      \"vkGetDeviceProcAddr\": \"OFXR_vkGetDeviceProcAddr\"\n"
            "    },\n"
@@ -570,13 +573,14 @@ std::string build_vulkan_layer_manifest(
 
 std::string build_implicit_layer_manifest(
     const std::filesystem::path& layer_dll,
-    std::uint32_t implementation_version) {
+    std::uint32_t implementation_version,
+    std::string_view layer_name) {
     const std::string escaped_path = escape_json(wide_to_utf8(
         std::filesystem::absolute(layer_dll).lexically_normal().native()));
     return "{\n"
            "  \"file_format_version\": \"1.0.0\",\n"
            "  \"api_layer\": {\n"
-           "    \"name\": \"XR_APILAYER_XRFrameBridge_diagnostic\",\n"
+           "    \"name\": \"" + std::string(layer_name) + "\",\n"
            "    \"library_path\": \"" + escaped_path + "\",\n"
            "    \"api_version\": \"1.0\",\n"
            "    \"implementation_version\": \"" +

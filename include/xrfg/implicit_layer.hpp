@@ -77,6 +77,36 @@ enum class RegistryScope {
     local_machine,
 };
 
+// V572: the layer for games run as administrator. The loader reads no
+// per-user layer in an elevated process, so the tray's arm never reaches one.
+// An opt-in machine-wide copy does: the same DLL, installed by an elevated
+// tray helper into a folder only administrators can write, registered in
+// HKLM under its own name. It loads only in an elevated process, and only
+// while a per-user arm with a byte-identical DLL exists, whose folder it then
+// takes its settings from as the per-user layer would; anywhere else it
+// declines at negotiation and the loader goes on without it.
+inline constexpr wchar_t kElevatedLayerName[] = L"XR_APILAYER_XRFrameBridge_elevated";
+inline constexpr wchar_t kElevatedManifestName[] = L"XR_APILAYER_XRFrameBridge_elevated.json";
+inline constexpr wchar_t kLayerDllName[] = L"XR_APILAYER_XRFrameBridge_diagnostic.dll";
+// The Vulkan queue layer's copy beside it, registered in HKLM's Vulkan key
+// under its own name, whose manifest names a negotiation entry point that
+// makes the same checks (OFXR_vkNegotiateLoaderLayerInterfaceVersionElevated).
+inline constexpr wchar_t kElevatedVulkanManifestName[] = L"OFXR_vulkan_queue_elevated.json";
+// Whether this process runs with an elevated token.
+[[nodiscard]] bool process_is_elevated() noexcept;
+// Byte for byte, read as data.
+[[nodiscard]] bool files_identical(
+    const std::filesystem::path& first,
+    const std::filesystem::path& second) noexcept;
+// The folder of an enabled per-user registration of one of the tray's
+// manifests (HKCU, `prefix`: the OpenXR layer's or the Vulkan layer's) that
+// holds a byte-identical copy of `layer_dll`, under the same file name: the
+// arm an elevated copy of that DLL belongs to. Empty without one.
+[[nodiscard]] std::filesystem::path armed_directory_matching(
+    const std::filesystem::path& layer_dll,
+    std::wstring_view registry_subkey = kRegistrySubkey,
+    std::wstring_view prefix = kManifestPrefix) noexcept;
+
 [[nodiscard]] RegistryScope registry_scope_for_integrity_rid(
     std::uint32_t integrity_rid) noexcept;
 [[nodiscard]] RegistryScope preferred_registry_scope() noexcept;

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <string_view>
 
 namespace xrfg {
 
@@ -253,6 +254,12 @@ enum class BridgeFlightOperation : std::uint32_t {
     // (implicit_layer::ArmControlState). a is 1 when the process runs under
     // Wine.
     arm_control,
+    // V572: which process this is, at negotiation, before anything else of
+    // the layer's: result 1 when it runs elevated, a 1 when the machine-wide
+    // copy for games run as administrator loaded rather than the tray's
+    // per-user one, b the process id. The executable's file name follows the
+    // numbers as name=, to the end of the line.
+    process_identity,
 };
 
 struct BridgeFlightToken {
@@ -318,6 +325,16 @@ public:
         std::uint64_t b = 0,
         std::uint64_t c = 0) noexcept;
 
+    // An event with a line of text after its numbers, as name=: what a
+    // number cannot say, such as the executable (process_identity).
+    void note(
+        BridgeFlightOperation operation,
+        std::int64_t result,
+        std::string_view text,
+        std::uint64_t a = 0,
+        std::uint64_t b = 0,
+        std::uint64_t c = 0) noexcept;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -325,5 +342,11 @@ private:
 
 [[nodiscard]] BridgeFlightLogger& bridge_flight_logger() noexcept;
 void initialize_bridge_flight_logger() noexcept;
+
+// V572: the folder the layer takes its ini from and writes its logs to: its
+// own DLL's, unless set. The machine-wide copy for games run as
+// administrator sets the per-user arm's folder, before the logger starts.
+void set_layer_directory(const std::filesystem::path& directory) noexcept;
+[[nodiscard]] std::filesystem::path layer_directory() noexcept;
 
 } // namespace xrfg

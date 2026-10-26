@@ -183,13 +183,21 @@ inline constexpr char kDefaultMultiplierHotkey[] = "ctrl+alt+f12";
 [[nodiscard]] std::string serialize_settings(const LauncherSettings& settings);
 
 // The Vulkan implicit layer's manifest, for the loader's ImplicitLayers key.
+// V572: name and negotiation export are the machine-wide copy's for games
+// run as administrator ("VK_LAYER_OFXR_queue_serialize_elevated",
+// "OFXR_vkNegotiateLoaderLayerInterfaceVersionElevated").
 [[nodiscard]] std::string build_vulkan_layer_manifest(
     const std::filesystem::path& layer_dll,
-    std::uint32_t implementation_version);
+    std::uint32_t implementation_version,
+    std::string_view layer_name = "VK_LAYER_OFXR_queue_serialize",
+    std::string_view negotiation = "OFXR_vkNegotiateLoaderLayerInterfaceVersion");
 
+// layer_name: the per-user arm's, or V572's machine-wide copy for games run
+// as administrator (implicit_layer::kElevatedLayerName).
 [[nodiscard]] std::string build_implicit_layer_manifest(
     const std::filesystem::path& layer_dll,
-    std::uint32_t implementation_version);
+    std::uint32_t implementation_version,
+    std::string_view layer_name = "XR_APILAYER_XRFrameBridge_diagnostic");
 
 // Diagnostics knobs the tray has no UI for. The runtime INI is their source of
 // truth: arming used to regenerate the whole file from LauncherSettings with

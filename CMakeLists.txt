@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.570.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.572.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -516,12 +516,15 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "$<TARGET_FILE_DIR:XR_APILAYER_XRFrameBridge_diagnostic>/ofxr_bridge.ini")
 
     # The Vulkan implicit layer that serialises queue submissions; see the
-    # comment at the top of its source. Links nothing but the CRT.
+    # comment at the top of its source. Links the CRT and, for the
+    # machine-wide copy's arm check (V572), xrfg_implicit_layer, which needs
+    # nothing beyond advapi32.
     add_library(OFXR_vulkan_queue_layer SHARED
         src/vulkan_layer/vulkan_queue_layer.cpp)
     target_include_directories(OFXR_vulkan_queue_layer PRIVATE
         "${XRFG_VULKAN_INCLUDE_DIR}")
     target_compile_features(OFXR_vulkan_queue_layer PRIVATE cxx_std_20)
+    target_link_libraries(OFXR_vulkan_queue_layer PRIVATE xrfg_implicit_layer)
     target_compile_definitions(OFXR_vulkan_queue_layer PRIVATE
         NOMINMAX
         WIN32_LEAN_AND_MEAN
@@ -547,6 +550,25 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             NAME xrfg_vulkan_queue_layer_global
             COMMAND xrfg_vulkan_queue_layer_global_tests
                 $<TARGET_FILE:OFXR_vulkan_queue_layer>)
+        # V572: the machine-wide copy declines outside an elevated game, and
+        # the real Vulkan loader carries on without it.
+        add_executable(xrfg_vulkan_queue_layer_elevated_tests
+            tests/vulkan_queue_layer_elevated_tests.cpp)
+        target_include_directories(xrfg_vulkan_queue_layer_elevated_tests PRIVATE
+            "${XRFG_VULKAN_INCLUDE_DIR}")
+        target_compile_features(xrfg_vulkan_queue_layer_elevated_tests PRIVATE cxx_std_20)
+        if(MSVC)
+            target_compile_options(xrfg_vulkan_queue_layer_elevated_tests PRIVATE
+                /W4 /permissive- /EHsc)
+            target_compile_definitions(xrfg_vulkan_queue_layer_elevated_tests PRIVATE
+                NOMINMAX WIN32_LEAN_AND_MEAN)
+        endif()
+        add_dependencies(xrfg_vulkan_queue_layer_elevated_tests OFXR_vulkan_queue_layer)
+        add_test(
+            NAME xrfg_vulkan_queue_layer_elevated
+            COMMAND xrfg_vulkan_queue_layer_elevated_tests
+                $<TARGET_FILE:OFXR_vulkan_queue_layer>)
+        set_tests_properties(xrfg_vulkan_queue_layer_elevated PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 
     if(XRFG_BUILD_STANDALONE)

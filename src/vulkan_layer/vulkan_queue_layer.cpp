@@ -32,12 +32,27 @@
 // it is registered. The tray registers it only while the bridge is armed and
 // the Vulkan option is on, and OFXR_DISABLE_VULKAN_QUEUE_LAYER=1 turns it
 // off for a process.
+//
+// Games run as administrator (V572). The Vulkan loader reads no per-user
+// layer in an elevated process, so the tray's registration never reaches
+// one. The machine-wide copy for those games (implicit_layer::
+// kElevatedVulkanManifestName) is registered for good, not only while armed,
+// so its manifest names OFXR_vkNegotiateLoaderLayerInterfaceVersionElevated,
+// which decides once per process whether the copy acts: only where the
+// process is elevated and the tray's per-user arm holds this very DLL.
+// Anywhere else the layer is inert - it stays in the chain, because the
+// Vulkan loader does not drop a layer that refuses negotiation but falls back
+// to its manifest's vkGetInstanceProcAddr and inserts it anyway (measured on
+// loader 1.4.357), and it hands out the next link's queue functions, so it
+// locks nothing and sees no submission.
 
 #ifndef VK_NO_PROTOTYPES
 #define VK_NO_PROTOTYPES
 #endif
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
+
+#include "xrfg/implicit_layer.hpp"
 
 #include <windows.h>
 
@@ -380,9 +395,20 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL layer_get_device_proc_addr(
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL layer_get_instance_proc_addr(
     VkInstance instance, const char* name);
 
+// V572: the machine-wide copy outside an elevated, armed game.
+std::atomic<bool> g_inert{false};
+
+[[nodiscard]] bool queue_function(std::string_view name) noexcept {
+    return name.rfind("vkQueue", 0) == 0;
+}
+
 // The functions this layer answers itself. A device-level query and an
 // instance-level one both have to find them: the loader asks either way.
+// Inert, only those that keep the chain linked.
 [[nodiscard]] PFN_vkVoidFunction intercepted(std::string_view name) noexcept {
+    if (g_inert.load(std::memory_order_acquire) && queue_function(name)) {
+        return nullptr;
+    }
     struct Entry {
         std::string_view name;
         PFN_vkVoidFunction function;
@@ -489,6 +515,44 @@ OFXR_vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface* version) 
         version->pfnGetPhysicalDeviceProcAddr = nullptr;
     }
     return VK_SUCCESS;
+}
+
+// V572: the machine-wide copy's negotiation, for games run as administrator.
+extern "C" __declspec(dllexport) VKAPI_ATTR VkResult VKAPI_CALL
+OFXR_vkNegotiateLoaderLayerInterfaceVersionElevated(VkNegotiateLayerInterface* version) {
+    static std::once_flag decided;
+    std::call_once(decided, [] {
+        bool active = false;
+        try {
+            HMODULE module = nullptr;
+            std::wstring path(32768, L'\0');
+            if (xrfg::implicit_layer::process_is_elevated() &&
+                GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    reinterpret_cast<LPCWSTR>(&OFXR_vkNegotiateLoaderLayerInterfaceVersionElevated),
+                    &module)) {
+                const DWORD length = GetModuleFileNameW(
+                    module, path.data(), static_cast<DWORD>(path.size()));
+                if (length != 0 && length < path.size()) {
+                    path.resize(length);
+                    active = !xrfg::implicit_layer::armed_directory_matching(
+                        path,
+                        xrfg::implicit_layer::kVulkanRegistrySubkey,
+                        xrfg::implicit_layer::kVulkanManifestPrefix).empty();
+                }
+            }
+        } catch (...) {
+            active = false;
+        }
+        g_inert.store(!active, std::memory_order_release);
+    });
+    return OFXR_vkNegotiateLoaderLayerInterfaceVersion(version);
+}
+
+// V572, for the tests: whether this copy decided to stay inert.
+extern "C" __declspec(dllexport) int OFXR_vkLayerInert() {
+    return g_inert.load(std::memory_order_acquire) ? 1 : 0;
 }
 
 // The loader's fallback for a manifest without a negotiation function; kept

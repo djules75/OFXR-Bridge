@@ -338,6 +338,60 @@ int main() {
         return 1;
     }
 
+    // V572: the machine-wide copy for games run as administrator is the same
+    // DLL under its own layer name, and belongs to the per-user arm whose DLL
+    // is byte-identical to it - not to a disabled registration, nor to an arm
+    // of another build.
+    {
+        namespace layer = xrfg::implicit_layer;
+        const std::string elevated_manifest = build_implicit_layer_manifest(
+            layer_path, 18, "XR_APILAYER_XRFrameBridge_elevated");
+        const auto root = std::filesystem::temp_directory_path() /
+            (L"ofxr-elevated-test-" + std::to_wstring(GetCurrentProcessId()));
+        const auto write = [](const std::filesystem::path& path, const char* bytes) {
+            std::filesystem::create_directories(path.parent_path());
+            std::ofstream(path, std::ios::binary) << bytes;
+        };
+        const auto installed = root / L"Elevated" / layer::kLayerDllName;
+        const auto armed = root / L"v018";
+        const auto other = root / L"v017";
+        write(installed, "layer build 18");
+        write(armed / layer::kLayerDllName, "layer build 18");
+        write(other / layer::kLayerDllName, "layer build 17");
+        const auto armed_manifest = armed / L"XR_APILAYER_XRFrameBridge_manual-1-2.json";
+        const auto other_manifest = other / L"XR_APILAYER_XRFrameBridge_manual-1-3.json";
+        const std::wstring elevated_subkey = test_subkey + L"-elevated";
+        const bool other_registered = layer::register_manifest(
+            other_manifest, layer::RegistryScope::current_user, nullptr, elevated_subkey);
+        const bool without_arm =
+            layer::armed_directory_matching(installed, elevated_subkey).empty();
+        const bool armed_registered = layer::register_manifest(
+            armed_manifest, layer::RegistryScope::current_user, nullptr, elevated_subkey);
+        const auto matched = layer::armed_directory_matching(installed, elevated_subkey);
+        // Disabled (DWORD 1): the loader skips it, so the copy must too.
+        HKEY key = nullptr;
+        bool disabled_skipped = false;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, elevated_subkey.c_str(), 0,
+                KEY_SET_VALUE, &key) == ERROR_SUCCESS) {
+            const DWORD disabled = 1;
+            RegSetValueExW(key, armed_manifest.c_str(), 0, REG_DWORD,
+                reinterpret_cast<const BYTE*>(&disabled), sizeof(disabled));
+            RegCloseKey(key);
+            disabled_skipped =
+                layer::armed_directory_matching(installed, elevated_subkey).empty();
+        }
+        static_cast<void>(RegDeleteKeyW(HKEY_CURRENT_USER, elevated_subkey.c_str()));
+        static_cast<void>(RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\OFXRBridgeTest"));
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+        if (!contains(elevated_manifest, "\"name\": \"XR_APILAYER_XRFrameBridge_elevated\"") ||
+            !other_registered || !without_arm || !armed_registered ||
+            matched != armed || !disabled_skipped) {
+            std::cerr << "elevated layer arm matching failed\n";
+            return 1;
+        }
+    }
+
     const auto backend_directory =
         std::filesystem::temp_directory_path() /
         (L"ofxr-manual-backend-" + std::to_wstring(GetCurrentProcessId()) +

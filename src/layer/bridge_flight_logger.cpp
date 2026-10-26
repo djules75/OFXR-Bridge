@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <cwchar>
 #include <deque>
 #include <limits>
@@ -131,6 +132,7 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::deferred_capture: return "deferred_capture";
     case BridgeFlightOperation::history_capture_wait: return "history_capture_wait";
     case BridgeFlightOperation::arm_control: return "arm_control";
+    case BridgeFlightOperation::process_identity: return "process_identity";
     }
     return "unknown";
 }
@@ -169,6 +171,7 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::vulkan_bridge:
     case BridgeFlightOperation::recording:
     case BridgeFlightOperation::arm_control:
+    case BridgeFlightOperation::process_identity:
         return true;
     case BridgeFlightOperation::presenter_transition:
         return (result >= 600 && result <= 604) ||
@@ -418,7 +421,8 @@ struct BridgeFlightLogger::Impl {
         std::uint64_t duration_microseconds,
         std::uint64_t a,
         std::uint64_t b,
-        std::uint64_t c) noexcept {
+        std::uint64_t c,
+        std::string_view text = {}) noexcept {
         const bool kept = phase == 'B'
             ? session_record(operation)
             : session_record(operation, result);
@@ -431,12 +435,25 @@ struct BridgeFlightLogger::Impl {
             ? static_cast<double>(counter - origin.QuadPart) * 1000.0 /
                   static_cast<double>(frequency.QuadPart)
             : 0.0;
-        std::array<char, 384> line{};
+        // V572: a note's text, cut at a line's worth and kept to one line.
+        std::array<char, 256> note{};
+        std::size_t note_length = 0;
+        if (!text.empty()) {
+            constexpr char kKey[] = " name=";
+            std::memcpy(note.data(), kKey, sizeof(kKey) - 1);
+            note_length = sizeof(kKey) - 1;
+            for (const char character : text) {
+                if (note_length + 1 >= note.size()) break;
+                note[note_length++] =
+                    character == '\r' || character == '\n' ? ' ' : character;
+            }
+        }
+        std::array<char, 640> line{};
         const int length = std::snprintf(
             line.data(),
             line.size(),
             "seq=%llu ms=%.3f tid=%lu phase=%c op=%s result=%lld dur_us=%llu "
-            "a=%llu b=%llu c=%llu\r\n",
+            "a=%llu b=%llu c=%llu%.*s\r\n",
             static_cast<unsigned long long>(sequence),
             elapsed_ms,
             static_cast<unsigned long>(GetCurrentThreadId()),
@@ -446,7 +463,9 @@ struct BridgeFlightLogger::Impl {
             static_cast<unsigned long long>(duration_microseconds),
             static_cast<unsigned long long>(a),
             static_cast<unsigned long long>(b),
-            static_cast<unsigned long long>(c));
+            static_cast<unsigned long long>(c),
+            static_cast<int>(note_length),
+            note.data());
         if (length <= 0 || static_cast<std::size_t>(length) >= line.size()) {
             return;
         }
@@ -816,6 +835,60 @@ void BridgeFlightLogger::event(
         c);
 }
 
+void BridgeFlightLogger::note(
+    BridgeFlightOperation operation,
+    std::int64_t result,
+    std::string_view text,
+    std::uint64_t a,
+    std::uint64_t b,
+    std::uint64_t c) noexcept {
+    if (!impl_ || (!enabled() && !session_record(operation, result))) {
+        return;
+    }
+    LARGE_INTEGER now{};
+    if (!QueryPerformanceCounter(&now)) {
+        return;
+    }
+    impl_->write(
+        impl_->next_sequence.fetch_add(1, std::memory_order_relaxed),
+        now.QuadPart,
+        'I',
+        operation,
+        result,
+        0,
+        a,
+        b,
+        c,
+        text);
+}
+
+namespace {
+std::mutex g_layer_directory_mutex;
+std::filesystem::path g_layer_directory;
+}  // namespace
+
+void set_layer_directory(const std::filesystem::path& directory) noexcept {
+    try {
+        std::scoped_lock lock(g_layer_directory_mutex);
+        g_layer_directory = directory;
+    } catch (...) {
+    }
+}
+
+std::filesystem::path layer_directory() noexcept {
+    try {
+        {
+            std::scoped_lock lock(g_layer_directory_mutex);
+            if (!g_layer_directory.empty()) {
+                return g_layer_directory;
+            }
+        }
+        return current_module_directory();
+    } catch (...) {
+        return {};
+    }
+}
+
 BridgeFlightLogger& bridge_flight_logger() noexcept {
     static BridgeFlightLogger logger;
     return logger;
@@ -825,7 +898,7 @@ void initialize_bridge_flight_logger() noexcept {
     static std::once_flag once;
     try {
         std::call_once(once, [] {
-            bridge_flight_logger().initialize(current_module_directory());
+            bridge_flight_logger().initialize(layer_directory());
         });
     } catch (...) {
     }
