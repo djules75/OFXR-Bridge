@@ -9722,8 +9722,25 @@ void continuous_presenter_main(
                     // compositor keeps showing the previous image, reprojected,
                     // instead of black. What this gives up is the slot of
                     // depth the hold would have bought, for this frame only.
+                    //
+                    // V577: nor where the application is released at a pop
+                    // (a pipelined application off SteamVR). There a held
+                    // pop holds the application too, and the release phase
+                    // gives synthesis its time instead, by releasing the
+                    // application a pop earlier when the first synthetics
+                    // arrive unwritten. Before V557fix1 kept a pipelined
+                    // frame on every runtime these sessions had nothing to
+                    // repeat and never held; once they could, DCS on Pimax -
+                    // its frame drawn 7 ms after release, so every synthetic
+                    // younger than a period at its pop - held nearly every
+                    // synthetic for age (issue #53): three refreshes a game
+                    // frame, the game at 20 fps against V551's 34, and the
+                    // release phase stayed at depth 0 because a synthetic
+                    // held for age never counts as late. Handed over, as
+                    // before, it is recorded as 402 and judged at its pop.
                     const bool can_hold =
-                        state->presenter_last_frame != nullptr;
+                        state->presenter_last_frame != nullptr &&
+                        !hold_waits_for_pop;
                     if ((too_young || not_written) && can_hold) {
                         held_age_ns = std::chrono::duration_cast<
                             std::chrono::nanoseconds>(age).count();
@@ -9794,7 +9811,8 @@ void continuous_presenter_main(
             // on. result=400: a synthetic held for the pipeline's depth;
             // 401: held because its output had not been written yet; 402: one
             // of those, handed over anyway because there was no frame to
-            // repeat. a is its age in microseconds, b the display period in
+            // repeat or the application is released at a pop (V577). a is
+            // its age in microseconds, b the display period in
             // microseconds, c its sequence.
             log_release_phase(phase_report);
             if (held_age_ns >= 0) {
