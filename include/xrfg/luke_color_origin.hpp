@@ -32,7 +32,8 @@ constexpr bool luke_origin_bit(std::uint32_t token, unsigned bit) noexcept {
 constexpr bool luke_origin_white(std::uint32_t token, unsigned x) noexcept {
     return (x % 4 < 2) == luke_origin_bit(token, x / 4);
 }
-struct LukeColorOriginDecode { std::uint32_t token{}; bool ambiguous{}; };
+// Image batches also report the first/last scanned row holding the token.
+struct LukeColorOriginDecode { std::uint32_t token{}; bool ambiguous{}; int first_row{-1}, last_row{-1}; };
 inline LukeColorOriginDecode decode_luke_origin_row(std::span<const float> row) noexcept {
     try {
         if (row.size() < 96 || row.size() > 16384) return {};
@@ -237,6 +238,23 @@ struct LukeColorOriginImage {
     unsigned width{},height{},row_pitch{};
 };
 void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
+    std::span<LukeColorOriginDecode> results) noexcept;
+// A final color is cropped from a taller producer at an offset fixed by the
+// host (Luke's square render to a wider eye: 591 Pimax rows). The scan must
+// cover every possible offset, but once a CRC-valid band is found the same
+// geometry puts it in the same rows. Decode those rows plus the protected
+// translation margin first; any miss or ambiguity decodes the whole scan, as
+// does every kLukeOriginWindowAudit-th read, so identity rules are unchanged.
+inline constexpr unsigned kLukeOriginWindowMargin = 16;
+inline constexpr unsigned kLukeOriginWindowAudit = 32;
+struct LukeOriginRowWindow {
+    std::uint64_t geometry{}; // 0: unknown; caller-defined scan identity
+    unsigned first{}, last{}; // inclusive scan rows of the last decoded band
+    unsigned narrowed{};      // narrowed reads since the last whole scan
+};
+// Returns one bit per image whose result came from its window alone.
+unsigned decode_luke_origin_images_windowed(std::span<const LukeColorOriginImage> images,
+    std::span<const std::uint64_t> geometry, std::span<LukeOriginRowWindow> windows,
     std::span<LukeColorOriginDecode> results) noexcept;
 struct LukeColorOriginRect { unsigned x{}, y{}, width{}, height{}; };
 inline constexpr unsigned kLukeOriginHeight = 8;

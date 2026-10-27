@@ -600,6 +600,69 @@ void cpu_batch_tests() {
  for(auto& t:callers)t.join();
  images[0].row_pitch=3;xrfg::decode_luke_origin_images(images,results);require(!results[0].token&&results[1].token==101,"invalid stride consumed or poisoned peer");
 }
+// Pimax/REAL VR Ghost of Tsushima: 3680x3680 producer, 3680x3089 eye, so a
+// 260x603 scan whose band sits at one fixed crop row. Only rows near the
+// learned band are decoded until a miss, a conflict or the periodic audit.
+void windowed_decode_tests() {
+    constexpr unsigned w=260,h=603,pitch=w*4;
+    std::array<std::vector<std::byte>,2> bytes;
+    std::array<xrfg::LukeColorOriginImage,2> images;
+    for(unsigned i=0;i<2;++i) {
+        bytes[i].assign(std::size_t(pitch)*h,std::byte{128});
+        images[i]={bytes[i].data(),DXGI_FORMAT_R8G8B8A8_UNORM,w,h,pitch};
+    }
+    const auto band=[&](unsigned image,unsigned top,std::uint32_t token) {
+        for(unsigned y=top;y<top+xrfg::kLukeOriginHeight;++y)for(unsigned x=0;x<256;++x)
+            xrfg::luke_origin_pixel(bytes[image].data()+std::size_t(y)*pitch+(x+2)*4,images[image].format,
+                xrfg::luke_origin_white(token,x));
+    };
+    const auto clear=[&](unsigned image){std::fill(bytes[image].begin(),bytes[image].end(),std::byte{128});};
+    std::array<std::uint64_t,2> geometry{7,9};
+    std::array<xrfg::LukeOriginRowWindow,2> windows{};
+    std::array<xrfg::LukeColorOriginDecode,2> results{};
+    const auto decode=[&](unsigned count=1){
+        return xrfg::decode_luke_origin_images_windowed(std::span(images.data(),count),
+            std::span(geometry.data(),count),std::span(windows.data(),count),std::span(results.data(),count));
+    };
+    band(0,297,0x51a7e3);
+    require(decode()==0&&results[0].token==0x51a7e3&&!results[0].ambiguous,"first read is a whole scan");
+    require(windows[0].geometry==7&&windows[0].first==297&&windows[0].last==304,"whole scan learned band rows");
+    require(decode()==1&&results[0].token==0x51a7e3&&results[0].first_row==297&&results[0].last_row==304,
+        "learned rows decoded alone, in scan coordinates");
+    clear(0);band(0,297+xrfg::kLukeOriginWindowMargin,0x51a7e4);
+    require(decode()==1&&results[0].token==0x51a7e4&&windows[0].first==297+xrfg::kLukeOriginWindowMargin,
+        "drift inside the margin followed without a whole scan");
+    clear(0);band(0,100,0x51a7e5);
+    require(decode()==0&&results[0].token==0x51a7e5&&windows[0].first==100,
+        "band outside the window recovered by the whole scan in the same read");
+    clear(0);
+    require(decode()==0&&!results[0].token&&windows[0].geometry==0,"missing token forgets the window");
+    // A conflicting copy outside the window is not seen by narrowed reads;
+    // the periodic whole scan still rejects the image and forgets the rows.
+    band(0,297,0x51a7e6);
+    require(decode()==0&&results[0].token==0x51a7e6,"relearn after a miss");
+    band(0,10,0x51a7e7);
+    bool rejected=false;
+    for(unsigned n=0;n<=xrfg::kLukeOriginWindowAudit&&!rejected;++n) {
+        const auto mask=decode();
+        rejected=results[0].ambiguous;
+        require(rejected==(mask==0),"only the whole-scan audit may reject the outside conflict");
+    }
+    require(rejected&&windows[0].geometry==0,"audit lost conflicting-token rejection");
+    require(decode()==0&&results[0].ambiguous,"forgotten window keeps scanning whole");
+    // New geometry discards rows learned for another layout.
+    clear(0);band(0,297,0x51a7e8);
+    require(decode()==0&&windows[0].geometry==7,"relearn");
+    geometry[0]=8;
+    require(decode()==0&&windows[0].geometry==8,"geometry change reused stale rows");
+    // Colors keep independent windows and results.
+    band(1,40,0x51a7e9);
+    require(decode(2)==1&&results[0].token==0x51a7e8&&results[1].token==0x51a7e9&&
+        windows[1].first==40,"second color borrowed the first color's window");
+    require(decode(2)==3&&results[1].token==0x51a7e9,"both colors narrowed independently");
+    images[1].row_pitch=3;
+    require((decode(2)&2)==0&&!results[1].token&&results[0].token==0x51a7e8,"invalid peer stride poisoned narrowed color");
+}
 void outlaws_protected_gpu_test() {
     wchar_t executable[MAX_PATH]{};GetModuleFileNameW(nullptr,executable,MAX_PATH);
     const auto* name=wcsrchr(executable,L'\\');
@@ -673,6 +736,6 @@ int captured_decode_benchmark(char** argv) {
 int main(int argc,char** argv) {
     try { if(argc==2 && std::string_view(argv[1])=="outlaws-protected") {outlaws_protected_gpu_test();return 0;}
         if(argc==2 && std::string_view(argv[1])=="gta-protected") {gta_protected_gpu_test();return 0;}
-        if(argc==3)return captured_decode_benchmark(argv);cpu_batch_tests();codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }
+        if(argc==3)return captured_decode_benchmark(argv);cpu_batch_tests();windowed_decode_tests();codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }
     catch(const std::exception& e) {std::cerr<<"Compact origin FAIL: "<<e.what()<<"\n";return 1;}
 }
