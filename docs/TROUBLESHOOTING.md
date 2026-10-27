@@ -1,7 +1,7 @@
 # OFXR Bridge troubleshooting
 
 > [!IMPORTANT]
-> **First, make sure you are on the latest version: 0.2.14.2.** Every
+> **First, make sure you are on the latest version: 0.2.14.3.** Every
 > release fixes problems reported here, so check the
 > [releases page](https://github.com/djules75/OFXR-Bridge/releases) before
 > anything else. The tray's menu shows the version you are running.
@@ -51,7 +51,7 @@ corner. Start the game and look at that corner in the headset.
 | Cause | What to do |
 |---|---|
 | The game uses **OpenVR**, not OpenXR | OFXR only works with OpenXR games. Some OpenVR games can run through OpenXR with [OpenComposite](https://gitlab.com/znixian/OpenOVR). |
-| The game runs **as administrator** | Run the game, and Steam or its launcher, normally. Never as administrator. |
+| The game runs **as administrator** | Run the game, and Steam or its launcher, normally. If a game has to run as administrator, turn on **Games run as administrator** in the tray (not recommended: see the [README](https://github.com/djules75/OFXR-Bridge/blob/main/README.md#games-run-as-administrator)). |
 | The tray was not armed when the game started | Start the tray first; it arms by itself. Then start the game. If you disarm and re-arm, restart the game. |
 | The game runs under another Windows user | Run the tray and the game under the same Windows account. |
 | The game is 32-bit, in D3D12, Vulkan or OpenGL | OFXR supports 32-bit games in D3D11 only: see [32-bit games](../README.md#32-bit-games). |
@@ -79,12 +79,14 @@ corner. Start the game and look at that corner in the headset.
 | Cause | What to do |
 |---|---|
 | The game already runs near your headset's refresh rate | Nothing to gain: OFXR helps games that can't hold full rate. Raise resolution or settings until the game sits around half your refresh rate. |
-| The game runs **below half** your refresh rate (under 45 FPS at 90 Hz) | Turn on **3X Frame Gen** in the tray (for games around 30 FPS at 90 Hz), lower the refresh rate (72 Hz needs 36 FPS), or lower settings until the game holds half. |
-| **3X Frame Gen** is on for a game that can hold half your refresh rate | Turn 3X off: it holds the game to a third of the refresh rate, and 2X looks better. |
+| The game runs **below half** your refresh rate (under 45 FPS at 90 Hz) | Turn on **3X Frame Gen** in the tray (for games around 30 FPS at 90 Hz) or **4X** (around 30 FPS at 120 Hz), lower the refresh rate (72 Hz needs 36 FPS), or lower settings until the game holds half. |
+| **3X** or **4X Frame Gen** is on for a game that can hold half your refresh rate | Go back to 2X: 3X holds the game to a third of the refresh rate and 4X to a quarter, and 2X looks better. |
 | Your VR software's own frame smoothing is on | Turn it off, it fights OFXR: **SteamVR** Motion Smoothing and "fixed frame rate at half" (per-application video settings), **Meta** ASW, **Virtual Desktop** SSW, **Pimax Play** Smart Smoothing, **Pico Streaming Assistant** Frame Interpolation. |
 | Your GPU runs out of VRAM | OFXR needs extra video memory on top of the game (see [How much VRAM OFXR uses](#how-much-vram-ofxr-uses)). Signs: stutter, sudden drops, or a crash, often after a few minutes. Lower the game's settings or the per-eye resolution first. |
-| 3X doesn't switch while you play | The game was started with **Prefer FPS over latency** off. Restart the game. |
-| 3X switches back to 2X, and the tray says the game uses R.E.A.L. VR | That mod only works in 2X. See the [game compatibility guide](GAME_COMPATIBILITY.md#real-vr-games). |
+| The tray asks you to restart the game to change the multiplier | Some games keep room only for the multiplier they started with, for example with **Lower VRAM** off. Restart the game: the setting is saved. |
+| 3X or 4X switches back to 2X, and the tray says the game uses R.E.A.L. VR | That mod only works in 2X. See the [game compatibility guide](GAME_COMPATIBILITY.md#real-vr-games). |
+| The multiplier changes by itself while you play | The multiplier key (Ctrl + Alt + F12 by default) is also a key your game or a mod uses. Choose another under **Current key binding**, below **Frame Gen multiplier** in the tray menu. |
+| A HUD smears or shows double images when you turn with the stick (Star Citizen's helmet HUD and cockpit instruments) | Turn on **HUD fix** in the tray. It costs some GPU time, more at 3X and 4X. |
 | With **Hybrid** on, the frame rate drops or moving objects look worse | Turn **Hybrid: depth search** off, then **Hybrid** off if needed. |
 | You play MSFS 2024, Skyrim VR, Fallout 4 VR or a R.E.A.L. VR game | Check the [game compatibility guide](GAME_COMPATIBILITY.md) for the settings that game needs. |
 | The number stops short of the refresh rate (110 to 115 at 120 Hz, for example), although the game runs above half of it without OFXR | Generating frames costs GPU time too, so the game needs some headroom above half the refresh rate. Lower the refresh rate, the per-eye resolution or the optical-flow resolution. Example: No Man's Sky ran at 94 FPS without OFXR; OFXR gave an even 100 at 100 Hz and 113 to 115 at 120 Hz, because a real frame plus a generated one took about 17.7 ms and 120 Hz allows 16.7. |
@@ -126,6 +128,7 @@ most setups.
 | **NVIDIA bidirectional consistency** | Off | Checks the motion both ways: slightly cleaner edges on moving objects | Doubles NVIDIA's optical-flow cost |
 | **Hybrid** | Off | Adds the game's own DLSS motion, for cleaner moving objects (DLSS games only) | Adds GPU time to every generated frame |
 | **Hybrid: depth search** | Off | Keeps thin nearby objects solid, such as cockpit frames | Adds more on top of Hybrid, more at high resolutions |
+| **HUD fix** | Off | Keeps a translucent HUD still instead of doubling on stick turns | Some GPU time, more at 3X and 4X |
 
 If your game has little headroom, any of these can cost more than the extra
 frames give back. For example, NVIDIA Slow at 100% on a Pimax Crystal Light
@@ -138,7 +141,10 @@ Per-game advice is in the
 ## How much VRAM OFXR uses
 
 OFXR needs some video memory on top of the game's. It grows with your
-per-eye resolution; 2X, 3X and the optical-flow backend cost the same.
+per-eye resolution; 2X, 3X, 4X and the optical-flow backend cost the same.
+OFXR keeps room for 4X from the start, so the multiplier can switch while
+you play: add about 0.04 GB at 4.6 Mpx, 0.1 GB at 13.6 Mpx and 0.2 GB at
+27.1 Mpx to the table below.
 
 Extra VRAM, both eyes, on SteamVR, Virtual Desktop and the Meta runtime:
 
@@ -157,7 +163,7 @@ fewer working images; the table assumes it. Turning it off costs about 15%
 more, and only helps if you see stutter with VRAM to spare.
 
 > [!WARNING]
-> **Pimax OpenXR uses about half again as much**, because Pimax's runtime
+> **Pimax OpenXR uses about 1.5 times the table**, because Pimax's runtime
 > keeps its own copy of every image. If VRAM is tight, run your Pimax
 > through SteamVR with
 > [sboys3's native SteamVR driver](https://store.pimax.com/blogs/blogs/sboys3-native-steamvr-driver-setup-guide),

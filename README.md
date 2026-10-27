@@ -5,8 +5,8 @@ rate.**
 
 OFXR Bridge creates extra frames between the ones your game renders, so you
 reach your headset's refresh rate even when your PC can't: a game at 45 FPS
-on a 90 Hz headset gets close to 90, and with 3X Frame Gen a game at 30 FPS
-too.
+on a 90 Hz headset gets close to 90, with 3X Frame Gen a game at 30 FPS too,
+and with 4X a game at 30 FPS on a 120 Hz headset.
 
 It runs from a tray icon: start it before your game and it works in the
 background, no game files touched. Generating frames costs a little GPU
@@ -51,6 +51,8 @@ R.E.A.L. VR games and Alien: Isolation) · [OFXR on Linux (Proton)](docs/LINUX.m
 >   FPS on a 90 Hz headset gives 90.
 > - **3X:** a game at about a third of your refresh rate reaches it too. 30
 >   FPS on a 90 Hz headset gives 90.
+> - **4X:** a game at about a quarter of your refresh rate reaches it too. 30
+>   FPS on a 120 Hz headset gives 120.
 > - Results vary by game, GPU and resolution. OFXR cannot make up frames the
 >   game does not render.
 
@@ -58,8 +60,9 @@ R.E.A.L. VR games and Alien: Isolation) · [OFXR on Linux (Proton)](docs/LINUX.m
 
 **Frame generation**
 
-- **2X and 3X Frame Gen**: one or two generated frames for every frame the
-  game renders, switchable while you play.
+- **2X, 3X and 4X Frame Gen**: one, two or three generated frames for every
+  frame the game renders, switchable while you play, from the tray or with a
+  key (Ctrl + Alt + F12 by default).
 - **Hybrid mode** for DLSS games: combines the game's own motion with OFXR's
   optical flow, for cleaner moving objects, with an optional **depth search**
   that keeps thin nearby objects solid.
@@ -69,6 +72,8 @@ R.E.A.L. VR games and Alien: Isolation) · [OFXR on Linux (Proton)](docs/LINUX.m
   exchange for reaching full frame rate from half, with smoother dips.
 - **HUD and markers** in UEVR games move smoothly with the generated frames
   instead of appearing twice.
+- **HUD fix**: a translucent HUD, such as Star Citizen's helmet HUD and
+  cockpit instruments, no longer leaves double images on stick turns.
 
 **Games and platforms**
 
@@ -89,6 +94,10 @@ R.E.A.L. VR games and Alien: Isolation) · [OFXR on Linux (Proton)](docs/LINUX.m
   (Ctrl + Alt + F7 by default).
 - **Lower VRAM** (on by default) and **Reset to default**, which puts every
   setting back to its factory default in one click.
+- **Tooltips** on the settings that cost GPU time or need a condition: hover
+  over them in the tray menu.
+- **Games run as administrator** (not recommended): lets OFXR work in games
+  that have to run as administrator.
 - An in-headset **FPS overlay** that counts only new frames, with the latency
   OFXR adds and Hybrid's status, in three sizes and four corners.
 - A **flight recorder** for diagnostics, switchable while you play.
@@ -103,9 +112,10 @@ R.E.A.L. VR games and Alien: Isolation) · [OFXR on Linux (Proton)](docs/LINUX.m
    cannot, the tray shows why; select **Arm bridge until manual disarm** to
    retry.
 4. Right-click the tray icon to choose the optical-flow backend and options.
-   The optical flow, Hybrid, the Frame Gen multiplier, the FPS overlay and
-   the flight recorder change in a running game; **Prefer FPS over latency**
-   and **Lower VRAM** apply the next time the game starts.
+   Hover over a setting to see what it costs. The optical flow, Hybrid, the
+   HUD fix, the Frame Gen multiplier, **Prefer FPS over latency**, the FPS
+   overlay and the flight recorder change in a running game; **Lower VRAM**
+   applies the next time the game starts.
 5. Start the game normally, **after** the tray: OFXR has to be armed when the
    game starts, especially for Hybrid. For injectors such as UEVR, leave the
    tray armed while the VR mod is injected.
@@ -128,8 +138,9 @@ To compare with and without generated frames while you play:
   rule OFXR out of a problem, disarm it and restart the game.
 
 > [!IMPORTANT]
-> **Never run the game as administrator.** OFXR does not load in it, with no
-> error and no FPS number.
+> **Don't run the game as administrator.** OFXR does not load in it, with no
+> error and no FPS number, unless you turn on
+> [Games run as administrator](#games-run-as-administrator).
 >
 > - Check the game's `.exe`, shortcut and launcher: Properties →
 >   Compatibility → "Run this program as an administrator" must be off.
@@ -199,11 +210,25 @@ such as cockpit frames and railings, from breaking up.
 - Some games need a setting changed: see the
   [game compatibility guide](docs/GAME_COMPATIBILITY.md).
 
+### HUD fix
+
+Tray option **HUD fix**, **off by default**, with Hybrid on or off. A
+translucent HUD drawn over the scene, such as Star Citizen's helmet HUD and
+its ship's cockpit instruments, can leave double images in the generated
+frames when you turn with the stick, more at 3X and 4X. The HUD fix keeps
+it still instead.
+
+- **It depends on the game:** it was made for Star Citizen. Try it if a HUD
+  smears or doubles when you turn.
+- **GPU cost:** it adds some GPU time, more at 3X and 4X.
+- **Switch it while you play**, without restarting the game.
+
 ### Star Citizen
 
 OFXR's files are digitally signed, so Easy Anti-Cheat lets OFXR load in Star
-Citizen. 2X and 3X both work, and Hybrid works with the game's DLSS. Start
-OFXR before the game. The best settings are in the
+Citizen. 2X, 3X and 4X work, Hybrid works with the game's DLSS, and the
+[HUD fix](#hud-fix) keeps the helmet HUD and cockpit instruments from
+doubling on stick turns. Start OFXR before the game. The best settings are in the
 [game compatibility guide](docs/GAME_COMPATIBILITY.md#star-citizen).
 
 > [!CAUTION]
@@ -257,23 +282,27 @@ finish instead of the gap the game leaves between frames.
   off and play the same scene. If you still hold your full frame rate, leave
   it off and save one frame of latency. If you lose frames, turn it back on.
 
-The change applies the next time the game starts.
+It changes in a running game, with a short pause. 3X and 4X need it, so
+choosing either turns it on.
 
-### 3X Frame Gen
+### 3X and 4X Frame Gen
 
-Tray menu **Frame Gen multiplier**: **2X** by default, or **3X**. 3X makes
-two in-between frames for every game frame, for games at about a third of
-your refresh rate (30 FPS at 90 Hz). If your game holds half the refresh
-rate, 2X looks better.
+Tray menu **Frame Gen multiplier**: **2X** by default, **3X** or **4X**. 3X
+makes two in-between frames for every game frame, for games at about a third
+of your refresh rate (30 FPS at 90 Hz); 4X makes three, for games at about a
+quarter (30 FPS at 120 Hz). Use the lowest multiplier your game can hold: if
+it holds half the refresh rate, 2X looks better.
 
-- **Change it while you play**, with one short hitch at the switch. If the
-  game was started with **Prefer FPS over latency** off, 3X applies the next
-  time the game starts.
+- **Change it while you play**, with one short hitch at the switch, from the
+  tray or with the multiplier key: **Ctrl + Alt + F12** steps 2X, 3X, 4X and
+  back to 2X. Change the key with **Current key binding**, under **Frame Gen
+  multiplier** in the tray menu. In some games, for example with **Lower
+  VRAM** off, the tray asks you to restart the game for a higher multiplier.
 - **Best results** in DLSS games where Hybrid works (**HYBRID OK** on the
   overlay): turn on **Hybrid** and **Hybrid: depth search**, if your GPU has
   the headroom.
-- **Expect more artifacts than 2X**, mostly in sideways motion, and a little
-  more latency.
+- **Expect more artifacts than 2X**, mostly in sideways motion, more at 4X,
+  and a little more latency.
 - **R.E.A.L. VR games stay at 2X**: see the
   [game compatibility guide](docs/GAME_COMPATIBILITY.md#real-vr-games).
 
@@ -290,14 +319,33 @@ Tray entry **Reset to default...**, in its own section below **Open bridge
 logs**. After you confirm, it puts every OFXR setting back to its factory
 default: optical flow **FidelityFX** at **50%** resolution, **Prefer FPS
 over latency** on, the Frame Gen multiplier at **2X**, **Lower VRAM** on,
-**Hybrid** and its depth search off, the FPS overlay big in the upper right
-with the latency and Hybrid status shown, the flight recorder off and the
-pause key back to **Ctrl + Alt + F7**. Settings only reachable by editing
-`tray.ini` go back to their defaults too.
+**Hybrid** and its depth search off, the **HUD fix** off, the FPS overlay big
+in the upper right with the latency, multiplier and Hybrid status shown, the
+flight recorder off, the pause key back to **Ctrl + Alt + F7** and the
+multiplier key to **Ctrl + Alt + F12**. Settings only reachable by editing
+`tray.ini` go back to their defaults too. **Games run as administrator** is
+not a setting and stays as it is.
 If OFXR runs worse than you expected and you have changed any settings,
-start here. The optical flow, Hybrid, the Frame Gen multiplier, the FPS
-overlay and the flight recorder change in a running game at once; the rest
-applies the next time the game starts.
+start here. **Lower VRAM** applies the next time the game starts; the rest
+changes in a running game at once.
+
+### Games run as administrator
+
+Tray entry **Games run as administrator (not recommended)**, below **Reset to
+default**. Run your games normally whenever you can: a game run as
+administrator can change anything on your PC, and so can every mod it loads.
+Use this only for a game that has to run as administrator.
+
+- **Turning it on** asks for Windows administrator rights once. It installs
+  a copy of OFXR for every user of the PC, in
+  `%ProgramFiles%\OFXR Bridge\Elevated`.
+- **It only works while the tray is armed**, with your usual settings and
+  logs.
+- **While it is on,** OFXR's small Vulkan layer loads into every Vulkan
+  program, even when OFXR is disarmed. It does nothing there.
+- **After you update OFXR,** the entry shows **update needed**: click it to
+  update the installed copy.
+- **Turn it off** to remove the installed copy.
 
 ### Cheeky Foveated DLSS
 
@@ -316,9 +364,10 @@ On every headset and VR software:
 - Leave **Prefer FPS over latency** on, then try the same scene with it off.
   If you still hold full frame rate without it, keep it off for one frame
   less latency.
-- Pick a refresh rate close to double your game's frame rate, or triple it
-  with **3X Frame Gen**. If that is still short of the refresh rate, your VR
-  software fills the gap with repeated frames and the image judders.
+- Pick a refresh rate close to double your game's frame rate, triple it
+  with **3X Frame Gen** or quadruple it with **4X**. If that is still short of
+  the refresh rate, your VR software fills the gap with repeated frames and
+  the image judders.
 
 ### When the number stops short of the refresh rate
 
@@ -347,6 +396,11 @@ configuration into `%LOCALAPPDATA%\OFXR Bridge`, creates an absolute-path
 OpenXR implicit-layer manifest and registers that manifest for the current
 Windows user, with a second one for the 32-bit layer. It does not inject a
 DLL into the game, replace game files or replace the active OpenXR runtime.
+
+**Games run as administrator**, when you turn it on, also installs the
+OpenXR layer and OFXR's Vulkan layer into `%ProgramFiles%\OFXR Bridge\Elevated`
+and registers them for every user of the PC. They stay installed until you
+turn the option off; while the tray is disarmed they do nothing.
 
 Selecting **Disarm** removes the exact OpenXR registrations. Closing the tray
 also disarms it, with a watchdog providing cleanup if the tray exits
