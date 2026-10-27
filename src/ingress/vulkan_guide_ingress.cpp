@@ -578,6 +578,8 @@ struct State {
     std::array<std::uint64_t, skip_count> skips{};
     std::uint64_t dropped{};
     std::atomic_bool configured{}, active{};
+    // Last state recorded as vulkan_bridge 6: the layer configures every frame.
+    std::atomic_int recorded{-1};
 };
 State& state() {
     static auto* value = new State; // hooks outlive static destruction
@@ -965,7 +967,8 @@ void configure_guide_capture(const VulkanSessionBinding& binding, ID3D12Device* 
         auto& s = state();
         if (!enabled || !device || !queue || binding.device == VK_NULL_HANDLE) {
             s.active.store(false, std::memory_order_release);
-            bridge_flight_logger().event(BridgeFlightOperation::vulkan_bridge, 6, 0, installed_modules(), 0);
+            if (s.recorded.exchange(0) != 0)
+                bridge_flight_logger().event(BridgeFlightOperation::vulkan_bridge, 6, 0, installed_modules(), 0);
             return;
         }
         std::shared_ptr<VulkanApi> api;
@@ -994,7 +997,8 @@ void configure_guide_capture(const VulkanSessionBinding& binding, ID3D12Device* 
         s.configured.store(true, std::memory_order_release);
         poll_guide_capture();
         s.active.store(true, std::memory_order_release);
-        bridge_flight_logger().event(BridgeFlightOperation::vulkan_bridge, 6, 1, installed_modules(), 0);
+        if (s.recorded.exchange(1) != 1)
+            bridge_flight_logger().event(BridgeFlightOperation::vulkan_bridge, 6, 1, installed_modules(), 0);
     } catch (...) {
     }
 }
@@ -1003,7 +1007,10 @@ void stop_guide_capture(ID3D12CommandQueue* queue) noexcept {
     try {
         auto& s = state();
         std::scoped_lock lock(s.mutex);
-        if (s.queue.Get() == queue) s.active.store(false, std::memory_order_release);
+        if (s.queue.Get() == queue) {
+            s.active.store(false, std::memory_order_release);
+            s.recorded.store(-1);
+        }
     } catch (...) {
     }
 }
