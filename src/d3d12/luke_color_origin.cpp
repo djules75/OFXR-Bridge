@@ -5,7 +5,9 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <memory>
+#include <string>
 #include <mutex>
 #include <vector>
 #include <cstdio>
@@ -348,6 +350,46 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
 }
 
 namespace {
+// With diagnostics on, an eye scan that decodes to nothing is saved as its
+// decoder luma (8-bit PGM) beside the layer: the first three, then at most
+// one every ten seconds, at most 24 a process. The scanned rows only, never
+// a whole eye image.
+void save_undecoded_scan(const LukeColorOriginImage& image, unsigned eye) noexcept {
+    try {
+        if (!bridge_flight_logger().enabled() || !image.pixels || !image.width || !image.height) return;
+        static std::atomic_uint saved{};
+        static std::atomic<std::uint64_t> last_ms{};
+        const auto now = GetTickCount64();
+        const auto count = saved.load();
+        if (count >= 24 || (count >= 3 && now - last_ms.load() < 10000)) return;
+        if (saved.fetch_add(1) >= 24) return;
+        last_ms.store(now);
+        HMODULE module{};
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(&save_undecoded_scan), &module)) return;
+        std::vector<wchar_t> path(32768);
+        const auto length = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
+        if (!length || length >= path.size()) return;
+        const auto destination = std::filesystem::path(path.data()).parent_path() /
+            (L"ofxr-luke-origin-scan-pid" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+             std::to_wstring(count + 1) + L"-eye" + std::to_wstring(eye) + L".pgm");
+        const auto bytes = luke_origin_pixel_bytes(image.format);
+        if (!bytes) return;
+        std::string data = "P5\n" + std::to_string(image.width) + " " + std::to_string(image.height) + "\n255\n";
+        for (unsigned y = 0; y < image.height; ++y)
+            for (unsigned x = 0; x < image.width; ++x) {
+                const float luma = luke_origin_luma(image.pixels + std::size_t(y) * image.row_pitch + x * bytes, image.format);
+                data.push_back(static_cast<char>(std::isfinite(luma) ? std::lround(std::clamp(luma, 0.f, 1.f) * 255) : 0));
+            }
+        const HANDLE file = CreateFileW(destination.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return;
+        DWORD written{};
+        WriteFile(file, data.data(), static_cast<DWORD>(data.size()), &written, nullptr);
+        CloseHandle(file);
+    } catch (...) { } // Observation never changes the decoder result.
+}
 HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
     std::uint32_t* tokens, HRESULT* results, unsigned count,
     D3D12_RESOURCE_STATES state, DWORD timeout_ms) noexcept {
@@ -501,6 +543,7 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
             results[i]=decoded[i].ambiguous ? HRESULT_FROM_WIN32(ERROR_INVALID_DATA) :
                 decoded[i].token ? S_OK : HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
             if(SUCCEEDED(results[i]))tokens[i]=decoded[i].token;else decode_status=results[i];
+            if(results[i]==HRESULT_FROM_WIN32(ERROR_NOT_FOUND))save_undecoded_scan(image_rows[i],i);
         }
         const D3D12_RANGE no_write{0,0}; reader->readback->Unmap(0,&no_write);
         phase(125,decode_status);
