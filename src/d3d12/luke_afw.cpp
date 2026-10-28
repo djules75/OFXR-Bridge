@@ -541,6 +541,7 @@ struct LukeAfwSynthesizer::Impl {
     std::uint64_t unit_epoch{};
     std::array<ULONGLONG, 64> input_rejection_report_ticks{};
     bool frame_buffers_ready{};
+    bool clean_frame_buffers{true};
 
     ~Impl() {
         // Normal live resets already retired last_submission_fence above.
@@ -1224,9 +1225,9 @@ HRESULT LukeAfwSynthesizer::initialize(ID3D12Device* device,
       catch (...) { return E_FAIL; }
 }
 
-HRESULT LukeAfwSynthesizer::initialize_locked(ID3D12Device* device,
+HRESULT LukeAfwSynthesizer::create_impl(ID3D12Device* device,
     ID3D12CommandQueue* queue, const std::filesystem::path& plugin_path,
-    bool isolated_provider) noexcept {
+    bool isolated_provider,std::unique_ptr<Impl>& output) noexcept {
     try {
         if (device == nullptr || queue == nullptr || plugin_path.empty()) return E_INVALIDARG;
         auto candidate = std::make_unique<Impl>();
@@ -1290,10 +1291,90 @@ HRESULT LukeAfwSynthesizer::initialize_locked(ID3D12Device* device,
         params.d3d12_queue = queue;
         candidate->renderer = candidate->init_device(params);
         if (candidate->renderer == nullptr) return E_FAIL;
-        impl_ = std::move(candidate);
+        output = std::move(candidate);
         return S_OK;
     } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
       catch (...) { return E_FAIL; }
+}
+
+HRESULT LukeAfwSynthesizer::initialize_locked(ID3D12Device* device,ID3D12CommandQueue* queue,
+    const std::filesystem::path& path,bool isolated) noexcept {
+    std::unique_ptr<Impl> candidate;
+    const auto hr=create_impl(device,queue,path,isolated,candidate);
+    if(SUCCEEDED(hr))impl_=std::move(candidate);
+    return hr;
+}
+void LukeAfwSynthesizer::queue_standby_locked() noexcept {
+    try {
+        if(!impl_||standby_.valid())return;
+        if(retirement_.valid()) {
+            if(retirement_.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
+            retirement_.get();
+        }
+        auto device=impl_->device;auto queue=impl_->queue;const auto path=impl_->provider_path;
+        standby_=std::async(std::launch::async,[device,queue,path] {
+            SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);
+            std::unique_ptr<Impl> candidate;
+            if(FAILED(create_impl(device.Get(),queue.Get(),path,true,candidate)))return std::unique_ptr<Impl>{};
+            return candidate;
+        });
+        standby_geometry_=false;
+    }catch(...){}
+}
+void LukeAfwSynthesizer::prepare_history_reset() noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if(reset_prepared_||standby_geometry_||!impl_||!impl_->frame_buffers_ready)return;
+        queue_standby_locked();
+        if(!standby_.valid()||standby_.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
+        auto candidate=standby_.get();if(!candidate)return;
+        const auto color=impl_->color_description;const auto divisor=impl_->quality_divisor;
+        standby_=std::async(std::launch::async,[candidate=std::move(candidate),color,divisor]() mutable {
+            FrameWarpInitParams params{};
+            candidate->quality_divisor=divisor;
+            candidate->work_width=static_cast<UINT>((color.Width+divisor-1)/divisor);
+            candidate->work_height=(color.Height+divisor-1)/divisor;
+            params.hmd_width=candidate->work_width;params.hmd_height=candidate->work_height;
+            params.eye_format=params.backbuffer_format=linear_color_format(color.Format);
+            candidate->eye_buffers=candidate->init_frame_warp(params);
+            if(!candidate->eye_buffers.eye_frame_buffers[0].color.texture||!candidate->eye_buffers.eye_frame_buffers[1].color.texture)
+                return std::unique_ptr<Impl>{};
+            if(divisor>1&&FAILED(candidate->color_scale.prepare(candidate->device.Get(),static_cast<UINT>(color.Width),color.Height,params.eye_format)))
+                return std::unique_ptr<Impl>{};
+            candidate->color_description=color;candidate->frame_buffers_ready=true;
+            return std::move(candidate);
+        });
+        standby_geometry_=true;
+    }catch(...){}
+}
+bool LukeAfwSynthesizer::history_reset_ready() noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        if(reset_prepared_)return true;
+        if(!standby_geometry_||!standby_.valid()||standby_.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return false;
+        // Only one retired provider can exist. Never replace a pending future
+        // (whose destructor could join on the game's thread).
+        if(retirement_.valid()) {
+            if(retirement_.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return false;
+            retirement_.get();
+        }
+        auto candidate=standby_.get();standby_geometry_=false;
+        if(!candidate)return false;
+        if(!impl_||!compatible_color(candidate->color_description,impl_->color_description)||
+            candidate->quality_divisor!=impl_->quality_divisor) {
+            retirement_=std::async(std::launch::async,[unused=std::move(candidate)]() mutable {unused.reset();});
+            return false;
+        }
+        candidate->camera_origin=impl_->camera_origin;
+        candidate->calibrated_units_per_metre=impl_->calibrated_units_per_metre;
+        candidate->unit_epoch=impl_->unit_epoch;
+        candidate->paired_unit_identity=impl_->paired_unit_identity;
+        auto old=std::move(impl_);impl_=std::move(candidate);
+        retirement_=std::async(std::launch::async,[old=std::move(old)]() mutable {old.reset();});
+        reset_prepared_=true;
+        bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,0,1230,0,0);
+        return true;
+    }catch(...){return false;}
 }
 
 HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
@@ -1558,8 +1639,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             impl_->active_shading_rate>0 && impl_->last_evaluated_publication &&
             !luke_afw_previous_opposite(guide.publication,
                 impl_->last_evaluated_publication,source_eye,impl_->last_evaluated_eye);
-        if(impl_->frame_buffers_ready &&
-            (*origin_changed || provider_geometry_changed || reduced_continuity_lost || gta_calibration_changed)) {
+        if(impl_->frame_buffers_ready && (provider_geometry_changed ||
+            (!impl_->clean_frame_buffers&&(*origin_changed || reduced_continuity_lost || gta_calibration_changed)))) {
             const auto provider=impl_->provider_path;
             const auto camera_origin=impl_->camera_origin;
             const auto calibrated_units=impl_->calibrated_units_per_metre;
@@ -1578,7 +1659,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         if (*origin_changed) {
             // AFW's private history and ours must never span two origins.
             // Reinitialize both eyes only at a producer lifetime/reset boundary.
-            impl_->frame_buffers_ready = false;
+            if(!impl_->clean_frame_buffers)impl_->frame_buffers_ready = false;
             impl_->previous_source_publication = {};
             impl_->previous_source_camera = {};
             impl_->last_evaluated_publication = 0;
@@ -2255,6 +2336,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         impl_->gpu_timing.mark(command_list,1);
         {
         AfwProviderCopyScope provider_copy_scope(impl_->renderer);
+        impl_->clean_frame_buffers=false;
         impl_->evaluate(params);
         // Beta6 returns no output on a shading-rate change, before recording
         // warping work. Its next call rebuilds the internal shading resources.
@@ -2372,6 +2454,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             impl_->previous_source_stream[source_eye] = guide.stream;
             impl_->previous_source_epoch[source_eye] = guide.epoch;
             impl_->previous_source_publication[source_eye] = guide.publication;
+            reset_prepared_=false;
+            queue_standby_locked();
         }
         return result;
     } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }

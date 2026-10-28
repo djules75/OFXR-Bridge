@@ -13724,13 +13724,15 @@ struct LukeOriginHistoryProbe {
                         });
                         if(new_epoch&&hold_last_pair()) {
                             if(!session->luke_warmup_started)session->luke_warmup_started=now;
+                            session->luke_afw->prepare_history_reset();
+                            const bool renderer_ready=session->luke_afw->history_reset_ready();
                             bool native_warming=origin->serial<=3;
                             if(auto guide=xrfg::resolve_luke_guide_token(tokens[i],session->d3d12_queue.Get(),session->d3d12_device.Get())) {
                                 xrfg::LukeNativeMotionConstants constants{};unsigned failure{};
                                 const bool ready=xrfg::luke_native_motion_constants(*guide,0,0,constants,failure);
                                 native_warming=!ready&&(failure==1||failure==3);
                             }
-                            if(native_warming) {
+                            if(native_warming||!renderer_ready) {
                                 session->luke_warmup_held=true;
                                 xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
                                     origin->serial,1220,origin->publication,origin->epoch);

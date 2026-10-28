@@ -51,12 +51,17 @@ struct ProviderReceipt {
     std::array<float,16> destination_camera{};
 } provider;
 std::vector<std::filesystem::path> private_modules;
+std::vector<std::filesystem::path> active_modules;
+const DWORD main_thread=GetCurrentThreadId();
+std::mutex modules_mutex;
+std::array<std::atomic<xrfg::EvaluateFrameWarpFn>,256> originals{};
+std::atomic<unsigned> next_original{};
 std::filesystem::path original_provider_file;
 std::vector<char> bytes(const std::filesystem::path& path) {
     std::ifstream file(path,std::ios::binary);
     return {std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
 }
-void __stdcall observe_evaluate(xrfg::FrameWarpEvaluateParams& params) {
+void observe_evaluate(xrfg::FrameWarpEvaluateParams& params,xrfg::EvaluateFrameWarpFn original) {
     ++provider.calls;
     if(params.camera_data)std::copy_n(params.camera_data->destination_view_to_world.values,16,provider.destination_camera.begin());
     provider.gain_x=params.motion_scale[0];provider.gain_y=params.motion_scale[1];
@@ -77,8 +82,15 @@ void __stdcall observe_evaluate(xrfg::FrameWarpEvaluateParams& params) {
         params.motion_scale[0]*=consumer_probe_gain;
         params.motion_scale[1]*=consumer_probe_gain;
     }
-    provider.original(params);
+    original(params);
 }
+template<std::size_t Slot>void __stdcall observe_slot(xrfg::FrameWarpEvaluateParams& params) {
+    observe_evaluate(params,originals[Slot].load());
+}
+template<std::size_t... Slots>constexpr auto observers(std::index_sequence<Slots...>) {
+    return std::array<xrfg::EvaluateFrameWarpFn,sizeof...(Slots)>{&observe_slot<Slots>...};
+}
+constexpr auto observer_slots=observers(std::make_index_sequence<256>{});
 void require(bool value,const char* message) {if(!value)throw std::runtime_error(message);}
 void check(HRESULT value,const char* message) {if(FAILED(value))std::cerr<<"HRESULT="<<std::hex<<unsigned(value)<<std::dec<<'\n';require(SUCCEEDED(value),message);}
 D3D12_RESOURCE_BARRIER transition(ID3D12Resource* resource,D3D12_RESOURCE_STATES from,D3D12_RESOURCE_STATES to) {
@@ -199,10 +211,14 @@ FARPROC WINAPI quality_get_proc_address(HMODULE module,LPCSTR name) {
         if(GetModuleFileNameW(module,path,32768) && std::filesystem::path(path).extension()==L".tmp") {
             quality::require(quality::bytes(path)==quality::bytes(quality::original_provider_file),
                 "isolated provider is not byte-identical to the selected bundled SDK");
+            std::scoped_lock lock(quality::modules_mutex);
             quality::private_modules.emplace_back(path);
+            if(GetCurrentThreadId()==quality::main_thread)quality::active_modules.emplace_back(path);
         }
-        quality::provider.original=reinterpret_cast<xrfg::EvaluateFrameWarpFn>(actual);
-        return reinterpret_cast<FARPROC>(&quality::observe_evaluate);
+        const auto slot=quality::next_original.fetch_add(1);
+        quality::require(slot<quality::observer_slots.size(),"provider observer slot budget");
+        quality::originals[slot]=reinterpret_cast<xrfg::EvaluateFrameWarpFn>(actual);
+        return reinterpret_cast<FARPROC>(quality::observer_slots[slot]);
     }
     return actual;
 }
@@ -222,6 +238,7 @@ int main(int argc,char** argv) {try {
     require(!current_scene_test||native_peer_camera,"current scene fixture requires GTA headlock");
     const bool geometry_transition=GetEnvironmentVariableW(L"XRFG_TEST_AFW_GEOMETRY_TRANSITION",nullptr,0)!=0;
     const bool epoch_transition=GetEnvironmentVariableW(L"XRFG_TEST_AFW_EPOCH_TRANSITION",nullptr,0)!=0;
+    const bool async_reset=GetEnvironmentVariableW(L"XRFG_TEST_AFW_ASYNC_RESET",nullptr,0)!=0;
     wchar_t gap_text[16]{};
     GetEnvironmentVariableW(L"XRFG_TEST_AFW_PUBLICATION_GAP",gap_text,16);
     const unsigned publication_gap=static_cast<unsigned>(_wtoi(gap_text));
@@ -268,6 +285,7 @@ int main(int argc,char** argv) {try {
             kind==D3D12_HEAP_TYPE_UPLOAD?D3D12_RESOURCE_STATE_GENERIC_READ:D3D12_RESOURCE_STATE_COPY_DEST,
             nullptr,IID_PPV_ARGS(&result)),"fixture buffer");return result;};
     bool all_camera_bits_match=true,all_mode_pixels_match=true;
+    std::vector<double> epoch_return_ms;
     for(const auto& initial_scene:scenes) for(unsigned span:{1u,2u}) for(int mode:{1,2,3}) {
         if(consumer_probe && (std::string_view(initial_scene.name)!="full" || span!=2 || mode!=3))continue;
         xrfg::LukeAfwSynthesizer synth;check(synth.initialize(device.Get(),queue.Get(),std::filesystem::path(argv[1])),"full AFW provider initialization");
@@ -287,7 +305,7 @@ int main(int argc,char** argv) {try {
             frame->serial=frame->publication=frame->camera_frame_token=frame->native_production_sequence=n;
             frame->previous_serial=n>=3?n-2:0;
             if(interleaved) {
-                frame->stream=1+(n&1);frame->epoch=n&1?7:3;
+                frame->stream=1+(n&1);frame->epoch=(n&1?7:3)+(epoch_transition&&n>=10?1:0);
                 frame->serial=(n+1)/2;frame->native_production_sequence=0;
                 frame->previous_serial=n>=3?(n-1)/2:0;
                 frame->luke_interleaved_history=true;
@@ -344,6 +362,16 @@ int main(int argc,char** argv) {try {
             if(n>=2)frame->previous_opposite_guide=frames[n-2];
             if(n>=3){frame->previous_same_guide=frames[n-3];frame->previous_same_native_camera=xrfg::dlss_native_camera_history(*frames[n-3]);}
             frames.push_back(frame);colors.push_back(source);
+            if(async_reset&&epoch_transition&&n>=10&&n<=12) {
+                synth.prepare_history_reset();
+                if(n==12) {
+                    const auto deadline=GetTickCount64()+3000;
+                    while(!synth.history_reset_ready()&&GetTickCount64()<deadline) {
+                        synth.prepare_history_reset();Sleep(1);
+                    }
+                    require(synth.history_reset_ready(),"asynchronous fresh renderer did not become ready");
+                }
+            }
             if(n<(interleaved?4u:3u) || ((epoch_transition || geometry_transition) && (n==10 || n==11)))continue;
             // Backend reconfiguration can consume a Release without evaluating
             // AFW. Keep original producer/cameras/geometry; omit only that color.
@@ -401,7 +429,9 @@ int main(int argc,char** argv) {try {
             provider.expected_gain_y=scene.scale_y*float(height)/float(scene.guide_height);
             provider.expected_gain_x*=float((scene.color_width+divisor-1)/divisor)/float(scene.color_width);
             provider.expected_gain_y*=float((scene.color_height+divisor-1)/divisor)/float(scene.color_height);
+            const auto cpu_begin=std::chrono::steady_clock::now();
             check(synth.synthesize(source.Get(),destination.Get(),*frame,source_view,destination_view,eye,float(baseline),settings,native_peer_camera),"actual full rotated AFW synthesis");
+            if(epoch_transition&&n==12)epoch_return_ms.push_back(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-cpu_begin).count());
             wait();
             if((eye_reference_test && n>=7)||(calibration_recovery_test && n>=9)) {
                 const auto expected=expected_peer(current,n,scene);
@@ -488,7 +518,7 @@ int main(int argc,char** argv) {try {
     CloseHandle(event);
     if(publication_gap) {
         const unsigned expected_replacements=12+(shading>0 ? 4 : 0);
-        require(private_modules.size()==expected_replacements,
+        require(active_modules.size()==expected_replacements,
             "each reduced Combined sequence must retire warm state exactly once at the omitted color");
         for(const auto& file:private_modules)require(!std::filesystem::exists(file),
             "gap recovery left a retired isolated AFW provider loaded or on disk");
@@ -497,7 +527,7 @@ int main(int argc,char** argv) {try {
             <<"; GPU states and pixels PASS\n";
     }
     if(shading==9) {
-        require(private_modules.size()==24,"live quality transitions did not create fresh isolated provider state");
+        require(active_modules.size()==24,"live quality transitions did not create fresh isolated provider state");
         for(const auto& file:private_modules)require(!std::filesystem::exists(file),
             "retired isolated AFW provider left its private file loaded or on disk");
         const auto log=xrfg::bridge_flight_logger().log_path();
@@ -532,6 +562,10 @@ int main(int argc,char** argv) {try {
         std::error_code error;std::filesystem::remove_all(diagnostic_root,error);
     }
     require(all_camera_bits_match,"KCD plugin camera reflects decoded inverseView instead of preserving its actual view basis");
+    if(!epoch_return_ms.empty()) {
+        std::sort(epoch_return_ms.begin(),epoch_return_ms.end());
+        std::cout<<"EPOCH_RETURN async="<<async_reset<<" samples="<<epoch_return_ms.size()<<" median_cpu_ms="<<epoch_return_ms[epoch_return_ms.size()/2]<<" max_cpu_ms="<<epoch_return_ms.back()<<'\n';
+    }
     require(all_mode_pixels_match,"full PDAFW rotated static-world reconstruction diverges from independent same-time peer oracle");
     std::cout<<(interleaved?"Interleaved AER full quality:":indiana?"Indiana full quality:":"KCD full quality:")<<" actual decoded camera, depth/Normal-motion shaders and PDAFW three modes match independent rotated-plane peer PASS\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

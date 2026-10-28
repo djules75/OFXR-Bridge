@@ -1781,6 +1781,12 @@ add_executable(xrfg_luke_kcd_quality_tests tests/luke_kcd_quality_tests.cpp)
         "-DSHADING_RATE=${shading_index}" -DEPOCH_TRANSITION=ON
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
     set_tests_properties(xrfg_luke_epoch_recovery_${shading_index} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+    add_test(NAME xrfg_luke_async_epoch_recovery_${shading_index} COMMAND "${CMAKE_COMMAND}"
+        "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+        "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/luke-async-epoch-recovery-${shading_index}"
+        "-DSHADING_RATE=${shading_index}" -DEPOCH_TRANSITION=ON -DASYNC_RESET=ON
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+    set_tests_properties(xrfg_luke_async_epoch_recovery_${shading_index} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
   endforeach()
   foreach(shading_index 0 4 8)
     add_test(NAME xrfg_luke_geometry_recovery_${shading_index} COMMAND "${CMAKE_COMMAND}"
@@ -1789,6 +1795,14 @@ add_executable(xrfg_luke_kcd_quality_tests tests/luke_kcd_quality_tests.cpp)
         "-DSHADING_RATE=${shading_index}" -DGEOMETRY_TRANSITION=ON
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
     set_tests_properties(xrfg_luke_geometry_recovery_${shading_index} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+  endforeach()
+  foreach(shading_index 4 8)
+    add_test(NAME xrfg_luke_async_interleaved_reset_${shading_index} COMMAND "${CMAKE_COMMAND}"
+        "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+        "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/luke-async-interleaved-reset-${shading_index}"
+        "-DSHADING_RATE=${shading_index}" -DEPOCH_TRANSITION=ON -DASYNC_RESET=ON -DINTERLEAVED=ON
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+    set_tests_properties(xrfg_luke_async_interleaved_reset_${shading_index} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
   endforeach()
   add_test(NAME xrfg_luke_indiana_live_shading COMMAND "${CMAKE_COMMAND}"
       "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
