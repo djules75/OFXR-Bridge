@@ -76,28 +76,37 @@ int main() {
         const Key epoch{1000001, 8};
         startup.observe_fresh(epoch, 200);
         startup.observe_fresh(epoch, 201);
-        expect(!startup.pending(), "new history epoch requires its own stable fresh streak");
+        expect(!startup.pending(), "scene cut cannot rearm a completed producer startup");
         startup.observe_fresh(epoch, 205);
         startup.observe_fresh(epoch, 206);
-        expect(!startup.pending(), "publication gaps discard the earlier candidate");
         startup.observe_fresh(epoch, 207);
-        expect(startup.pending() == epoch, "three frames after a gap arm the new epoch");
+        expect(!startup.pending(), "fresh post-cut history must not drain or reset the route again");
+        // Retry/gap behaviour still applies to a genuinely new producer.
+        const Key retry_stream{1500001, 8};
+        startup.observe_fresh(retry_stream, 205);
+        startup.observe_fresh(retry_stream, 206);
+        expect(!startup.pending(), "new producer requires its own fresh streak");
+        startup.observe_fresh(retry_stream, 209);
+        startup.observe_fresh(retry_stream, 210);
+        expect(!startup.pending(), "publication gaps discard the earlier candidate");
+        startup.observe_fresh(retry_stream, 211);
+        expect(startup.pending() == retry_stream, "three frames after a gap arm the new producer");
         startup.observe_failure();
         expect(!startup.pending(), "missing/admission failure disarms a pending candidate");
-        startup.observe_fresh(epoch, 208);
-        startup.observe_fresh(epoch, 209);
+        startup.observe_fresh(retry_stream, 212);
+        startup.observe_fresh(retry_stream, 213);
         expect(!startup.pending(), "failure recovery starts a new three-fresh streak");
-        startup.observe_fresh(epoch, 210);
-        startup.complete(epoch, false);
+        startup.observe_fresh(retry_stream, 214);
+        startup.complete(retry_stream, false);
         expect(!startup.pending(), "failed reconfiguration cannot immediately retry");
-        startup.observe_fresh(epoch, 211);
-        startup.observe_fresh(epoch, 212);
+        startup.observe_fresh(retry_stream, 215);
+        startup.observe_fresh(retry_stream, 216);
         expect(!startup.pending(), "failed force requires three new fresh frames before retry");
-        startup.observe_fresh(epoch, 213);
-        expect(startup.pending() == epoch, "first failure permits one bounded retry");
-        startup.complete(epoch, false);
-        for (std::uint64_t publication = 214; publication < 300; ++publication)
-            startup.observe_fresh(epoch, publication);
+        startup.observe_fresh(retry_stream, 217);
+        expect(startup.pending() == retry_stream, "first failure permits one bounded retry");
+        startup.complete(retry_stream, false);
+        for (std::uint64_t publication = 218; publication < 300; ++publication)
+            startup.observe_fresh(retry_stream, publication);
         expect(!startup.pending(), "two failed attempts cannot cause a per-frame retry loop");
 
         const Key new_stream{2000001, 8};
@@ -109,7 +118,7 @@ int main() {
         expect(startup.pending() == new_stream, "new producer stream has independent startup state");
         startup.complete(new_stream, true);
 
-        const Key overflow{2000001, 9};
+        const Key overflow{2500001, 9};
         startup.observe_fresh(overflow, std::numeric_limits<std::uint64_t>::max() - 1);
         startup.observe_fresh(overflow, std::numeric_limits<std::uint64_t>::max());
         startup.observe_fresh(overflow, 1);
@@ -155,9 +164,9 @@ int main() {
         expect(!ordinary_drain.pending(), "ordinary successful hot On-to-Off drain satisfies startup without a force");
         ordinary_drain.observe_fresh(epoch, 510);
         ordinary_drain.observe_fresh(epoch, 511);
-        expect(!ordinary_drain.pending(), "ordinary drain does not satisfy a future history epoch");
+        expect(!ordinary_drain.pending(), "ordinary drain remains satisfied across a scene cut");
         ordinary_drain.observe_fresh(epoch, 512);
-        expect(ordinary_drain.pending() == epoch, "future epoch still needs its independent startup rendezvous");
+        expect(!ordinary_drain.pending(), "three post-cut frames cannot reset the metrics via startup");
     }
     {
         xrfg::LukeCameraOrigin origin;
