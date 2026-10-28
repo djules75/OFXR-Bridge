@@ -747,6 +747,8 @@ void gta_protected_gpu_test() {
         D3D12_RESOURCE_STATE_COMMON,5000,&observed_color),"GTA GPU diagnostic color receipt");
     require(observed_color[0]&&observed_color[1]&&observed_tokens[0]==expected+1&&observed_tokens[1]==expected+1,
         "GTA color receipt changed exact tokens");
+    const auto raw_scene=xrfg::luke_original_scene_identity(observed_tokens,{0,1});
+    require(bool(raw_scene)&&raw_scene.output==0,"actual GPU CRC pair could not identify the original real scene");
     gpu.reset();auto erased=gpu.texture(2987,2736);gpu.crop(wide.Get(),erased.Get(),219,0,2987,2736);
     masks.push_back(gpu.black_rows(erased.Get(),440,44));gpu.submit();std::uint32_t absent{};
     require(xrfg::read_luke_color_origin(gpu.queue.Get(),erased.Get(),&absent,D3D12_RESOURCE_STATE_COMMON,5000)==HRESULT_FROM_WIN32(ERROR_NOT_FOUND)&&!absent,
@@ -754,6 +756,7 @@ void gta_protected_gpu_test() {
     check(xrfg::read_luke_color_origin_pair(gpu.queue.Get(),{erased.Get(),erased.Get()},observed_tokens,observed_results,
         D3D12_RESOURCE_STATE_COMMON,5000,&observed_color),"GTA black GPU diagnostic receipt");
     require(!observed_color[0]&&!observed_color[1]&&!observed_tokens[0]&&!observed_tokens[1],"GTA black readback not classified exactly");
+    require(!xrfg::luke_original_scene_identity(observed_tokens,{0,1}),"erased GPU markers invented a real scene identity");
     std::cout<<"GTA protected GPU: "<<checks<<" checks PASS\n";
 }
 int captured_decode_benchmark(char** argv) {

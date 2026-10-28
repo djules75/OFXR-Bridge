@@ -2309,7 +2309,7 @@ void gta_flat_scene_test() {
     const auto flat=prepare();
     check(flat.kind==PreparedGenerationKind::none&&flat.reason==GenerationPrepareReason::luke_flat_scene,
         "full application flat quad must bypass AFW on absent stereo");
-    check(completed.empty(),"flat quad must not invent stereo FPS identity");
+    check(!flat.original_scene&&completed.empty(),"flat quad must not invent stereo FPS identity");
     quad.eyeVisibility=XR_EYE_VISIBILITY_LEFT;
     check(prepare().reason==GenerationPrepareReason::missing_generation,"single-eye overlay is not a flat scene");
     quad.eyeVisibility=XR_EYE_VISIBILITY_BOTH;quad.subImage.imageRect.extent.width=1023;

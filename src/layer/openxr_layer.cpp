@@ -11611,6 +11611,7 @@ struct PreparedProjectionFrame {
     std::shared_ptr<const HeldAfwPair> held_afw_pair;
     std::optional<LukeAfwStartupCandidate> startup_candidate;
     std::uint64_t scene_serial{};
+    xrfg::SceneIdentity original_scene;
 };
 
 void attach_djules_outputs(PreparedProjectionFrame& prepared,
@@ -13696,6 +13697,10 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
             std::scoped_lock lock(session->gpu_mutex);
             read_origins();
         }
+        output.original_scene=xrfg::luke_original_scene_identity(
+            {SUCCEEDED(origin_results[0])?origin_tokens[0]:0,
+             SUCCEEDED(origin_results[1])?origin_tokens[1]:0},
+            {entries[0].logical_eye,entries[1].logical_eye});
         for(std::size_t index=0;index<entries.size();++index) {
             auto& entry=entries[index];const HRESULT result=origin_results[index];
             xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
@@ -16243,6 +16248,15 @@ XrResult layer_end_frame_impl(
             state->fps_overlay->set_afw_active(afw_produced.kind != PreparedGenerationKind::none);
         xrfg::embedded::report_afw_prepare(static_cast<std::int64_t>(afw_produced.reason));
         if (afw_produced.kind == PreparedGenerationKind::none) {
+            // These are the untouched application colors, not AFW output.
+            // Keep an already proven CPU identity; otherwise use BOTH exact
+            // CRCs read from this stereo pair solely for real-frame metrics.
+            if (afw_produced.original_scene &&
+                (!interface_stamp.scene_owner || !interface_stamp.scene_serial)) {
+                interface_stamp.scene_owner=afw_produced.original_scene.owner;
+                interface_stamp.scene_serial=afw_produced.original_scene.serial;
+                current_snapshot.interface_stamp=interface_stamp;
+            }
             const bool missing_afw_input =
                 afw_produced.reason == GenerationPrepareReason::missing_generation ||
                 afw_produced.reason == GenerationPrepareReason::missing_capture ||
