@@ -328,6 +328,15 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
     std::uint32_t color_origin_token,
     ID3D12CommandQueue* consumer_queue,
     ID3D12Device* canonical_consumer_device) noexcept;
+// Control-only reset preflight. These metadata queries do NOT return a guide,
+// attach old history or authorize AFW generation. Tokens must still be decoded.
+struct LukeNativeOriginMetadata {
+    std::uint64_t stream{},epoch{},publication{},serial{};
+};
+bool luke_native_stream_reset(std::uint64_t stream,std::uint64_t accepted_epoch,
+    ID3D12Device* device) noexcept;
+std::optional<LukeNativeOriginMetadata> luke_native_origin_metadata(
+    std::uint32_t token,ID3D12Device* device) noexcept;
 void report_dlss_motion_vector_status(DlssMotionVectorStatus status) noexcept;
 void report_dlss_motion_vector_use() noexcept;
 DlssMotionVectorStatistics dlss_motion_vector_statistics() noexcept;

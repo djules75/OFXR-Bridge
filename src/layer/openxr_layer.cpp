@@ -33,6 +33,7 @@
 #include "xrfg/luke_color_origin.hpp"
 #include "xrfg/luke_origin_loss_capture.hpp"
 #include "xrfg/luke_origin_continuity.hpp"
+#include "xrfg/luke_native_motion.hpp"
 #include "xrfg/luke_world_scale.hpp"
 #include "xrfg/embedded_control.hpp"
 #include "xrfg/ngx_guide_capture.hpp"
@@ -629,6 +630,7 @@ struct HeldAfwPair {
     std::array<HeldAfwResource, 2> resources;
     std::uint64_t revision{};
     std::uint64_t production_serial{};
+    std::array<xrfg::LukeNativeOriginMetadata,2> native_domains;
 };
 
 struct ProjectionViewReference {
@@ -971,6 +973,8 @@ struct SessionState {
     std::uint64_t luke_afw_last_evaluated_publication{};
     xrfg::LukeOriginLossCapture luke_origin_loss_capture; // diagnostic only; luke_guide_mutex
     xrfg::LukeOriginContinuityBank luke_origin_continuity; // frame_call_mutex; all Luke ingress
+    std::uint64_t luke_warmup_pair{},luke_warmup_started{};
+    bool luke_warmup_held{},luke_warmup_probe_poisoned{};
     bool luke_origin_resync_pending{}; // frame_call_mutex
     // Last fully published AFW stereo pair. OpenXR permits re-submission of
     // the last released swapchain image on an XR frame with no game render.
@@ -13500,6 +13504,41 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
 }
 
 
+struct LukeOriginHistoryProbe {
+    std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
+    xrfg::D3D12HistoryCaptureTicket capture;
+};
+// Only a native reset uses this preflight. Pin the two exact released captures
+// before reading CRCs, without acquiring or changing any XR destination image.
+[[nodiscard]] HRESULT read_luke_capture_origins(ID3D12CommandQueue* queue,
+    const std::array<LukeOriginHistoryProbe,2>& inputs,
+    std::array<std::uint32_t,2>& tokens,std::array<HRESULT,2>& results,
+    bool& poisoned) noexcept {
+    std::array<xrfg::D3D12HistoryConsumerLease,2> leases{};
+    std::array<Microsoft::WRL::ComPtr<ID3D12Resource>,2> resources;
+    std::array<Microsoft::WRL::ComPtr<ID3D12Fence>,2> producers;
+    unsigned acquired{};
+    const auto cancel=[&] {for(unsigned i=0;i<acquired;++i)inputs[i].history->cancel_consumer(leases[i]);};
+    if(!queue)return E_POINTER;
+    for(unsigned i=0;i<2;++i) {
+        if(!inputs[i].history) {cancel();return E_POINTER;}
+        const auto hr=inputs[i].history->acquire_consumer(inputs[i].capture,&leases[i],
+            resources[i].GetAddressOf(),producers[i].GetAddressOf());
+        if(FAILED(hr)) {cancel();return hr;}
+        ++acquired;
+        const auto wait=queue->Wait(producers[i].Get(),inputs[i].capture.fence_value);
+        if(FAILED(wait)) {cancel();return wait;}
+    }
+    xrfg::LukeColorOriginReadReceipt receipt;
+    const auto hr=xrfg::read_luke_color_origin_pair(queue,{resources[0].Get(),resources[1].Get()},
+        tokens,results,D3D12_RESOURCE_STATE_COMMON,250,nullptr,&receipt);
+    if(receipt.fence&&receipt.value) {
+        for(unsigned i=0;i<2;++i)if(FAILED(inputs[i].history->retire_consumer(leases[i],receipt.fence.Get(),receipt.value)))poisoned=true;
+    } else if(!receipt.submitted)cancel();
+    else poisoned=true; // Submitted without a fence: quarantine leases until session teardown.
+    return poisoned?E_FAIL:hr;
+}
+
 // V23189 deliberately owns the whole two-eye transaction. Both private
 // current images are populated first, AFW replaces only the peer, and only then
 // are the D3D11 OpenXR images published/released.  This prevents the first eye
@@ -13649,6 +13688,59 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
             output.reason = GenerationPrepareReason::missing_capture;
             release_deferred();
             return output;
+        }
+        // A cut resets native N-1/N-2 history, independently of barcode loss.
+        // Probe only while this accepted stream has a newer native epoch.
+        // A positive CRC naming native serial1..3 keeps the already published
+        // stereo pair; never synthesize from old-epoch depth or motion vectors.
+        if(!session->luke_warmup_probe_poisoned) {
+            std::shared_ptr<const HeldAfwPair> pair;
+            {std::scoped_lock lock(session->luke_guide_mutex);pair=session->luke_afw_last_pair;}
+            const bool reset=pair&&(xrfg::luke_native_stream_reset(pair->native_domains[0].stream,pair->native_domains[0].epoch,session->d3d12_device.Get()) ||
+                ((pair->native_domains[1].stream!=pair->native_domains[0].stream || pair->native_domains[1].epoch!=pair->native_domains[0].epoch)&&
+                 xrfg::luke_native_stream_reset(pair->native_domains[1].stream,pair->native_domains[1].epoch,session->d3d12_device.Get())));
+            if(reset) {
+                const auto now=GetTickCount64();
+                if(session->luke_warmup_pair!=pair->production_serial) {
+                    session->luke_warmup_pair=pair->production_serial;session->luke_warmup_started=0;
+                }
+                if(!session->luke_warmup_started ||
+                    (now>=session->luke_warmup_started&&now-session->luke_warmup_started<=250)) {
+                    std::array<LukeOriginHistoryProbe,2> inputs;
+                    for(unsigned i=0;i<2;++i) {
+                        std::scoped_lock lock(entries[i].swapchain->mutex);
+                        inputs[i].history=entries[i].swapchain->d3d12_history;
+                        if(entries[i].source_capture)inputs[i].capture=entries[i].source_capture->capture;
+                    }
+                    std::array<std::uint32_t,2> tokens{};std::array<HRESULT,2> results{};
+                    const auto probe=read_luke_capture_origins(session->d3d12_queue.Get(),inputs,tokens,results,
+                        session->luke_warmup_probe_poisoned);
+                    if(SUCCEEDED(probe))for(unsigned i=0;i<2;++i)if(entries[i].logical_eye==*released_eye&&
+                        SUCCEEDED(results[i])&&SUCCEEDED(results[1-i])&&tokens[1-i]&&
+                        std::uint64_t(tokens[1-i])+1==tokens[i]) {
+                        const auto origin=xrfg::luke_native_origin_metadata(tokens[i],session->d3d12_device.Get());
+                        const bool new_epoch=origin&&std::any_of(pair->native_domains.begin(),pair->native_domains.end(),[&](const auto& domain) {
+                            return origin->stream==domain.stream&&domain.epoch&&origin->epoch>domain.epoch;
+                        });
+                        if(new_epoch&&hold_last_pair()) {
+                            if(!session->luke_warmup_started)session->luke_warmup_started=now;
+                            bool native_warming=origin->serial<=3;
+                            if(auto guide=xrfg::resolve_luke_guide_token(tokens[i],session->d3d12_queue.Get(),session->d3d12_device.Get())) {
+                                xrfg::LukeNativeMotionConstants constants{};unsigned failure{};
+                                const bool ready=xrfg::luke_native_motion_constants(*guide,0,0,constants,failure);
+                                native_warming=!ready&&(failure==1||failure==3);
+                            }
+                            if(native_warming) {
+                                session->luke_warmup_held=true;
+                                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                                    origin->serial,1220,origin->publication,origin->epoch);
+                                return output;
+                            }
+                            output={}; // a genuinely ready new scene proceeds through normal admission
+                        }
+                    }
+                }
+            }
         }
         std::optional<float> xr_eye_baseline;
         {std::scoped_lock lock(session->mutex);xr_eye_baseline=session->luke_xr_eye_baseline;}
@@ -14127,6 +14219,11 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         pair->projection = snapshot;
         pair->revision = afw_status.revision;
         pair->production_serial = frame_serial;
+        pair->native_domains[source.logical_eye]={source.guide->stream,source.guide->epoch,source.guide->publication,source.guide->serial};
+        if(source.guide->previous_opposite_guide) {
+            const auto& peer=*source.guide->previous_opposite_guide;
+            pair->native_domains[1-source.logical_eye]={peer.stream,peer.epoch,peer.publication,peer.serial};
+        }
         for (std::size_t index = 0; index < entries.size(); ++index)
             pair->resources[index] = {mappings[index].application_swapchain,
                 entries[index].generation->current[kAfwScratchSlot].handle,
@@ -16353,6 +16450,13 @@ XrResult layer_end_frame_impl(
         if (state->fps_overlay)
             state->fps_overlay->set_afw_active(afw_produced.kind != PreparedGenerationKind::none);
         xrfg::embedded::report_afw_prepare(static_cast<std::int64_t>(afw_produced.reason));
+        if(state->luke_warmup_held&&afw_produced.kind!=PreparedGenerationKind::none&&!afw_produced.held_afw_pair) {
+            // A new scene must prime OFXR; it cannot interpolate with the old
+            // pair that was held while native camera history was rebuilding.
+            clear_generation_continuity(state);metadata_pairable=false;
+            state->luke_warmup_held=false;state->luke_warmup_started=0;
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,0,1221,frame_serial,0);
+        }
         if (afw_produced.kind == PreparedGenerationKind::none) {
             // These are the untouched application colors, not AFW output.
             // Keep an already proven CPU identity; otherwise use BOTH exact

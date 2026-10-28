@@ -842,6 +842,43 @@ void inline_afw_publication_gpu_test(const std::shared_ptr<SessionState>& state,
     if(pixel_serial==2){probe.reset();probe_history.reset();}
 }
 
+void origin_history_preflight_gpu_test(const std::shared_ptr<SessionState>& state) {
+    using Microsoft::WRL::ComPtr;
+    std::array<ComPtr<ID3D12Resource>,2> colors;
+    std::array<LukeOriginHistoryProbe,2> inputs;
+    ComPtr<ID3D12CommandAllocator> allocator;ComPtr<ID3D12GraphicsCommandList> list;
+    check(SUCCEEDED(state->d3d12_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&allocator))),"probe allocator");
+    check(SUCCEEDED(state->d3d12_device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),nullptr,IID_PPV_ARGS(&list))),"probe list");
+    xrfg::configure_luke_color_origin_extent(512,128);
+    for(unsigned i=0;i<2;++i) {
+        D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=512;d.Height=128;
+        d.DepthOrArraySize=d.MipLevels=d.SampleDesc.Count=1;d.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+        check(SUCCEEDED(state->d3d12_device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,
+            D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&colors[i]))),"probe color");
+        check(SUCCEEDED(xrfg::mark_luke_color_origin(list.Get(),colors[i].Get(),111+i,D3D12_RESOURCE_STATE_COMMON)),"probe actual marker");
+    }
+    check(SUCCEEDED(list->Close()),"probe close");ID3D12CommandList* lists[]{list.Get()};state->d3d12_queue->ExecuteCommandLists(1,lists);
+    for(unsigned i=0;i<2;++i) {
+        inputs[i].history=std::make_shared<xrfg::D3D12SwapchainHistory>();
+        ID3D12Resource* sources[]{colors[i].Get()};
+        check(SUCCEEDED(inputs[i].history->initialize(state->d3d12_device.Get(),state->d3d12_queue.Get(),sources,D3D12_RESOURCE_STATE_COMMON)),"probe history init");
+        check(SUCCEEDED(inputs[i].history->capture(0,&inputs[i].capture))&&SUCCEEDED(inputs[i].history->commit(inputs[i].capture)),"probe frozen capture");
+    }
+    std::array<std::uint32_t,2> tokens{};std::array<HRESULT,2> results{};bool poisoned{};
+    check(SUCCEEDED(read_luke_capture_origins(state->d3d12_queue.Get(),inputs,tokens,results,poisoned))&&
+        !poisoned&&tokens[0]==111&&tokens[1]==112,"preflight did not read exact leased source tokens");
+    for(unsigned i=0;i<2;++i) {
+        xrfg::D3D12HistoryConsumerLease lease;ComPtr<ID3D12Resource> image;ComPtr<ID3D12Fence> fence;
+        check(SUCCEEDED(inputs[i].history->acquire_consumer(inputs[i].capture,&lease,image.GetAddressOf(),fence.GetAddressOf())),
+            "completed CRC probe left a lease busy before ordinary AFW source copy");
+        inputs[i].history->cancel_consumer(lease);
+        check(SUCCEEDED(inputs[i].history->wait_for_idle()),"probe retirement");
+    }
+    xrfg::configure_luke_color_origin_extent(256,128);
+    std::cout<<"Native reset preflight: exact two source CRCs, producer waits and reusable retired history leases PASS\n";
+}
+
 void held_afw_pair_gpu_test(const std::shared_ptr<SessionState>& state,
     const XrFrameEndInfo& end, const ProjectionSnapshot& snapshot,
     const std::vector<ProjectionResourceMapping>& mappings, unsigned pixel_serial) {
@@ -860,6 +897,7 @@ void held_afw_pair_gpu_test(const std::shared_ptr<SessionState>& state,
     state->graphics_binding_capabilities = 8;
     state->luke_afw = std::make_shared<xrfg::LukeAfwSynthesizer>();
     state->luke_afw_last_pair = pair;
+    if(pixel_serial==1)origin_history_preflight_gpu_test(state);
     std::vector<ProjectionResourceDestination> identities;
     for (const auto& mapping : mappings)
         identities.push_back({mapping.application_swapchain, mapping.application_swapchain});

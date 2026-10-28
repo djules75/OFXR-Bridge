@@ -1942,6 +1942,32 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
     }
 }
 
+bool luke_native_stream_reset(std::uint64_t stream,std::uint64_t accepted_epoch,
+    ID3D12Device* device) noexcept {
+    try {
+        if(!g_tracking_enabled.load(std::memory_order_acquire)||!stream||!accepted_epoch||!device)return false;
+        auto& state=registry();std::scoped_lock lock(state.mutex);
+        const auto found=state.streams.find(stream);
+        if(found==state.streams.end())return false;
+        const auto& s=found->second;
+        return s.latest&&s.latest->camera_frame_token_valid&&s.latest->epoch>accepted_epoch&&
+            same_identity(s.latest->motion_snapshot_device.Get(),device);
+    }catch(...){return false;}
+}
+std::optional<LukeNativeOriginMetadata> luke_native_origin_metadata(
+    std::uint32_t token,ID3D12Device* device) noexcept {
+    try {
+        if(!g_tracking_enabled.load(std::memory_order_acquire)||!token||!device)return {};
+        auto& state=registry();std::scoped_lock lock(state.mutex);
+        std::optional<LukeNativeOriginMetadata> result;
+        for(const auto& [id,s]:state.streams)
+            for(const auto& f:s.luke_origin_history)if(f->color_origin_token==token) {
+                if(result||!f->camera_frame_token_valid||!same_identity(f->motion_snapshot_device.Get(),device))return {};
+                result=LukeNativeOriginMetadata{id,f->epoch,f->publication,f->serial};
+            }
+        return result;
+    }catch(...){return {};}
+}
 void report_dlss_motion_vector_status(DlssMotionVectorStatus status) noexcept {
     try {
         auto& state = registry();

@@ -1949,6 +1949,10 @@ void test_protected_guide_snapshots(D3D12WarpFixture& fixture) {
     require_readback_matches(fixture, recycled->motion_vectors.Get(), make_pattern(221), "recycled MV", snapshot_state);
     held.clear();
     const auto reset = publish(10, true);
+    const auto reset_metadata=xrfg::luke_native_origin_metadata(reset->color_origin_token,fixture.device());
+    require(reset_metadata&&reset_metadata->epoch==reset->epoch&&reset_metadata->serial==1&&
+        xrfg::luke_native_stream_reset(reset->stream,recycled->epoch,fixture.device()),
+        "ordinary non-GTA native reset preflight remained title-restricted");
     require(reset->publication == recycled->publication + 1 && reset->serial == 1 &&
         reset->color_origin_token > recycled->color_origin_token &&
         !xrfg::resolve_luke_guide_token(recycled->color_origin_token, fixture.queue(), fixture.device()) &&
@@ -2328,6 +2332,16 @@ void test_luke_interleaved_origins(D3D12WarpFixture& fixture, unsigned native_sp
         const auto reset25=publish(25,0,true);
         require(reset25->epoch==old23->epoch+1 && reset25->serial==1,
             "GTA fixture did not reproduce one native eye reset before delayed XR consumption");
+        require(xrfg::luke_native_stream_reset(old23->stream,old23->epoch,fixture.device()) &&
+            !xrfg::luke_native_stream_reset(old23->stream,reset25->epoch,fixture.device()) &&
+            !xrfg::luke_native_stream_reset(old23->stream,old23->epoch,nullptr),
+            "reset control preflight lost its exact accepted owner/epoch");
+        const auto metadata=xrfg::luke_native_origin_metadata(reset25->color_origin_token,fixture.device());
+        require(metadata&&metadata->stream==reset25->stream&&metadata->epoch==reset25->epoch&&
+            metadata->publication==reset25->publication&&metadata->serial==1&&
+            !xrfg::luke_native_origin_metadata(0,fixture.device())&&
+            !xrfg::luke_native_origin_metadata(reset25->color_origin_token,nullptr),
+            "reset metadata guessed a key or admitted a foreign consumer");
         const auto delayed24=xrfg::resolve_luke_guide_token(token24,fixture.queue(),fixture.device());
         require(delayed24 && delayed24->publication==old24->publication && delayed24->previous_opposite_guide &&
             delayed24->previous_opposite_guide->publication==old23->publication && delayed24->previous_same_guide &&

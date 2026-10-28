@@ -353,7 +353,9 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
 namespace {
 HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
     std::uint32_t* tokens, HRESULT* results, unsigned count,
-    D3D12_RESOURCE_STATES state, DWORD timeout_ms, bool* nonblack=nullptr) noexcept {
+    D3D12_RESOURCE_STATES state, DWORD timeout_ms, bool* nonblack=nullptr,
+    LukeColorOriginReadReceipt* receipt=nullptr) noexcept {
+    if(receipt)*receipt={};
     struct Plan {
         D3D12_RESOURCE_DESC original{};
         LukeColorOriginLayout layout{};
@@ -462,10 +464,13 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
         }
         result=reader->list->Close();
         if (FAILED(result)) return finish(result);
-        ID3D12CommandList* lists[]{reader->list.Get()}; queue->ExecuteCommandLists(1,lists);
+        ID3D12CommandList* lists[]{reader->list.Get()};
+        if(receipt)receipt->submitted=true;
+        queue->ExecuteCommandLists(1,lists);
         const auto value=reader->next_fence++;
         result=queue->Signal(reader->fence.Get(),value);
         if (FAILED(result)) { reader->poisoned=true; return finish(result); }
+        if(receipt) {receipt->fence=reader->fence;receipt->value=value;}
         reader->last_fence=value;
         phase(126,static_cast<HRESULT>(valid_count)); // Number of colors in this submission.
         phase(123,result);
@@ -577,8 +582,8 @@ HRESULT read_luke_color_origin(ID3D12CommandQueue* queue, ID3D12Resource* color,
 HRESULT read_luke_color_origin_pair(ID3D12CommandQueue* queue,
     const std::array<ID3D12Resource*,2>& colors, std::array<std::uint32_t,2>& tokens,
     std::array<HRESULT,2>& results, D3D12_RESOURCE_STATES state, DWORD timeout_ms,
-    std::array<bool,2>* nonblack) noexcept {
+    std::array<bool,2>* nonblack, LukeColorOriginReadReceipt* receipt) noexcept {
     return read_origins(queue,colors.data(),tokens.data(),results.data(),2,state,timeout_ms,
-        nonblack?nonblack->data():nullptr);
+        nonblack?nonblack->data():nullptr,receipt);
 }
 } // namespace xrfg

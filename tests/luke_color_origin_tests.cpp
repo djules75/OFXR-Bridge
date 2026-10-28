@@ -400,11 +400,15 @@ void gpu_tests() {
     gpu.submit();
     std::array<std::uint32_t,2> pair_tokens{};
     std::array<HRESULT,2> pair_results{};
+    xrfg::LukeColorOriginReadReceipt pair_receipt;
     const auto read_pair=[&](std::array<ID3D12Resource*,2> colors,DWORD timeout=5000) {
         return xrfg::read_luke_color_origin_pair(gpu.queue.Get(),colors,pair_tokens,pair_results,
-            D3D12_RESOURCE_STATE_COMMON,timeout);
+            D3D12_RESOURCE_STATE_COMMON,timeout,nullptr,&pair_receipt);
     };
     check(read_pair({pair_a.Get(),pair_b.Get()}),"paired transport with different row pitches");
+    require(pair_receipt.submitted&&pair_receipt.fence&&pair_receipt.value&&
+        pair_receipt.fence->GetCompletedValue()>=pair_receipt.value,
+        "completed origin read did not return its exact GPU lease-retirement receipt");
     require(pair_results[0]==S_OK && pair_results[1]==S_OK &&
         pair_tokens[0]==token_a && pair_tokens[1]==token_b,"paired eyes merged tokens/footprints");
     check(read_pair({pair_b.Get(),pair_a.Get()}),"reversed paired transport");
@@ -428,6 +432,9 @@ void gpu_tests() {
         pair_tokens[1]==token_b,"invalid peer suppressed/contaminated valid eye");
     check(gpu.queue->Wait(gate.Get(),2),"gate pair reader");
     const auto pair_stalled=read_pair({pair_b.Get(),pair_b.Get()},5);
+    require(pair_receipt.submitted&&pair_receipt.fence&&pair_receipt.value&&
+        pair_receipt.fence->GetCompletedValue()<pair_receipt.value,
+        "timed-out origin read lost its pending fence or reused its source lease early");
     check(gate->Signal(2),"release pair reader gate");
     require(pair_stalled==HRESULT_FROM_WIN32(WAIT_TIMEOUT) &&
         pair_results[0]==pair_stalled && pair_results[1]==pair_stalled &&
