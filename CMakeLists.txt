@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.682.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.709.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -144,6 +144,14 @@ if(XRFG_BUILD_TESTS)
     target_include_directories(xrfg_luke_counter_probe_tests PRIVATE include)
     target_compile_features(xrfg_luke_counter_probe_tests PRIVATE cxx_std_20)
     add_test(NAME xrfg_luke_counter_probe_tests COMMAND xrfg_luke_counter_probe_tests)
+    add_executable(xrfg_gta_headlock_tests tests/luke_gta_headlock_tests.cpp)
+    target_include_directories(xrfg_gta_headlock_tests PRIVATE include)
+    target_compile_features(xrfg_gta_headlock_tests PRIVATE cxx_std_20)
+    add_test(NAME xrfg_gta_headlock_tests COMMAND xrfg_gta_headlock_tests)
+    add_executable(xrfg_gta_eye_reference_tests tests/luke_gta_eye_reference_tests.cpp)
+    target_include_directories(xrfg_gta_eye_reference_tests PRIVATE include)
+    target_compile_features(xrfg_gta_eye_reference_tests PRIVATE cxx_std_20)
+    add_test(NAME xrfg_gta_eye_reference_tests COMMAND xrfg_gta_eye_reference_tests)
     add_executable(xrfg_core_tests tests/core_tests.cpp)
     target_link_libraries(xrfg_core_tests PRIVATE xrfg_core)
     if(MSVC)
@@ -1495,6 +1503,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         endif()
 
         add_test(NAME xrfg_luke_protected_guides COMMAND xrfg_d3d12_history_tests protected-guides)
+        add_test(NAME xrfg_gta_reset_origins COMMAND ${CMAKE_COMMAND}
+            "-DTEST_EXE=$<TARGET_FILE:xrfg_d3d12_history_tests>"
+            "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/gta-reset-origins"
+            -DTEST_MODE=gta-reset-origins
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gta_origin_test.cmake")
+        set_tests_properties(xrfg_gta_reset_origins PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+
 
 
 
@@ -1783,6 +1799,47 @@ add_executable(xrfg_luke_kcd_quality_tests tests/luke_kcd_quality_tests.cpp)
       "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/gta-native-quality" -DTITLE=GTAVE
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
   set_tests_properties(xrfg_luke_gta_native_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+  add_test(NAME xrfg_luke_gta_headlock_quality COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/gta-headlock-quality" -DTITLE=GTAVE
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_gta_headlock_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE ENVIRONMENT "XRFG_TEST_GTA_HEADLOCK=1")
+  add_test(NAME xrfg_luke_gta_current_scene_quality COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/xrfg_luke_gta_current_scene_quality" -DTITLE=GTAVE -DSHADING_RATE=0
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_gta_current_scene_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+      ENVIRONMENT "XRFG_TEST_GTA_HEADLOCK=1;XRFG_TEST_GTA_CURRENT_SCENE=1")
+  add_test(NAME xrfg_luke_gta_current_scene_half_quality COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/xrfg_luke_gta_current_scene_half_quality" -DTITLE=GTAVE -DSHADING_RATE=4
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_gta_current_scene_half_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+      ENVIRONMENT "XRFG_TEST_GTA_HEADLOCK=1;XRFG_TEST_GTA_CURRENT_SCENE=1")
+  add_test(NAME xrfg_luke_gta_eye_reference_quality COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/xrfg_luke_gta_eye_reference_quality" -DTITLE=GTAVE -DSHADING_RATE=0
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_gta_eye_reference_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+      ENVIRONMENT "XRFG_TEST_GTA_HEADLOCK=1;XRFG_TEST_GTA_CURRENT_SCENE=1;XRFG_TEST_GTA_EYE_REFERENCE=1")
+  add_test(NAME xrfg_luke_gta_eye_reference_half_quality COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/xrfg_luke_gta_eye_reference_half_quality" -DTITLE=GTAVE -DSHADING_RATE=4
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_gta_eye_reference_half_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+      ENVIRONMENT "XRFG_TEST_GTA_HEADLOCK=1;XRFG_TEST_GTA_CURRENT_SCENE=1;XRFG_TEST_GTA_EYE_REFERENCE=1")
+  add_test(NAME xrfg_luke_gta_calibration_recovery_quality COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/xrfg_luke_gta_calibration_recovery_quality" -DTITLE=GTAVE -DSHADING_RATE=0
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_gta_calibration_recovery_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+      ENVIRONMENT "XRFG_TEST_GTA_HEADLOCK=1;XRFG_TEST_GTA_CURRENT_SCENE=1;XRFG_TEST_GTA_CALIBRATION_RECOVERY=1")
+  add_test(NAME xrfg_luke_gta_calibration_recovery_half_quality COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
+      "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/xrfg_luke_gta_calibration_recovery_half_quality" -DTITLE=GTAVE -DSHADING_RATE=4
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_luke_kcd_quality.cmake")
+  set_tests_properties(xrfg_luke_gta_calibration_recovery_half_quality PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+      ENVIRONMENT "XRFG_TEST_GTA_HEADLOCK=1;XRFG_TEST_GTA_CURRENT_SCENE=1;XRFG_TEST_GTA_CALIBRATION_RECOVERY=1")
   add_test(NAME xrfg_luke_dead_space_native_quality COMMAND "${CMAKE_COMMAND}"
       "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
       "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/dead-space-native-quality" -DTITLE=DS2023
@@ -1807,4 +1864,12 @@ add_executable(xrfg_luke_kcd_quality_tests tests/luke_kcd_quality_tests.cpp)
        PASS_REGULAR_EXPRESSION "KCD full quality:")
   endif()
  endif()
+endif()
+
+if(XRFG_BUILD_TESTS AND TARGET xrfg_three_slot_director_tests)
+  add_test(NAME xrfg_gta_flat_scene COMMAND "${CMAKE_COMMAND}"
+    "-DTEST_EXE=$<TARGET_FILE:xrfg_three_slot_director_tests>"
+    "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/gta-flat-scene" -DTEST_MODE=gta-flat-scene
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gta_origin_test.cmake")
+  set_tests_properties(xrfg_gta_flat_scene PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endif()

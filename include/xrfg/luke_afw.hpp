@@ -40,7 +40,8 @@ public:
         const D3D12ReprojectionView& destination_view,
         std::uint32_t source_eye,
         float xr_eye_baseline,
-        const embedded::AfwSettings& settings) noexcept;
+        const embedded::AfwSettings& settings,
+        bool native_peer_camera=false) noexcept;
 
     [[nodiscard]] bool initialized() const noexcept;
 

@@ -395,7 +395,25 @@ NVSDK_NGX_Result actual_crimson_public_forwarder(ID3D12GraphicsCommandList* list
         c.injector_motion,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     actual_fixture_copy(list,c.public_depth,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
         c.injector_depth,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if(test_gta_enhanced_production_identity) {
+        auto& modified=*static_cast<DispatchParameters*>(const_cast<NVSDK_NGX_Parameter*>(parameters));
+        modified.motion=c.injector_motion;modified.depth=c.injector_depth;
+        modified.output=c.injector_output;
+    }
     const auto result=evaluate<0>(list,handle,parameters,callback);
+    if(test_gta_enhanced_production_identity&&NVSDK_NGX_SUCCEED(result)) {
+        // GTA's actual public fixture delegates directly to the typed body.
+        // Inspect its native target here, before the wrapper's final composite.
+        D3D12_RESOURCE_BARRIER barrier{};barrier.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition={c.injector_output,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE};
+        list->ResourceBarrier(1,&barrier);
+        D3D12_TEXTURE_COPY_LOCATION from{},to{};from.pResource=c.injector_output;
+        from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;to.pResource=c.before_public_readback.Get();
+        to.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;to.PlacedFootprint=c.before_public_footprint;
+        list->CopyTextureRegion(&to,0,0,0,&from,nullptr);
+        std::swap(barrier.Transition.StateBefore,barrier.Transition.StateAfter);list->ResourceBarrier(1,&barrier);
+    }
     if(NVSDK_NGX_SUCCEED(result))actual_fixture_copy(list,c.public_output,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,c.composited_color,D3D12_RESOURCE_STATE_COPY_SOURCE);
     return result;
@@ -621,6 +639,8 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
     bool scene_camera=false,SelectLukeExecutionQueue selector=nullptr,bool outlaws=false,bool dead_space=false,bool gta=false) {
     const auto require=[](bool ok,const char* message){if(!ok)throw std::runtime_error(message);};
     const auto check=[&](HRESULT result,const char* message){require(SUCCEEDED(result),message);};
+    const bool original_public_guides=test_crimson_native_motion||gta;
+    const bool final_public_color=original_public_guides||gta;
     try {
         const auto vr_module=LoadLibraryW(realvr),sl_module=LoadLibraryW(streamline);
         native_ingress::refresh_luke_detection(); // mirror the production XR/session entry
@@ -730,7 +750,7 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             require(!d3d_owner::same(foreign_device.Get(),device.Get()),"foreign hardware owner equals WARP");
             check(foreign_device->CreateCommandQueue(&qd,IID_PPV_ARGS(&foreign_queue)),"foreign actual consumer queue");
         }
-        if(test_crimson_native_motion||dead_space)check(device->CreateCommandQueue(&qd,IID_PPV_ARGS(&execution)),
+        if(final_public_color||dead_space)check(device->CreateCommandQueue(&qd,IID_PPV_ARGS(&execution)),
             "Crimson independent snapshot read queue");
         auto* consumer=execution?execution.Get():queue.Get();
 
@@ -748,7 +768,7 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         auto depth=texture(7,3,DXGI_FORMAT_R32_FLOAT,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         ComPtr<ID3D12Resource> injector_motion,injector_depth,injector_output,composited_color;
-        if(scene_camera||outlaws||test_crimson_native_motion) {
+        if(scene_camera||outlaws||final_public_color) {
             injector_motion=texture(7,3,DXGI_FORMAT_R32G32_FLOAT,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             injector_depth=texture(7,3,DXGI_FORMAT_R32_FLOAT,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             injector_output=texture(512,32,DXGI_FORMAT_R8G8B8A8_UNORM,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -773,7 +793,7 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             "actual native SR creation");
         parameters.present=true;
         const auto direct_identity=state().features.at(handle).identity;
-        if(test_crimson_native_motion) {
+        if(final_public_color) {
             state().modules[0].typed_implementation=true;
             state().modules[0].evaluate=state().modules[3].evaluate;
             state().modules[3].evaluate=&actual_crimson_public_forwarder;
@@ -827,7 +847,7 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
         context.public_output=color.Get();context.public_motion=motion.Get();context.public_depth=depth.Get();
         context.injector_output=injector_output.Get();context.injector_motion=injector_motion.Get();
         context.injector_depth=injector_depth.Get();context.composited_color=composited_color.Get();
-        if(outlaws) {
+        if(outlaws||gta) {
             const auto desc=injector_output->GetDesc();
             device->GetCopyableFootprints(&desc,0,1,0,&context.before_public_footprint,nullptr,nullptr,&context.before_public_bytes);
             D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_READBACK;
@@ -1014,7 +1034,7 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             const auto old_stream=retained.empty()?0:retained.back()->stream;
             const auto old_token=retained.empty()?0:retained.back()->color_origin_token;
             std::array<ComPtr<ID3D12Resource>,5> uploads;
-            for(unsigned index=0;index<(scene_camera||outlaws||test_crimson_native_motion?5u:2u);++index) {
+            for(unsigned index=0;index<(scene_camera||outlaws||final_public_color?5u:2u);++index) {
                 auto* resource=index==0?motion.Get():index==1?depth.Get():index==2?injector_motion.Get():
                     index==3?injector_depth.Get():composited_color.Get();
                 const auto desc=resource->GetDesc();
@@ -1066,6 +1086,11 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
                 context.expect_capture=n!=12;
                 parameters.motion=n==12?nullptr:motion.Get();
             }
+            if(gta) {
+                // A new caller production supplies its own public bindings;
+                // do not reuse the previous wrapper's in-place mutation.
+                parameters.output=color.Get();parameters.motion=motion.Get();parameters.depth=depth.Get();
+            }
             if(scene_camera||outlaws) {
                 parameters.output=color.Get();parameters.depth=depth.Get();parameters.input_color=color.Get();
                 parameters.reset=0;parameters.scale_x=parameters.scale_y=1;
@@ -1095,7 +1120,7 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             require(set_constants(constants,n,0)&&evaluate_sl(reinterpret_cast<sl1::CommandBuffer*>(list.Get()),sl1::eFeatureDLSS,n,0),
                 "actual capture original Streamline results");
             if(context.frame && !scene_camera)require(
-                context.frame->raw_motion_native_span==((dead_space || gta || test_ghost_native_motion ||
+                context.frame->raw_motion_native_span==((dead_space || test_ghost_native_motion ||
                     test_horizon_native_motion)?2u:1u),
                 "actual title/runtime capture used the wrong native motion interval");
             const unsigned successful=n>=recycle_production?n-recycle_production+1:
@@ -1178,18 +1203,23 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
             }
             check(marker_result,"actual capture completed final public color marker read");
             require(token==context.frame->color_origin_token,"actual capture color marker did not carry its exact publication");
-            if(outlaws) {
+            if(outlaws||gta) {
                 void* data{};const D3D12_RANGE range{0,static_cast<SIZE_T>(context.before_public_bytes)};
                 check(context.before_public_readback->Map(0,&range,&data),"Outlaws private color before public completion");
-                std::array<float,512> row{};
+                std::array<float,512> row{};bool native_marker=false;
                 for(unsigned y=0;y<32;++y) {
                     for(unsigned x=0;x<row.size();++x)row[x]=luke_origin_luma(
                         static_cast<const std::byte*>(data)+context.before_public_footprint.Offset+
                         y*context.before_public_footprint.Footprint.RowPitch+x*4,DXGI_FORMAT_R8G8B8A8_UNORM);
                     const auto decoded=decode_luke_origin_row(row);
-                    require(!decoded.token&&!decoded.ambiguous,
+                    if(gta) {
+                        require(!decoded.ambiguous&&(!decoded.token||decoded.token==context.frame->color_origin_token),
+                            "GTA native output carries a different production from original N1 guides");
+                        native_marker|=decoded.token!=0;
+                    } else require(!decoded.token&&!decoded.ambiguous,
                         "Outlaws native origin marker became visible before original public wrapper completion");
                 }
+                if(gta)require(native_marker,"GTA actual native color lost original N1 identity before wrapper copyback");
                 const D3D12_RANGE no_write{0,0};context.before_public_readback->Unmap(0,&no_write);
             }
             if(context.recycle_on_release) {
@@ -1224,9 +1254,9 @@ int run_actual_ngx_capture_pipeline(const wchar_t* realvr,const wchar_t* streaml
                     verify_private_snapshots(joined);
                     if(scene_camera||outlaws)verify_final_public_color(n);
                 }
-                if(test_crimson_native_motion||dead_space) {
+                if(final_public_color||dead_space) {
                     verify_private_snapshots(joined);
-                    if(test_crimson_native_motion)verify_final_public_color(n);
+                    if(final_public_color)verify_final_public_color(n);
                 }
                 if(logical_family) {
                     LukeNativeMotionConstants corrected{};unsigned why{};

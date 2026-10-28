@@ -8,6 +8,7 @@
 #include "xrfg/luke_guide_window.hpp"
 #include "xrfg/luke_physical_projection.hpp"
 #include "xrfg/luke_pose_camera.hpp"
+#include "xrfg/luke_gta_eye_reference.hpp"
 #include "xrfg/luke_camera_origin.hpp"
 #include "xrfg/luke_world_scale.hpp"
 #include "xrfg/luke_world_scale_config.hpp"
@@ -307,7 +308,7 @@ bool camera_data(const D3D12ReprojectionView& source,
     const DlssMotionVectorFrame& guide, std::uint32_t source_eye,
     float world_scale, float xr_eye_baseline, float units_per_metre,
     const LukeCameraOrigin& origin, LukeProducerCameraAxes axes,
-    CameraData& output) noexcept {
+    CameraData& output,bool native_peer_camera=false) noexcept {
     output = {};
     if (!guide.camera_data_valid || !guide.camera_matrices_valid ||
         source_eye > 1) return false;
@@ -355,10 +356,40 @@ bool camera_data(const D3D12ReprojectionView& source,
         source_position[1] + direction * guide.camera_right[1] * game_baseline,
         source_position[2] + direction * guide.camera_right[2] * game_baseline};
     LukeCameraBasis destination_basis{};
-    if (!luke_destination_view_camera_basis(source.pose.orientation,
-            destination.pose.orientation, source_basis,
-            guide.camera_view_to_clip[11], destination_basis,
-            view_x_sign, view_y_sign)) return false;
+    if(native_peer_camera) {
+        // The peer receipt owns its projection and submitted AER head pose,
+        // not the gameplay-camera time of the generated view. Keep the scene
+        // at this source production; retaining the old scene camera makes the
+        // static generated background effectively repeat the old real peer.
+        const auto& peer=guide.previous_opposite_guide;
+        if(!guide.gta_headlock || !guide.gta_headlock->active() || !peer ||
+            peer->stream!=guide.stream || peer->epoch!=guide.epoch ||
+            peer->publication+1!=guide.publication || !peer->camera_data_valid ||
+            !peer->camera_matrices_valid || peer->output_width!=guide.output_width ||
+            peer->output_height!=guide.output_height ||
+            !luke_view_camera_basis({peer->camera_right,peer->camera_up,peer->camera_forward},
+                peer->camera_view_to_clip[11],destination_basis,axes))return false;
+        if(!std::all_of(peer->camera_position.begin(),peer->camera_position.end(),
+            [](float v){return std::isfinite(v);}))return false;
+        destination_projection=peer->camera_view_to_clip;
+        if(!luke_physical_eye_projection(destination_projection,
+            destination.fov.angle_left,destination.fov.angle_right,
+            destination.fov.angle_up,destination.fov.angle_down))return false;
+        std::copy(destination_projection.begin(),destination_projection.end(),
+            output.destination_view_to_clip.values);
+        if(!invert(output.destination_view_to_clip,output.destination_clip_to_view))return false;
+    }
+    if(!luke_destination_view_camera_basis(source.pose.orientation,
+            destination.pose.orientation,source_basis,guide.camera_view_to_clip[11],
+            destination_basis,view_x_sign,view_y_sign))return false;
+    if(native_peer_camera && source_eye==1) {
+        // GTA's locked producer anchors the right eye at zero. Its left-eye
+        // offset follows the left head orientation, not the newer right one.
+        // Keep the existing measured distance, with that observed rig direction.
+        for(unsigned axis=0;axis<3;++axis)
+            destination_position[axis]=source_position[axis]+
+                direction*destination_basis[0][axis]*game_baseline;
+    }
     view_to_world(destination_basis[0], destination_basis[1],
         destination_basis[2], destination_position,
         output.destination_view_to_world);
@@ -460,6 +491,8 @@ struct LukeAfwSynthesizer::Impl {
     bool quality_can_scale{};
     int active_shading_rate{-1}; // changes replace retired provider state, never mutate it
     std::array<CameraData, 2> previous_source_camera{};
+    std::array<Quaternion,2> previous_source_xr_orientation{};
+    std::array<bool,2> previous_source_headlocked{};
     std::uint64_t last_evaluated_publication{};
     std::array<std::uint64_t,4> paired_unit_identity{};
     unsigned last_evaluated_eye{2};
@@ -1009,7 +1042,7 @@ struct LukeAfwSynthesizer::Impl {
 
         D3D12_DESCRIPTOR_HEAP_DESC descriptor_description{};
         descriptor_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        descriptor_description.NumDescriptors = 3;
+        descriptor_description.NumDescriptors = 5;
         descriptor_description.Flags =
             D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> descriptors;
@@ -1017,27 +1050,17 @@ struct LukeAfwSynthesizer::Impl {
             IID_PPV_ARGS(descriptors.GetAddressOf()));
         if (FAILED(result)) return result;
 
-        std::array<D3D12_DESCRIPTOR_RANGE, 3> ranges{};
-        std::array<D3D12_ROOT_PARAMETER, 4> parameters{};
-        for (UINT index = 0; index < ranges.size(); ++index) {
-            ranges[index].RangeType = index == 2
-                ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV
-                : D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-            ranges[index].NumDescriptors = 1;
-            ranges[index].BaseShaderRegister = index == 1 ? 1 : 0;
-            ranges[index].OffsetInDescriptorsFromTableStart = 0;
-            parameters[index].ParameterType =
-                D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-            parameters[index].DescriptorTable.NumDescriptorRanges = 1;
-            parameters[index].DescriptorTable.pDescriptorRanges =
-                &ranges[index];
-            parameters[index].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        std::array<D3D12_DESCRIPTOR_RANGE,2> ranges{};
+        std::array<D3D12_ROOT_PARAMETER,3> parameters{};
+        for(UINT index=0;index<2;++index) {
+            ranges[index].RangeType=index?D3D12_DESCRIPTOR_RANGE_TYPE_UAV:D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            ranges[index].NumDescriptors=index?1:4;
+            parameters[index].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            parameters[index].DescriptorTable={1,&ranges[index]};
         }
-        parameters[3].ParameterType =
-            D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        parameters[3].Constants.ShaderRegister = 0;
-        parameters[3].Constants.Num32BitValues = 60;
-        parameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        parameters[2].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        parameters[2].Constants.ShaderRegister=0;
+        parameters[2].Constants.Num32BitValues=60;
         D3D12_ROOT_SIGNATURE_DESC root_description{};
         root_description.NumParameters =
             static_cast<UINT>(parameters.size());
@@ -1067,7 +1090,7 @@ struct LukeAfwSynthesizer::Impl {
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         D3D12_CPU_DESCRIPTOR_HANDLE cpu =
             descriptors->GetCPUDescriptorHandleForHeapStart();
-        cpu.ptr += 2 * descriptor_size;
+        cpu.ptr += 4 * descriptor_size;
         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
         uav.Format = kLukeAfwMotionFormat;
         uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
@@ -1097,17 +1120,28 @@ struct LukeAfwSynthesizer::Impl {
             width != depth_width || height != depth_height)
             return E_INVALIDARG;
 
-        for(unsigned index=0; index<2; ++index) {
-            ID3D12Resource* field=index==0?guide.motion_vectors.Get():depth.texture;
+        const bool extend=constants.padding[1]==1.F;
+        const auto* middle=extend?guide.previous_opposite_guide.get():nullptr;
+        if(extend && (!middle || !middle->motion_vectors || !middle->depth))return E_INVALIDARG;
+        for(unsigned index=0;index<4;++index) {
+            ID3D12Resource* field=index==0?guide.motion_vectors.Get():index==1?depth.texture:
+                index==2?(extend?middle->motion_vectors.Get():guide.motion_vectors.Get()):
+                (extend?middle->depth.Get():depth.texture);
             D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-            srv.Format=index==0?luke_motion_srv_format(field->GetDesc().Format):DXGI_FORMAT_R32_FLOAT;
-            if(srv.Format==DXGI_FORMAT_UNKNOWN) return DXGI_ERROR_UNSUPPORTED;
+            srv.Format=index==0||index==2?luke_motion_srv_format(field->GetDesc().Format):
+                index==3&&extend?luke_depth_format(field->GetDesc().Format).srv:DXGI_FORMAT_R32_FLOAT;
+            if(srv.Format==DXGI_FORMAT_UNKNOWN)return DXGI_ERROR_UNSUPPORTED;
             srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
             srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             srv.Texture2D.MipLevels=1;
             auto cpu=composed_motion_descriptors->GetCPUDescriptorHandleForHeapStart();
             cpu.ptr+=index*composed_motion_descriptor_size;
             device->CreateShaderResourceView(field,&srv,cpu);
+        }
+        if(extend && middle->producer_fence && middle->producer_fence_value &&
+            middle->producer_fence->GetCompletedValue()<middle->producer_fence_value) {
+            const auto waited=queue->Wait(middle->producer_fence.Get(),middle->producer_fence_value);
+            if(FAILED(waited))return waited;
         }
         const HRESULT descriptor_status=device->GetDeviceRemovedReason();
         if(FAILED(descriptor_status)) return descriptor_status;
@@ -1123,6 +1157,15 @@ struct LukeAfwSynthesizer::Impl {
             barrier.Transition.StateAfter = after;
             return barrier;
         };
+        std::array<D3D12_RESOURCE_BARRIER,2> history_barriers{};
+        UINT history_barrier_count{};
+        if(extend) {
+            if(middle->resource_state!=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
+                history_barriers[history_barrier_count++]=transition(middle->motion_vectors.Get(),middle->resource_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            if(middle->depth_resource_state!=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
+                history_barriers[history_barrier_count++]=transition(middle->depth.Get(),middle->depth_resource_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            if(history_barrier_count)list->ResourceBarrier(history_barrier_count,history_barriers.data());
+        }
         auto to_uav = transition(composed_motion_staging.Get(),
             D3D12_RESOURCE_STATE_COMMON,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1134,12 +1177,15 @@ struct LukeAfwSynthesizer::Impl {
         list->SetPipelineState(composed_motion_pipeline.Get());
         D3D12_GPU_DESCRIPTOR_HANDLE gpu =
             composed_motion_descriptors->GetGPUDescriptorHandleForHeapStart();
-        for (UINT index = 0; index < 3; ++index) {
-            list->SetComputeRootDescriptorTable(index, gpu);
-            gpu.ptr += composed_motion_descriptor_size;
-        }
-        list->SetComputeRoot32BitConstants(3, 60, &constants, 0);
+        list->SetComputeRootDescriptorTable(0,gpu);
+        gpu.ptr+=4*composed_motion_descriptor_size;
+        list->SetComputeRootDescriptorTable(1,gpu);
+        list->SetComputeRoot32BitConstants(2,60,&constants,0);
         list->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        for(UINT i=0;i<history_barrier_count;++i)
+            std::swap(history_barriers[i].Transition.StateBefore,history_barriers[i].Transition.StateAfter);
+        if(history_barrier_count)list->ResourceBarrier(history_barrier_count,history_barriers.data());
+
 
         std::array<D3D12_RESOURCE_BARRIER, 3> before_copy{};
         before_copy[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -1256,7 +1302,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
     const D3D12ReprojectionView& destination_view,
     std::uint32_t source_eye,
     float xr_eye_baseline,
-    const embedded::AfwSettings& settings) noexcept {
+    const embedded::AfwSettings& settings,bool native_peer_camera) noexcept {
     try {
         std::scoped_lock lock(mutex_);
         report_stage(AfwStage::enter, S_OK, source_eye, guide.publication);
@@ -1469,7 +1515,15 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             impl_->unit_epoch=unit_epoch;
             impl_->paired_unit_identity=paired_unit_identity;
         }
-        if (impl_->calibrated_units_per_metre == 0 && guide.calibrated_game_eye_baseline > 0)
+        bool gta_calibration_changed=false;
+        if(guide.gta_headlock && std::isfinite(guide.calibrated_game_eye_baseline) &&
+            guide.calibrated_game_eye_baseline>0) {
+            const float updated=guide.calibrated_game_eye_baseline*impl_->world_scale/xr_eye_baseline;
+            gta_calibration_changed=impl_->calibrated_units_per_metre>0 &&
+                std::abs(updated-impl_->calibrated_units_per_metre)>impl_->calibrated_units_per_metre*.03F;
+            if(impl_->calibrated_units_per_metre==0||gta_calibration_changed)
+                impl_->calibrated_units_per_metre=updated;
+        } else if (impl_->calibrated_units_per_metre == 0 && guide.calibrated_game_eye_baseline > 0)
             impl_->calibrated_units_per_metre = guide.calibrated_game_eye_baseline * impl_->world_scale / xr_eye_baseline;
         const float units = impl_->calibrated_units_per_metre;
         float game_baseline{};
@@ -1505,7 +1559,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             !luke_afw_previous_opposite(guide.publication,
                 impl_->last_evaluated_publication,source_eye,impl_->last_evaluated_eye);
         if(impl_->frame_buffers_ready &&
-            (*origin_changed || provider_geometry_changed || reduced_continuity_lost)) {
+            (*origin_changed || provider_geometry_changed || reduced_continuity_lost || gta_calibration_changed)) {
             const auto provider=impl_->provider_path;
             const auto camera_origin=impl_->camera_origin;
             const auto calibrated_units=impl_->calibrated_units_per_metre;
@@ -1513,7 +1567,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             const auto paired_unit_identity=impl_->paired_unit_identity;
             const auto result=initialize_locked(impl_->device.Get(),impl_->queue.Get(),provider,true);
             report_stage(AfwStage::frame_warp_init_begin,result,
-                *origin_changed ? 1045 : provider_geometry_changed ? 1046 : 1047,
+                *origin_changed ? 1045 : gta_calibration_changed ? 1203 : provider_geometry_changed ? 1046 : 1047,
                 guide.publication);
             if(FAILED(result))return result;
             impl_->camera_origin=camera_origin;
@@ -1534,7 +1588,56 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         CameraData camera{};
         if (!camera_data(source_view, destination_view, guide, source_eye,
                          impl_->world_scale, xr_eye_baseline, units, impl_->camera_origin,
-                         impl_->camera_axes, camera)) return E_INVALIDARG;
+                         impl_->camera_axes, camera,native_peer_camera)) return E_INVALIDARG;
+        if(native_peer_camera) {
+            const unsigned peer_eye=1-source_eye;
+            bool corrected=false;
+            auto cached_peer_head=impl_->previous_source_xr_orientation[peer_eye];
+            auto submitted_peer_head=destination_view.pose.orientation;
+            const bool same_peer_reference=stereo_pose_detail::unit(cached_peer_head) &&
+                stereo_pose_detail::unit(submitted_peer_head) &&
+                std::abs(cached_peer_head.x*submitted_peer_head.x+cached_peer_head.y*submitted_peer_head.y+
+                    cached_peer_head.z*submitted_peer_head.z+cached_peer_head.w*submitted_peer_head.w)>1.F-1e-5F;
+            if(!guide.reset && same_peer_reference && impl_->previous_source_headlocked[source_eye] &&
+                impl_->previous_source_headlocked[peer_eye] &&
+                impl_->previous_source_stream[source_eye]==guide.stream &&
+                impl_->previous_source_stream[peer_eye]==guide.stream &&
+                impl_->previous_source_epoch[source_eye]==guide.epoch &&
+                impl_->previous_source_epoch[peer_eye]==guide.epoch &&
+                impl_->previous_source_publication[source_eye]+2==guide.publication &&
+                impl_->previous_source_publication[peer_eye]+1==guide.publication &&
+                guide.previous_opposite_guide && guide.previous_same_guide &&
+                guide.previous_same_guide->publication==impl_->previous_source_publication[source_eye] &&
+                guide.previous_opposite_guide->publication==impl_->previous_source_publication[peer_eye]) {
+                const auto input=[](const Matrix4x4& matrix,Quaternion head,unsigned eye) {
+                    LukeGtaEyeCamera result;std::copy_n(matrix.values,16,result.view_to_world.begin());
+                    result.xr_orientation=head;result.eye=eye;return result;
+                };
+                float baseline{};
+                const float current_ms=guide.frame_time_delta_ms;
+                const float peer_ms=guide.previous_opposite_guide->frame_time_delta_ms;
+                if(std::isfinite(current_ms)&&std::isfinite(peer_ms)&&current_ms>0&&peer_ms>0&&
+                    luke_game_eye_baseline(xr_eye_baseline,impl_->world_scale,units,baseline)) {
+                    const auto target=luke_gta_peer_eye_reference(
+                        input(camera.source_view_to_world,source_view.pose.orientation,source_eye),
+                        input(impl_->previous_source_camera[source_eye].source_view_to_world,
+                            impl_->previous_source_xr_orientation[source_eye],source_eye),
+                        input(impl_->previous_source_camera[peer_eye].source_view_to_world,
+                            impl_->previous_source_xr_orientation[peer_eye],peer_eye),
+                        baseline,current_ms/(current_ms+peer_ms));
+                    if(target) {
+                        Matrix4x4 destination;std::copy(target->begin(),target->end(),destination.values);
+                        Matrix4x4 inverse_destination;
+                        if(invert(destination,inverse_destination)) {
+                            camera.destination_view_to_world=destination;
+                            camera.destination_world_to_view=inverse_destination;corrected=true;
+                        }
+                    }
+                }
+            }
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                corrected,1202,guide.publication,impl_->previous_source_publication[source_eye]);
+        }
         std::uint32_t baseline_bits{};
         std::memcpy(&baseline_bits, &xr_eye_baseline, sizeof(baseline_bits));
         bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
@@ -1923,6 +2026,12 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         report_stage(AfwStage::motion_copied, result, source_eye,
             guide.publication);
         if (FAILED(result)) return result;
+        if(native_motion.padding[1]==1.F) {
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,1,1198,
+                guide.publication,guide.previous_opposite_guide->publication);
+            if(two_frame_capture_active())two_frame_capture_timeline("native_object_history",1,
+                guide.stream,guide.publication,guide.previous_opposite_guide->publication);
+        }
 
         input.depth = impl_->depth;
         input.motion_vectors = impl_->motion;
@@ -2074,6 +2183,16 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 contract.motion_current_to_middle_opposite.begin());
             contract.raw_previous_clip_to_clip = guide.raw_previous_clip_to_clip;
             contract.camera_position = guide.camera_position;
+            const DlssMotionVectorFrame* tracked[]{&guide,
+                guide.previous_opposite_guide.get(),guide.previous_same_guide.get()};
+            for(unsigned i=0;i<3;++i)if(tracked[i]&&tracked[i]->gta_headlock) {
+                const auto& receipt=*tracked[i]->gta_headlock;
+                contract.gta_tracking_render[i]=receipt.render;
+                contract.gta_tracking_mode[i]=receipt.mode;
+                contract.gta_tracking_yaw[i]=receipt.yaw_offset;
+                contract.gta_tracking_valid[i]=receipt.tracking_valid;
+                contract.gta_tracking_poses[i]=receipt.tracking;
+            }
             contract.camera_right = guide.camera_right;
             contract.camera_up = guide.camera_up;
             std::copy(camera.source_view_to_world.values + 8,
@@ -2248,6 +2367,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             impl_->last_evaluated_publication = guide.publication;
             impl_->last_evaluated_eye = source_eye;
             impl_->previous_source_camera[source_eye] = camera;
+            impl_->previous_source_xr_orientation[source_eye] = source_view.pose.orientation;
+            impl_->previous_source_headlocked[source_eye] = native_peer_camera;
             impl_->previous_source_stream[source_eye] = guide.stream;
             impl_->previous_source_epoch[source_eye] = guide.epoch;
             impl_->previous_source_publication[source_eye] = guide.publication;

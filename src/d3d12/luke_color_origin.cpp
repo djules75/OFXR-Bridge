@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <string>
 #include <mutex>
 #include <vector>
 #include <cstdio>
@@ -17,16 +18,21 @@ namespace xrfg {
 namespace {
 // Outlaws' final REAL VR color can translate the corner barcode beyond the
 // eye boundary; its FPS text also covers that corner. Keep its exact token
-// inside the eye, away from that overlay. GTA's final reprojection clips its
-// original top-edge band; use the measured vertical margin only for that title.
-std::array<unsigned,2> origin_inset() noexcept {
-    static const auto inset=[] {
+// inside the eye, away from that overlay. GTA additionally masks the top of
+// realtime scripted scenes; its bounded scan follows the full-size eye height.
+std::array<unsigned,2> origin_inset(unsigned color_height) noexcept {
+    static const auto title=[] {
         wchar_t path[MAX_PATH]{};
         GetModuleFileNameW(nullptr,path,MAX_PATH);
         const auto* name=wcsrchr(path,L'\\');
-        return luke_origin_inset_for_title(name?name+1:path);
+        return std::wstring(name?name+1:path);
     }();
-    return inset;
+    return luke_origin_inset_for_title(title,color_height);
+}
+bool gta_color_origin() noexcept {
+    static const bool result=[] {wchar_t p[MAX_PATH]{};GetModuleFileNameW(nullptr,p,MAX_PATH);
+        const auto* n=wcsrchr(p,L'\\');return !_wcsicmp(n?n+1:p,L"GTA5_Enhanced.exe");}();
+    return result;
 }
 using Microsoft::WRL::ComPtr;
 struct Uploads {
@@ -293,7 +299,7 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             return E_PENDING; // Actual eye viewport is not known during startup.
         }
         LukeColorOriginLayout layout;
-        const auto inset=origin_inset();
+        const auto inset=origin_inset(static_cast<UINT>(color_extent));
         if (!compact_luke_origin_layout(rect.width, rect.height,
                 static_cast<UINT>(color_extent >> 32), static_cast<UINT>(color_extent), layout,inset[0],inset[1]))
         {
@@ -347,7 +353,7 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
 namespace {
 HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
     std::uint32_t* tokens, HRESULT* results, unsigned count,
-    D3D12_RESOURCE_STATES state, DWORD timeout_ms) noexcept {
+    D3D12_RESOURCE_STATES state, DWORD timeout_ms, bool* nonblack=nullptr) noexcept {
     struct Plan {
         D3D12_RESOURCE_DESC original{};
         LukeColorOriginLayout layout{};
@@ -358,6 +364,7 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
     std::array<ReadReport, 2> reports{};
     for (unsigned i=0; i<count; ++i) {
         tokens[i]=0; results[i]=E_UNEXPECTED; reports[i].token=&tokens[i];
+        if(nonblack)nonblack[i]=false;
     }
     const auto finish = [&](HRESULT hr) {
         for (unsigned i=0; i<count; ++i) {
@@ -385,7 +392,7 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
                 report_origin_layout(false,1,0,extent_bits(static_cast<UINT>(original.Width),original.Height));
                 results[i]=E_PENDING; continue;
             }
-            const auto inset=origin_inset();
+            const auto inset=origin_inset(original.Height);
             if (!compact_luke_origin_layout(static_cast<UINT>(output_extent>>32),static_cast<UINT>(output_extent),
                     static_cast<UINT>(original.Width),original.Height,plan.layout,inset[0],inset[1])) {
                 report_origin_layout(false,2,output_extent,extent_bits(static_cast<UINT>(original.Width),original.Height));
@@ -481,7 +488,9 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
             image_rows[i]={static_cast<const std::byte*>(mapped)+p.footprint.Offset,
                 p.original.Format,p.layout.scan.width,p.layout.scan.height,p.footprint.Footprint.RowPitch};
         }
-        decode_luke_origin_images(std::span(image_rows.data(),count),std::span(decoded.data(),count));
+        for(unsigned i=0;i<count;++i)image_rows[i].rgb_fallback=gta_color_origin();
+        decode_luke_origin_images(std::span(image_rows.data(),count),std::span(decoded.data(),count),
+            nonblack?std::span<bool>(nonblack,count):std::span<bool>{});
         HRESULT decode_status=S_OK;
         for(unsigned i=0;i<count;++i)if(plans[i].valid) {
             results[i]=decoded[i].ambiguous ? HRESULT_FROM_WIN32(ERROR_INVALID_DATA) :
@@ -497,9 +506,11 @@ HRESULT read_origins(ID3D12CommandQueue* queue, ID3D12Resource* const* colors,
 } // namespace
 
 void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
-    std::span<LukeColorOriginDecode> results) noexcept {
+    std::span<LukeColorOriginDecode> results, std::span<bool> nonblack) noexcept {
     if(results.size()!=images.size())return;
     std::fill(results.begin(),results.end(),LukeColorOriginDecode{});
+    const bool observe_color=nonblack.size()==images.size()&&!nonblack.empty();
+    if(observe_color)std::fill(nonblack.begin(),nonblack.end(),false);
     try {
         std::size_t total{};
         std::vector<std::size_t> offsets{0};
@@ -509,6 +520,7 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
             offsets.push_back(total);
         }
         std::vector<LukeColorOriginDecode> rows(total);
+        std::vector<unsigned char> color_rows(observe_color?total:0);
         const auto decode=[&](unsigned worker,unsigned step) noexcept {
             try {
                 std::vector<float> row;
@@ -520,6 +532,8 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
                         const auto* pixels=image.pixels+(index-offsets[i])*image.row_pitch;
                         for(unsigned x=0;x<image.width;++x)row[x]=luke_origin_luma(pixels+x*bpp,image.format);
                         rows[index]=decode_luke_origin_row(row);
+                        if(observe_color)color_rows[index]=std::any_of(row.begin(),row.end(),
+                            [](float v){return std::isfinite(v)&&v!=0.F;});
                     }
                 }
             } catch(...) {for(std::size_t i=worker;i<rows.size();i+=step)rows[i].ambiguous=true;}
@@ -530,7 +544,26 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
         } else decode(0,1);
         for(unsigned i=0;i<images.size();++i)for(std::size_t y=offsets[i];y<offsets[i+1];++y) {
             const auto row=rows[y];auto& result=results[i];result.ambiguous|=row.ambiguous;
+            if(observe_color)nonblack[i]=nonblack[i]||color_rows[y]!=0;
             if(row.token) {if(result.token&&result.token!=row.token)result.ambiguous=true;result.token=row.token;}
+        }
+        for(unsigned i=0;i<images.size();++i) {
+            const auto& image=images[i];auto& result=results[i];
+            if(result.token||result.ambiguous||!image.rgb_fallback||offsets[i]==offsets[i+1])continue;
+            const bool rgba=image.format==DXGI_FORMAT_R8G8B8A8_UNORM||image.format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB||image.format==DXGI_FORMAT_R8G8B8A8_TYPELESS;
+            const bool bgra=image.format==DXGI_FORMAT_B8G8R8A8_UNORM||image.format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB||image.format==DXGI_FORMAT_B8G8R8A8_TYPELESS;
+            if(!rgba&&!bgra)continue;
+            std::vector<float> row(image.width);
+            for(unsigned channel=0;channel<3;++channel)for(unsigned y=0;y<image.height;++y) {
+                const auto* pixels=image.pixels+y*image.row_pitch;
+                for(unsigned x=0;x<image.width;++x)row[x]=std::to_integer<unsigned char>(pixels[x*4+channel])/255.F;
+                const auto decoded=decode_luke_origin_row(row);
+                result.ambiguous|=decoded.ambiguous;
+                if(decoded.token) {
+                    if(result.token&&result.token!=decoded.token)result.ambiguous=true;
+                    result.token=decoded.token;
+                }
+            }
         }
     } catch(...) {for(auto& result:results)result={0,true};}
 }
@@ -543,7 +576,9 @@ HRESULT read_luke_color_origin(ID3D12CommandQueue* queue, ID3D12Resource* color,
 }
 HRESULT read_luke_color_origin_pair(ID3D12CommandQueue* queue,
     const std::array<ID3D12Resource*,2>& colors, std::array<std::uint32_t,2>& tokens,
-    std::array<HRESULT,2>& results, D3D12_RESOURCE_STATES state, DWORD timeout_ms) noexcept {
-    return read_origins(queue,colors.data(),tokens.data(),results.data(),2,state,timeout_ms);
+    std::array<HRESULT,2>& results, D3D12_RESOURCE_STATES state, DWORD timeout_ms,
+    std::array<bool,2>* nonblack) noexcept {
+    return read_origins(queue,colors.data(),tokens.data(),results.data(),2,state,timeout_ms,
+        nonblack?nonblack->data():nullptr);
 }
 } // namespace xrfg

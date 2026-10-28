@@ -31,6 +31,7 @@
 #include "xrfg/native_ingress/D3D_DeviceOwner.h"
 #include "xrfg/luke_afw_startup.hpp"
 #include "xrfg/luke_color_origin.hpp"
+#include "xrfg/luke_origin_loss_capture.hpp"
 #include "xrfg/luke_world_scale.hpp"
 #include "xrfg/embedded_control.hpp"
 #include "xrfg/ngx_guide_capture.hpp"
@@ -457,6 +458,32 @@ void log_luke_projection_poses(
     std::uint64_t serial,
     std::int64_t stage) noexcept {
     if (frame == nullptr || frame->layers == nullptr || serial == 0) return;
+    if (stage==1 && xrfg::two_frame_capture_images_active()) {
+        const auto rectangle=[&](unsigned layer,unsigned view,const XrSwapchainSubImage& image) {
+            const auto handle=handle_value(image.swapchain);
+            const auto code=static_cast<std::int64_t>((layer<<16)|view);
+            xrfg::two_frame_capture_timeline("layer_image",code,handle,frame->displayTime,image.imageArrayIndex);
+            xrfg::two_frame_capture_timeline("layer_rect_origin",code,handle,frame->displayTime,
+                (std::uint64_t(std::uint32_t(image.imageRect.offset.x))<<32)|std::uint32_t(image.imageRect.offset.y));
+            xrfg::two_frame_capture_timeline("layer_rect_extent",code,handle,frame->displayTime,
+                (std::uint64_t(std::uint32_t(image.imageRect.extent.width))<<32)|std::uint32_t(image.imageRect.extent.height));
+        };
+        for(unsigned i=0;i<frame->layerCount && i<8;++i) {
+            const auto* header=frame->layers[i];if(!header)continue;
+            xrfg::two_frame_capture_timeline("layer_type",i,serial,frame->displayTime,header->type);
+            xrfg::two_frame_capture_timeline("layer_flags",i,serial,frame->displayTime,header->layerFlags);
+            if(header->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                const auto* p=reinterpret_cast<const XrCompositionLayerProjection*>(header);
+                for(unsigned v=0;p->views && v<p->viewCount && v<8;++v)rectangle(i,v,p->views[v].subImage);
+            } else if(header->type==XR_TYPE_COMPOSITION_LAYER_QUAD) {
+                const auto* q=reinterpret_cast<const XrCompositionLayerQuad*>(header);rectangle(i,0,q->subImage);
+                const auto bits=[](float f){std::uint32_t x{};std::memcpy(&x,&f,sizeof(x));return x;};
+                xrfg::two_frame_capture_timeline("quad_size",i,handle_value(q->subImage.swapchain),frame->displayTime,
+                    (std::uint64_t(bits(q->size.width))<<32)|bits(q->size.height));
+                xrfg::two_frame_capture_timeline("quad_visibility",i,handle_value(q->subImage.swapchain),frame->displayTime,q->eyeVisibility);
+            }
+        }
+    }
     for (std::uint32_t layer_index = 0;
          layer_index < frame->layerCount && layer_index < 8;
          ++layer_index) {
@@ -941,6 +968,7 @@ struct SessionState {
     // Per-eye monotonicity alone permits a newer right-eye evaluation to be
     // followed by an older left-eye one when XR releases arrive out of order.
     std::uint64_t luke_afw_last_evaluated_publication{};
+    xrfg::LukeOriginLossCapture luke_origin_loss_capture; // diagnostic only; luke_guide_mutex
     // Last fully published AFW stereo pair. OpenXR permits re-submission of
     // the last released swapchain image on an XR frame with no game render.
     std::shared_ptr<const HeldAfwPair> luke_afw_last_pair;
@@ -7711,6 +7739,21 @@ XrResult release_swapchain_image_locked(
     // rather than the session failing.
     if (bridge && candidate_index) {
         const HRESULT copy_result = bridge->release(*candidate_index);
+        if (SUCCEEDED(copy_result) && state->session->luke_afw_enabled &&
+            (state->create_info.usageFlags&XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) &&
+            !(state->create_info.usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
+            !(state->create_info.createFlags&XR_SWAPCHAIN_CREATE_PROTECTED_CONTENT_BIT) &&
+            xrfg::two_frame_capture_claim_application(handle_value(state->handle))) {
+            xrfg::TwoFrameImageInfo original{};
+            original.stage="xr_application_original";
+            original.swapchain=handle_value(state->handle);
+            original.capture_serial=*candidate_index; // Actual acquired image index, not a guessed frame ID.
+            original.eye=state->dlss_logical_eye_index?static_cast<int>(*state->dlss_logical_eye_index):-1;
+            original.width=state->create_info.width;original.height=state->create_info.height;
+            const auto diagnostic=bridge->diagnostic_capture_application(*candidate_index,original);
+            xrfg::two_frame_capture_timeline("original_image",diagnostic,
+                handle_value(state->handle),0,*candidate_index);
+        }
         if (FAILED(copy_result)) {
             xrfg::bridge_flight_logger().event(
                 xrfg::BridgeFlightOperation::d3d11_bridge,
@@ -7765,6 +7808,21 @@ XrResult release_swapchain_image_locked(
     }
 
     const bool release_bound_guides = release_bound_projection_guides(*state->session);
+    if (candidate_index && !bridge && state->session->luke_afw_enabled &&
+        state->session->graphics_binding==SessionGraphicsBinding::d3d11 &&
+        *candidate_index<state->enumerated_d3d11_images.size() &&
+        (state->create_info.usageFlags&XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) &&
+        !(state->create_info.usageFlags&XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
+        !(state->create_info.createFlags&XR_SWAPCHAIN_CREATE_PROTECTED_CONTENT_BIT) &&
+        xrfg::two_frame_capture_claim_application(handle_value(state->handle))) {
+        xrfg::TwoFrameImageInfo original{};original.stage="xr_application_original_d11";
+        original.swapchain=handle_value(state->handle);original.capture_serial=*candidate_index;
+        original.eye=state->dlss_logical_eye_index?static_cast<int>(*state->dlss_logical_eye_index):-1;
+        original.width=state->create_info.width;original.height=state->create_info.height;
+        const auto result=xrfg::two_frame_capture_record_d3d11(original,state->session->d3d12_device.Get(),
+            state->session->d3d11_context.Get(),state->enumerated_d3d11_images[*candidate_index].Get());
+        xrfg::two_frame_capture_timeline("original_image_d11",result,handle_value(state->handle),0,*candidate_index);
+    }
     const auto release_publication = release_bound_guides && candidate_index
         ? xrfg::dlss_motion_vector_publications() : 0;
     const HRESULT composition_result = candidate_index && !idle_luke && captures_needed
@@ -11433,6 +11491,7 @@ enum class GenerationPrepareReason : std::int64_t {
     fsr_stereo_recovering = 26,
     native_stereo_unavailable = 27,
     afw_input_unavailable = 28,
+    luke_flat_scene = 29,
 };
 
 // A refused native projection/history is local to AFW. It says nothing about
@@ -13448,7 +13507,8 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
     std::optional<std::uint32_t> released_eye,
     std::uint64_t frame_serial,
     bool capture_temporal_input,
-    std::vector<PostAfwFrameInput>& completed_inputs) noexcept {
+    std::vector<PostAfwFrameInput>& completed_inputs,
+    const XrFrameEndInfo* composition=nullptr) noexcept {
     PreparedProjectionFrame output{};
     struct Entry {
         std::shared_ptr<SwapchainState> swapchain;
@@ -13462,6 +13522,26 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         std::uint32_t logical_eye{std::numeric_limits<std::uint32_t>::max()};
     };
     std::array<Entry, 2> entries{};
+    static const bool gta=[] {wchar_t p[MAX_PATH]{};GetModuleFileNameW(nullptr,p,MAX_PATH);
+        const auto* n=wcsrchr(p,L'\\');return !_wcsicmp(n?n+1:p,L"GTA5_Enhanced.exe");}();
+    const auto flat_quad=[&]() -> bool {
+        if(!gta||!composition||!composition->layers)return false;
+        bool found{};
+        for(unsigned i=0;i<composition->layerCount;++i) {
+            const auto* base=composition->layers[i];if(!base||base->type!=XR_TYPE_COMPOSITION_LAYER_QUAD)continue;
+            const auto& q=*reinterpret_cast<const XrCompositionLayerQuad*>(base);
+            if(q.eyeVisibility!=XR_EYE_VISIBILITY_BOTH||q.subImage.imageArrayIndex||q.subImage.imageRect.offset.x||q.subImage.imageRect.offset.y)continue;
+            auto chain=find_swapchain(q.subImage.swapchain);if(!chain||chain->session!=session)continue;
+            std::scoped_lock lock(chain->mutex);
+            if(chain->create_info.width!=std::uint32_t(q.subImage.imageRect.extent.width)||
+                chain->create_info.height!=std::uint32_t(q.subImage.imageRect.extent.height)||
+                chain->create_info.width<1024)continue;
+            // This is a passthrough classification, not an origin/guide or
+            // FPS receipt. A game effect may erase the quad marker as well.
+            found=true;
+        }
+        return found;
+    };
     // Diagnostic-only stages 28/29: missing-guide subreason and the age of
     // the selected eye's NGX publication relative to the newest publication.
     const auto report_missing = [](std::int64_t reason,
@@ -13480,10 +13560,14 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         }
     };
     try {
+        if(gta&&session) {
+            std::scoped_lock guide_lock(session->luke_guide_mutex);
+            session->luke_origin_loss_capture.set_logging(xrfg::bridge_flight_logger().enabled());
+        }
         if (!session || !session->luke_afw_enabled || !session->luke_afw ||
             (session->graphics_binding_capabilities & 8ULL) == 0 ||
             mappings.size() != 2) {
-            output.reason = GenerationPrepareReason::missing_generation;
+            output.reason = flat_quad()?GenerationPrepareReason::luke_flat_scene:GenerationPrepareReason::missing_generation;
             return output;
         }
         for (std::size_t index = 0; index < entries.size(); ++index) {
@@ -13542,6 +13626,12 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
                 1, 33, afw_status.revision, pair->production_serial);
             return true;
         };
+        if(gta&&!released_eye) {
+            if(flat_quad()) {
+                output.reason=GenerationPrepareReason::luke_flat_scene;
+                release_deferred();return output;
+            }
+        }
         if (!released_eye) {
             if (hold_last_pair()) return output;
         }
@@ -13580,6 +13670,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         }
         std::array<ID3D12Resource*,2> origin_colors{};
         std::array<HRESULT,2> origin_results{};
+        std::array<bool,2> origin_nonblack{};
         for(std::size_t index=0;index<entries.size();++index) {
             auto& entry=entries[index];const auto images=entry.generation->d3d11_interop->current_destination_images();
             if(entry.prepared.current_destination_index>=images.size()) {
@@ -13593,7 +13684,8 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
             // independent tokens/results and the same producer ordering. No new
             // frame of history or delayed eye selection is introduced.
             xrfg::read_luke_color_origin_pair(session->d3d12_queue.Get(),
-                origin_colors,origin_tokens,origin_results);
+                origin_colors,origin_tokens,origin_results,D3D12_RESOURCE_STATE_COMMON,250,
+                (gta||xrfg::bridge_flight_logger().enabled())?&origin_nonblack:nullptr);
         };
         if (entries[0].generation->isolated_luke_synthesis && entries[1].generation->isolated_luke_synthesis) {
             // The reader owns its allocator/readback lock. Its CPU decode must
@@ -13616,6 +13708,98 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
                 publications[index]=entry.guide->publication;
         }
         const auto selected=xrfg::select_luke_afw_color_source(publications,last_evaluated);
+        if (xrfg::bridge_flight_logger().enabled()) {
+            static const bool gta=[] {
+                wchar_t path[MAX_PATH]{};GetModuleFileNameW(nullptr,path,MAX_PATH);
+                const auto* name=wcsrchr(path,L'\\');
+                return !_wcsicmp(name?name+1:path,L"GTA5_Enhanced.exe");
+            }();
+            static const bool automatic_capture=GetPrivateProfileIntW(L"diagnostics",L"gta_auto_capture",1,
+                (current_layer_directory()/L"ofxr_bridge.ini").c_str())!=0;
+            if (gta && automatic_capture) {
+                const bool has_token=origin_tokens[0]||origin_tokens[1];
+                const bool fresh_stereo=released_eye&&*released_eye<2&&
+                    entries[0].source_capture&&entries[1].source_capture;
+                // A black compact read ROI does not prove a black full image.
+                // Freeze the whole original colour to distinguish a letterbox
+                // from an actually empty projection on the next loss witness.
+                const bool diagnostic_scene=has_token||origin_nonblack[0]||origin_nonblack[1]||fresh_stereo;
+                // Capture failed AFW source admission AFTER the bounded bonus.
+                // A rescued missing CRC is not the unavailable state the owner
+                // sees. F9 can also arm this while failure is already present.
+                const bool afw_ready=selected.has_value();
+                const auto now=GetTickCount64();
+                bool witness{};unsigned missing_count{};
+                {std::scoped_lock guide_lock(session->luke_guide_mutex);
+                    auto& loss=session->luke_origin_loss_capture;
+                    if(loss.observe(afw_ready,diagnostic_scene,now)&&xrfg::two_frame_capture_request_origin_loss()) {
+                        loss.captured(now);witness=true;missing_count=loss.missing;
+                    }
+                }
+                if (witness) {
+                    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                        0,1190,frame_serial,missing_count);
+                    xrfg::two_frame_capture_timeline("afw_unavailable_after_bonus",5,frame_serial,
+                        composition?composition->displayTime:0,0);
+                    log_luke_projection_poses(composition,frame_serial,12);
+                    // Freeze the actual submitted quad in THIS failing EndFrame,
+                    // not the next release, so a pause/menu cannot be confused
+                    // with a later scripted scene from neighbouring frames.
+                    if(composition&&composition->layers)for(unsigned layer=0;layer<composition->layerCount;++layer) {
+                        const auto* base=composition->layers[layer];
+                        if(!base||base->type!=XR_TYPE_COMPOSITION_LAYER_QUAD)continue;
+                        const auto& quad=*reinterpret_cast<const XrCompositionLayerQuad*>(base);
+                        auto chain=find_swapchain(quad.subImage.swapchain);
+                        if(!chain||chain->session!=session||
+                            (chain->create_info.createFlags&XR_SWAPCHAIN_CREATE_PROTECTED_CONTENT_BIT))continue;
+                        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;std::uint32_t index{};
+                        {std::scoped_lock chain_lock(chain->mutex);
+                            if(!chain->last_released_index||*chain->last_released_index>=chain->enumerated_d3d11_images.size())continue;
+                            index=*chain->last_released_index;texture=chain->enumerated_d3d11_images[index];}
+                        if(!texture||!xrfg::two_frame_capture_claim_application(handle_value(chain->handle)))continue;
+                        xrfg::TwoFrameImageInfo image{};image.stage="na_application_quad";
+                        image.swapchain=handle_value(chain->handle);image.capture_serial=frame_serial;
+                        image.display_time=composition->displayTime;image.slice=quad.subImage.imageArrayIndex;
+                        image.width=chain->create_info.width;image.height=chain->create_info.height;
+                        const auto captured=xrfg::two_frame_capture_record_d3d11(image,session->d3d12_device.Get(),
+                            session->d3d11_context.Get(),texture.Get());
+                        xrfg::two_frame_capture_timeline("na_application_quad_result",captured,frame_serial,
+                            composition->displayTime,(std::uint64_t(layer)<<32)|index);
+                    }
+                    // These disjoint mirrors are the exact frozen colors just
+                    // read above. Copy NOW, before release/reuse: starting on
+                    // the next xrEndFrame can miss a one-frame kill effect.
+                    for (std::size_t i=0;i<entries.size();++i) {
+                        xrfg::two_frame_capture_timeline("origin_loss_crc",origin_results[i],frame_serial,0,
+                            (std::uint64_t(entries[i].logical_eye)<<32)|origin_tokens[i]);
+                        xrfg::TwoFrameImageInfo image{};
+                        image.stage="luke_origin_loss_color";
+                        image.capture_serial=frame_serial;
+                        image.eye=static_cast<std::int32_t>(entries[i].logical_eye);
+                        const auto desc=origin_colors[i]->GetDesc();
+                        image.width=static_cast<std::uint32_t>(desc.Width);
+                        image.height=desc.Height;
+                        const auto captured=xrfg::two_frame_capture_record_queue(image,session->d3d12_device.Get(),session->d3d12_queue.Get(),
+                            origin_colors[i],D3D12_RESOURCE_STATE_COMMON);
+                        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                            captured,1191+i,frame_serial,origin_tokens[i]);
+                    }
+                }
+            }
+        }
+        if(gta) {
+            // Classify only after exact physical token selection. The
+            // nonblack flags describe the marker ROI, NOT the whole projection:
+            // a late letterbox can blacken that ROI while native stereo continues.
+            // Genuine no-new-stereo quads still take the earlier bypass above.
+            if(!selected&&flat_quad()&&!origin_tokens[0]&&!origin_tokens[1]&&
+                !origin_nonblack[0]&&!origin_nonblack[1]&&
+                origin_results[0]==HRESULT_FROM_WIN32(ERROR_NOT_FOUND)&&
+                origin_results[1]==HRESULT_FROM_WIN32(ERROR_NOT_FOUND)) {
+                output.reason=GenerationPrepareReason::luke_flat_scene;
+                release_deferred();return output;
+            }
+        }
         if(!selected) {
             output.reason=GenerationPrepareReason::missing_capture;release_deferred();return output;
         }
@@ -13672,6 +13856,16 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
             last = source.guide->publication;
         }
 
+        const bool native_peer_camera = source.guide->gta_headlock &&
+            source.guide->gta_headlock->active() && destination.guide &&
+            source.guide->previous_opposite_guide &&
+            source.guide->previous_opposite_guide->publication == destination.guide->publication &&
+            source.guide->previous_opposite_guide->stream == destination.guide->stream &&
+            source.guide->previous_opposite_guide->epoch == destination.guide->epoch &&
+            source.guide->previous_opposite_guide->camera_frame_token == destination.guide->camera_frame_token;
+        if(source.guide->gta_headlock)xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::luke_afw_stage,source.guide->gta_headlock->mode,1199,
+            source.guide->publication,native_peer_camera);
         HRESULT afw_result = E_UNEXPECTED;
         bool afw_evaluated = false;
         const auto& afw_settings = afw_status.desired;
@@ -13681,7 +13875,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
                 source_images[source.prepared.current_destination_index],
                 destination_images[destination.prepared.current_destination_index],
                 *source.guide, source.views.front(), destination.views.front(),
-                source.logical_eye, *xr_eye_baseline, afw_settings);
+                source.logical_eye, *xr_eye_baseline, afw_settings,native_peer_camera);
             afw_evaluated = SUCCEEDED(afw_result);
         }
         if (afw_evaluated) {
@@ -16044,7 +16238,7 @@ XrResult layer_end_frame_impl(
             state->frame_generation_mode != xrfg::D3D12FrameGenerationMode::fsr3;
         afw_produced = prepare_luke_afw_frame(state, current_snapshot,
             projection_mappings, luke_afw_released_eye, frame_serial,
-            capture_temporal_input, inputs);
+            capture_temporal_input, inputs,end_info);
         if (state->fps_overlay)
             state->fps_overlay->set_afw_active(afw_produced.kind != PreparedGenerationKind::none);
         xrfg::embedded::report_afw_prepare(static_cast<std::int64_t>(afw_produced.reason));

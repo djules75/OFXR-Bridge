@@ -146,6 +146,7 @@ struct RuntimeStatus {
     std::uint32_t buffer_capacity{}; // active admission capacity; zero for native Legacy/AFW-only
     std::uint32_t eye_long_side{}; // minimum per-eye longest side of the submitted stereo scene
     bool shared_queue{}; // actual capture/OFXR queue fallback, not the requested pacing
+    bool afw_flat_scene{};
 };
 inline bool pacing_comparison_runtime(const RuntimeStatus& r) noexcept {
     return !r.vdxr_legacy;

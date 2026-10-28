@@ -583,6 +583,15 @@ int main() {
     for(unsigned i=1;i<=12;++i)
         expect(unstable_units.observe(1,i,i%2 ? 6.0F : 7.0F)==0,
             "inconsistent acceleration/camera separation is not silently accepted");
+    xrfg::LukeSceneCameraUnitCalibration scene_units;
+    for(unsigned i=1;i<=8;++i)expect(scene_units.observe(1,i,.11857F)==0,"GTA startup requires a complete native calibration window");
+    expect(near(scene_units.observe(1,9,.11857F),.11857F),"GTA scripted-rig calibration established");
+    for(unsigned i=10;i<=17;++i)expect(near(scene_units.observe(1,i,.06195F),.11857F),"one or mixed-window rig sample cannot rescale AFW");
+    expect(near(scene_units.observe(1,18,.06195F),.06195F),"consistent gameplay rig replaces stale scripted separation");
+    expect(near(scene_units.observe(2,19,0),.06195F),"GTA temporal reset preserves proven unit conversion while cameras re-prime");
+    expect(near(scene_units.observe(2,19,.2F),.06195F),"duplicate scene publication adds no calibration confidence");
+    expect(scene_units.observe(2,18,.2F)==0,"out-of-order scene camera rejected");
+    for(unsigned i=20;i<40;++i)expect(near(scene_units.observe(2,i,i%2?.04F:.09F),.06195F),"unstable post-cut cameras cannot poison recovered units");
     constexpr float physical_ipd = 0.06412F;
     const std::array<float, 3> xr_left{-physical_ipd * 0.5F, 0.0F, 0.0F};
     const std::array<float, 3> xr_right{physical_ipd * 0.5F, 0.0F, 0.0F};

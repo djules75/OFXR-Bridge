@@ -2285,7 +2285,53 @@ void luke_queue_policy_test() {
     }
     std::cout<<"Queue policy: SteamVR/VDXR, legacy/comparison, AFW-only, per-eye fallback lifetime PASS\n";
 }
+void gta_flat_scene_test() {
+    auto session=std::make_shared<SessionState>(std::make_shared<Dispatch>());
+    session->luke_afw_enabled=true;
+    session->luke_afw=std::make_shared<xrfg::LukeAfwSynthesizer>();
+    session->graphics_binding_capabilities=8;
+    XrSwapchainCreateInfo create{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    create.width=1024;create.height=128;create.arraySize=create.sampleCount=1;
+    auto chain=std::make_shared<SwapchainState>(session,create);
+    auto other=std::make_shared<SwapchainState>(session,create);
+    const auto handle=reinterpret_cast<XrSwapchain>(std::uintptr_t(0x69201));
+    const auto other_handle=reinterpret_cast<XrSwapchain>(std::uintptr_t(0x69202));
+    {std::scoped_lock lock(g_state_mutex);g_swapchains[handle]=chain;g_swapchains[other_handle]=other;}
+    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quad.eyeVisibility=XR_EYE_VISIBILITY_BOTH;quad.subImage.swapchain=handle;
+    quad.subImage.imageRect.extent={1024,128};
+    XrCompositionLayerQuad second=quad;second.subImage.swapchain=other_handle;
+    const XrCompositionLayerBaseHeader* layers[]{reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&second)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.layerCount=1;end.layers=layers;
+    std::vector<PostAfwFrameInput> completed;
+    const auto prepare=[&] {return prepare_luke_afw_frame(session,{}, {},std::nullopt,1,false,completed,&end);};
+    const auto flat=prepare();
+    check(flat.kind==PreparedGenerationKind::none&&flat.reason==GenerationPrepareReason::luke_flat_scene,
+        "full application flat quad must bypass AFW on absent stereo");
+    check(completed.empty(),"flat quad must not invent stereo FPS identity");
+    quad.eyeVisibility=XR_EYE_VISIBILITY_LEFT;
+    check(prepare().reason==GenerationPrepareReason::missing_generation,"single-eye overlay is not a flat scene");
+    quad.eyeVisibility=XR_EYE_VISIBILITY_BOTH;quad.subImage.imageRect.extent.width=1023;
+    check(prepare().reason==GenerationPrepareReason::missing_generation,"partial overlay is not a full scene");
+    quad.subImage.imageRect.extent.width=1024;
+    const auto before=xrfg::embedded::afw_snapshot();
+    xrfg::embedded::report_afw_prepare(static_cast<std::int64_t>(prepare().reason));
+    const auto suspended=xrfg::embedded::afw_snapshot();
+    check(suspended.flat_scene&&suspended.failed_frames==before.failed_frames,"flat scene is a suspension, not failed AFW");
+    end.layerCount=0;
+    check(prepare().reason==GenerationPrepareReason::missing_generation,"removed quad must not remain latched");
+    xrfg::embedded::report_afw_prepare(0);
+    const auto resumed=xrfg::embedded::afw_snapshot();
+    check(!resumed.flat_scene&&resumed.ready_frames==suspended.ready_frames+1,"valid stereo resumes ordinary status");
+    {std::scoped_lock lock(g_state_mutex);g_swapchains.erase(handle);g_swapchains.erase(other_handle);}
+    std::cout<<"GTA flat scene: full application BOTH-eye quad despite erased CRC, no staging read or fake FPS; normal status resumes PASS\n";
+}
 int main(int argc, char** argv) {
+    if(argc>1 && std::string_view(argv[1])=="gta-flat-scene") {
+        try {xrfg_fixture::ControlProfile profile;gta_flat_scene_test();return 0;}
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     if(argc>1 && std::string_view(argv[1])=="luke-queue-policy") {
         try {luke_queue_policy_test();return 0;}
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

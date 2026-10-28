@@ -50,6 +50,7 @@ constexpr std::uint32_t afw_shading_rate(int index) noexcept {
 }
 
 struct AfwSnapshot {
+    bool flat_scene{};
     AfwSettings desired{};
     int active_shading_rate{-1};
     std::uint64_t revision{1};

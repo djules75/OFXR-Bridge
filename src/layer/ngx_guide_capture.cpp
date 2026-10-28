@@ -555,6 +555,125 @@ HRESULT complete_color(ID3D12GraphicsCommandList*,const NVSDK_NGX_Parameter*,
     const std::shared_ptr<const DlssMotionVectorFrame>&,bool);
 HRESULT complete_color_resource(ID3D12GraphicsCommandList*,ID3D12Resource*,
     const std::shared_ptr<const DlssMotionVectorFrame>&,bool);
+// Keep GTA's accepted typed-native N-2 guides. Only the color marker moves
+// to the end of its exact enclosing public invocation; no "latest" lookup.
+class GtaFinalColorScope {
+    inline static thread_local GtaFinalColorScope* current_{};
+    Feature creator_{};
+    const NVSDK_NGX_Handle* handle_{};
+    ComPtr<ID3D12GraphicsCommandList> command_;
+    ComPtr<ID3D12Resource> output_;
+    const void* list_{};
+    const void* device_{};
+    std::shared_ptr<const DlssMotionVectorFrame> frame_;
+    bool active_{},completed_{},rejected_{},hdr_{};
+    unsigned claims_{},native_claims_{};
+    void reject(unsigned reason=1) noexcept {
+        if(!rejected_)bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+            -static_cast<std::int64_t>(reason),1196,creator_.identity,
+            (std::uint64_t(claims_)<<32)|(frame_?frame_->color_origin_token:0));
+        rejected_=true;
+        if(frame_)invalidate_dlss_motion_vector_stream_history(frame_->stream);
+    }
+public:
+    GtaFinalColorScope(bool public_call,const Feature& feature,const NVSDK_NGX_Handle* handle,
+        ID3D12GraphicsCommandList* command,const NVSDK_NGX_Parameter* p,
+        const void* list,const void* device) noexcept {
+        if(!gta_enhanced_process()||!native_ingress::luke_detected()||!public_call)return;
+        if(current_) {
+            if(current_->creator_.identity!=feature.creation_source_identity||current_->list_!=list||current_->device_!=device)
+                current_->reject();
+            return;
+        }
+        if(!feature.creation_observed||!feature.identity||feature.creation_source_identity!=feature.identity)return;
+        active_=true;current_=this;creator_=feature;handle_=handle;list_=list;device_=device;
+        try {
+            command_=native(command);output_=native(get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_Output));
+            if(!command_||!output_||!list_||!device_)reject();
+        }catch(...){reject();}
+    }
+    ~GtaFinalColorScope() {
+        if(!active_)return;
+        if(!completed_)reject();
+        current_=nullptr;
+    }
+    static void record(const Feature& feature,const void* list,const void* device,
+        const std::shared_ptr<const DlssMotionVectorFrame>& frame,bool hdr,
+        NVSDK_NGX_Result result,bool can_complete) noexcept {
+        auto* owner=current_;if(!owner)return;
+        if(owner->claims_++||owner->rejected_||!feature.creation_observed||
+            feature.creation_source_identity!=owner->creator_.identity||feature.type!=owner->creator_.type||
+            list!=owner->list_||device!=owner->device_||!frame||frame->raw_motion_native_span!=1||
+            NVSDK_NGX_FAILED(result)||!can_complete) {
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,feature.creation_observed,1197,
+                (std::uint64_t(feature.identity)<<32)|feature.creation_source_identity,
+                (std::uint64_t(frame?frame->raw_motion_native_span:0)<<32)|(can_complete?1:0));
+            owner->reject(4);return;
+        }
+        owner->frame_=frame;owner->hdr_=hdr;
+    }
+    static void native_complete(const Feature& feature,const void* list,const void* device,
+        ID3D12GraphicsCommandList* command,const NVSDK_NGX_Parameter* parameters,
+        NVSDK_NGX_Result result) noexcept {
+        auto* owner=current_;if(!owner)return;
+        try {
+            if(owner->native_claims_++||owner->rejected_||!owner->frame_||!feature.creation_observed||
+                feature.creation_source_identity!=owner->creator_.identity||feature.type!=owner->creator_.type||
+                list!=owner->list_||device!=owner->device_||NVSDK_NGX_FAILED(result)||
+                !get<ID3D12Resource*>(parameters,NVSDK_NGX_Parameter_MotionVectors)||
+                !get<ID3D12Resource*>(parameters,NVSDK_NGX_Parameter_Depth)) {owner->reject(8);return;}
+            auto output=native(get<ID3D12Resource*>(parameters,NVSDK_NGX_Parameter_Output));
+            auto cmd=native(command);ComPtr<ID3D12Device> actual,canonical;
+            if(!output||!cmd||FAILED(output->GetDevice(IID_PPV_ARGS(&actual)))||
+                FAILED(d3d_native::allocation_owner(actual.Get(),canonical))||
+                !d3d_owner::same(canonical.Get(),owner->frame_->verified_producer_device.Get())) {owner->reject(9);return;}
+            const auto desc=output->GetDesc();
+            if(desc.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D||desc.DepthOrArraySize!=1||desc.SampleDesc.Count!=1||
+                desc.Width!=owner->frame_->output_width||desc.Height!=owner->frame_->output_height||
+                owner->frame_->output_x||owner->frame_->output_y) {owner->reject(10);return;}
+            const auto view=owner->hdr_&&desc.Format==DXGI_FORMAT_R16G16B16A16_TYPELESS?DXGI_FORMAT_R16G16B16A16_FLOAT:
+                owner->hdr_&&desc.Format==DXGI_FORMAT_R32G32B32A32_TYPELESS?DXGI_FORMAT_R32G32B32A32_FLOAT:DXGI_FORMAT_UNKNOWN;
+            const auto marked=embedded::afw_snapshot().desired.mode==0?S_FALSE:
+                mark_luke_color_origin(cmd.Get(),output.Get(),owner->frame_->color_origin_token,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,owner->frame_->verified_producer_device.Get(),
+                    {0,0,owner->frame_->output_width,owner->frame_->output_height},view);
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,marked,1200,
+                owner->frame_->publication,owner->frame_->color_origin_token);
+            if(FAILED(marked))owner->reject(11);
+        }catch(...){owner->reject(12);}
+    }
+    NVSDK_NGX_Result complete(NVSDK_NGX_Result result) noexcept {
+        if(!active_)return result;
+        completed_=true;
+        try {
+            std::scoped_lock lock(state().mutex);
+            const auto found=state().features.find(handle_);
+            if(NVSDK_NGX_FAILED(result)||rejected_||claims_!=1||native_claims_!=1||!frame_||!command_||!output_||
+                found==state().features.end()||found->second.identity!=creator_.identity||
+                found->second.creation_source_identity!=creator_.identity) {reject(5);return result;}
+            ComPtr<ID3D12Device> device,canonical;ComPtr<IUnknown> identity,list_identity;
+            if(FAILED(output_->GetDevice(IID_PPV_ARGS(&device)))||
+                FAILED(d3d_native::allocation_owner(device.Get(),canonical))||
+                !d3d_owner::same(canonical.Get(),frame_->verified_producer_device.Get())||
+                FAILED(frame_->verified_producer_device.As(&identity))||identity.Get()!=device_||
+                FAILED(command_.As(&list_identity))||list_identity.Get()!=list_) {reject(6);return result;}
+            const auto desc=output_->GetDesc();
+            if(desc.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D||desc.DepthOrArraySize!=1||desc.SampleDesc.Count!=1||
+                desc.Width!=frame_->output_width||desc.Height!=frame_->output_height||frame_->output_x||frame_->output_y||
+                !frame_->color_origin_token) {reject(7);return result;}
+            const auto view=hdr_&&desc.Format==DXGI_FORMAT_R16G16B16A16_TYPELESS?DXGI_FORMAT_R16G16B16A16_FLOAT:
+                hdr_&&desc.Format==DXGI_FORMAT_R32G32B32A32_TYPELESS?DXGI_FORMAT_R32G32B32A32_FLOAT:DXGI_FORMAT_UNKNOWN;
+            const auto marked=embedded::afw_snapshot().desired.mode==0?S_FALSE:
+                mark_luke_color_origin(command_.Get(),output_.Get(),frame_->color_origin_token,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,frame_->verified_producer_device.Get(),
+                    {0,0,frame_->output_width,frame_->output_height},view);
+            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,marked,1196,
+                frame_->publication,frame_->color_origin_token);
+            if(FAILED(marked))reject();
+        }catch(...){reject();}
+        return result;
+    }
+};
 // Preserve the original scene camera and final caller Output before REALVR.
 // KCD guides/scalars are frozen at the unique typed DLSS entry, matching the
 // selected OptiScaler D12 publisher. The actual native production owns the clock.
@@ -932,6 +1051,9 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     if(luke && !invocation_camera && (crimson_desert_process()||same_eye_native_motion()))
         g.raw_motion_native_span=2;
     if(observed_motion_span)g.raw_motion_native_span=observed_motion_span;
+    g.compose_native_object_history=luke && gta_enhanced_process() && g.raw_motion_native_span==1;
+    if(luke&&gta_enhanced_process())
+        g.gta_headlock=query_luke_gta_headlock(bridge_flight_logger().enabled());
     // Scoped camera values replace apply_camera's camera read, while its Luke
     // snapshot-lifetime contract must still protect all queued GPU consumers.
     g.protect_snapshot_lifetime=luke;
@@ -1213,7 +1335,7 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
     ComPtr<IUnknown> native_list_identity;
     if(native_list)static_cast<void>(native_list.As(&native_list_identity));
     ComPtr<IUnknown> native_device_identity;
-    if((kcd_production||outlaws_production)&&native_list) {
+    if((kcd_production||outlaws_production||gta_enhanced_process())&&native_list) {
         ComPtr<ID3D12Device> reported,canonical;
         if(SUCCEEDED(native_list->GetDevice(IID_PPV_ARGS(reported.GetAddressOf())))&&
             SUCCEEDED(d3d_native::allocation_owner(reported.Get(),canonical)))
@@ -1314,6 +1436,8 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
             native_list_identity.Get(),native_device_identity.Get());
     NgxCreationEvaluationScope creation_scope(evaluation_metadata,native_list_identity.Get(),
         !state().modules[slot].typed_implementation,native_device_identity.Get());
+    GtaFinalColorScope gta_final(!state().modules[slot].typed_implementation,evaluation_metadata,h,
+        list,p,native_list_identity.Get(),native_device_identity.Get());
     if(kingdom_come_process()&&!state().modules[slot].typed_implementation)
         public_production=NgxCreationEvaluationScope::public_production(evaluation_metadata.type,
             native_list_identity.Get(),native_device_identity.Get());
@@ -1331,17 +1455,20 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
         native_list.Get(),p,h);
     invocation_camera.prepare_public_frame();
     const auto forward_public=[&] {
-        const auto result=forward();invocation_camera.finish_public(result);return result;
+        const auto result=forward();invocation_camera.finish_public(result);return gta_final.complete(result);
     };
     // V563 matched public/native F8 and color features: Crimson's public field
     // is exact N-1; REALVR modifies it into an approximate N-2 field before the
     // typed SR body. Own this known SR invocation before that modification,
     // freeze guides there, and complete its color only after the wrapper.
-    const bool crimson_public=crimson_desert_process() && native_ingress::luke_detected() &&
+    // GTA's original N-1 object intervals are composed with native depth;
+    // freeze them before REAL VR's history-conditioned combined field.
+    // The final caller scope still stamps only after the wrapper returns.
+    const bool original_public=(crimson_desert_process() || gta_enhanced_process()) && native_ingress::luke_detected() &&
         !state().modules[slot].typed_implementation;
-    const bool crimson_delegate_nr=crimson_public && native_available;
+    const bool delegate_nr=original_public && native_available;
     NgxEvaluationBoundary scope(slot,state().modules[slot].typed_implementation,
-        native_available && !crimson_public,crimson_public);
+        native_available && !original_public,original_public);
     if(diagnostic_entry)title_capture_log("dead_space_observation_state",slot,scope.observes(),state().active.load(),scope.outermost());
     if(sr && scope.outermost() && !state().modules[slot].typed_implementation &&
         crimson_desert_process() && two_frame_capture_images_active() && native_ingress::luke_detected()) {
@@ -1408,6 +1535,8 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
             const auto result=forward_public();
             if(NVSDK_NGX_SUCCEED(result))try {neural_rendering::after_sr(identity,list,p,queue.Get());}
             catch(...){log("native_completion_exception");}
+            if(gta_enhanced_process())GtaFinalColorScope::native_complete(evaluation_metadata,
+                native_list_identity.Get(),native_device_identity.Get(),list,p,result);
             return result;
         }
         return forward_public();
@@ -1448,14 +1577,19 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
             production_sequence,native_list_identity.Get(),native_device_identity.Get(),frame);
         if(!public_transaction&&(!logical_production || production_sequence))frame=capture(list,h,p,production_sequence,guide_stream,
             kcd_production?&invocation_camera:nullptr,public_production,nullptr,nullptr,nullptr,
-            crimson_public?1U:0U);
-        if(!crimson_delegate_nr)neural_rendering::before_sr(identity,list,p,queue.Get());
+            original_public?1U:0U);
+        if(!delegate_nr)neural_rendering::before_sr(identity,list,p,queue.Get());
     }catch(...){log("native_pre_sr_exception");}
+    if(original_public&&gta_enhanced_process())
+        GtaFinalColorScope::record(evaluation_metadata,native_list_identity.Get(),native_device_identity.Get(),frame,hdr,
+            NVSDK_NGX_Result_Success,scope.can_complete());
     const auto result=forward();
     if(sr&&NVSDK_NGX_SUCCEED(result))try {
-        if(!crimson_delegate_nr)neural_rendering::after_sr(identity,list,p,queue.Get());
-        if(scope.can_complete()&&!public_transaction&&!outlaws_family) {
-            if(crimson_public&&frame)complete_color_resource(list,frame->output.Get(),frame,hdr);
+        if(!delegate_nr)neural_rendering::after_sr(identity,list,p,queue.Get());
+        // GTA's enclosing final-caller scope marks after wrapper composition.
+        if(scope.can_complete()&&!public_transaction&&!outlaws_family&&
+            !(original_public&&gta_enhanced_process())) {
+            if(original_public&&frame)complete_color_resource(list,frame->output.Get(),frame,hdr);
             else complete_color(list,p,frame,hdr);
         }
     }catch(...){log("native_completion_exception");}
@@ -1463,7 +1597,7 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
         native_list_identity.Get(),native_device_identity.Get(),frame,hdr,result,scope.can_complete());
     if(public_transaction)invocation_camera.complete_native(result,scope.can_complete());
     invocation_camera.finish_public(result);
-    if(crimson_public && (NVSDK_NGX_FAILED(result)||!scope.can_complete()))
+    if(original_public && (NVSDK_NGX_FAILED(result)||!scope.can_complete()))
         invalidate_dlss_motion_vector_stream_history(guide_stream);
     if(logical_production) {
         if(NVSDK_NGX_FAILED(result) || !scope.can_complete() || !production_sequence)
@@ -1474,7 +1608,7 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
         if(public_production&&(production_sequence<=8||production_sequence%300==0))
             log(kcd_production?"kcd_public_production":"outlaws_public_production",public_production,reinterpret_cast<UINT64>(h),production_sequence,guide_stream);
     }
-    return result;
+    return gta_final.complete(result);
 }
 template<UINT slot> NVSDK_NGX_Result release(NVSDK_NGX_Handle* handle) {
     unsigned id{};std::uint64_t guide_stream=reinterpret_cast<UINT64>(handle);

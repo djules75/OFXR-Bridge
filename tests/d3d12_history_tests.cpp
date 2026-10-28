@@ -2225,7 +2225,7 @@ void test_luke_multi_handle_origins(D3D12WarpFixture& fixture) {
     std::cout<<"Multi-handle native color: actual CRC transport, exact own N-1/N-2, old/current pixels, crossqueue/device/interval/reset/retirement/eviction guards PASS\n";
 }
 
-void test_luke_interleaved_origins(D3D12WarpFixture& fixture, unsigned native_span=1) {
+void test_luke_interleaved_origins(D3D12WarpFixture& fixture, unsigned native_span=1, bool reset_transition=false) {
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_disabled_dlss_motion_vector_resources();
     xrfg::configure_dlss_motion_vector_tracking(true);
@@ -2274,6 +2274,57 @@ void test_luke_interleaved_origins(D3D12WarpFixture& fixture, unsigned native_sp
             "interleaved exact N-1 depth",joined->previous_opposite_guide->depth_resource_state);
         if(n>=22)require(std::abs(joined->calibrated_game_eye_baseline-6.4F)<.0001F,
             "interleaved production calibration did not cancel camera translation");
+    }
+    if(reset_transition) {
+        const auto token23=produced[22]->color_origin_token,token24=produced[23]->color_origin_token;
+        std::shared_ptr<const xrfg::DlssMotionVectorFrame> last;
+        {
+        const auto old23=produced[22],old24=produced[23];
+        const auto reset25=publish(25,0,true);
+        require(reset25->epoch==old23->epoch+1 && reset25->serial==1,
+            "GTA fixture did not reproduce one native eye reset before delayed XR consumption");
+        const auto delayed24=xrfg::resolve_luke_guide_token(token24,fixture.queue(),fixture.device());
+        require(delayed24 && delayed24->publication==old24->publication && delayed24->previous_opposite_guide &&
+            delayed24->previous_opposite_guide->publication==old23->publication && delayed24->previous_same_guide &&
+            delayed24->previous_same_guide->publication==produced[21]->publication,
+            "GTA native reset discarded the exact in-flight old color N-1/N-2");
+        const auto delayed23=xrfg::resolve_luke_guide_token(token23,fixture.queue(),fixture.device());
+        require(delayed23 && delayed23->epoch==old23->epoch && delayed23->serial==old23->serial &&
+            delayed23->previous_opposite_guide->publication==produced[21]->publication,
+            "GTA old color was relabelled with the newest owner epoch");
+        require_readback_matches(fixture,delayed24->motion_vectors.Get(),make_pattern(72),
+            "GTA reset retained exact old MV",delayed24->resource_state);
+        require_readback_matches(fixture,delayed24->previous_opposite_guide->depth.Get(),make_pattern(115),
+            "GTA reset retained exact old N-1 depth",delayed24->previous_opposite_guide->depth_resource_state);
+        require(!xrfg::resolve_luke_guide_token(reset25->color_origin_token,fixture.queue(),fixture.device()),
+            "GTA new reset epoch borrowed the old opposite history");
+        const auto next26=publish(26),next27=publish(27);
+        require(!xrfg::resolve_luke_guide_token(next26->color_origin_token,fixture.queue(),fixture.device()) &&
+            !xrfg::resolve_luke_guide_token(next27->color_origin_token,fixture.queue(),fixture.device()),
+            "GTA incomplete/reset A/B/A interval was admitted");
+        last=publish(28);
+        auto recovered=xrfg::resolve_luke_guide_token(last->color_origin_token,fixture.queue(),fixture.device());
+        require(recovered && recovered->publication==last->publication && recovered->previous_opposite_guide &&
+            recovered->previous_opposite_guide->publication==next27->publication &&
+            recovered->previous_same_guide->publication==next26->publication,
+            "GTA new epoch failed to recover its exact new A/B/A history");
+        }
+        // Release test pins; only real registry ownership may limit reuse now.
+        // No unbounded history: old keys expire naturally under the same ring limit.
+        produced.clear();
+        for(unsigned n=29;n<=56;++n)last=publish(n);
+        require(!xrfg::resolve_luke_guide_token(token24,fixture.queue(),fixture.device()) &&
+            !xrfg::resolve_luke_guide_token(token23,fixture.queue(),fixture.device()),
+            "GTA reset history escaped the bounded exact-color cache");
+        const auto recovered=xrfg::resolve_luke_guide_token(last->color_origin_token,fixture.queue(),fixture.device());
+        require(recovered!=nullptr,"GTA bounded history blocked ongoing producer slots");
+        xrfg::invalidate_dlss_motion_vector_stream_history(last->stream);
+        require(!xrfg::resolve_luke_guide_token(last->color_origin_token,fixture.queue(),fixture.device()),
+            "GTA explicit failed-native invalidation retained a stale color");
+        xrfg::configure_dlss_motion_vector_tracking(false);
+        xrfg::retire_disabled_dlss_motion_vector_resources();
+        std::cout<<"GTA reset: delayed exact GPU guides, old epoch identity, strict new prime, bounded eviction and explicit invalidation PASS\n";
+        return;
     }
     auto bad=publish(25,999);
     require(!xrfg::resolve_luke_guide_token(bad->color_origin_token,fixture.queue(),fixture.device()),
@@ -5503,6 +5554,12 @@ int main(int argc, char** argv) {
         if (argc > 1 && std::string_view(argv[1]) == "release-bound-guides") {
             D3D12WarpFixture fixture;
             test_release_bound_dlss_guides(fixture);
+            fixture.require_no_debug_errors();
+            return 0;
+        }
+        if (argc > 1 && std::string_view(argv[1]) == "gta-reset-origins") {
+            D3D12WarpFixture fixture;
+            test_luke_interleaved_origins(fixture,2,true);
             fixture.require_no_debug_errors();
             return 0;
         }

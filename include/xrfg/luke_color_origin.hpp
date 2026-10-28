@@ -235,9 +235,12 @@ struct LukeColorOriginImage {
     const std::byte* pixels{};
     DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
     unsigned width{},height{},row_pitch{};
+    bool rgb_fallback{}; // chromatic postprocessing; full sync/payload/CRC only
 };
+// Optional diagnostic receipt: any finite nonzero RGB luma in this read ROI,
+// not a whole-frame visibility or scene-validity decision. CRC is unchanged.
 void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
-    std::span<LukeColorOriginDecode> results) noexcept;
+    std::span<LukeColorOriginDecode> results, std::span<bool> nonblack = {}) noexcept;
 struct LukeColorOriginRect { unsigned x{}, y{}, width{}, height{}; };
 inline constexpr unsigned kLukeOriginHeight = 8;
 inline constexpr unsigned kLukeOriginMargin = 2;
@@ -296,7 +299,6 @@ inline bool compact_luke_origin_layout(unsigned output_width, unsigned output_he
 // Geometry negotiation is independent of identity. The first consumer knows
 // the actual eye extent before any marker read; SR warmup may precede it.
 void configure_luke_color_origin_extent(unsigned color_width, unsigned color_height) noexcept;
-
 // Two immutable black/white cell uploads per device/format/height. No per-frame
 // upload allocation, CPU rewrite, producer-submission receipt or 64-frame cap.
 HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* color,
@@ -316,5 +318,5 @@ HRESULT read_luke_color_origin_pair(ID3D12CommandQueue* queue,
     const std::array<ID3D12Resource*, 2>& colors,
     std::array<std::uint32_t, 2>& tokens, std::array<HRESULT, 2>& results,
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON,
-    DWORD timeout_ms = 250) noexcept;
+    DWORD timeout_ms = 250, std::array<bool,2>* nonblack = nullptr) noexcept;
 } // namespace xrfg

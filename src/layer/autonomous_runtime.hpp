@@ -97,7 +97,8 @@ inline void publish_runtime_status(unsigned native_generated_frames=0,
     out.pending=control.pending; out.errors=control.errors;
     out.afw_projection_frames=afw.projection_frames; out.afw_ready_frames=afw.ready_frames;
     const auto now=GetTickCount64();
-    out.afw_running=afw.desired.mode!=0 && afw.last_success_ms &&
+    out.afw_flat_scene=afw.flat_scene;
+    out.afw_running=!afw.flat_scene && afw.desired.mode!=0 && afw.last_success_ms &&
         now>=afw.last_success_ms && now-afw.last_success_ms<2000;
     out.nr_running=nr.running;
     out.logging_active=bridge_flight_logger().enabled();

@@ -1,4 +1,5 @@
 #pragma once
+#include "xrfg/luke_gta_headlock.hpp"
 
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -89,6 +90,9 @@ struct DlssMotionVectorPublication {
     // DLSS consumes float XY; only our existing owned motion copy is typed.
     // Generic/external publishers keep the original resource format.
     bool dlss_float_motion{};
+    // Original one-step GTA inputs need both immutable object-motion intervals.
+    bool compose_native_object_history{};
+    std::optional<LukeGtaHeadlock> gta_headlock;
 };
 
 // Scalar native camera history: no retained older GPU resources or SL metadata.
@@ -180,6 +184,8 @@ struct DlssMotionVectorFrame {
     // Resolver-proven chronological A/B/A cameras; original stream/epoch/
     // serial identities remain intact, never rewritten as a virtual feature.
     bool luke_interleaved_history{};
+    bool compose_native_object_history{};
+    std::optional<LukeGtaHeadlock> gta_headlock;
     // Calibrated same-time eye separation in the producer camera units.
     float calibrated_game_eye_baseline{};
     std::shared_ptr<DlssSnapshotRetention> motion_retention;

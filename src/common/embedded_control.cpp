@@ -226,6 +226,8 @@ void report_afw_prepare(std::int64_t reason) {
     auto& c = afw_control();
     std::scoped_lock lock(c.mutex);
     ++c.snapshot.projection_frames;
+    c.snapshot.flat_scene=reason==29;
+    if(reason==29)return; // application scene is a 2D quad, not failed AFW
     if (reason == 0) ++c.snapshot.ready_frames;
     else if (reason == 5) ++c.snapshot.missing_capture_frames;
     else if (reason == 18) ++c.snapshot.busy_frames;

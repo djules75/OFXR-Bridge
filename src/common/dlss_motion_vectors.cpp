@@ -50,8 +50,22 @@ struct SnapshotSlot {
     bool submission_started{}; // pre-Execute quarantine awaiting its first post-Execute receipt
 };
 
+bool retain_luke_reset_origins() noexcept {
+    // GTA can reset one native eye before XR consumes its preceding color.
+    // Preserve only exact protected keys, with their original epochs; this
+    // does not authorize joining a new camera across that reset boundary.
+    static const bool gta=[] {
+        wchar_t path[MAX_PATH]{};GetModuleFileNameW(nullptr,path,MAX_PATH);
+        const auto* name=wcsrchr(path,L'\\');
+        return !_wcsicmp(name?name+1:path,L"GTA5_Enhanced.exe");
+    }();
+    return gta;
+}
+
 struct StreamState {
+    bool retain_reset_origins{retain_luke_reset_origins()};
     LukeCameraUnitCalibration camera_units;
+    LukeSceneCameraUnitCalibration scene_camera_units;
     std::uint64_t epoch{1};
     std::uint64_t serial{};
     std::uint64_t first_publication{};
@@ -178,7 +192,8 @@ std::shared_ptr<const DlssMotionVectorFrame> protected_publication(
     for (const auto& [id, stream] : state.streams)
         for (const auto& frame : stream.luke_origin_history)
             if (frame->publication == publication) {
-                if (found || frame->stream != id || frame->epoch != stream.epoch) return {};
+                if (found || frame->stream != id ||
+                    (!stream.retain_reset_origins && frame->epoch != stream.epoch)) return {};
                 found = frame;
             }
     return found;
@@ -556,7 +571,9 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
             stream.previous.reset();
             stream.previous2.reset();
             stream.latest.reset();
-            stream.luke_origin_history.clear();
+            // These immutable records can still be named by a color already
+            // in flight. The same bounded ring/reader ownership prevents reuse.
+            if (!stream.retain_reset_origins) stream.luke_origin_history.clear();
         }
         ComPtr<ID3D12Resource> output_snapshot;
         if (publication.snapshot_output) {
@@ -660,6 +677,8 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
         frame->camera_frame_token_valid = publication.camera_frame_token_valid;
         frame->native_production_sequence = publication.native_production_sequence;
         frame->raw_motion_native_span = publication.raw_motion_native_span;
+        frame->compose_native_object_history = publication.compose_native_object_history;
+        frame->gta_headlock=publication.gta_headlock;
         frame->depth_x = publication.depth_x;
         frame->depth_y = publication.depth_y;
         frame->source_depth_x = publication.depth_x;
@@ -713,8 +732,9 @@ std::shared_ptr<const DlssMotionVectorFrame> publish_dlss_motion_vectors(
                 std::uint64_t(middle->color_origin_token) + 1 == frame->color_origin_token);
             const float sample = consecutive
                 ? luke_camera_separation(camera_sample(older), camera_sample(middle), camera_sample(frame)) : 0;
-            frame->calibrated_game_eye_baseline = stream.camera_units.observe(
-                frame->epoch, frame->publication, sample);
+            frame->calibrated_game_eye_baseline = stream.retain_reset_origins
+                ? stream.scene_camera_units.observe(frame->epoch,frame->publication,sample)
+                : stream.camera_units.observe(frame->epoch,frame->publication,sample);
         }
         if (stream.previous && stream.previous->epoch == frame->epoch &&
             stream.previous->serial + 2 == frame->serial &&
@@ -1841,12 +1861,12 @@ std::shared_ptr<const DlssMotionVectorFrame> resolve_luke_guide_token(
         if (interleaved) previous = interleaved_middle;
         if (!interleaved && (current->stream != owner_stream || current->stream != previous->stream ||
             current->epoch != previous->epoch ||
-            current->epoch != stream.epoch ||
+            (!stream.retain_reset_origins && current->epoch != stream.epoch) ||
             previous->serial + 1 != current->serial ||
             previous->publication + 1 != current->publication)) {
             ++state.statistics.resolve_stale_pairs;
             const unsigned reason=current->stream!=owner_stream||current->stream!=previous->stream?5:
-                current->epoch!=previous->epoch||current->epoch!=stream.epoch?6:
+                current->epoch!=previous->epoch||(!stream.retain_reset_origins&&current->epoch!=stream.epoch)?6:
                 previous->serial+1!=current->serial?7:8;
             report_luke_token_refusal(reason,color_origin_token,state,owner,owner_stream,current.get(),previous.get(),
                 consumer_queue,canonical_consumer_device);
