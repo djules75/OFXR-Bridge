@@ -19,6 +19,8 @@ namespace {
 // eye boundary; its FPS text also covers that corner. Keep its exact token
 // inside the eye, away from that overlay. GTA's final reprojection clips its
 // original top-edge band; use the measured vertical margin only for that title.
+// The Last of Us Part I's final color moves its band up and left (its left eye
+// lost the band's first 13 pixels at the edge): 32 pixels of margin each way.
 std::array<unsigned,2> origin_inset() noexcept {
     static const auto inset=[] {
         wchar_t path[MAX_PATH]{};

@@ -11,6 +11,7 @@ inline constexpr bool origin_title_equal(std::wstring_view a,std::wstring_view b
 inline constexpr std::array<unsigned,2> luke_origin_inset_for_title(std::wstring_view name) {
     if(origin_title_equal(name,L"Outlaws.exe"))return {256,32};
     if(origin_title_equal(name,L"GTA5_Enhanced.exe"))return {0,32};
+    if(origin_title_equal(name,L"tlou-i.exe"))return {32,32};
     return {0,0};
 }
 }
