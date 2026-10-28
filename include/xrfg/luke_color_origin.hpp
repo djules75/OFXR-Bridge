@@ -286,14 +286,14 @@ void decode_luke_origin_images(std::span<const LukeColorOriginImage> images,
 // host (Luke's square render to a wider eye: 591 Pimax rows). The scan must
 // cover every possible offset, but once a CRC-valid band is found the same
 // geometry puts it in the same rows. Decode those rows plus the protected
-// translation margin first; any miss or ambiguity decodes the whole scan, as
-// does every kLukeOriginWindowAudit-th read, so identity rules are unchanged.
+// translation margin first; any miss, ambiguity or geometry change decodes
+// the whole scan in the same read. A conflicting token outside the window is
+// seen at the next whole scan, not before: a periodic whole scan to look for
+// one cost a 3-6 ms hitch every 32 frames for a case never observed.
 inline constexpr unsigned kLukeOriginWindowMargin = 16;
-inline constexpr unsigned kLukeOriginWindowAudit = 32;
 struct LukeOriginRowWindow {
     std::uint64_t geometry{}; // 0: unknown; caller-defined scan identity
     unsigned first{}, last{}; // inclusive scan rows of the last decoded band
-    unsigned narrowed{};      // narrowed reads since the last whole scan
 };
 // Returns one bit per image whose result came from its window alone.
 unsigned decode_luke_origin_images_windowed(std::span<const LukeColorOriginImage> images,

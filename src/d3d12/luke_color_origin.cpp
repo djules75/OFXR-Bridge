@@ -635,8 +635,7 @@ unsigned decode_luke_origin_images_windowed(std::span<const LukeColorOriginImage
         auto& window=windows[i];
         if(!geometry[i]||window.geometry!=geometry[i]) {window={};continue;}
         const auto& image=images[i];
-        if(!image.pixels||window.narrowed>=kLukeOriginWindowAudit||
-            window.first>window.last||window.last>=image.height)continue;
+        if(!image.pixels||window.first>window.last||window.last>=image.height)continue;
         const unsigned begin=window.first>kLukeOriginWindowMargin?window.first-kLukeOriginWindowMargin:0;
         const unsigned end=std::min(image.height-1,window.last+kLukeOriginWindowMargin);
         if(end-begin+1>=image.height)continue;
@@ -657,7 +656,6 @@ unsigned decode_luke_origin_images_windowed(std::span<const LukeColorOriginImage
             auto& window=windows[i];
             window.first=static_cast<unsigned>(result.first_row);
             window.last=static_cast<unsigned>(result.last_row);
-            ++window.narrowed;
             continue;
         }
         narrowed&=~(1U<<i);
@@ -674,7 +672,7 @@ unsigned decode_luke_origin_images_windowed(std::span<const LukeColorOriginImage
         const auto& result=results[i];
         windows[i]=geometry[i]&&result.token&&!result.ambiguous&&result.first_row>=0
             ? LukeOriginRowWindow{geometry[i],static_cast<unsigned>(result.first_row),
-                static_cast<unsigned>(result.last_row),0}
+                static_cast<unsigned>(result.last_row)}
             : LukeOriginRowWindow{};
     }
     return narrowed;

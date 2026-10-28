@@ -690,7 +690,7 @@ void cpu_batch_tests() {
 }
 // Pimax/REAL VR Ghost of Tsushima: 3680x3680 producer, 3680x3089 eye, so a
 // 260x603 scan whose band sits at one fixed crop row. Only rows near the
-// learned band are decoded until a miss, a conflict or the periodic audit.
+// learned band are decoded until a miss, a conflict or a geometry change.
 void windowed_decode_tests() {
     constexpr unsigned w=260,h=603,pitch=w*4;
     std::array<std::vector<std::byte>,2> bytes;
@@ -733,19 +733,19 @@ void windowed_decode_tests() {
         "band outside the window recovered by the whole scan in the same read");
     clear(0);
     require(decode()==0&&!results[0].token&&windows[0].geometry==0,"missing token forgets the window");
-    // A conflicting copy outside the window is not seen by narrowed reads;
-    // the periodic whole scan still rejects the image and forgets the rows.
+    // A conflicting copy outside the window is not seen by narrowed reads
+    // (no periodic whole scan); the next whole scan, here after the learned
+    // band goes missing, rejects the image and forgets the rows.
     band(0,297,0x51a7e6);
     require(decode()==0&&results[0].token==0x51a7e6,"relearn after a miss");
     band(0,10,0x51a7e7);
-    bool rejected=false;
-    for(unsigned n=0;n<=xrfg::kLukeOriginWindowAudit&&!rejected;++n) {
-        const auto mask=decode();
-        rejected=results[0].ambiguous;
-        require(rejected==(mask==0),"only the whole-scan audit may reject the outside conflict");
-    }
-    require(rejected&&windows[0].geometry==0,"audit lost conflicting-token rejection");
-    require(decode()==0&&results[0].ambiguous,"forgotten window keeps scanning whole");
+    for(unsigned n=0;n<64;++n)
+        require(decode()==1&&results[0].token==0x51a7e6&&!results[0].ambiguous,"narrowed reads scanned whole");
+    clear(0);band(0,10,0x51a7e7);
+    require(decode()==0&&results[0].token==0x51a7e7&&windows[0].first==10,"whole scan after a miss did not relearn");
+    clear(0);band(0,297,0x51a7e6);band(0,150,0x51a7e7);
+    for(unsigned n=0;n<2;++n)require(decode()==0&&results[0].ambiguous&&windows[0].geometry==0,
+        "whole scan lost conflicting-token rejection, or an ambiguous read learned rows");
     // New geometry discards rows learned for another layout.
     clear(0);band(0,297,0x51a7e8);
     require(decode()==0&&windows[0].geometry==7,"relearn");

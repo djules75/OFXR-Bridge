@@ -46,8 +46,9 @@ every possible offset, yet each read finds the band in the same rows.
 of the same scan geometry found its CRC-valid band, plus 16 rows on each side
 (the existing translation bound). A miss, an ambiguous result or a geometry
 change decodes the whole scan in the same read, so no frame loses its token.
-Every 32nd read is a whole scan, so a conflicting token outside the window is
-still rejected; until that audit, a narrowed read cannot see it. The GPU
+A conflicting token outside the window is seen at the next whole scan, not
+before: the periodic whole scan that looked for one every 32nd read was
+removed, as it cost a 3-6 ms hitch every 32 frames for a case never seen. The GPU
 copy, the marker, the CRC and the identity rules are unchanged. Stage 127
 records which colors were decoded from their learned rows.
 
