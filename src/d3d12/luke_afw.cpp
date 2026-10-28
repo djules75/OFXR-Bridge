@@ -539,6 +539,7 @@ struct LukeAfwSynthesizer::Impl {
     LukeProducerCameraAxes camera_axes{LukeProducerCameraAxes::view};
     float calibrated_units_per_metre{};
     std::uint64_t unit_epoch{};
+    std::uint64_t unit_stream{};
     std::array<ULONGLONG, 64> input_rejection_report_ticks{};
     bool frame_buffers_ready{};
     bool clean_frame_buffers{true};
@@ -1367,7 +1368,7 @@ bool LukeAfwSynthesizer::history_reset_ready() noexcept {
         }
         candidate->camera_origin=impl_->camera_origin;
         candidate->calibrated_units_per_metre=impl_->calibrated_units_per_metre;
-        candidate->unit_epoch=impl_->unit_epoch;
+        candidate->unit_epoch=impl_->unit_epoch;candidate->unit_stream=impl_->unit_stream;
         candidate->paired_unit_identity=impl_->paired_unit_identity;
         auto old=std::move(impl_);impl_=std::move(candidate);
         retirement_=std::async(std::launch::async,[old=std::move(old)]() mutable {old.reset();});
@@ -1563,10 +1564,16 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         const auto paired_key = interleaved ? luke_interleaved_producer_key(
             dlss_native_camera_history(guide), dlss_native_camera_history(*guide.previous_opposite_guide))
             : std::array<std::uint64_t,4>{};
-        if (impl_->paired_unit_identity != paired_key || (!interleaved && impl_->unit_epoch != guide.epoch)) {
+        if (impl_->paired_unit_identity != paired_key || (!interleaved &&
+            (impl_->unit_epoch != guide.epoch||impl_->unit_stream!=guide.stream))) {
+            const bool same_domain=interleaved ? impl_->paired_unit_identity[0]==paired_key[0]&&
+                impl_->paired_unit_identity[2]==paired_key[2]&&paired_key[0]&&paired_key[2]
+                : impl_->unit_stream==guide.stream&&guide.stream;
+            const bool keep_units=same_domain&&compatible_color(impl_->color_description,color_desc);
             impl_->unit_epoch = guide.epoch;
+            impl_->unit_stream=guide.stream;
             impl_->paired_unit_identity = paired_key;
-            impl_->calibrated_units_per_metre = 0;
+            if(!keep_units)impl_->calibrated_units_per_metre = 0;
         }
         const auto quality_format=linear_color_format(color_desc.Format);
         if(impl_->checked_quality_format!=quality_format) {
@@ -1586,18 +1593,18 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             const auto provider=impl_->provider_path;
             const auto camera_origin=impl_->camera_origin;
             const auto calibrated_units=impl_->calibrated_units_per_metre;
-            const auto unit_epoch=impl_->unit_epoch;
+            const auto unit_epoch=impl_->unit_epoch;const auto unit_stream=impl_->unit_stream;
             const auto paired_unit_identity=impl_->paired_unit_identity;
             const auto result=initialize_locked(impl_->device.Get(),impl_->queue.Get(),provider,true);
             report_stage(AfwStage::frame_warp_init_begin,result,1044,settings.shading_rate);
             if (FAILED(result)) return result;
             impl_->camera_origin=camera_origin;
             impl_->calibrated_units_per_metre=calibrated_units;
-            impl_->unit_epoch=unit_epoch;
+            impl_->unit_epoch=unit_epoch;impl_->unit_stream=unit_stream;
             impl_->paired_unit_identity=paired_unit_identity;
         }
         bool gta_calibration_changed=false;
-        if(guide.gta_headlock && std::isfinite(guide.calibrated_game_eye_baseline) &&
+        if(std::isfinite(guide.calibrated_game_eye_baseline) &&
             guide.calibrated_game_eye_baseline>0) {
             const float updated=guide.calibrated_game_eye_baseline*impl_->world_scale/xr_eye_baseline;
             gta_calibration_changed=impl_->calibrated_units_per_metre>0 &&
@@ -1644,7 +1651,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             const auto provider=impl_->provider_path;
             const auto camera_origin=impl_->camera_origin;
             const auto calibrated_units=impl_->calibrated_units_per_metre;
-            const auto unit_epoch=impl_->unit_epoch;
+            const auto unit_epoch=impl_->unit_epoch;const auto unit_stream=impl_->unit_stream;
             const auto paired_unit_identity=impl_->paired_unit_identity;
             const auto result=initialize_locked(impl_->device.Get(),impl_->queue.Get(),provider,true);
             report_stage(AfwStage::frame_warp_init_begin,result,
@@ -1653,7 +1660,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             if(FAILED(result))return result;
             impl_->camera_origin=camera_origin;
             impl_->calibrated_units_per_metre=calibrated_units;
-            impl_->unit_epoch=unit_epoch;
+            impl_->unit_epoch=unit_epoch;impl_->unit_stream=unit_stream;
             impl_->paired_unit_identity=paired_unit_identity;
         }
         if (*origin_changed) {
