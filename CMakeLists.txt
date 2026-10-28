@@ -152,6 +152,10 @@ if(XRFG_BUILD_TESTS)
     target_include_directories(xrfg_gta_eye_reference_tests PRIVATE include)
     target_compile_features(xrfg_gta_eye_reference_tests PRIVATE cxx_std_20)
     add_test(NAME xrfg_gta_eye_reference_tests COMMAND xrfg_gta_eye_reference_tests)
+    add_executable(xrfg_luke_origin_continuity_tests tests/luke_origin_continuity_tests.cpp)
+    target_include_directories(xrfg_luke_origin_continuity_tests PRIVATE include)
+    target_compile_features(xrfg_luke_origin_continuity_tests PRIVATE cxx_std_20)
+    add_test(NAME xrfg_luke_origin_continuity_tests COMMAND xrfg_luke_origin_continuity_tests)
     add_executable(xrfg_core_tests tests/core_tests.cpp)
     target_link_libraries(xrfg_core_tests PRIVATE xrfg_core)
     if(MSVC)
@@ -1509,7 +1513,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             -DTEST_MODE=gta-reset-origins
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gta_origin_test.cmake")
         set_tests_properties(xrfg_gta_reset_origins PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
-
+        add_test(NAME xrfg_gta_origin_continuity_gpu COMMAND ${CMAKE_COMMAND}
+            "-DTEST_EXE=$<TARGET_FILE:xrfg_d3d12_history_tests>"
+            "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/gta-origin-continuity"
+            -DTEST_MODE=gta-origin-continuity
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gta_origin_test.cmake")
+        set_tests_properties(xrfg_gta_origin_continuity_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 
 
 

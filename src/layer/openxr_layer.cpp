@@ -32,6 +32,7 @@
 #include "xrfg/luke_afw_startup.hpp"
 #include "xrfg/luke_color_origin.hpp"
 #include "xrfg/luke_origin_loss_capture.hpp"
+#include "xrfg/luke_origin_continuity.hpp"
 #include "xrfg/luke_world_scale.hpp"
 #include "xrfg/embedded_control.hpp"
 #include "xrfg/ngx_guide_capture.hpp"
@@ -969,6 +970,8 @@ struct SessionState {
     // followed by an older left-eye one when XR releases arrive out of order.
     std::uint64_t luke_afw_last_evaluated_publication{};
     xrfg::LukeOriginLossCapture luke_origin_loss_capture; // diagnostic only; luke_guide_mutex
+    xrfg::LukeOriginContinuityBank luke_origin_continuity; // frame_call_mutex; all Luke ingress
+    bool luke_origin_resync_pending{}; // frame_call_mutex
     // Last fully published AFW stereo pair. OpenXR permits re-submission of
     // the last released swapchain image on an XR frame with no game render.
     std::shared_ptr<const HeldAfwPair> luke_afw_last_pair;
@@ -13712,7 +13715,102 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
                 entry.guide->previous_opposite_guide->camera_data_valid)
                 publications[index]=entry.guide->publication;
         }
-        const auto selected=xrfg::select_luke_afw_color_source(publications,last_evaluated);
+        bool sequence_continued=false;
+        bool force_afw_reset=false;
+        std::optional<xrfg::LukeOriginSequencePrediction> sequence_prediction;
+        const auto sequence_now=GetTickCount64();
+        std::array<std::uint64_t,2> sequence_captures{},sequence_contexts{};
+        for(const auto& entry:entries)if(entry.source_capture&&entry.logical_eye<2) {
+            sequence_captures[entry.logical_eye]=entry.source_capture->capture.serial;
+            sequence_contexts[entry.logical_eye]=reinterpret_cast<std::uintptr_t>(entry.generation.get());
+        }
+        const auto sequence_stamp=[&](const xrfg::DlssMotionVectorFrame& guide,unsigned eye) {
+            xrfg::LukeOriginSequenceFrame f;f.stream=guide.stream;f.epoch=guide.epoch;
+            f.publication=guide.publication;f.native=guide.native_production_sequence?guide.native_production_sequence:(guide.camera_frame_token_valid?guide.camera_frame_token:0);
+            f.owner=guide.gta_headlock?guide.gta_headlock->owner:reinterpret_cast<std::uintptr_t>(session->d3d12_device.Get());f.token=guide.color_origin_token;f.eye=eye;
+            f.captures=sequence_captures;f.contexts=sequence_contexts;
+            f.shape={guide.output_width,guide.output_height,guide.motion_width,guide.motion_height};return f;
+        };
+        if(released_eye&&*released_eye<2) {
+            for(const auto& entry:entries)if(entry.logical_eye==*released_eye&&entry.guide&&
+                origin_tokens[&entry-entries.data()]==entry.guide->color_origin_token) {
+                const auto index=std::size_t(&entry-entries.data());
+                const auto other=1-index;
+                const bool complete=origin_tokens[other]&&
+                    std::uint64_t(origin_tokens[other])+1==origin_tokens[index];
+                force_afw_reset=session->luke_origin_continuity.confirm(
+                    sequence_stamp(*entry.guide,entry.logical_eye),complete,sequence_now)||session->luke_origin_resync_pending;
+                if(force_afw_reset) {
+                    std::scoped_lock guide_lock(session->luke_guide_mutex);
+                    session->luke_afw_last_evaluated_publication=0;
+                    session->luke_afw_last_guide_publication={};session->luke_afw_last_pair.reset();last_evaluated=0;
+                    session->luke_origin_resync_pending=false;
+                    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                        1,1206,entry.guide->publication,origin_tokens[index]);
+                }
+            }
+        }
+        auto selected=xrfg::select_luke_afw_color_source(publications,last_evaluated);
+        if(!selected&&released_eye&&*released_eye<2) {
+            const auto missing=HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+            bool ambiguous=false;std::optional<std::size_t> current_index;
+            for(std::size_t i=0;i<entries.size();++i) {
+                if(entries[i].logical_eye==*released_eye)current_index=i;
+                ambiguous|=origin_results[i]==HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+            }
+            if(ambiguous)session->luke_origin_resync_pending|=session->luke_origin_continuity.invalidate();
+            if(!ambiguous&&current_index&&origin_results[*current_index]==missing&&!origin_tokens[*current_index]) {
+                unsigned sequence_refusal{};
+                sequence_prediction=session->luke_origin_continuity.predict(sequence_now,*released_eye,
+                    sequence_captures,sequence_contexts,&sequence_refusal);
+                if(!sequence_prediction) {
+                    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                        sequence_refusal,1208,frame_serial,last_evaluated);
+                    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                        session->luke_origin_continuity.confirmations(*released_eye),1209,frame_serial,
+                        session->luke_origin_continuity.age(*released_eye,sequence_now));
+                }
+                if(sequence_prediction) {
+                    bool compatible=true;
+                    for(std::size_t i=0;i<entries.size();++i)if(origin_tokens[i]) {
+                        const auto token=sequence_prediction->frame.token-(entries[i].logical_eye!=*released_eye?1U:0U);
+                        compatible&=origin_tokens[i]==token;
+                    }
+                    if(!compatible) {
+                        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                            7,1208,frame_serial,sequence_prediction->frame.token);
+                        session->luke_origin_resync_pending|=session->luke_origin_continuity.invalidate();
+                    }
+                    else {
+                        auto guide=xrfg::resolve_luke_guide_token(sequence_prediction->frame.token,
+                            session->d3d12_queue.Get(),session->d3d12_device.Get());
+                        if(!guide)xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                            5,1208,frame_serial,sequence_prediction->frame.token);
+                        if(guide) {
+                            if(!xrfg::LukeOriginContinuity::matches(sequence_prediction->frame,
+                                sequence_stamp(*guide,*released_eye))) {
+                                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                                    6,1208,frame_serial,sequence_prediction->frame.token);
+                                session->luke_origin_resync_pending|=session->luke_origin_continuity.invalidate();
+                            }
+                            else if(guide->camera_data_valid&&guide->previous_opposite_guide&&
+                                guide->previous_opposite_guide->camera_data_valid&&guide->publication>last_evaluated) {
+                                const auto source=*current_index,peer=1-source;
+                                entries[source].guide=guide;
+                                entries[peer].guide=guide->previous_opposite_guide;
+                                selected=source;sequence_continued=true;
+                                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                                    *released_eye,1204,guide->publication,sequence_prediction->frame.token);
+                                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                                    *released_eye,1205,frame_serial,sequence_prediction->age_ms);
+                                xrfg::two_frame_capture_timeline("origin_continuity",*released_eye,
+                                    guide->publication,sequence_prediction->age_ms,sequence_prediction->frame.token);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if (xrfg::bridge_flight_logger().enabled()) {
             static const bool gta=[] {
                 wchar_t path[MAX_PATH]{};GetModuleFileNameW(nullptr,path,MAX_PATH);
@@ -13745,7 +13843,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
                     xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
                         0,1190,frame_serial,missing_count);
                     xrfg::two_frame_capture_timeline("afw_unavailable_after_bonus",5,frame_serial,
-                        composition?composition->displayTime:0,0);
+                        composition?composition->displayTime:0,session->luke_origin_continuity.age(released_eye.value_or(2),now));
                     log_luke_projection_poses(composition,frame_serial,12);
                     // Freeze the actual submitted quad in THIS failing EndFrame,
                     // not the next release, so a pause/menu cannot be confused
@@ -13793,7 +13891,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
             }
         }
         if(gta) {
-            // Classify only after exact physical token selection. The
+            // Only classify after the bounded continuation attempt. The
             // nonblack flags describe the marker ROI, NOT the whole projection:
             // a late letterbox can blacken that ROI while native stereo continues.
             // Genuine no-new-stereo quads still take the earlier bypass above.
@@ -13810,7 +13908,14 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
         }
         const std::size_t source_index=*selected,destination_index=1-source_index;
         Entry& source=entries[source_index];Entry& destination=entries[destination_index];
-        const auto origin_token=origin_tokens[source_index];
+        const bool continuation_gap=sequence_continued&&last_evaluated&&source.guide->publication!=last_evaluated+1;
+        if(force_afw_reset||continuation_gap) {
+            if(continuation_gap)xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
+                1,1207,source.guide->publication,last_evaluated);
+            auto reset=std::make_shared<xrfg::DlssMotionVectorFrame>(*source.guide);
+            reset->reset=true;source.guide=std::move(reset);
+        }
+        const auto origin_token=sequence_continued?source.guide->color_origin_token:origin_tokens[source_index];
         const auto source_images=source.generation->d3d11_interop->current_destination_images();
         const auto destination_images=destination.generation->d3d11_interop->current_destination_images();
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::luke_afw_stage,
@@ -13973,6 +14078,7 @@ void retire_unused_composition_outputs(const std::shared_ptr<SessionState>& stat
             if (!afw_evaluated) completed_inputs.clear();
         }
         if (afw_evaluated) {
+            if(sequence_continued)session->luke_origin_continuity.used(*released_eye);
             std::scoped_lock guide_lock(session->luke_guide_mutex);
             session->luke_afw_last_evaluated_publication =
                 source.guide->publication;

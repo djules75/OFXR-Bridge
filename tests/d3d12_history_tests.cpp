@@ -3,6 +3,7 @@
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/luke_color_origin.hpp"
+#include "xrfg/luke_origin_continuity.hpp"
 #include "xrfg/d3d12_native_binding.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 // Private test session; no keyboard input or shipping test control.
@@ -2223,6 +2224,50 @@ void test_luke_multi_handle_origins(D3D12WarpFixture& fixture) {
     xrfg::retire_disabled_dlss_motion_vector_resources();
     xrfg::configure_luke_color_origin_extent(0,0);
     std::cout<<"Multi-handle native color: actual CRC transport, exact own N-1/N-2, old/current pixels, crossqueue/device/interval/reset/retirement/eviction guards PASS\n";
+}
+
+void test_gta_origin_continuity(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);xrfg::retire_disabled_dlss_motion_vector_resources();
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    auto color=create_source_texture(fixture),motion=create_source_texture(fixture),depth=create_source_texture(fixture);
+    xrfg::LukeOriginContinuity continuity;unsigned continued=0;
+    std::vector<std::shared_ptr<const xrfg::DlssMotionVectorFrame>> pins;
+    for(unsigned n=1;n<=12;++n) {
+        upload_pattern(fixture,motion.Get(),make_pattern(static_cast<std::uint8_t>(n*3)));
+        upload_pattern(fixture,depth.Get(),make_pattern(static_cast<std::uint8_t>(n*5)));
+        std::shared_ptr<const xrfg::DlssMotionVectorFrame> frame;
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list){xrfg::DlssMotionVectorPublication p;
+            p.stream=91500;p.output=color.Get();p.motion_vectors=motion.Get();p.depth=depth.Get();
+            p.producer_queue=fixture.queue();p.producer_command_list=list;p.protect_snapshot_lifetime=true;p.raw_motion_native_span=1;
+            p.output_width=p.motion_width=p.depth_width=kWidth;p.output_height=p.motion_height=p.depth_height=kHeight;
+            p.resource_state=p.depth_resource_state=D3D12_RESOURCE_STATE_RENDER_TARGET;
+            p.camera_frame_token_valid=p.camera_data_valid=p.camera_matrices_valid=true;p.camera_frame_token=1000+n;
+            p.camera_right={1,0,0};p.camera_up={0,1,0};p.camera_forward={0,0,-1};p.camera_position={float(n)*.2F,0,0};
+            p.camera_view_to_clip[0]=p.camera_view_to_clip[5]=1;p.camera_view_to_clip[11]=-1;p.camera_view_to_clip[14]=.1F;
+            p.camera_clip_to_view[0]=p.camera_clip_to_view[5]=1;p.camera_clip_to_view[11]=10;p.camera_clip_to_view[14]=-1;
+            p.frame_time_delta_ms=16;p.reset=n==8;frame=xrfg::publish_dlss_motion_vectors(p);});
+        require(frame!=nullptr,"continuity original native publication missing");pins.push_back(frame);
+        if(n<3)continue;
+        const unsigned step=n-3;xrfg::LukeOriginSequenceFrame stamp;stamp.stream=frame->stream;stamp.epoch=frame->epoch;
+        stamp.publication=frame->publication;stamp.native=frame->camera_frame_token;stamp.token=frame->color_origin_token;
+        stamp.eye=step&1;stamp.owner=99;stamp.contexts={10,20};stamp.captures={50+step/2,50+(step+1)/2};stamp.shape={kWidth,kHeight,kWidth,kHeight};
+        if(n<=4){require(xrfg::resolve_luke_guide_token(stamp.token,fixture.queue(),fixture.device())!=nullptr,"CRC anchor did not resolve its own native history");continuity.confirm(stamp,true,n*11);continue;}
+        const auto prediction=continuity.predict(n*11,stamp.eye,stamp.captures,stamp.contexts);
+        require(prediction&&xrfg::LukeOriginContinuity::matches(prediction->frame,stamp),"continued key differs from original produced key");
+        const auto guide=xrfg::resolve_luke_guide_token(prediction->frame.token,fixture.queue(),fixture.device());
+        if(n==8){require(!guide,"continuity crossed a reset into old camera/vector history");continue;}
+        require(guide&&guide->publication==stamp.publication&&guide->camera_frame_token==stamp.native&&guide->previous_opposite_guide&&
+            guide->previous_opposite_guide->epoch==guide->epoch&&guide->previous_opposite_guide->publication+1==guide->publication,
+            "continued token did not resolve exact fresh native guides");
+        require_readback_matches(fixture,guide->motion_vectors.Get(),make_pattern(static_cast<std::uint8_t>(n*3)),"continued native MV is fresh",guide->resource_state);
+        require_readback_matches(fixture,guide->previous_opposite_guide->depth.Get(),make_pattern(static_cast<std::uint8_t>((n-1)*5)),"continued opposite depth is exact",guide->previous_opposite_guide->depth_resource_state);
+        continuity.used();++continued;
+        if(n==12)require(!continuity.confirm(stamp,true,n*11),"matching CRC recovery reset exact continued GPU history");
+    }
+    require(continued==7,"continuity GPU fixture did not cover the expected new native frames");
+    require(!xrfg::resolve_luke_guide_token(UINT32_MAX,fixture.queue(),fixture.device()),"unknown sequence key fell back to latest guide");
+    xrfg::configure_dlss_motion_vector_tracking(false);pins.clear();xrfg::retire_disabled_dlss_motion_vector_resources();
+    std::cout<<"GTA continuation GPU: actual new MV/depth/fence keys, reset refusal, own-epoch recovery and matching CRC return PASS\n";
 }
 
 void test_luke_interleaved_origins(D3D12WarpFixture& fixture, unsigned native_span=1, bool reset_transition=false) {
@@ -5556,6 +5601,9 @@ int main(int argc, char** argv) {
             test_release_bound_dlss_guides(fixture);
             fixture.require_no_debug_errors();
             return 0;
+        }
+        if(argc>1&&std::string_view(argv[1])=="gta-origin-continuity") {
+            D3D12WarpFixture fixture;test_gta_origin_continuity(fixture);fixture.require_no_debug_errors();return 0;
         }
         if (argc > 1 && std::string_view(argv[1]) == "gta-reset-origins") {
             D3D12WarpFixture fixture;
