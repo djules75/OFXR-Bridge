@@ -289,28 +289,45 @@ bool framewarp(Settings& draft, const Snapshot& state) {
     bool changed=ImGui::Checkbox("AFW Only (restart game)",&draft.afw_only);
     if(state.connected && (state.runtime.pacing_mode==kAfwOnlyPacingMode)!=draft.afw_only)
         ImGui::TextWrapped("AFW Only change saved. Restart the game to apply it.");
-    changed |= ImGui::Combo("Framewarp mode", &draft.afw_mode,
-        "Off\0Alternate eye (for debug)\0Previous frame (for debug)\0Combined\0");
-    if (draft.afw_mode == 3) {
-        constexpr int rates[]{0,4,8};
-        int selected=draft.afw_shading_rate==8 ? 2 : draft.afw_shading_rate==4 ? 1 : 0;
-        if(ImGui::Combo("AFW shading rate",&selected,
-            "1x1 (full quality)\0" "2x2 (half per axis)\0" "4x4 (quarter per axis)\0")) {
-            draft.afw_shading_rate=rates[selected];changed=true;
+    changed |= ImGui::Combo("Reconstruction", &draft.luke_osr,
+        "AFW\0AFW + OSR band fill\0");
+    ImGui::TextWrapped(draft.luke_osr
+        ? "OSR (OFXR Stereo Reconstruction) band fill: OFXR's own fill of the band beside near objects that neither the other eye nor the previous frame can see, the streaks AFW leaves while strafing. Same inputs as AFW, applies live."
+        : "AFW output as is.");
+    changed |= ImGui::Checkbox("Advanced parameters", &draft.luke_advanced);
+    if (draft.luke_advanced) {
+        if (draft.luke_osr) {
+            changed |= ImGui::SliderInt("Band fill", &draft.luke_osr_fill, 1, 8, "x%d");
+            ImGui::TextWrapped("How much of the band is filled at slow strafes. 1 fills only what no viewpoint saw; 2 fills the whole band once the eye clearly leads. Nothing is filled standing still or in the trailing eye.");
+            changed |= ImGui::SliderInt("Band cover", &draft.luke_osr_cover, 0, 8, "%d texels");
+            ImGui::TextWrapped("Depth texels (two eye pixels each) the fill extends past the band on the background side, mirroring from beyond them. Raise it only if a dark outline remains on the background side of the band.");
+            changed |= ImGui::SliderInt("Object trim", &draft.luke_osr_trim, 0, 2, "%d texels");
+            ImGui::TextWrapped("Depth texels of the object's own smeared edge replaced with background as well. Thins the object; leave at 0 unless its edge keeps a dark line.");
+            ImGui::TextWrapped("With Debug framewarp on, OSR tints filled pixels magenta, cover and trim orange, and band pixels left to AFW cyan.");
         }
-        ImGui::TextWrapped("Beta6: reduces Combined warping work; output resolution stays unchanged. A quality change rebuilds AFW history while the game stays open.");
-        if(state.connected && state.runtime.afw_shading_rate>=0 &&
-            state.runtime.afw_shading_rate!=draft.afw_shading_rate)
-            ImGui::TextWrapped("Quality change pending the next successful AFW evaluation. Current index: %d",state.runtime.afw_shading_rate);
+        changed |= ImGui::Combo("Framewarp mode", &draft.afw_mode,
+            "Off\0Alternate eye (for debug)\0Previous frame (for debug)\0Combined\0");
+        if (draft.afw_mode == 3) {
+            constexpr int rates[]{0,4,8};
+            int selected=draft.afw_shading_rate==8 ? 2 : draft.afw_shading_rate==4 ? 1 : 0;
+            if(ImGui::Combo("AFW shading rate",&selected,
+                "1x1 (full quality)\0" "2x2 (half per axis)\0" "4x4 (quarter per axis)\0")) {
+                draft.afw_shading_rate=rates[selected];changed=true;
+            }
+            ImGui::TextWrapped("Beta6: reduces Combined warping work; output resolution stays unchanged. A quality change rebuilds AFW history while the game stays open.");
+            if(state.connected && state.runtime.afw_shading_rate>=0 &&
+                state.runtime.afw_shading_rate!=draft.afw_shading_rate)
+                ImGui::TextWrapped("Quality change pending the next successful AFW evaluation. Current index: %d",state.runtime.afw_shading_rate);
+        }
+        changed |= ImGui::Checkbox("Debug framewarp", &draft.afw_debug);
+        ImGui::TextWrapped("Requires Luke Ross and RealVR.ini. Camera and stereo motion correction is always applied; same-eye history reconstructs the missing camera interval.");
+        if(draft.advanced_mode)changed |= ImGui::Checkbox("Clear before framewarp", &draft.afw_clear_before_warping);
+        changed |= ImGui::SliderFloat("Ignore motion", &draft.afw_ignore_motion_threshold, 0, 16, "%.2f");
+        ImGui::TextWrapped("Threshold for ignoring per-object motion vectors.");
+        changed |= ImGui::Combo("Depth dilation", &draft.afw_depth_dilate_mode,
+            "Off\0Horizontal\0Square\0");
+        ImGui::TextWrapped("Reduces ghosting and flicker, with less precise object silhouettes. Off by default.");
     }
-    changed |= ImGui::Checkbox("Debug framewarp", &draft.afw_debug);
-    ImGui::TextWrapped("Requires Luke Ross and RealVR.ini. Camera and stereo motion correction is always applied; same-eye history reconstructs the missing camera interval.");
-    if(draft.advanced_mode)changed |= ImGui::Checkbox("Clear before framewarp", &draft.afw_clear_before_warping);
-    changed |= ImGui::SliderFloat("Ignore motion", &draft.afw_ignore_motion_threshold, 0, 16, "%.2f");
-    ImGui::TextWrapped("Threshold for ignoring per-object motion vectors.");
-    changed |= ImGui::Combo("Depth dilation", &draft.afw_depth_dilate_mode,
-        "Off\0Horizontal\0Square\0");
-    ImGui::TextWrapped("Reduces ghosting and flicker, with less precise object silhouettes.");
     if (state.connected) ImGui::TextDisabled("Ready frames: %llu / projections: %llu",
         static_cast<unsigned long long>(state.runtime.afw_ready_frames),
         static_cast<unsigned long long>(state.runtime.afw_projection_frames));

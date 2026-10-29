@@ -287,6 +287,10 @@ void actual_widgets() {
     require(tray.widgets.draft.nr_enabled == snapshot().desired.nr_enabled,
         "tray reflects hot headset checkbox edit");
     headset.select_tab("Luke Ross");
+    // The provider controls sit behind the persisted Advanced parameters checkbox.
+    headset.activate("/Framewarp_", "Advanced parameters");
+    headset.draw();
+    require(snapshot().desired.luke_advanced, "Luke advanced checkbox publishes hot setting");
     headset.activate("/Framewarp_", "Debug framewarp");
     headset.draw();
     require(snapshot().desired.afw_debug != enabled.desired.afw_debug,

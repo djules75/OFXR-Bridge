@@ -20,6 +20,8 @@
 #include "luke_depth_calibrate_shader.hpp"
 #include "luke_compose_motion_shader.hpp"
 #include "luke_afw_color_scale.hpp"
+#include "osr_hole_fill_pass.hpp"
+#include "xrfg/osr_hole_fill.hpp"
 
 #include <Windows.h>
 
@@ -491,6 +493,7 @@ struct LukeAfwSynthesizer::Impl {
     bool gpu_timing_initialized{};
     EyeFrameBuffers eye_buffers{};
     AfwColorScale color_scale;
+    OsrHoleFill osr; // OSR stereo hole fill, same inputs as the provider
     UINT work_width{},work_height{},quality_divisor{1};
     DXGI_FORMAT checked_quality_format{DXGI_FORMAT_UNKNOWN};
     bool quality_can_scale{};
@@ -504,6 +507,7 @@ struct LukeAfwSynthesizer::Impl {
     std::array<std::uint64_t, 2> previous_source_stream{};
     std::array<std::uint64_t, 2> previous_source_epoch{};
     std::array<std::uint64_t, 2> previous_source_publication{};
+    std::array<bool, 2> osr_leading{}; // OSR: per destination eye, with hysteresis
     TextureDesc depth;
     Microsoft::WRL::ComPtr<ID3D12Resource> depth_staging;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> depth_descriptor_heap;
@@ -2199,6 +2203,46 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 !reverse(provider_camera.destination_view_to_clip, provider_camera.destination_clip_to_view))
                 return E_INVALIDARG;
         }
+        // OSR (OFXR Stereo Reconstruction): which destination texels the source
+        // eye reaches, from exactly the depth and matrices the provider gets.
+        bool osr_recorded = false;
+        OsrConstants osr_constants{};
+        if (settings.osr && settings.mode != 0 && impl_->quality_can_scale &&
+            input.depth.texture != nullptr) {
+            const auto depth_extent = input.depth.texture->GetDesc();
+            const Matrix4x4 source_to_destination = multiply(multiply(multiply(
+                provider_camera.source_clip_to_view, provider_camera.source_view_to_world),
+                provider_camera.destination_world_to_view), provider_camera.destination_view_to_clip);
+            std::copy_n(source_to_destination.values, 16, osr_constants.source_to_destination);
+            osr_constants.depth_width = static_cast<std::uint32_t>(depth_extent.Width);
+            osr_constants.depth_height = depth_extent.Height;
+            osr_constants.color_width = static_cast<std::uint32_t>(color_desc.Width);
+            osr_constants.color_height = color_desc.Height;
+            osr_constants.flags = settings.debug ? 1u : 0u;
+            const auto cover = static_cast<std::uint32_t>(std::clamp(settings.osr_cover, 0, 8));
+            osr_constants.background_margin = cover;
+            osr_constants.occluder_margin = static_cast<std::uint32_t>(std::clamp(settings.osr_trim, 0, 2));
+            const HRESULT osr_ready = impl_->osr.prepare(impl_->device.Get(),
+                osr_constants.depth_width, osr_constants.depth_height,
+                osr_constants.color_width, osr_constants.color_height, quality_format);
+            if (SUCCEEDED(osr_ready)) {
+                impl_->osr.record_coverage(impl_->device.Get(), command_list,
+                    input.depth.texture, input.depth.initial_state, osr_constants);
+                osr_recorded = true;
+                if (two_frame_capture_active()) {
+                    TwoFrameImageInfo coverage{};
+                    coverage.stage = "osr_coverage";
+                    coverage.stream = guide.stream;
+                    coverage.capture_serial = guide.publication;
+                    coverage.eye = static_cast<std::int32_t>(1U - source_eye);
+                    coverage.width = osr_constants.depth_width;
+                    coverage.height = osr_constants.depth_height;
+                    two_frame_capture_record_ng_x(coverage, impl_->device.Get(),
+                        command_list, impl_->osr.coverage(), impl_->osr.coverage_state());
+                }
+            } else bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                osr_ready, 1301, guide.publication, source_eye);
+        }
         FrameWarpEvaluateParams params{};
         params.command_list = command_list;
         params.input_eye_frame_buffer = &input;
@@ -2437,14 +2481,41 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                     two_frame_capture_record_ng_x(returned, impl_->device.Get(),
                         command_list, generated.texture, generated.initial_state);
                 }
+                TextureDesc final_color = generated;
                 if(quality_divisor>1) {
                     auto* expanded=impl_->color_scale.expanded();
                     impl_->color_scale.record(impl_->device.Get(),command_list,generated.texture,generated.initial_state,
                         impl_->work_width,impl_->work_height,expanded,D3D12_RESOURCE_STATE_COMMON,
                         static_cast<UINT>(color_desc.Width),color_desc.Height,1);
-                    TextureDesc scaled{};scaled.texture=expanded;scaled.initial_state=D3D12_RESOURCE_STATE_COMMON;
-                    copy(impl_->renderer,command_list,destination,scaled,color_box,0,0);
-                } else copy(impl_->renderer, command_list, destination, generated,
+                    final_color={};final_color.texture=expanded;final_color.initial_state=D3D12_RESOURCE_STATE_COMMON;
+                }
+                if (osr_recorded) {
+                    // Where the peer eye's previous frame sits on the source-to-
+                    // destination axis decides whether this eye leads and how
+                    // much of each stereo band OSR owns (xrfg/osr_hole_fill.hpp).
+                    const unsigned peer_eye = 1U - source_eye;
+                    const auto point = [](const Matrix4x4& view_to_world) noexcept {
+                        return OsrPoint{view_to_world.values[12], view_to_world.values[13], view_to_world.values[14]};
+                    };
+                    const bool have_history = impl_->previous_source_publication[peer_eye] != 0;
+                    const float history = osr_history_parameter(point(camera.source_view_to_world),
+                        point(camera.destination_view_to_world),
+                        point(impl_->previous_source_camera[peer_eye].source_view_to_world));
+                    impl_->osr_leading[peer_eye] = osr_update_leading(impl_->osr_leading[peer_eye], history);
+                    osr_constants.fill_fraction = osr_fill_fraction(effective_mode, have_history, history,
+                        impl_->osr_leading[peer_eye], static_cast<float>(std::clamp(settings.osr_fill, 1, 8)));
+                    impl_->osr.record_fill(impl_->device.Get(), command_list, input.depth.texture,
+                        final_color.texture, final_color.initial_state, osr_constants);
+                    final_color={};final_color.texture=impl_->osr.output();final_color.initial_state=D3D12_RESOURCE_STATE_COMMON;
+                    std::uint32_t fraction_bits{}, history_bits{};
+                    std::memcpy(&fraction_bits, &osr_constants.fill_fraction, sizeof(fraction_bits));
+                    std::memcpy(&history_bits, &history, sizeof(history_bits));
+                    bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,
+                        static_cast<std::int64_t>((static_cast<std::uint64_t>(history_bits) << 32) | fraction_bits),
+                        1300, guide.publication,
+                        (static_cast<std::uint64_t>(effective_mode) << 8) | (have_history ? 1u : 0u));
+                }
+                copy(impl_->renderer, command_list, destination, final_color,
                     color_box, 0, 0);
                 report_stage(AfwStage::output_copied, S_OK, source_eye,
                     guide.publication);
@@ -2462,12 +2533,14 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 }
             }
         }
+        if (osr_recorded) impl_->osr.finish(command_list);
         impl_->gpu_timing.mark(command_list,3);
         impl_->gpu_timing.resolve(command_list);
         const HRESULT close_result = recording.close();
         report_stage(AfwStage::command_list_closed, close_result, source_eye,
             guide.publication);
         if (FAILED(close_result) || FAILED(result)) {
+            if (osr_recorded) impl_->osr.discard();
             impl_->depth_staging_state = initial_depth_state;
             impl_->depth_calibration_contracts = initial_calibration_contracts;
             impl_->depth_calibration_reset_pending = initial_calibration_reset;

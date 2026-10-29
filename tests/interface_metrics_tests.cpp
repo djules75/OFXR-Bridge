@@ -281,6 +281,12 @@ void wording() {
     s.desired.nr_enabled=true;s.runtime.nr_running=true;
     check(interface_state_text(s)=="FSR + AFW + Neural", "actual neural processing is explicit");
     check(interface_status_text(s).find("AFW: Active | Neural Render: Active")!=std::string::npos, "all active effects reported independently");
+    s.desired.luke_osr=1;
+    check(interface_state_text(s)=="FSR + AFW + OSR + Neural", "OSR band fill is explicit in the mode label");
+    check(interface_status_text(s).find("AFW + OSR: Active")!=std::string::npos, "OSR band fill is explicit in the status line");
+    s.desired.nr_enabled=false;s.runtime.nr_running=false;
+    check(interface_state_text(s)=="FSR + AFW + OSR", "OSR label without neural");
+    s.desired.luke_osr=0;s.desired.nr_enabled=true;s.runtime.nr_running=true;
     s.runtime.afw_running=false;s.runtime.nr_running=false;
     check(interface_status_text(s).find("AFW: Waiting | Neural Render: Waiting")!=std::string::npos, "enabled without output is waiting");
     s.runtime.afw_running=true;s.runtime.nr_running=true;s.runtime.heartbeat_ms=GetTickCount64()-2000;

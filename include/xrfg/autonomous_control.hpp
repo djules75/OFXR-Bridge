@@ -51,6 +51,11 @@ struct Settings {
     float afw_ignore_motion_threshold{2.5F};
     int afw_depth_dilate_mode{};
     int afw_shading_rate{}; // beta6 Combined; 0 full resolution, 4=2x2, 8=4x4
+    int luke_osr{};        // 0 AFW output as is, 1 AFW + OSR band fill (docs/OSR_HOLE_FILL.md)
+    int luke_osr_cover{};  // OSR: band cover in depth texels beyond the hole, 0..8
+    int luke_osr_trim{};   // OSR: object-edge texels replaced too, 0..2
+    int luke_osr_fill{2};  // OSR: band fill gain, 1..8
+    bool luke_advanced{};  // Luke Ross tab: show the provider and OSR parameters
     bool nr_enabled{};
     bool nr_before_sr{true};
     float nr_intensity{1.F};

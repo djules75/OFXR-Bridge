@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.734.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.735.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -169,6 +169,11 @@ if(XRFG_BUILD_TESTS)
         target_compile_features(xrfg_luke_world_scale_config_tests PRIVATE cxx_std_20)
         target_compile_definitions(xrfg_luke_world_scale_config_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         add_test(NAME xrfg_luke_world_scale_config COMMAND xrfg_luke_world_scale_config_tests)
+        add_executable(xrfg_osr_hole_fill_tests tests/osr_hole_fill_tests.cpp)
+        target_include_directories(xrfg_osr_hole_fill_tests PRIVATE include)
+        target_compile_features(xrfg_osr_hole_fill_tests PRIVATE cxx_std_20)
+        target_compile_definitions(xrfg_osr_hole_fill_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        add_test(NAME xrfg_osr_hole_fill COMMAND xrfg_osr_hole_fill_tests)
     endif()
     add_executable(xrfg_fps_overlay_tests tests/fps_overlay_tests.cpp)
     target_link_libraries(xrfg_fps_overlay_tests PRIVATE xrfg_core)
@@ -246,6 +251,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     set(XRFG_LUKE_DEPTH_CALIBRATE_HEADER "${XRFG_GENERATED_SHADER_DIR}/luke_depth_calibrate_shader.hpp")
     set(XRFG_LUKE_AFW_COLOR_SCALE_HEADER "${XRFG_GENERATED_SHADER_DIR}/luke_afw_color_scale_shader.hpp")
     set(XRFG_LUKE_COMPOSE_MOTION_HEADER "${XRFG_GENERATED_SHADER_DIR}/luke_compose_motion_shader.hpp")
+    set(XRFG_OSR_CLEAR_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_clear_shader.hpp")
+    set(XRFG_OSR_SPLAT_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_splat_shader.hpp")
+    set(XRFG_OSR_FILL_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_fill_shader.hpp")
     set(XRFG_VULKAN_D24_DECODE_HEADER "${XRFG_GENERATED_SHADER_DIR}/vulkan_d24_decode_shader.hpp")
     add_custom_command(
         OUTPUT
@@ -271,6 +279,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_LUKE_DEPTH_CALIBRATE_HEADER}"
             "${XRFG_LUKE_COMPOSE_MOTION_HEADER}"
             "${XRFG_LUKE_AFW_COLOR_SCALE_HEADER}"
+            "${XRFG_OSR_CLEAR_HEADER}"
+            "${XRFG_OSR_SPLAT_HEADER}"
+            "${XRFG_OSR_FILL_HEADER}"
             "${XRFG_VULKAN_D24_DECODE_HEADER}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeGameMotionMidpointPS
@@ -365,11 +376,24 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_LUKE_COMPOSE_MOTION_HEADER}" /Vn g_xrfg_luke_compose_motion_shader
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/luke_compose_motion.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrClearCoverage
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_CLEAR_HEADER}" /Vn g_xrfg_osr_clear_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_hole_fill.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrSplatCoverage
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_SPLAT_HEADER}" /Vn g_xrfg_osr_splat_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_hole_fill.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E OsrFillHoles
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_OSR_FILL_HEADER}" /Vn g_xrfg_osr_fill_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_hole_fill.hlsl"
         DEPENDS
             "${XRFG_SYNTHESIS_SHADER}"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/fsr_cinema_projection.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/luke_depth_convert.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/luke_compose_motion.hlsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_hole_fill.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/ingress/vulkan_d24_decode.hlsl"
         VERBATIM)
 
@@ -410,6 +434,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_LUKE_DEPTH_CALIBRATE_HEADER}"
         "${XRFG_LUKE_COMPOSE_MOTION_HEADER}"
         "${XRFG_LUKE_AFW_COLOR_SCALE_HEADER}"
+        "${XRFG_OSR_CLEAR_HEADER}"
+        "${XRFG_OSR_SPLAT_HEADER}"
+        "${XRFG_OSR_FILL_HEADER}"
         "${XRFG_VULKAN_D24_DECODE_HEADER}")
     foreach(stage decide compose)
         set(header "${XRFG_GENERATED_SHADER_DIR}/guide_composer_${stage}_shader.hpp")

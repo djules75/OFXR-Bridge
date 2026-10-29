@@ -93,7 +93,15 @@ struct AfwControl {
             L"experimental", L"luke_afw_shading_rate", 0, ini().c_str())), 0, 8);
         settings.depth_dilate_mode = std::clamp(static_cast<int>(
             GetPrivateProfileIntW(L"experimental", L"luke_afw_depth_dilate_mode",
-                1, ini().c_str())), 0, 2);
+                0, ini().c_str())), 0, 2);
+        settings.osr = GetPrivateProfileIntW(L"experimental", L"luke_osr", 0,
+            ini().c_str()) != 0;
+        settings.osr_cover = std::clamp(static_cast<int>(GetPrivateProfileIntW(
+            L"experimental", L"luke_osr_cover", 0, ini().c_str())), 0, 8);
+        settings.osr_trim = std::clamp(static_cast<int>(GetPrivateProfileIntW(
+            L"experimental", L"luke_osr_trim", 0, ini().c_str())), 0, 2);
+        settings.osr_fill = std::clamp(static_cast<int>(GetPrivateProfileIntW(
+            L"experimental", L"luke_osr_fill", 2, ini().c_str())), 1, 8);
     }
 };
 AfwControl& afw_control() { static AfwControl state; return state; }
@@ -161,6 +169,9 @@ AfwSnapshot afw_snapshot() {
 
 bool request_afw(AfwSettings settings) {
     if (settings.mode < 0 || settings.mode > 3 ||
+        settings.osr_cover < 0 || settings.osr_cover > 8 ||
+        settings.osr_trim < 0 || settings.osr_trim > 2 ||
+        settings.osr_fill < 1 || settings.osr_fill > 8 ||
         settings.shading_rate < 0 || settings.shading_rate > 8 ||
         settings.depth_dilate_mode < 0 || settings.depth_dilate_mode > 2 ||
         !std::isfinite(settings.ignore_motion_threshold) ||
@@ -193,6 +204,20 @@ bool request_afw(AfwSettings settings) {
     if (old.shading_rate != settings.shading_rate) {
         wchar_t value[16]{}; swprintf_s(value,L"%d",settings.shading_rate);
         ok &= write(L"experimental",L"luke_afw_shading_rate",value);
+    }
+    if (old.osr != settings.osr)
+        ok &= write(L"experimental", L"luke_osr", settings.osr ? L"1" : L"0");
+    if (old.osr_cover != settings.osr_cover) {
+        wchar_t value[16]{}; swprintf_s(value, L"%d", settings.osr_cover);
+        ok &= write(L"experimental", L"luke_osr_cover", value);
+    }
+    if (old.osr_trim != settings.osr_trim) {
+        wchar_t value[16]{}; swprintf_s(value, L"%d", settings.osr_trim);
+        ok &= write(L"experimental", L"luke_osr_trim", value);
+    }
+    if (old.osr_fill != settings.osr_fill) {
+        wchar_t value[16]{}; swprintf_s(value, L"%d", settings.osr_fill);
+        ok &= write(L"experimental", L"luke_osr_fill", value);
     }
     if (!(old == settings)) {
         c.snapshot.desired = settings;
