@@ -153,9 +153,14 @@ template<unsigned Family>inline ULONG STDMETHODCALLTYPE release_list(ID3D12Graph
     std::scoped_lock lock(mutex);const auto result=original_list_release[Family](list);
     if(!result)roots.erase(list);return result;
 }
+// Entries leave at a list's final Release or its Reset, so this only bounds a
+// leak. A list first bound once the map is full gets no record, and a DLSS
+// production on it has no camera: Uncharted keeps 280-430 lists alive, and
+// at 256 REAL VR's fix binding was lost on 20-60% of frames. About 1 KB each.
+inline constexpr std::size_t kMaxTrackedLists = 4096;
 inline Roots* context(ID3D12GraphicsCommandList* list) {
     if(auto it=roots.find(list);it!=roots.end())return &it->second;
-    if(roots.size()>=256)return nullptr;
+    if(roots.size()>=kMaxTrackedLists)return nullptr;
     return &roots.emplace(list,Roots{}).first->second;
 }
 inline void bind(ID3D12GraphicsCommandList* list,bool graphics,UINT slot,D3D12_GPU_VIRTUAL_ADDRESS gpu) {
