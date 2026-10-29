@@ -45,6 +45,7 @@ struct LukeContextDiagnostics {
     std::uint32_t pending_lists{}, registered_queues{};
     std::uintptr_t execute_entry{}, device{}, queue{};
     std::uint64_t submissions{};
+    std::uintptr_t execute_game_entry{}; // second hooked implementation, 0 if none
 };
 LukeContextDiagnostics luke_context_diagnostics() noexcept;
 }

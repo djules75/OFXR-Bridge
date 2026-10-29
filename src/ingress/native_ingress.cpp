@@ -23,14 +23,16 @@ namespace {
 using Microsoft::WRL::ComPtr;
 struct Hooks {
     std::mutex mutex;
-    SafetyHookInline execute, create_queue, reset_list;
+    SafetyHookInline execute, execute_game, create_queue, reset_list;
     std::uintptr_t execute_entry{}; // diagnostics only, assigned on hook installation
+    std::uintptr_t execute_game_entry{}; // a second implementation found on the producer device
     bool execute_probe_active{};
     ULONGLONG execute_probe_retry_at{};
+    std::array<std::uintptr_t,8> probed_devices{}; // producer devices already checked for their own entry
     using Execute=void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*,UINT,ID3D12CommandList* const*);
     using CreateQueue=HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*,const D3D12_COMMAND_QUEUE_DESC*,REFIID,void**);
     using ResetList=HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,ID3D12CommandAllocator*,ID3D12PipelineState*);
-    Execute submit{};
+    Execute submit{}, submit_game{};
     CreateQueue make_queue{};
     ResetList reset{};
     std::vector<ComPtr<ID3D12CommandQueue>> queues;
@@ -50,7 +52,19 @@ template<std::size_t N> bool finite(const std::array<float,N>& values) {
     return true;
 }
 void attach_real_vr_cameras(unsigned count,ID3D12CommandList* const* lists) noexcept;
+// Two hooked entries may chain into each other (one implementation forwarding
+// to the other). Only the outermost hooked call observes a submission.
+thread_local unsigned execute_depth{};
+void execute_observed(ID3D12CommandQueue* queue,UINT count,ID3D12CommandList* const* lists,Hooks::Execute original);
 void STDMETHODCALLTYPE execute(ID3D12CommandQueue* queue,UINT count,ID3D12CommandList* const* lists) {
+    execute_observed(queue,count,lists,hooks().submit);
+}
+void STDMETHODCALLTYPE execute_game(ID3D12CommandQueue* queue,UINT count,ID3D12CommandList* const* lists) {
+    execute_observed(queue,count,lists,hooks().submit_game);
+}
+void execute_observed(ID3D12CommandQueue* queue,UINT count,ID3D12CommandList* const* lists,Hooks::Execute original) {
+    if(execute_depth) {original(queue,count,lists);return;}
+    struct Depth{Depth(){++execute_depth;}~Depth(){--execute_depth;}} depth;
     ++submissions;
     std::vector<ComPtr<ID3D12CommandList>> owners;
     std::vector<ID3D12CommandList*> native_lists;
@@ -72,7 +86,7 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue* queue,UINT count,ID3D12Comman
         begin_dlss_motion_vector_submission(1,unidentified);
     }
     begin_dlss_motion_vector_submission(static_cast<unsigned>(native_lists.size()),native_lists.data());
-    try {hooks().submit(queue,count,lists);}
+    try {original(queue,count,lists);}
     catch(...) {
         abandon_dlss_motion_vector_submission(static_cast<unsigned>(native_lists.size()),native_lists.data());
         throw;
@@ -174,6 +188,22 @@ static bool install_execute_hook(Hooks& s, ID3D12CommandQueue* queue) {
     }
     return bool(s.execute);
 }
+// Caller owns Hooks::mutex. A queue on the producer device whose Execute
+// entry differs from the hooked one gets its own hook. Cyberpunk 2077 and
+// Avatar: Frontiers of Pandora on VDXR: OFXR's D3D11 bridge queue was hooked
+// first, before the game created DLSS, and that entry never saw the game's
+// submissions. Returns S_OK when installed, S_FALSE when already hooked.
+static HRESULT install_game_execute_hook(Hooks& s, ID3D12CommandQueue* queue) {
+    auto** table=*reinterpret_cast<void***>(queue);
+    const auto entry=reinterpret_cast<std::uintptr_t>(table[10]);
+    if(entry==s.execute_entry || entry==s.execute_game_entry)return S_FALSE;
+    if(s.execute_game)return E_NOT_VALID_STATE; // a third implementation: keep the first two
+    s.execute_game=safetyhook::create_inline(table[10],reinterpret_cast<void*>(&execute_game),SafetyHookInline::StartDisabled);
+    if(!s.execute_game)return E_FAIL;
+    s.execute_game_entry=entry;s.submit_game=s.execute_game.original<Hooks::Execute>();
+    (void)s.execute_game.enable();
+    return S_OK;
+}
 void configure_queue(ID3D12CommandQueue* input) noexcept {
     try {
         IUnknown* native{};ComPtr<ID3D12CommandQueue> queue;
@@ -186,11 +216,12 @@ void configure_queue(ID3D12CommandQueue* input) noexcept {
     }catch(...) {}
 }
 void install_device(ID3D12Device* input) noexcept {
-    bool probing=false;
+    bool probing=false,second_probe=false;
     try {
         IUnknown* native{};ComPtr<ID3D12Device> device;
         if(!d3d_native::get_borrowed(input,&native)||FAILED(native->QueryInterface(IID_PPV_ARGS(&device))))return;
         auto& s=hooks();Hooks::CreateQueue create{};
+        const auto identity=reinterpret_cast<std::uintptr_t>(device.Get());
         {
             std::scoped_lock lock(s.mutex);
             if(!s.create_queue) {
@@ -200,10 +231,17 @@ void install_device(ID3D12Device* input) noexcept {
             }
             // A failed D11 helper-device creation leaves no registered queue.
             // The game may have created all its queues before hooks existed.
-            if(!s.execute && !s.execute_probe_active) {
+            // An existing hook may also cover another implementation only
+            // (OFXR's bridge queue hooked first): while Luke lists stay
+            // unmatched, check this producer device's own entry once.
+            const bool unmatched=s.execute && luke_detected() &&
+                !has_luke_context.load(std::memory_order_acquire) &&
+                pending_luke_lists.load(std::memory_order_acquire)!=0 &&
+                std::find(s.probed_devices.begin(),s.probed_devices.end(),identity)==s.probed_devices.end();
+            if((!s.execute || unmatched) && !s.execute_probe_active) {
                 const auto now=GetTickCount64();
                 if(now>=s.execute_probe_retry_at) {
-                    probing=s.execute_probe_active=true;
+                    probing=s.execute_probe_active=true;second_probe=bool(s.execute);
                     s.execute_probe_retry_at=now+1000;
                     create=s.make_queue;
                 }
@@ -222,12 +260,28 @@ void install_device(ID3D12Device* input) noexcept {
                 if(!d3d_native::get_borrowed(probe.Get(),&borrowed))result=E_NOINTERFACE;
                 else result=borrowed->QueryInterface(IID_PPV_ARGS(&canonical));
             }
+            std::uintptr_t hooked{},probed{};
             {
                 std::scoped_lock lock(s.mutex);
-                if(SUCCEEDED(result) && !install_execute_hook(s,canonical.Get()))result=E_FAIL;
+                if(SUCCEEDED(result)) {
+                    probed=reinterpret_cast<std::uintptr_t>((*reinterpret_cast<void***>(canonical.Get()))[10]);
+                    if(second_probe)result=install_game_execute_hook(s,canonical.Get());
+                    else if(!install_execute_hook(s,canonical.Get()))result=E_FAIL;
+                }
+                if(second_probe && result!=E_FAIL) {
+                    // Checked once per producer device, whatever the outcome.
+                    auto slot=std::find(s.probed_devices.begin(),s.probed_devices.end(),std::uintptr_t{});
+                    if(slot==s.probed_devices.end())slot=s.probed_devices.begin();
+                    *slot=identity;
+                }
+                hooked=s.execute_entry;
                 s.execute_probe_active=false;probing=false;
             }
-            bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,result,961,
+            // 961: first hook from this device. 963: a hook already existed;
+            // result S_OK = this device's entry differed and is now hooked,
+            // S_FALSE = same entry; b = existing entry, c = this device's entry.
+            if(second_probe)bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,result,963,hooked,probed);
+            else bridge_flight_logger().event(BridgeFlightOperation::luke_afw_stage,result,961,
                 reinterpret_cast<std::uintptr_t>(device.Get()),0);
         }
         if(scene_camera_wanted())luke_scene_camera::install(device.Get());
@@ -530,7 +584,7 @@ LukeContextDiagnostics luke_context_diagnostics() noexcept {
     return {has_luke_context.load(std::memory_order_acquire),bool(s.execute),bool(s.create_queue),
         static_cast<std::uint32_t>(s.luke_lists.size()),static_cast<std::uint32_t>(s.queues.size()),
         s.execute_entry,reinterpret_cast<std::uintptr_t>(s.luke_device.Get()),
-        reinterpret_cast<std::uintptr_t>(s.luke_queue.Get()),submissions.load()};
+        reinterpret_cast<std::uintptr_t>(s.luke_queue.Get()),submissions.load(),s.execute_game_entry};
 }
 std::uint32_t allocate_handle_key() noexcept {
     auto prior=handles.load();

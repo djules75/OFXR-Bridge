@@ -542,7 +542,7 @@ int main() {
     {
         StatusInputs idle;
         idle.armed = true;
-        idle.build = 733;
+        idle.build = 734;
         idle.updated = "2026-10-28T09:12:03.512Z";
         const std::string without = build_status_json(idle);
         StatusInputs running = idle;
@@ -569,7 +569,7 @@ int main() {
             !contains(without, "\"generating\": null,") ||
             !contains(without, "\"output_fps\": null,") ||
             !contains(without, "\"latency_ms\": null,") ||
-            !contains(without, "\"build\": 733") ||
+            !contains(without, "\"build\": 734") ||
             !contains(without, "\"updated\": \"2026-10-28T09:12:03.512Z\"") ||
             !contains(with, "\"paused\": true,") || !contains(with, "\"multiplier\": 3,") ||
             !contains(with, "\"generating\": true,") ||

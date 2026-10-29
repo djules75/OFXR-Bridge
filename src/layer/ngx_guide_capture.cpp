@@ -1026,7 +1026,21 @@ std::shared_ptr<const DlssMotionVectorFrame> capture(ID3D12GraphicsCommandList* 
     const bool luke=native_ingress::luke_detected();
     if(luke) {
         ComPtr<ID3D12Device> owner;ComPtr<ID3D12CommandQueue> producer;
-        if(!native_ingress::query_luke_context(owner.GetAddressOf(),producer.GetAddressOf())){rejected(3);return {};}
+        if(!native_ingress::query_luke_context(owner.GetAddressOf(),producer.GetAddressOf())) {
+            // Without the producer context every Luke capture is refused and
+            // AFW gets no input. a=refusals, b=pending lists<<32|registered
+            // queues, c=hooked submissions, d=low 32 bits of the hooked
+            // Execute entries: the first hook in the low word, the producer
+            // device's own (0 if none) in the high word.
+            static std::atomic_uint refusals{};
+            const auto count=refusals.fetch_add(1,std::memory_order_relaxed)+1;
+            if(count<=4||count%600==0) {
+                const auto c=native_ingress::luke_context_diagnostics();
+                log("luke_context_missing",count,(UINT64(c.pending_lists)<<32)|c.registered_queues,c.submissions,
+                    (UINT64(c.execute_game_entry&0xFFFFFFFFU)<<32)|(c.execute_entry&0xFFFFFFFFU));
+            }
+            rejected(3);return {};
+        }
         queue=std::move(producer);
     }
     if(!queue){rejected(4);return {};}
