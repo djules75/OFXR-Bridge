@@ -441,6 +441,45 @@ struct Gpu {
         return upload; // Caller retains until the submitted readback fence completes.
     }
 };
+void doom_hdr_gpu_test() {
+    require(xrfg::luke_origin_bright_primary_for_title(L"DOOMTheDarkAges.exe")&&
+        xrfg::luke_origin_bright_primary_for_title(L"doomthedarkages.EXE")&&
+        !xrfg::luke_origin_bright_primary_for_title(L"TheGreatCircle.exe")&&
+        !xrfg::luke_origin_bright_primary_for_title(L"GTA5_Enhanced.exe")&&
+        !xrfg::luke_origin_bright_primary_for_title(L"Outlaws.exe"),"DOOM-only HDR contrast scope");
+    Gpu gpu;
+    auto source=gpu.texture(1024,1024,DXGI_FORMAT_R16G16B16A16_FLOAT);
+    auto eye=gpu.texture(1024,744,DXGI_FORMAT_R16G16B16A16_FLOAT);
+    xrfg::configure_luke_color_origin_extent(1024,744);
+    constexpr std::uint32_t expected=0x12345;
+    xrfg::LukeColorOriginRect written{};
+    check(xrfg::mark_luke_color_origin(gpu.list.Get(),source.Get(),expected,D3D12_RESOURCE_STATE_COMMON,
+        gpu.device.Get(),{},DXGI_FORMAT_UNKNOWN,&written),"DOOM HDR stamp");
+    require(written.x==2&&written.y==282&&written.width==256&&written.height==8,
+        "DOOM HDR fix changed marker geometry/copy budget");
+    D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;desc.Width=16384;
+    desc.Height=desc.DepthOrArraySize=desc.MipLevels=desc.SampleDesc.Count=1;desc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> readback;check(gpu.device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,
+        D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&readback)),"DOOM stamp readback");
+    gpu.transition(source.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION src{},dst{};src.pResource=source.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.pResource=readback.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint.Footprint={DXGI_FORMAT_R16G16B16A16_FLOAT,256,8,1,2048};
+    const D3D12_BOX box{2,282,0,258,290,1};gpu.list->CopyTextureRegion(&dst,0,0,0,&src,&box);
+    gpu.transition(source.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON);
+    gpu.crop(source.Get(),eye.Get(),0,140,1024,744);gpu.submit();
+    std::uint32_t token{};check(xrfg::read_luke_color_origin(gpu.queue.Get(),eye.Get(),&token,
+        D3D12_RESOURCE_STATE_COMMON,5000),"DOOM cropped marker read");
+    require(token==expected,"DOOM HDR marker changed identity");
+    void* mapped{};D3D12_RANGE range{0,16384};check(readback->Map(0,&range,&mapped),"DOOM HDR map");
+    const auto* half=static_cast<const std::uint16_t*>(mapped);
+    const bool levels=half[0]==0x3c00&&half[1]==0x3c00&&half[2]==0x3c00&&
+        half[8]==0&&half[9]==0&&half[10]==0;
+    const D3D12_RANGE untouched{0,0};readback->Unmap(0,&untouched);
+    require(levels,"DOOM HDR stamp is still dim 1/16 instead of full-white 1.0");
+    std::cout<<"DOOM HDR GPU stamp: full-white1.0/black0, exact256x8/16384bytes, crop280 and CRC identity PASS\n";
+}
 void gpu_tests() {
     Gpu gpu;
     auto source=gpu.texture(1024,64),left=gpu.texture(800,64),right=gpu.texture(800,64);
@@ -942,7 +981,8 @@ int captured_decode_benchmark(char** argv) {
  std::sort(serial_ms.begin(),serial_ms.end());std::sort(parallel_ms.begin(),parallel_ms.end());std::cout<<"CAPTURED_DECODE serial_ms="<<serial_ms[7]<<" parallel_ms="<<parallel_ms[7]<<" token0="<<expected[0].token<<" token1="<<expected[1].token<<" ambiguous="<<expected[0].ambiguous<<','<<expected[1].ambiguous<<'\n';return 0;
 }
 int main(int argc,char** argv) {
-    try { if(argc==2 && std::string_view(argv[1])=="outlaws-protected") {outlaws_protected_gpu_test();return 0;}
+    try { if(argc==2 && std::string_view(argv[1])=="doom-hdr") {doom_hdr_gpu_test();return 0;}
+        if(argc==2 && std::string_view(argv[1])=="outlaws-protected") {outlaws_protected_gpu_test();return 0;}
         if(argc==2 && std::string_view(argv[1])=="gta-protected") {gta_protected_gpu_test();return 0;}
         if(argc==3)return captured_decode_benchmark(argv);cpu_batch_tests();windowed_decode_tests();codec_tests();luma_tests();gpu_tests();std::cout<<"Compact origin: "<<checks<<" checks PASS\n";return 0; }
     catch(const std::exception& e) {std::cerr<<"Compact origin FAIL: "<<e.what()<<"\n";return 1;}

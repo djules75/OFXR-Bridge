@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.755.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.756.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -912,6 +912,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_compile_definitions(xrfg_luke_color_origin_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         target_link_libraries(xrfg_luke_color_origin_tests PRIVATE d3d12 dxgi xrfg_bridge_flight_logger)
         add_test(NAME xrfg_luke_color_origin COMMAND xrfg_luke_color_origin_tests)
+        add_test(NAME xrfg_doom_hdr_origin COMMAND ${CMAKE_COMMAND}
+            "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_color_origin_tests>"
+            "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/doom-hdr-origin"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_doom_hdr_origin_test.cmake")
+        set_tests_properties(xrfg_doom_hdr_origin PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
         set_tests_properties(xrfg_luke_color_origin PROPERTIES TIMEOUT 30)
         add_test(NAME xrfg_outlaws_protected_origin COMMAND ${CMAKE_COMMAND}
             "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_color_origin_tests>"

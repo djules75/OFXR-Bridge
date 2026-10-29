@@ -30,6 +30,14 @@ std::array<unsigned,2> origin_inset(unsigned color_height) noexcept {
     }();
     return luke_origin_inset_for_title(title,color_height);
 }
+bool bright_primary_origin() noexcept {
+    static const bool selected=[] {
+        wchar_t path[MAX_PATH]{};GetModuleFileNameW(nullptr,path,MAX_PATH);
+        const auto* name=wcsrchr(path,L'\\');
+        return luke_origin_bright_primary_for_title(name?name+1:path);
+    }();
+    return selected;
+}
 bool gta_color_origin() noexcept {
     static const bool result=[] {wchar_t p[MAX_PATH]{};GetModuleFileNameW(nullptr,p,MAX_PATH);
         const auto* n=wcsrchr(p,L'\\');return !_wcsicmp(n?n+1:p,L"GTA5_Enhanced.exe");}();
@@ -336,12 +344,13 @@ HRESULT mark_luke_color_origin(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             auto barrier = transition(color, state, D3D12_RESOURCE_STATE_COPY_DEST);
             list->ResourceBarrier(1, &barrier);
         }
+        const bool primary_bright=bright_primary_origin();
         for(unsigned band=0;band<layout.band_count;++band) {
             const UINT x=rect.x+layout.bands[band].x,y=rect.y+layout.bands[band].y;
             for (unsigned cell = 0; cell < kLukeOriginBits * 2; ++cell) {
             const bool white = luke_origin_white(token, cell * 2);
             D3D12_TEXTURE_COPY_LOCATION source{};
-            source.pResource = (layout.bright[band] ? patterns->bright_colors : patterns->colors)[white ? 1 : 0].Get();
+            source.pResource = ((layout.bright[band]||primary_bright) ? patterns->bright_colors : patterns->colors)[white ? 1 : 0].Get();
             source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
             source.PlacedFootprint.Footprint = {format, 2, kLukeOriginHeight, 1, 256};
                 list->CopyTextureRegion(&destination, x + cell * 2, y, 0, &source, nullptr);
