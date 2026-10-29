@@ -5594,6 +5594,13 @@ int main(int argc, char** argv) {
             return 0;
         }
 #ifdef XRFG_NATIVE_DLSSG
+        if (argc > 1 && std::string_view(argv[1]) == "native-resized-eye") {
+            if (!native_test_has_supported_nvidia_adapter()) return 77;
+            D3D12WarpFixture fixture(true);
+            if(xrfg::native_dlssg_max_generated_frames(fixture.device())==0)return 77;
+            test_native_dlss_packed_stereo(fixture,false,kFormat,false,nullptr,true);
+            fixture.require_no_debug_errors();return 0;
+        }
         if (argc > 1 && std::string_view(argv[1]) == "native-dlssg-capture") {
             if (!native_test_has_supported_nvidia_adapter()) return 77;
             D3D12WarpFixture fixture(true);

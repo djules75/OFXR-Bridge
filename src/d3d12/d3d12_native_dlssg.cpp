@@ -1371,6 +1371,30 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             bg->eye_count > 2) {
             return skip(Skip::guides, 2);
         }
+        // Native SR can render a complete eye at a different pixel extent
+        // from the mod's final XR image. Keep the retained native texels and
+        // prove their placement from the camera, rather than treating XR pixel
+        // coordinates as coordinates in the SR output (Witcher3VR). No guessed
+        // scaling, producer mutation or relaxed bounds check is used.
+        DlssMotionVectorSet placed_a=*ag,placed_b=*bg;
+        const auto place_camera_guides=[&](DlssMotionVectorSet& set,std::span<const D3D12ReprojectionView> views) {
+            for(UINT i=0;i<views.size();++i) {
+                const UINT index=p.source.DepthOrArraySize==1 && set.eye_count==views.size()
+                    ? i:slice(views[i],i,UINT(views.size()),p.source.DepthOrArraySize);
+                if(index>=set.eye_count||!set.eyes[index])continue;
+                const auto& g=*set.eyes[index];
+                const auto r=rect(views[i],UINT(p.source.Width),p.source.Height);
+                const bool covered=r.offset_x>=g.output_x && r.offset_y>=g.output_y &&
+                    std::uint64_t(r.offset_x)+r.width<=std::uint64_t(g.output_x)+g.output_width &&
+                    std::uint64_t(r.offset_y)+r.height<=std::uint64_t(g.output_y)+g.output_height;
+                if(covered)continue;
+                const auto& f=views[i].fov;
+                const DlssEyeView eye{std::tan(f.angle_left),std::tan(f.angle_right),
+                    std::tan(f.angle_up),std::tan(f.angle_down),int(r.offset_x),int(r.offset_y),r.width,r.height};
+                if(auto aligned=place_guide_in_view(g,eye))set.eyes[index]=std::move(aligned);
+            }
+        };
+        place_camera_guides(placed_a,av);place_camera_guides(placed_b,bv);ag=&placed_a;bg=&placed_b;
         // Validate the entire stereo pair before writing a command. No partial
         // eye, guessed depth, or cross-stream history is handed to NGX.
         const auto guide_index = [&](UINT i) {
