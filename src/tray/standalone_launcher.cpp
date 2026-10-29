@@ -530,7 +530,7 @@ std::string build_vulkan_layer_manifest(
            "    \"api_version\": \"1.3.296\",\n"
            "    \"implementation_version\": \"" +
            std::to_string(implementation_version) + "\",\n"
-           "    \"description\": \"OFXR-BRIDGE 0.3.1 (v" +
+           "    \"description\": \"OFXR-BRIDGE 0.3.2 (v" +
            std::to_string(implementation_version) +
            "): serialises Vulkan queue submissions while the bridge is armed\",\n"
            "    \"functions\": {\n"
@@ -558,7 +558,7 @@ std::string build_implicit_layer_manifest(
            "    \"api_version\": \"1.0\",\n"
            "    \"implementation_version\": \"" +
            std::to_string(implementation_version) + "\",\n"
-           "    \"description\": \"OFXR-BRIDGE 0.3.1 (v" +
+           "    \"description\": \"OFXR-BRIDGE 0.3.2 (v" +
            std::to_string(implementation_version) +
            ") manual persistent implicit layer\",\n"
            "    \"disable_environment\": \"XRFG_DISABLE_OFXR_BRIDGE\"\n"

@@ -669,10 +669,38 @@ struct PrivateOpenXrRuntime::Impl {
                         if(slots.valid())options.trace(20,packet->sequence,deadline,static_cast<std::int64_t>(slots.slot()));
                         options.trace(24,packet->sequence,prediction_qpc(prediction).value_or(0),renewed);
                     }
-                } else if(diagnostic) {
-                    options.trace(7,packet->sequence,wait_enter,0);
-                    options.trace(6,packet->sequence,wait_leave,0);
-                    options.trace(28,packet->sequence,begun_at,0); // no director pacing
+                } else {
+                    // Framework bypass still needs a live native XR cycle.
+                    // GPU preparation may outlive the Wait already in flight.
+                    // Renew only that expired Begin; retain the same FIFO image
+                    // and never introduce the director's pacing/delay here.
+                    unsigned renewed{};
+                    while(!stopping && prediction.shouldRender) {
+                        const auto at=prediction_qpc(prediction);
+                        if(!at || *at>clock_ns()+PrivateOutputSchedule::preparation_lead)break;
+                        if(diagnostic)options.trace(23,packet->sequence,*at,clock_ns());
+                        if(renewed && renewed%8==0 && !sleep_until(clock_ns()+physical,1'250'000))break;
+                        if(!post_wait(0,false)){result=XR_ERROR_CALL_ORDER_INVALID;break;}
+                        auto fresh=take_wait();
+                        if(!fresh){result=XR_ERROR_SESSION_NOT_RUNNING;break;}
+                        result=fresh->result;if(XR_FAILED(result))break;
+                        prediction=fresh->prediction;waited=true;
+                        wait_enter=fresh->entered;wait_leave=fresh->returned;
+                        XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+                        result=options.real.begin(options.real.session,&begin);
+                        if(XR_FAILED(result))break;
+                        waited=false;begun=true;begun_at=clock_ns();++renewed;
+                    }
+                    if(stopping || XR_FAILED(result)) {
+                        if(!stopping)fail(result);
+                        retire(packet);fifo->retire();break;
+                    }
+                    if(diagnostic) {
+                        options.trace(7,packet->sequence,wait_enter,0);
+                        options.trace(6,packet->sequence,wait_leave,0);
+                        options.trace(28,packet->sequence,begun_at,0); // no director pacing
+                        options.trace(24,packet->sequence,prediction_qpc(prediction).value_or(0),renewed);
+                    }
                 }
                 // Wait for the next cycle may overlap this frame's handoff.
                 // Begin/End remain exclusively serialized on this consumer;

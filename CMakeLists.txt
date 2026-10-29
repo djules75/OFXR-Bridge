@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.735.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.746.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -620,6 +620,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_link_libraries(xrfg_private_openxr_runtime_tests PRIVATE xrfg_steamvr_delivery xrfg_d3d12_history)
         target_compile_features(xrfg_private_openxr_runtime_tests PRIVATE cxx_std_20)
         add_test(NAME xrfg_private_openxr_runtime_gpu COMMAND xrfg_private_openxr_runtime_tests)
+        add_test(NAME xrfg_private_framework_expired_clock_gpu COMMAND xrfg_private_openxr_runtime_tests framework-expired)
+        set_tests_properties(xrfg_private_framework_expired_clock_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         add_test(NAME xrfg_private_framework_bypass_gpu COMMAND xrfg_private_openxr_runtime_tests bypass)
         set_tests_properties(xrfg_private_framework_bypass_gpu PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         add_test(NAME xrfg_private_native_timing_gpu COMMAND xrfg_private_openxr_runtime_tests metrics)

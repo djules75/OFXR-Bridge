@@ -30,7 +30,7 @@ void status(const Snapshot& state) {
     const auto now = GetTickCount64();
     const bool current = state.connected && m.updated_ms && now >= m.updated_ms && now - m.updated_ms < 2000;
     const float header_x=ImGui::GetCursorPosX(),header_width=ImGui::GetContentRegionAvail().x;
-    ImGui::TextDisabled("OFXR-BRIDGE 0.3.1 (v%d)",XRFG_IMPLEMENTATION_VERSION);
+    ImGui::TextDisabled("OFXR-BRIDGE 0.3.2 (v%d)",XRFG_IMPLEMENTATION_VERSION);
     const auto vram=interface_vram_text(state);
     const auto vram_width=ImGui::CalcTextSize(vram.c_str()).x;
     ImGui::SameLine();
