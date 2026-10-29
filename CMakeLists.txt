@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.748.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.755.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -93,6 +93,16 @@ if(XRFG_BUILD_TESTS)
         target_compile_features(xrfg_luke_detection_tests PRIVATE cxx_std_20)
         target_compile_definitions(xrfg_luke_detection_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN XRFG_LUKE_DETECTION_TESTS)
         add_dependencies(xrfg_luke_detection_tests xrfg_luke_marker_custom xrfg_luke_marker_named)
+        foreach(game DOOMTheDarkAges TheGreatCircle)
+            add_test(NAME xrfg_luke_detection_legacy_${game} COMMAND "${CMAKE_COMMAND}"
+                "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_detection_tests>"
+                "-DCUSTOM_MARKER=$<TARGET_FILE:xrfg_luke_marker_custom>"
+                "-DNAMED_MARKER=$<TARGET_FILE:xrfg_luke_marker_named>"
+                "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/legacy-recognition-${game}"
+                "-DGAME_EXE=${game}.exe"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_legacy_luke_detection.cmake")
+        endforeach()
+
         add_test(NAME xrfg_luke_detection_lifecycle COMMAND xrfg_luke_detection_tests
             "$<TARGET_FILE:xrfg_luke_marker_custom>" "$<TARGET_FILE:xrfg_luke_marker_named>")
         add_test(NAME xrfg_luke_detection_preloaded COMMAND xrfg_luke_detection_tests

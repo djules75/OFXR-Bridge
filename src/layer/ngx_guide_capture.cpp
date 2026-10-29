@@ -1828,8 +1828,9 @@ void install_feature_hooks() {
 }
 void start_hook_monitor() {
     static std::atomic_bool started{};if(started.exchange(true))return;
-    HMODULE pinned{};if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
-        reinterpret_cast<LPCWSTR>(&start_hook_monitor),&pinned))return;
+    HMODULE pinned{};const auto retained=GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
+        reinterpret_cast<LPCWSTR>(&start_hook_monitor),&pinned);
+    if(!retained&&!native_ingress::legacy_luke_vulkan_detection())return;
     native_ingress::start_luke_detection_notifications();
     std::thread([]{for(;;){native_ingress::refresh_luke_detection(false);install_feature_hooks();Sleep(50);}}).detach();
 }
