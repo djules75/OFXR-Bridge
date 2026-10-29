@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.746.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.747.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -858,6 +858,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         target_compile_definitions(xrfg_d3d11_bridge_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         add_test(NAME xrfg_d3d11_bridge_tests COMMAND xrfg_d3d11_bridge_tests)
         set_tests_properties(xrfg_d3d11_bridge_tests PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME xrfg_quarantine_history_recovery COMMAND xrfg_three_slot_director_tests quarantine-history-recovery)
+        set_tests_properties(xrfg_quarantine_history_recovery PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
         add_test(NAME xrfg_release_bound_guides COMMAND xrfg_d3d12_history_tests release-bound-guides)
         set_tests_properties(xrfg_release_bound_guides PROPERTIES TIMEOUT 30)
         add_test(NAME xrfg_elliott_controller_layer COMMAND xrfg_three_slot_director_tests elliott-controller)

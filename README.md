@@ -2,7 +2,7 @@
 
 OFXR-BRIDGE is an experimental OpenXR API layer that inserts generated frames between rendered frames.
 
-Prepared beta release: **0.3.2 (v746)**. The internal build number is shown in the package name and the application.
+Prepared beta release: **0.3.2 (v747)**. The internal build number is shown in the package name and the application.
 
 Download builds from [GitHub Releases](https://github.com/tig3rmast3r/OFXR-Bridge/releases).
 

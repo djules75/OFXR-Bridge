@@ -890,6 +890,7 @@ struct SessionState {
     std::atomic<std::shared_ptr<xrfg::InterfaceCycle>> interface_active_cycle;
     std::uint64_t next_application_frame_serial{1}; // mutex
     std::optional<ProjectionSnapshot> previous_projection;
+    std::atomic_bool generation_continuity_reset_pending{};
     XrTime generation_resume_display_time{};
     std::chrono::steady_clock::time_point generation_resume_wall_time{};
     XrDuration minimum_runtime_display_period{};
@@ -4354,6 +4355,8 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_set_presentation_transform_ofxr(
     const auto state = find_session(session);
     if (!state) return XR_ERROR_HANDLE_INVALID;
     std::scoped_lock lock(state->frame_call_mutex);
+    if (state->presentation_transform.active != (transform->active != 0U))
+        state->generation_continuity_reset_pending.store(true, std::memory_order_release);
     state->presentation_transform = {};
     state->presentation_transform.active = transform->active != 0U;
     state->presentation_transform.view_count = transform->view_count;
@@ -14488,6 +14491,7 @@ void schedule_generation_quarantine(
             if (deadline > state->generation_resume_wall_time) {
                 state->generation_resume_wall_time = deadline;
             }
+            state->generation_continuity_reset_pending.store(true, std::memory_order_release);
             state->previous_projection.reset();
         }
         state->generation_steady_state_established = false;
@@ -14510,6 +14514,8 @@ void schedule_generation_quarantine(
 
 void clear_generation_continuity(
     const std::shared_ptr<SessionState>& state) noexcept {
+    // Consume only this request. A concurrent quarantine must remain pending.
+    state->generation_continuity_reset_pending.exchange(false, std::memory_order_acq_rel);
     if (continuous_presenter_active(state))
         static_cast<void>(wait_for_presenter_idle(state));
     xrfg::bridge_flight_logger().event(
@@ -14545,6 +14551,15 @@ void clear_generation_continuity(
         }
     } catch (...) {
     }
+}
+
+// A bypass must release retained GPU history even if a preceding structural
+// quarantine has already cleared its CPU projection metadata.
+void clear_bypassed_generation_continuity(const std::shared_ptr<SessionState>& state) noexcept {
+    bool has_anchor;
+    { std::scoped_lock lock(state->mutex); has_anchor = state->previous_projection.has_value(); }
+    if (has_anchor || state->generation_continuity_reset_pending.load(std::memory_order_acquire))
+        clear_generation_continuity(state);
 }
 
 // The raw XR and post-AFW colors have different temporal anchors. Reset once
@@ -15854,6 +15869,11 @@ XrResult layer_end_frame_impl(
         }
     }
     xrfg::autonomous::apply_runtime_settings();
+    // Presentation-domain changes are one transaction boundary for all views.
+    // Retire anchors before admission/pairing instead of silently re-priming
+    // one resource inside a transaction still expecting a synthetic pair.
+    if (state->generation_continuity_reset_pending.load(std::memory_order_acquire))
+        clear_generation_continuity(state);
     struct RuntimeReportScope {
         const std::shared_ptr<SessionState>& state;
         const XrFrameEndInfo* frame;
@@ -16209,9 +16229,7 @@ XrResult layer_end_frame_impl(
             // synthesis history. Retire the old anchor BEFORE draining/taking
             // the content lock, so the next valid frame primes instead of
             // pairing across a missing serial and entering quarantine.
-            bool has_anchor;
-            { std::scoped_lock lock(state->mutex); has_anchor = state->previous_projection.has_value(); }
-            if (has_anchor) clear_generation_continuity(state);
+            clear_bypassed_generation_continuity(state);
             const XrResult exclusive_result = enter_presenter_exclusive();
             if (XR_FAILED(exclusive_result)) {
                 return exclusive_result;
