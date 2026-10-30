@@ -1896,6 +1896,10 @@ HMODULE load_ngx_core() {
 #ifdef XRFG_NATIVE_INGRESS_TESTS
 #include "ngx_dispatch_test.inc"
 #endif
+void native_ingress::capture_log(const char* message, std::uint64_t a, std::uint64_t b,
+    std::uint64_t c, std::uint64_t d) noexcept {
+    try { log(message, a, b, c, d); } catch (...) {}
+}
 void prepare_ngx_feature_discovery(const wchar_t* directory) noexcept {
     try {
         native_ingress::refresh_luke_detection();

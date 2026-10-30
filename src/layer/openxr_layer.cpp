@@ -7914,6 +7914,20 @@ XrResult release_swapchain_image_locked(
             std::scoped_lock lock(state->mutex);
             auto* application_d3d11_device = state->session->d3d11_bridge
                 ? state->session->d3d11_bridge->device.Get() : state->session->d3d11_device.Get();
+            const auto resolve_by_size = [&] {
+                const int eye = state->session->luke_afw_enabled ? -1 :
+                    state->projection_eye.load(std::memory_order_relaxed);
+                return xrfg::resolve_dlss_motion_vectors(
+                    state->enumerated_d3d12_images[*candidate_index].Get(),
+                    state->session->d3d12_queue.Get(),
+                    eye, release_publication,
+                    release_bound_guides && (eye == 0 || eye == 1)
+                        ? state->session->eye_release_publication[1 - eye].load(
+                              std::memory_order_relaxed) : 0,
+                    strict_fsr_release_guides(*state->session)
+                        ? both_eyes_identity(*state, {true, state->fsr_eye_identity.stream, state->fsr_eye_identity.epoch})
+                        : both_eyes_identity(*state, {}));
+            };
             if ((d3d11_interop || bridge) && xrfg::d3d11_guides_claimed(application_d3d11_device)) {
                 // Resolve this actual eye texture. The returned one-eye set is
                 // already selected, including right-eye logical index 1.
@@ -7925,25 +7939,34 @@ XrResult release_swapchain_image_locked(
                     pending_motion_vectors = xrfg::resolve_d3d11_dlss_guides(
                         state->enumerated_d3d11_images[*candidate_index].Get(),
                         state->session->d3d12_queue.Get());
+                // No receipt reached the image: the game copied each eye's
+                // DLSS output into its half of one side-by-side image (Ready
+                // or Not with VRO), and only whole-resource copies carry a
+                // receipt. Match by size, as for D3D12 Native Stereo, but only
+                // that case - two streams each exactly half of one image. An
+                // eye-sized image without a receipt still borrows nothing.
+                const bool receipt = pending_motion_vectors != nullptr;
+                if (!receipt && *candidate_index < state->enumerated_d3d12_images.size() &&
+                    state->enumerated_d3d12_images[*candidate_index]->GetDesc().DepthOrArraySize == 1) {
+                    auto side_by_side = resolve_by_size();
+                    if (side_by_side && side_by_side->eye_count == xrfg::kDlssMotionVectorEyeCount)
+                        pending_motion_vectors = std::move(side_by_side);
+                }
+                // Record 811: result 0 by receipt, 2 by size, 1 none; c the
+                // first eye's publication, the eye count in its top byte.
+                // The first samples and then every change of outcome.
+                const std::int64_t outcome = receipt ? 0 : pending_motion_vectors ? 2 : 1;
                 static std::atomic<unsigned> diagnostic_samples{0};
-                if (diagnostic_samples.fetch_add(1,std::memory_order_relaxed)<32) {
+                static std::atomic<std::int64_t> last_outcome{-1};
+                const bool changed = last_outcome.exchange(outcome,std::memory_order_relaxed)!=outcome;
+                if (diagnostic_samples.fetch_add(1,std::memory_order_relaxed)<32 || changed) {
                     const auto frame=pending_motion_vectors ? pending_motion_vectors->eyes[0] : nullptr;
                     xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::d3d11_bridge,
-                        frame?S_OK:S_FALSE,811,handle_value(state->handle),frame?frame->publication:0);
+                        outcome,811,handle_value(state->handle),
+                        frame?(frame->publication|(static_cast<std::uint64_t>(pending_motion_vectors->eye_count)<<56)):0);
                 }
             } else if (*candidate_index < state->enumerated_d3d12_images.size()) {
-                const int eye = state->session->luke_afw_enabled ? -1 :
-                    state->projection_eye.load(std::memory_order_relaxed);
-                pending_motion_vectors = xrfg::resolve_dlss_motion_vectors(
-                    state->enumerated_d3d12_images[*candidate_index].Get(),
-                    state->session->d3d12_queue.Get(),
-                    eye, release_publication,
-                    release_bound_guides && (eye == 0 || eye == 1)
-                        ? state->session->eye_release_publication[1 - eye].load(
-                              std::memory_order_relaxed) : 0,
-                    strict_fsr_release_guides(*state->session)
-                        ? both_eyes_identity(*state, {true, state->fsr_eye_identity.stream, state->fsr_eye_identity.epoch})
-                        : both_eyes_identity(*state, {}));
+                pending_motion_vectors = resolve_by_size();
             } else if (d3d11_interop) {
                 std::shared_ptr<const xrfg::DlssMotionVectorSet> resolved;
                 if (luke_split_eye) {

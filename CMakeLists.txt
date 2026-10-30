@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.756.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.757.0 LANGUAGES CXX)
 
 if(MSVC)
     # The standalone layer is injected into hosts that
@@ -265,6 +265,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     set(XRFG_OSR_SPLAT_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_splat_shader.hpp")
     set(XRFG_OSR_FILL_HEADER "${XRFG_GENERATED_SHADER_DIR}/osr_fill_shader.hpp")
     set(XRFG_VULKAN_D24_DECODE_HEADER "${XRFG_GENERATED_SHADER_DIR}/vulkan_d24_decode_shader.hpp")
+    set(XRFG_D3D11_DEPTH_UNPACK_HEADER "${XRFG_GENERATED_SHADER_DIR}/d3d11_depth_unpack_shader.hpp")
     add_custom_command(
         OUTPUT
             "${XRFG_GAME_MOTION_SYNTHESIZE_PIXEL_HEADER}"
@@ -293,6 +294,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_OSR_SPLAT_HEADER}"
             "${XRFG_OSR_FILL_HEADER}"
             "${XRFG_VULKAN_D24_DECODE_HEADER}"
+            "${XRFG_D3D11_DEPTH_UNPACK_HEADER}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeGameMotionMidpointPS
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
@@ -398,6 +400,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_OSR_FILL_HEADER}" /Vn g_xrfg_osr_fill_shader
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_hole_fill.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_0 /E UnpackDepth
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_D3D11_DEPTH_UNPACK_HEADER}" /Vn g_xrfg_d3d11_depth_unpack_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d11/d3d11_depth_unpack.hlsl"
         DEPENDS
             "${XRFG_SYNTHESIS_SHADER}"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/fsr_cinema_projection.hlsl"
@@ -405,6 +411,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/luke_compose_motion.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/osr_hole_fill.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/ingress/vulkan_d24_decode.hlsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d11/d3d11_depth_unpack.hlsl"
         VERBATIM)
 
     add_library(xrfg_d3d12_history STATIC
@@ -447,7 +454,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_OSR_CLEAR_HEADER}"
         "${XRFG_OSR_SPLAT_HEADER}"
         "${XRFG_OSR_FILL_HEADER}"
-        "${XRFG_VULKAN_D24_DECODE_HEADER}")
+        "${XRFG_VULKAN_D24_DECODE_HEADER}"
+        "${XRFG_D3D11_DEPTH_UNPACK_HEADER}")
     foreach(stage decide compose)
         set(header "${XRFG_GENERATED_SHADER_DIR}/guide_composer_${stage}_shader.hpp")
         if(stage STREQUAL "decide")
