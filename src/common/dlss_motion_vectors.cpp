@@ -1499,6 +1499,155 @@ resolve_view_placed_dlss_guides(
     }
 }
 
+namespace {
+
+// An output this many times smaller than the eye's view at most, and of its
+// aspect to within this fraction, is that view enlarged (0.2's V537).
+constexpr double kStretchLimit = 3.0;
+constexpr double kStretchAspect = 0.01;
+
+[[nodiscard]] bool enlarges_view(const DlssMotionVectorFrame& frame, const DlssEyeView& view) noexcept {
+    if (view.width == 0 || view.height == 0 || frame.output_x != 0 || frame.output_y != 0 ||
+        frame.output_width == 0 || frame.output_height == 0 || frame.motion_width == 0 ||
+        frame.motion_height == 0)
+        return false;
+    if (frame.output_width >= view.width && frame.output_height >= view.height) return false;
+    const double scale_x = static_cast<double>(view.width) / frame.output_width;
+    const double scale_y = static_cast<double>(view.height) / frame.output_height;
+    return scale_x >= 1.0 && scale_y >= 1.0 && scale_x <= kStretchLimit &&
+        scale_y <= kStretchLimit && std::fabs(scale_x / scale_y - 1.0) <= kStretchAspect;
+}
+
+}  // namespace
+
+std::array<std::shared_ptr<const DlssMotionVectorSet>, kDlssMotionVectorEyeCount>
+resolve_enlarged_dlss_guides(
+    ID3D12CommandQueue* consumer_queue,
+    const std::array<DlssEyeView, kDlssMotionVectorEyeCount>& eyes,
+    std::uint64_t released_at) noexcept {
+    std::array<std::shared_ptr<const DlssMotionVectorSet>, kDlssMotionVectorEyeCount> none{};
+    try {
+        if (!g_tracking_enabled.load(std::memory_order_acquire) || consumer_queue == nullptr) {
+            return none;
+        }
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        ++state.statistics.resolve_calls;
+        const auto newest = state.next_publication - 1;
+        // Each stream's evaluation by the release, if it enlarges both views
+        // and is recent: a stream the game stopped evaluating keeps its last.
+        std::vector<std::shared_ptr<const DlssMotionVectorFrame>> chosen;
+        for (const auto& [unused_stream_id, stream] : state.streams) {
+            static_cast<void>(unused_stream_id);
+            const auto& latest = stream.latest;
+            if (!latest || newest - latest->publication > kMaximumViewPublicationGap) continue;
+            if (!same_identity(latest->producer_queue.Get(), consumer_queue) &&
+                !(latest->producer_fence && latest->producer_fence_value != 0 &&
+                  same_device(latest->producer_fence.Get(), consumer_queue))) continue;
+            if (!enlarges_view(*latest, eyes[0]) || !enlarges_view(*latest, eyes[1])) continue;
+            auto frame = latest;
+            if (released_at != 0 && frame->publication > released_at) {
+                frame = stream.previous && stream.previous->epoch == latest->epoch &&
+                        stream.previous->publication <= released_at
+                    ? stream.previous : nullptr;
+            }
+            if (frame) chosen.push_back(std::move(frame));
+        }
+        // One a view: anything else is not this layout, and a third is a
+        // guess.
+        if (chosen.size() != kDlssMotionVectorEyeCount) {
+            state.statistics.status = DlssMotionVectorStatus::output_not_direct;
+            return none;
+        }
+        // Both eyes evaluate before the one image's release, so the release
+        // cannot order them: where the inputs sit, else the evaluation order
+        // (the game renders the left eye first).
+        std::sort(chosen.begin(), chosen.end(), [](const auto& a, const auto& b) {
+            const auto ao = input_offset(*a), bo = input_offset(*b);
+            return ao != bo ? ao < bo : a->publication < b->publication;
+        });
+        std::array<std::shared_ptr<const DlssMotionVectorSet>, kDlssMotionVectorEyeCount> result{};
+        for (std::uint32_t eye = 0; eye < kDlssMotionVectorEyeCount; ++eye) {
+            const auto& frame = chosen[eye];
+            // In OFXR-BRIDGE a CPU publication is not a cross-queue receipt.
+            if (!same_identity(frame->producer_queue.Get(), consumer_queue) &&
+                !(frame->producer_fence && frame->producer_fence_value != 0 &&
+                  same_device(frame->producer_fence.Get(), consumer_queue) &&
+                  SUCCEEDED(consumer_queue->Wait(frame->producer_fence.Get(),
+                      frame->producer_fence_value)))) {
+                ++state.statistics.resolve_queue_mismatches;
+                state.statistics.status = DlssMotionVectorStatus::queue_mismatch;
+                return none;
+            }
+            const auto& view = eyes[eye];
+            auto placed = std::make_shared<DlssMotionVectorFrame>(*frame);
+            placed->output_x = static_cast<std::uint32_t>(std::max(view.x, 0));
+            placed->output_y = static_cast<std::uint32_t>(std::max(view.y, 0));
+            placed->output_width = view.width;
+            placed->output_height = view.height;
+            placed->placed = true;
+            placed->placed_motion_rect = {static_cast<float>(frame->motion_x),
+                static_cast<float>(frame->motion_y), static_cast<float>(frame->motion_width),
+                static_cast<float>(frame->motion_height)};
+            auto set = std::make_shared<DlssMotionVectorSet>();
+            set->eye_count = 1;
+            set->eyes[0] = std::move(placed);
+            result[eye] = std::move(set);
+        }
+        state.statistics.matched += kDlssMotionVectorEyeCount;
+        return result;
+    } catch (...) {
+        return none;
+    }
+}
+
+void report_dlss_guide_census(ID3D12CommandQueue* consumer_queue,
+    std::uint32_t image_width, std::uint32_t image_height, std::uint64_t detail) noexcept {
+    try {
+        auto& logger = bridge_flight_logger();
+        if (!logger.enabled() && !logger.ram_enabled()) return;
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        const auto newest = state.next_publication - 1;
+        // 756: a the live streams << 32 | the resolver's last status, b the
+        // image (width << 32 | height), c the caller's detail.
+        std::uint32_t live = 0;
+        for (const auto& entry : state.streams)
+            if (entry.second.latest) ++live;
+        logger.event(BridgeFlightOperation::presenter_transition, 756,
+            (static_cast<std::uint64_t>(live) << 32) | static_cast<std::uint32_t>(state.statistics.status),
+            (static_cast<std::uint64_t>(image_width) << 32) | image_height, detail);
+        // 757 per stream: a the stream's low 32 bits << 32 | its motion
+        // inputs' x (16 bits) << 16 | flags (1 the consumer queue or a fence
+        // on its device, 2 a camera, 4 depth, 8 the newest is a reset);
+        // b output width, height, motion width, height (16 bits each); c
+        // the newest publication's distance behind the newest of all << 32 |
+        // the stream's epoch.
+        unsigned reported = 0;
+        for (const auto& [stream_id, stream] : state.streams) {
+            const auto& frame = stream.latest;
+            if (!frame) continue;
+            if (++reported > 8) break;
+            const bool queue = same_identity(frame->producer_queue.Get(), consumer_queue) ||
+                (frame->producer_fence && frame->producer_fence_value != 0 &&
+                 same_device(frame->producer_fence.Get(), consumer_queue));
+            const std::uint64_t flags = (queue ? 1U : 0U) |
+                (dlss_view_geometry(*frame).known ? 2U : 0U) | (frame->depth ? 4U : 0U) |
+                (frame->reset ? 8U : 0U);
+            const auto bits16 = [](std::uint32_t value) {
+                return static_cast<std::uint64_t>(std::min<std::uint32_t>(value, 0xFFFFU));
+            };
+            logger.event(BridgeFlightOperation::presenter_transition, 757,
+                ((stream_id & 0xFFFFFFFFULL) << 32) | (bits16(frame->source_motion_x) << 16) | flags,
+                (bits16(frame->output_width) << 48) | (bits16(frame->output_height) << 32) |
+                    (bits16(frame->motion_width) << 16) | bits16(frame->motion_height),
+                ((newest >= frame->publication ? newest - frame->publication : 0) << 32) |
+                    (frame->epoch & 0xFFFFFFFFULL));
+        }
+    } catch (...) {
+    }
+}
+
 std::uint64_t dlss_motion_vector_publications() noexcept {
     try {
         auto& state = registry();
@@ -1586,12 +1735,22 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         // exactly one horizontal half of the XR image. This excludes desktop
         // DLSS streams and leaves ordinary mono/Sync Sequential resources on
         // the existing array-size-one path.
+        //
+        // Only recent streams: one the game stopped evaluating keeps its
+        // last frame, and a pair of those is the same stale guides every
+        // frame. Cheeky Foveated DLSS switched from foveated rendering back
+        // to its eye-sized streams and back again: the eye-sized pair was
+        // still taken, a frame from before the switch, and DLSS-G refused
+        // it as discontinuous (record 1, detail 5) for good.
         bool packed_stereo = false;
         if (eye_count == 1) {
+            const auto newest_publication = state.next_publication - 1;
             std::vector<Candidate> horizontal_eye_candidates;
             horizontal_eye_candidates.reserve(candidates.size());
             for (const auto& candidate : candidates) {
-                if (candidate.frame->output_width != 0 &&
+                if (newest_publication - candidate.frame->publication <=
+                        kMaximumViewPublicationGap &&
+                    candidate.frame->output_width != 0 &&
                     candidate.frame->output_height != 0 &&
                     description.Width ==
                         static_cast<std::uint64_t>(

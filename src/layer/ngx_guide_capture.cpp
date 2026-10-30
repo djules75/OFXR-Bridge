@@ -1637,7 +1637,42 @@ template<UINT slot, bool c_entry = false> NVSDK_NGX_Result evaluate(ID3D12Graphi
                 native_list_identity.Get(),native_device_identity.Get(),list,p,result);
             return result;
         }
-        return forward_public();
+        const auto result=forward_public();
+        // A generic dispatch that deferred to the native body, and that body's
+        // hook never ran: a hook installed before OFXR's (Cheeky Foveated DLSS
+        // in Cyberpunk 2077) reached the DLSS runtime past it. Observe here
+        // after the call, as 0.2 did, rather than lose the evaluation. Not for
+        // the titles whose generic and native fields differ (KCD, Outlaws,
+        // Crimson Desert, GTA), which keep their exact boundaries.
+        const bool deferred=sr&&!scope.observes()&&!scope.public_guide_parent()&&
+            !state().modules[slot].typed_implementation;
+        const bool fallback=deferred&&NVSDK_NGX_SUCCEED(result)&&scope.unobserved()&&
+            !kcd_production&&!outlaws_production&&!original_public&&!gta_enhanced_process()&&
+            !public_production;
+        std::shared_ptr<const DlssMotionVectorFrame> frame;
+        if(fallback)try {
+            native_ingress::observe_luke_production(list);
+            native_ingress::observe_upscaler_inputs(
+                get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_MotionVectors) != nullptr,
+                get<ID3D12Resource*>(p,NVSDK_NGX_Parameter_Depth) != nullptr);
+            frame=capture(list,h,p,0,reinterpret_cast<UINT64>(h),nullptr,0,nullptr,nullptr,nullptr,0);
+            complete_color(list,p,frame,hdr);
+        }catch(...){log("native_completion_exception");}
+        // A deferred SR evaluation's census, the first 16 and every 1000th:
+        // a the slot, b deferred calls << 32 | those no hook inside entered,
+        // c those observed here << 32 | those published, d this one's handle.
+        if(deferred) {
+            static std::atomic_uint64_t deferred_calls{},unreached{},observed{},published{};
+            const auto calls=deferred_calls.fetch_add(1,std::memory_order_relaxed)+1;
+            const auto missed=unreached.fetch_add(scope.inner_entered()?0U:1U,std::memory_order_relaxed)+
+                (scope.inner_entered()?0U:1U);
+            const auto own=observed.fetch_add(fallback?1U:0U,std::memory_order_relaxed)+(fallback?1U:0U);
+            const auto made=published.fetch_add(frame?1U:0U,std::memory_order_relaxed)+(frame?1U:0U);
+            if(calls<=16||calls%1000==0)
+                log("ngx_deferred_census",slot,(calls<<32)|(missed&0xffffffffULL),
+                    (own<<32)|(made&0xffffffffULL),reinterpret_cast<UINT64>(h));
+        }
+        return result;
     }
     bool outlaws_family{};
     if(outlaws_production&&state().modules[slot].typed_implementation) {

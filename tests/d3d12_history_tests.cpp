@@ -3931,6 +3931,97 @@ void test_view_placed_dlss_guides(D3D12WarpFixture& fixture) {
     std::cout << "Foveated guides placed by their cameras: field from projection, periphery per eye, release bound, insets refused, camera side PASS\n";
 }
 
+// Cheeky Foveated DLSS without Streamline: no camera on any stream. Each
+// eye's periphery is its view enlarged (the shape to 1%, at most three times
+// smaller); the insets are not. Both eyes or neither; the first evaluated is
+// the left unless the motion inputs sit apart.
+void test_enlarged_dlss_guides(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    const auto texture = [&](UINT width, UINT height) {
+        auto description = stereo_texture_description(width, height);
+        description.DepthOrArraySize = 1;
+        description.Flags = D3D12_RESOURCE_FLAG_NONE;
+        const auto properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        ComPtr<ID3D12Resource> resource;
+        require_hresult(fixture.device()->CreateCommittedResource(&properties,
+            D3D12_HEAP_FLAG_NONE, &description, D3D12_RESOURCE_STATE_COMMON,
+            nullptr, IID_PPV_ARGS(&resource)), "enlarged guide texture");
+        return resource;
+    };
+    // Eyes 200 x 220 side by side; peripheries 100 x 110 (the shape, half the
+    // size), insets 64 x 64 (neither the shape nor within three times).
+    const auto periphery_a = texture(100, 110), periphery_b = texture(100, 110);
+    const auto inset_a = texture(64, 64), inset_b = texture(64, 64);
+    const auto motion = texture(96, 48);
+    const auto publish = [&](std::uint64_t stream, ID3D12Resource* output, UINT width, UINT height,
+                             UINT motion_x = 0) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            xrfg::DlssMotionVectorPublication p{};
+            p.stream = stream;
+            p.output = output;
+            p.motion_vectors = motion.Get();
+            p.output_width = width; p.output_height = height;
+            p.motion_x = motion_x; p.motion_width = 48; p.motion_height = 48;
+            p.producer_queue = fixture.queue(); p.producer_command_list = list;
+            p.resource_state = D3D12_RESOURCE_STATE_COMMON;
+            require(xrfg::publish_dlss_motion_vectors(p) != nullptr, "enlarged publication failed");
+        });
+        return xrfg::dlss_motion_vector_publications();
+    };
+    const std::array<xrfg::DlssEyeView, 2> eyes{
+        xrfg::DlssEyeView{-1.0F, 1.0F, 1.0F, -1.0F, 0, 0, 200, 220},
+        xrfg::DlssEyeView{-1.0F, 1.0F, 1.0F, -1.0F, 200, 0, 200, 220}};
+    std::uint64_t release{};
+    for (int frame = 0; frame < 2; ++frame) {
+        publish(911, inset_a.Get(), 64, 64);
+        publish(912, periphery_a.Get(), 100, 110);
+        publish(913, periphery_b.Get(), 100, 110);
+        release = publish(914, inset_b.Get(), 64, 64);
+    }
+    const auto enlarged = xrfg::resolve_enlarged_dlss_guides(fixture.queue(), eyes, release);
+    require(enlarged[0] && enlarged[1] && enlarged[0]->eyes[0] && enlarged[1]->eyes[0] &&
+            enlarged[0]->eyes[0]->stream == 912 && enlarged[1]->eyes[0]->stream == 913,
+        "the peripheries were not taken in evaluation order, or the insets were");
+    const auto& left = *enlarged[0]->eyes[0];
+    const auto& right = *enlarged[1]->eyes[0];
+    require(left.placed && left.output_x == 0 && left.output_y == 0 && left.output_width == 200 &&
+            left.output_height == 220 && right.placed && right.output_x == 200 && right.output_width == 200 &&
+            left.placed_motion_rect == std::array<float, 4>{0.0F, 0.0F, 48.0F, 48.0F} &&
+            xrfg::guide_motion_rect(left) == left.placed_motion_rect,
+        "a periphery was not placed over its eye's half with all of its vectors");
+    require(left.serial == 2 && right.serial == 2, "the newest evaluation by the release was not taken");
+    const auto earlier = xrfg::resolve_enlarged_dlss_guides(fixture.queue(), eyes, release - 4);
+    require(earlier[0] && earlier[0]->eyes[0]->serial == 1, "a release did not bound the evaluation taken");
+    // A third enlarging stream is a guess: nothing.
+    const auto third = publish(915, periphery_a.Get(), 100, 110);
+    const auto guess = xrfg::resolve_enlarged_dlss_guides(fixture.queue(), eyes, third);
+    require(!guess[0] && !guess[1], "three enlarging streams were paired");
+    xrfg::retire_dlss_motion_vector_stream(915);
+    // One periphery alone: neither eye.
+    xrfg::retire_dlss_motion_vector_stream(913);
+    const auto alone = publish(912, periphery_a.Get(), 100, 110);
+    const auto single = xrfg::resolve_enlarged_dlss_guides(fixture.queue(), eyes, alone);
+    require(!single[0] && !single[1], "a single periphery was placed");
+    // Motion inputs apart decide the eyes, not the evaluation order.
+    for (const auto stream : {911ULL, 912ULL, 914ULL}) xrfg::retire_dlss_motion_vector_stream(stream);
+    publish(921, periphery_a.Get(), 100, 110, 48);
+    const auto apart = publish(922, periphery_b.Get(), 100, 110, 0);
+    const auto sided = xrfg::resolve_enlarged_dlss_guides(fixture.queue(), eyes, apart);
+    require(sided[0] && sided[1] && sided[0]->eyes[0]->stream == 922 && sided[1]->eyes[0]->stream == 921,
+        "the motion inputs' positions did not decide the eyes");
+    // A stream the game stopped evaluating keeps its last frame; after enough
+    // other publications it is no longer recent, and the pair is gone.
+    for (int n = 0; n < 40; ++n) publish(923, inset_a.Get(), 64, 64);
+    const auto stale = xrfg::resolve_enlarged_dlss_guides(fixture.queue(), eyes, xrfg::dlss_motion_vector_publications());
+    require(!stale[0] && !stale[1], "stale peripheries were still paired");
+    for (const auto stream : {921ULL, 922ULL, 923ULL}) xrfg::retire_dlss_motion_vector_stream(stream);
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    std::cout << "Enlarged guides: peripheries over both eyes, insets refused, release bound, third refused, single refused, input side, stale refused PASS\n";
+}
+
 void test_release_bound_dlss_guides(D3D12WarpFixture& fixture) {
     using Mode = xrfg::D3D12FrameGenerationMode;
     require(xrfg::use_release_bound_game_guides(Mode::ofxr, true, false) &&
@@ -4377,6 +4468,22 @@ void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
         native_left.Get(), fixture.queue());
     require(native_mono && native_mono->eye_count == 1,
         "ordinary mono resolution changed with Native Stereo guides");
+    // The pair must be recent: a stream the game stopped evaluating keeps its
+    // last frame, and nine publications of another stream later the eye-sized
+    // pair is stale (Cheeky Foveated DLSS toggling foveation off and on).
+    const auto unrelated_output = create_texture(24, 24, 1);
+    for (int n = 0; n < 9; ++n)
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* command_list) {
+            xrfg::publish_dlss_motion_vectors({
+                505, unrelated_output.Get(), motion.Get(), fixture.queue(), 0, 0, 24, 24,
+                0, 0, width / 2, height / 2, 1.0F, 1.0F, 0.0F, 0.0F,
+                D3D12_RESOURCE_STATE_COMMON, false, false, command_list});
+        });
+    const auto stale_native = xrfg::resolve_dlss_motion_vectors(
+        native_xr.Get(), fixture.queue());
+    require(!stale_native || stale_native->eye_count != 2,
+        "a stale eye-sized pair was still matched to the double-wide image");
+    xrfg::retire_dlss_motion_vector_stream(505);
 
     xrfg::configure_dlss_motion_vector_tracking(false);
     require(!xrfg::resolve_dlss_motion_vectors(xr_output.Get(), fixture.queue()),
@@ -5782,6 +5889,7 @@ int main(int argc, char** argv) {
             D3D12WarpFixture fixture;
             test_release_bound_dlss_guides(fixture);
             test_view_placed_dlss_guides(fixture);
+            test_enlarged_dlss_guides(fixture);
             fixture.require_no_debug_errors();
             return 0;
         }

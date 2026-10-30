@@ -942,6 +942,12 @@ struct SessionState {
     // that found none to place (refresh_release_bound_projection_guides).
     std::uint64_t view_placements{};
     std::uint64_t view_placement_misses{};
+    // One side-by-side image for both eyes: the last frame's outcome (0 by
+    // size at release, 1 placed by camera, 2 none, 3 an enlarged output;
+    // -1 before the first),
+    // and the stream censuses logged (refresh_side_by_side_projection_guides).
+    int side_by_side_guide_outcome{-1};
+    std::uint32_t side_by_side_censuses{};
     xrfg::D3D12FrameGenerationMode frame_generation_mode{};
     bool hybrid_requested{};
     std::uint32_t native_dlss_generated_frames{};
@@ -10844,6 +10850,102 @@ void note_projection_eyes(
     }
 }
 
+// Both eyes in one image, side by side (UEVR's Native Stereo): the release
+// resolved its guides by size, which takes two DLSS outputs each exactly one
+// half of the image. Cheeky Foveated DLSS's foveated rendering evaluates per
+// eye a periphery and an inset and composites them itself; that found none,
+// and DLSS-G stood down with "Missing game vectors". When the release found
+// nothing, each eye now takes the stream whose camera covers its view,
+// placed into its half (0.2's V515, as for MSFS 2024's per-eye images);
+// without cameras - Cheeky calls DLSS outside Streamline - the stream whose
+// output is its view enlarged (0.2's V537): Cheeky's periphery, 1826 x 1430
+// for a 4197 x 3287 eye. Called with the session's GPU lock held. 753 as for
+// per-eye images; 756 and 757, the DLSS streams as seen, on a change of
+// outcome, the first eight frames that find nothing and every 512th after.
+void refresh_side_by_side_projection_guides(
+    SessionState& session, const ProjectionSnapshot& snapshot,
+    const ProjectionResourceMapping& mapping) noexcept {
+    const auto chain = find_swapchain(mapping.application_swapchain);
+    if (!chain || chain->create_info.arraySize != 1) return;
+    std::array<xrfg::DlssEyeView, 2> views{};
+    std::array<std::size_t, 2> local_of_eye{2, 2};
+    for (std::size_t local = 0; local < mapping.views.size(); ++local) {
+        const auto& reference = mapping.views[local];
+        if (reference.projection_index >= snapshot.layers.size() ||
+            snapshot.layers[reference.projection_index].views.size() != 2 ||
+            reference.view_index >= 2 || local_of_eye[reference.view_index] != 2) return;
+        const auto& view = snapshot.layers[reference.projection_index].views[reference.view_index];
+        const auto& fov = view.fov;
+        const auto& rect = view.subImage.imageRect;
+        views[reference.view_index] = {std::tan(fov.angleLeft), std::tan(fov.angleRight),
+            std::tan(fov.angleUp), std::tan(fov.angleDown), rect.offset.x, rect.offset.y,
+            static_cast<std::uint32_t>(std::max(rect.extent.width, 0)),
+            static_cast<std::uint32_t>(std::max(rect.extent.height, 0))};
+        local_of_eye[reference.view_index] = local;
+    }
+    std::uint64_t release = 0;
+    bool by_size = false;
+    {
+        std::scoped_lock lock(chain->mutex);
+        if (!chain->last_released_capture || !chain->last_released_index ||
+            chain->last_released_capture->source_index != *chain->last_released_index ||
+            *chain->last_released_index >= chain->enumerated_d3d12_images.size()) return;
+        release = chain->release_publication;
+        // A frame without a new release still holds the set placed for the
+        // last one; that is not a match by size.
+        const auto& guides = chain->last_released_motion_vectors;
+        by_size = guides && !(guides->eyes[0] && guides->eyes[0]->placed);
+    }
+    int outcome = by_size ? 0 : 2;
+    std::shared_ptr<xrfg::DlssMotionVectorSet> placed_set;
+    // Not on the FSR route, which reads whole texels.
+    if (!by_size && release != 0 && !strict_fsr_release_guides(session)) {
+        auto placed = xrfg::resolve_view_placed_dlss_guides(
+            session.d3d12_queue.Get(), views, {release, release});
+        outcome = 1;
+        if (!placed[0] || !placed[1]) {
+            placed = xrfg::resolve_enlarged_dlss_guides(session.d3d12_queue.Get(), views, release);
+            outcome = 3;
+        }
+        if (placed[0] && placed[1] && placed[0]->eyes[0] && placed[1]->eyes[0]) {
+            placed_set = std::make_shared<xrfg::DlssMotionVectorSet>();
+            placed_set->eye_count = 2;
+            for (std::size_t eye = 0; eye < 2; ++eye)
+                placed_set->eyes[local_of_eye[eye]] = placed[eye]->eyes[0];
+        } else {
+            outcome = 2;
+        }
+    }
+    if (placed_set) {
+        std::scoped_lock lock(chain->mutex);
+        chain->last_released_motion_vectors = placed_set;
+        if (session.view_placements < 16 || session.view_placements % 512 == 0) {
+            const auto eighths = [](float value) {
+                return static_cast<std::uint64_t>(std::clamp(value * 8.0F, 0.0F, 65535.0F)) & 0xFFFFU;
+            };
+            for (std::size_t eye = 0; eye < 2; ++eye) {
+                const auto& frame = *placed_set->eyes[local_of_eye[eye]];
+                xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::presenter_transition, 753,
+                    (static_cast<std::uint64_t>(eye) << 32U) | (frame.stream & 0xFFFFFFFFULL),
+                    eighths(frame.placed_motion_rect[0]) | (eighths(frame.placed_motion_rect[1]) << 16U) |
+                        (eighths(frame.placed_motion_rect[2]) << 32U) |
+                        (eighths(frame.placed_motion_rect[3]) << 48U),
+                    frame.publication);
+            }
+        }
+        ++session.view_placements;
+    }
+    const bool changed = outcome != session.side_by_side_guide_outcome;
+    session.side_by_side_guide_outcome = outcome;
+    std::uint64_t misses = 0;
+    if (outcome == 2) misses = ++session.view_placement_misses;
+    if ((changed && session.side_by_side_censuses < 64) || (outcome == 2 && (misses <= 8 || misses % 512 == 0))) {
+        ++session.side_by_side_censuses;
+        xrfg::report_dlss_guide_census(session.d3d12_queue.Get(), chain->create_info.width,
+            chain->create_info.height, static_cast<std::uint64_t>(outcome) | (release << 8));
+    }
+}
+
 // Revisit only the guide join, after both eyes' releases are known. Color
 // capture and its ticket remain release-bound; no EndFrame color recapture.
 // Ordinary D3D12 FSR uses strict identity; D11/AFW contracts stay separate.
@@ -10865,6 +10967,10 @@ void refresh_release_bound_projection_guides(
     };
     try {
         std::scoped_lock gpu_lock(session.gpu_mutex);
+        if (mappings.mappings.size() == 1 && mappings.mappings.front().views.size() == 2) {
+            refresh_side_by_side_projection_guides(session, snapshot, mappings.mappings.front());
+            return;
+        }
         std::array<std::uint64_t, 2> releases{};
         std::array<XrRect2Di, 2> rects{};
         std::array<std::optional<XrFovf>, 2> fovs{};

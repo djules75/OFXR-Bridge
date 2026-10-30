@@ -417,6 +417,23 @@ resolve_view_placed_dlss_guides(
     ID3D12CommandQueue* consumer_queue,
     const std::array<DlssEyeView, kDlssMotionVectorEyeCount>& eyes,
     const std::array<std::uint64_t, kDlssMotionVectorEyeCount>& released_at) noexcept;
+// Both eyes' guides from two recent streams whose outputs are each eye's
+// view enlarged: smaller than the view, of its shape to within 1%, at most
+// three times smaller (0.2's V537). Cheeky Foveated DLSS's foveated
+// rendering evaluates per eye a periphery over the whole field at a fraction
+// of the eye's pixels and an inset, with no camera to place them by. The
+// periphery is placed over the whole view; the eye that evaluated first is
+// the left, unless the inputs sit apart. Both eyes or neither.
+std::array<std::shared_ptr<const DlssMotionVectorSet>, kDlssMotionVectorEyeCount>
+resolve_enlarged_dlss_guides(
+    ID3D12CommandQueue* consumer_queue,
+    const std::array<DlssEyeView, kDlssMotionVectorEyeCount>& eyes,
+    std::uint64_t released_at) noexcept;
+// Diagnostics only: the live DLSS streams as a released image's guide
+// resolution saw them, for an eye image that got none. presenter_transition
+// 756, then 757 per stream (at most eight). Changes nothing.
+void report_dlss_guide_census(ID3D12CommandQueue* consumer_queue,
+    std::uint32_t image_width, std::uint32_t image_height, std::uint64_t detail) noexcept;
 // Resolves by logical projection-view count when the OpenXR swapchain is
 // D3D11 and therefore has no D3D12 image from which to derive array size.
 std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
